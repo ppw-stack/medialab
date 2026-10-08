@@ -15,6 +15,8 @@ from typing import Literal
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.crypto import CredentialCipher
+
 #: 密钥生成提示，避免用户猜测格式
 KEY_HINT = 'python -c "import secrets; print(secrets.token_urlsafe(32))"'
 
@@ -77,23 +79,18 @@ class AppSettings(BaseSettings):
     @field_validator("encryption_key")
     @classmethod
     def _validate_key(cls, v: SecretStr) -> SecretStr:
-        """fail-fast：密钥必须是 32 字节 URL-safe base64（FR-7.1）。"""
+        """fail-fast：密钥必须是 32 字节 base64（FR-7.1）。
+
+        接受 ``secrets.token_urlsafe(32)`` 产出的无填充 URL-safe base64——
+        这是文档与 ``.env.example`` 推荐的生成方式。
+        """
         raw = v.get_secret_value().strip()
         if not raw:
             raise ValueError("ENCRYPTION_KEY 不能为空；生成命令：" + KEY_HINT)
-        import base64
-
         try:
-            decoded = base64.urlsafe_b64decode(raw.encode())
-        except Exception as exc:
-            raise ValueError(
-                f"ENCRYPTION_KEY 不是合法的 URL-safe base64；生成命令：{KEY_HINT}"
-            ) from exc
-        if len(decoded) != 32:
-            raise ValueError(
-                f"ENCRYPTION_KEY 解码后应为 32 字节，实际 {len(decoded)} 字节；"
-                f"生成命令：{KEY_HINT}"
-            )
+            CredentialCipher(raw)
+        except ValueError as exc:
+            raise ValueError(f"{exc}；生成命令：{KEY_HINT}") from exc
         return v
 
     @field_validator("log_level")

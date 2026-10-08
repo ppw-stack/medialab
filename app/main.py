@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -21,6 +20,7 @@ from app.core.config import AppSettings, get_settings
 from app.core.logging import configure_logging, get_logger
 from app.core.metrics import render_metrics, state
 from app.db.session import dispose_db, init_db, writer
+from app.services.scheduler import scheduler_center
 
 logger = get_logger(__name__)
 
@@ -32,11 +32,13 @@ DRAIN_TIMEOUT = 60.0
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: AppSettings = get_settings()
     configure_logging(settings.log_level, json_output=settings.log_json)
-    logger.info(
-        "启动 %s v%s env=%s", settings.app_name, __version__, settings.env
-    )
+    logger.info("启动 %s v%s env=%s", settings.app_name, __version__, settings.env)
+
+    grace = float(settings.shutdown_grace_seconds)
     if settings.scheduler_enabled:
-        logger.info("调度中心占位已启用（业务任务自 M2 起挂载）")
+        # 停机第一步：停止新任务调度（M2 起有在途作业时才有实际等待）
+        scheduler_center.start()
+    scheduler_center.accepting_new_work = False
 
     init_db(settings)
     await writer.create_all()
@@ -45,12 +47,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        logger.info("收到停机信号，等待在途命令（上限 %.0fs）", DRAIN_TIMEOUT)
-        drain = asyncio.Event()
-        try:
-            await asyncio.wait_for(drain.wait(), timeout=DRAIN_TIMEOUT)
-        except TimeoutError:  # pragma: no cover — 正常不会触发
-            logger.warning("等待在途命令超时，强制退出")
+        pending = scheduler_center.inflight_count()
+        logger.info(
+            "收到停机信号，等待在途作业 %d 个（上限 %.0fs）", pending, grace
+        )
+        if pending:
+            await scheduler_center.drain(timeout=grace)
         await dispose_db()
         logger.info("已停机")
 

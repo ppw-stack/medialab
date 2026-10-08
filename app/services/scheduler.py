@@ -49,6 +49,8 @@ class SchedulerCenter:
         self._specs: dict[str, JobSpec] = {}
         self._running: set[str] = set()
         self._inflight: set[asyncio.Task[None]] = set()
+        #: 停机期间置 False：拒绝新作业，只等在途作业收敛（FR-8.2）
+        self.accepting_new_work = True
 
     # ------------------------------------------------------------ 生命周期
     def start(self) -> None:
@@ -65,21 +67,32 @@ class SchedulerCenter:
                 self._schedule(spec)
         logger.info("调度中心已启动，已注册作业 %d 个", len(self._specs))
 
+    def inflight_count(self) -> int:
+        """当前正在执行的作业数。"""
+        return len(self._inflight)
+
+    async def drain(self, *, timeout: float) -> None:  # noqa: ASYNC109
+        """等待在途作业收敛，超时则取消（FR-8.2）。
+
+        调用方须先 :meth:`stop_accepting` 或手工置 ``accepting_new_work=False``。
+        """
+        if not self._inflight:
+            return
+        done, pending = await asyncio.wait(list(self._inflight), timeout=timeout)
+        if pending:
+            logger.warning("等待在途作业超时，取消 %d 个", len(pending))
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+        logger.info("在途作业已收敛：完成 %d，取消 %d", len(done), len(pending))
+
     async def shutdown(self, *, grace_seconds: int = 60) -> None:
         """停机：先停新调度，再等在途作业（FR-8.2）。"""
+        self.accepting_new_work = False
         if self._scheduler is not None:
             self._scheduler.shutdown(wait=False)
             self._scheduler = None
-        if self._inflight:
-            logger.info("等待在途作业 %d 个（上限 %ds）", len(self._inflight), grace_seconds)
-            done, pending = await asyncio.wait(
-                list(self._inflight), timeout=grace_seconds
-            )
-            for task in pending:
-                task.cancel()
-            if pending:
-                logger.warning("等待超时，取消 %d 个作业", len(pending))
-            _ = done
+        await self.drain(timeout=grace_seconds)
         logger.info("调度中心已停止")
 
     # ------------------------------------------------------------ 注册
@@ -127,6 +140,8 @@ class SchedulerCenter:
     def _wrap(self, spec: JobSpec) -> JobFn:
         async def _run() -> None:
             # R8：单作业异常隔离，绝不让调度器整体崩掉
+            if not self.accepting_new_work:
+                return
             if spec.name in self._running:
                 logger.debug("作业 %s 上一轮未结束，跳过本轮", spec.name)
                 return

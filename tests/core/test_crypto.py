@@ -64,6 +64,42 @@ def test_invalid_key_length_rejected() -> None:
         CredentialCipher(base64.urlsafe_b64encode(b"short").decode())
 
 
+def test_unpadded_token_urlsafe_accepted() -> None:
+    """``secrets.token_urlsafe(32)`` 产出 43 字符**无填充** base64。
+
+    这是文档与 ``.env.example`` 推荐的生成方式，必须开箱可用——
+    该缺陷由 docker 冒烟验证发现（严格 b64decode 因缺 ``=`` 报
+    "Incorrect padding" 导致容器无法启动）。
+    """
+    import secrets
+
+    for _ in range(20):
+        key = secrets.token_urlsafe(32)
+        assert "=" not in key
+        cipher = CredentialCipher(key)  # 不应抛异常
+        token = cipher.encrypt("x", owner_type="site", owner_id="s")
+        assert cipher.decrypt(token, owner_type="site", owner_id="s") == "x"
+
+
+def test_padded_and_unpadded_equivalent() -> None:
+    raw = b"k" * 32
+    padded = base64.urlsafe_b64encode(raw).decode()
+    unpadded = padded.rstrip("=")
+    a = CredentialCipher(padded)
+    b = CredentialCipher(unpadded)
+    token = a.encrypt("secret", owner_type="site", owner_id="s")
+    assert b.decrypt(token, owner_type="site", owner_id="s") == "secret"
+
+
+def test_settings_accept_unpadded_key() -> None:
+    """启动配置的校验必须与加密器一致（FR-7.1 fail-fast 不得误伤）。"""
+    import secrets
+
+    key = secrets.token_urlsafe(32)
+    s = AppSettings(encryption_key=key, env="test")  # type: ignore[call-arg]
+    assert build_cipher(s).key_version == 1
+
+
 # ------------------------------------------------------------ fail-fast FR-7.1
 def test_missing_key_aborts_startup(test_key: str) -> None:
     """缺密钥必须启动失败，禁止明文降级（AC-17）。"""

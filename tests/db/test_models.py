@@ -1,0 +1,213 @@
+"""ORM 元数据与关系测试（§8）。
+
+这些是"结构性"测试：关系配错、建表缺失时 SQLAlchemy 只在**实际查询**时
+才报错，早期不易发现（曾导致 ``/api/v1/dashboard`` 在容器内 500）。
+"""
+
+from __future__ import annotations
+
+import pytest
+from app.db.models import Base, DownloaderInstance, Site, Torrent
+
+
+def test_all_expected_tables_registered() -> None:
+    """§8 要求的核心表必须齐备。"""
+    expected = {
+        "action_logs",
+        "alerts",
+        "cooldown_hash",
+        "downloader_instances",
+        "feeds",
+        "free_candidates",
+        "rules",
+        "site_window_stats",
+        "sites",
+        "task_queue",
+        "torrents",
+        "trash",
+    }
+    assert expected <= set(Base.metadata.tables)
+
+
+def test_downloader_sites_relationship_points_to_site() -> None:
+    """``DownloaderInstance.sites`` 必须指向 Site，而不是自引用。"""
+    assert DownloaderInstance.sites.property.mapper.class_ is Site
+
+
+def test_site_downloader_relationship_points_to_downloader() -> None:
+    assert Site.downloader.property.mapper.class_ is DownloaderInstance
+
+
+def test_relationship_back_populates_is_symmetric() -> None:
+    """双向关系必须互为 back_populates，否则赋值会报错或静默失效。"""
+    assert DownloaderInstance.sites.property.back_populates == "downloader"
+    assert Site.downloader.property.back_populates == "sites"
+
+
+def test_required_indexes_present() -> None:
+    """§8 索引要求：info_hash 唯一 + 看护/清理查询路径。"""
+    torrents = Base.metadata.tables["torrents"]
+    index_names = {ix.name for ix in torrents.indexes}
+    assert "ix_torrents_info_hash" in index_names
+    assert "ix_torrents_status_abort_at" in index_names
+    assert "ix_torrents_source_status_free_end" in index_names
+    assert "ix_torrents_site_source" in index_names
+
+
+def test_cooldown_unique_per_site_hash() -> None:
+    """FR-2.3.1：同站独立冷却，(site_id, info_hash) 必须唯一。"""
+    constraints = Base.metadata.tables["cooldown_hash"].constraints
+    assert any(
+        {c.name for c in con.columns} == {"site_id", "info_hash"} for con in constraints
+    )
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        "torrents",
+        "sites",
+        "cooldown_hash",
+        "feeds",
+        "free_candidates",
+        "site_window_stats",
+    ],
+)
+def test_foreign_keys_declared(table: str) -> None:
+    """强关联表必须显式声明外键，否则站点隔离无法保证。"""
+    assert Base.metadata.tables[table].foreign_keys, f"{table} 缺少外键声明"
+
+
+@pytest.mark.parametrize("table", ["downloader_instances", "trash", "action_logs"])
+def test_weak_reference_tables_use_plain_ints(table: str) -> None:
+    """这三张表故意**不**建外键。
+
+    理由：站点/下载器被删除后，回收站条目与审计日志必须**保留**（FR-5.2.7
+    可回溯）。若用外键 + 级联删除，历史会随主记录一起消失。
+    因此它们存的是裸 id，删除由业务层显式处理。
+    """
+    assert not Base.metadata.tables[table].foreign_keys
+
+
+def test_torrent_window_columns_exist() -> None:
+    """看护锚点字段（FR-3.4）必须持久化。"""
+    cols = Base.metadata.tables["torrents"].columns
+    for name in (
+        "free_type",
+        "free_end_at",
+        "deadline_at",
+        "abort_at",
+        "window_slack",
+        "free_confidence",
+        "paused_reason",
+        "trash_id",
+    ):
+        assert name in cols, name
+
+
+def test_site_config_columns_exist() -> None:
+    """站点差异配置化字段（FR-1.5.2）。"""
+    cols = Base.metadata.tables["sites"].columns
+    for name in (
+        "adapter",
+        "rss_time_pattern",
+        "window_field_map",
+        "free_type_map",
+        "download_factor_map",
+        "detail_path_template",
+        "time_unit_multiplier",
+        "clock_offset",
+        "grab_short_window",
+    ):
+        assert name in cols, name
+
+
+def test_metadata_creates_all_without_error() -> None:
+    """建表语句可在 SQLite 方言下生成。"""
+    from sqlalchemy.dialects import sqlite
+    from sqlalchemy.schema import CreateTable
+
+    dialect = sqlite.dialect()
+    for table in Base.metadata.tables.values():
+        str(CreateTable(table).compile(dialect=dialect))
+
+
+async def test_join_downloader_to_site_executes(db) -> None:
+    """真实执行一次 join 查询。
+
+    这条用例直接捕获 ``DownloaderInstance.sites`` 被误配成自引用导致的
+    ``NoForeignKeysError``（该缺陷曾让 /api/v1/dashboard 在容器内返回 500）。
+    """
+    from app.db.session import session_scope
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    dl_id = None
+    async with session_scope() as session:
+        dl = DownloaderInstance(name="qbt-main", type="qbittorrent", url="http://x")
+        session.add(dl)
+        await session.flush()
+        dl_id = dl.id
+        session.add(Site(name="example-pt", domain="example.test", downloader_id=dl.id))
+
+    async with session_scope() as session:
+        rows = (
+            await session.execute(
+                select(Torrent, Site.name)
+                .join(Site, Site.id == Torrent.site_id)
+                .where(Torrent.source == "free_seed")
+            )
+        ).all()
+        assert rows == []
+
+        dl_loaded = (
+            await session.execute(
+                select(DownloaderInstance)
+                .where(DownloaderInstance.id == dl_id)
+                .options(selectinload(DownloaderInstance.sites))
+            )
+        ).scalars().one()
+        assert [s.name for s in dl_loaded.sites] == ["example-pt"]
+
+
+async def test_torrent_window_persists_and_indexes(db) -> None:
+    """窗口锚点字段可写入并按 abort_at 索引查询（FR-3.4）。"""
+    from datetime import timedelta
+
+    from app.core.timeutils import utcnow
+    from app.db.models import FreeType, TorrentStatus
+    from app.db.session import session_scope
+    from sqlalchemy import select
+
+    abort_at = utcnow() + timedelta(hours=6)
+    async with session_scope() as session:
+        dl = DownloaderInstance(name="dl1", type="qbittorrent", url="http://x")
+        session.add(dl)
+        await session.flush()
+        site = Site(name="s1", domain="d1.test", downloader_id=dl.id)
+        session.add(site)
+        await session.flush()
+        session.add(
+            Torrent(
+                info_hash="a" * 40,
+                name="test",
+                site_id=site.id,
+                downloader_id=dl.id,
+                source="free_seed",
+                status=TorrentStatus.ACTIVE,
+                free_type=FreeType.TIMED,
+                free_end_at=abort_at,
+                abort_at=abort_at,
+                deadline_at=abort_at - timedelta(minutes=30),
+                free_confidence=0.95,
+            )
+        )
+
+    async with session_scope() as session:
+        t = (
+            await session.execute(
+                select(Torrent).where(Torrent.source == "free_seed")
+            )
+        ).scalars().one()
+        assert t.abort_at == abort_at
+        assert t.free_confidence == 0.95

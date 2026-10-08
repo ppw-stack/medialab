@@ -1,4 +1,4 @@
-# 多阶段构建：.venv、tests、.git、__pycache__ 不进镜像
+# 多阶段构建：.venv、tests、.git、缓存不进镜像
 **/.venv
 **/.venv/**
 **/__pycache__
@@ -19,7 +19,11 @@
 **/.gitignore
 **/.env
 **/.env.*
-**/*.md
 **/Makefile
 **/LICENSE
-**/README.md
+**/docs
+**/*.md
+!**/README.md
+
+# .orca 为本地工作副本（需求文档已单独随源码分发，不需要进镜像）
+**/.orca

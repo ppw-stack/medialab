@@ -95,7 +95,6 @@ async def list_free_seeds(
                     .limit(page_size)
                 )
             )
-            .tuples()
             .all()
         )
         items = [_to_card(t, site_name, now) for t, site_name in rows]

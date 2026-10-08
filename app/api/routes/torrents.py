@@ -75,7 +75,6 @@ async def list_torrents(
                     .limit(page_size)
                 )
             )
-            .tuples()
             .all()
         )
 

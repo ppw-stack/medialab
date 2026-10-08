@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import base64
 import os
-from typing import Final
+from typing import Any, Final
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -39,9 +39,16 @@ class CredentialCipher:
 
     @staticmethod
     def _decode_key(key_b64: str) -> bytes:
+        """解码密钥。
+
+        ``secrets.token_urlsafe(32)`` 产出的是**无填充**的 URL-safe base64
+        （43 字符），而严格的 ``urlsafe_b64decode`` 要求补齐 ``=``。因此这里
+        先补齐填充再解码——这也是文档里给出的生成命令能直接用的原因。
+        """
         raw = key_b64.strip().encode()
+        padded = raw + b"=" * (-len(raw) % 4)
         try:
-            decoded = base64.urlsafe_b64decode(raw)
+            decoded = base64.urlsafe_b64decode(padded)
         except Exception as exc:
             raise ValueError("ENCRYPTION_KEY 非法 base64") from exc
         if len(decoded) != 32:
@@ -91,15 +98,15 @@ class CredentialCipher:
             return None
 
 
-def build_cipher(settings: AppSettings) -> CredentialCipher:
-    """从 :class:`~app.core.config.AppSettings` 构造加密器。"""
+def build_cipher(settings: Any) -> CredentialCipher:
+    """从配置对象构造加密器。
+
+    接受任何带 ``encryption_key`` / ``key_version`` 属性的对象，避免
+    ``core.config`` ↔ ``core.crypto`` 的循环导入。
+    """
     key = settings.encryption_key
-    key_str = key.get_secret_value()
-    return CredentialCipher(key_str, key_version=settings.key_version)
-
-
-#: 类型前向引用，避免导入循环
-from app.core.config import AppSettings  # noqa: E402
+    key_str = key.get_secret_value() if hasattr(key, "get_secret_value") else str(key)
+    return CredentialCipher(key_str, key_version=int(settings.key_version))
 
 
 def mask_secret(value: str | None, *, keep: int = 0) -> str:

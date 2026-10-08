@@ -118,6 +118,8 @@ class DownloaderInstance(Base):
     __tablename__ = "downloader_instances"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: 反向关系：指向 sites.downloader_id（M2 用）
+    sites: Mapped[list[Site]] = relationship(back_populates="downloader")
     name: Mapped[str] = mapped_column(String(64), unique=True)
     type: Mapped[str] = mapped_column(String(32))  # qbittorrent/transmission/deluge/aria2
     url: Mapped[str] = mapped_column(String(512))
@@ -161,7 +163,6 @@ class Site(Base):
     downloader_id: Mapped[int | None] = mapped_column(
         ForeignKey("downloader_instances.id"), nullable=True
     )
-    sites: Mapped[list[Site]] = relationship(back_populates="downloader")
     category: Mapped[str] = mapped_column(String(64), default="cross-seed")
     save_path_template: Mapped[str] = mapped_column(
         String(512), default="/data/torrents/{site}/{name}"
