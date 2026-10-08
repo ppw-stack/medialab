@@ -9,6 +9,9 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 from app.core.logging import get_logger
+from app.services.factory import AdapterFactory
+from app.services.inspect_job import inspect_and_alert
+from app.services.inspector import INSPECT_INTERVAL
 from app.services.scheduler import JobSpec, scheduler_center
 from app.services.seed_engine import SeedEngine
 
@@ -45,6 +48,19 @@ def register_jobs(
         )
     )
     logger.info("已注册 M2 周期作业：cross_seed / queue_replay")
+
+
+def register_inspect_job(factory: AdapterFactory) -> None:
+    """注册 M3 巡检作业（FR-4.1，默认 15 分钟一轮）。"""
+    scheduler_center.register(
+        JobSpec(
+            name="inspect",
+            func=lambda: _swallow(inspect_and_alert(factory)),
+            interval_seconds=INSPECT_INTERVAL,
+            offset_seconds=5,
+        )
+    )
+    logger.info("已注册 M3 周期作业：inspect（%ds）", INSPECT_INTERVAL)
 
 
 async def _swallow(result: Awaitable[object]) -> None:

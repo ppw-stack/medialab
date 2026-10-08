@@ -200,3 +200,27 @@ def get_factory() -> AdapterFactory:
     if _factory is None:
         raise RuntimeError("适配器工厂未初始化")
     return _factory
+
+
+def decrypt_notify_secret(
+    row: object, token: str
+) -> str | None:
+    """解密通知渠道密钥。
+
+    独立于 :class:`AdapterFactory`——通知渠道不需要连接池工厂，
+    但仍要走同一套凭据解密逻辑（FR-7）。
+
+    ``row`` 只需带 ``name`` 属性。
+    """
+    global _factory
+    if _factory is None:
+        raise RuntimeError("适配器工厂未初始化，无法解密渠道密钥")
+    name = getattr(row, "name", "?")
+    plain = _factory._cipher.try_decrypt(
+        token, owner_type="notify_channel", owner_id=name
+    )
+    if plain is None:
+        raise CredentialMissing(
+            f"通知渠道 {name} 的密钥无法解密——请检查 ENCRYPTION_KEY（FR-7.1）"
+        )
+    return plain

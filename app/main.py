@@ -22,7 +22,7 @@ from app.core.logging import configure_logging, get_logger
 from app.core.metrics import render_metrics, state
 from app.db.session import dispose_db, init_db, writer
 from app.services.factory import AdapterFactory, init_factory
-from app.services.jobs import register_jobs
+from app.services.jobs import register_inspect_job, register_jobs
 from app.services.queue_worker import recover_on_start, replay_once
 from app.services.scheduler import scheduler_center
 from app.services.seed_engine import SeedEngine
@@ -52,6 +52,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if settings.scheduler_enabled:
         scheduler_center.start()
         register_jobs(engine, lambda: replay_once(factory))
+        register_inspect_job(factory)
 
     try:
         yield

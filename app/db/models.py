@@ -6,7 +6,7 @@ M1 建立全部表结构（M2~M5 只填充逻辑）。时间列统一 naive UTC�
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Final
+from typing import ClassVar, Final
 
 from sqlalchemy import (
     JSON,
@@ -125,6 +125,41 @@ class Decision:
     ACCEPTED = "accepted"
     SKIPPED = "skipped"
     FAILED = "failed"
+
+
+class AlertLevel:
+    """告警级别（FR-4.3）。
+
+    顺序有意义：:func:`rank` 用于渠道 ``min_level`` 比较。
+    """
+
+    INFO = "info"
+    WARNING = "warning"
+    CRITICAL = "critical"
+
+    ORDER: ClassVar[dict[str, int]] = {INFO: 0, WARNING: 1, CRITICAL: 2}
+
+    @staticmethod
+    def rank(level: str) -> int:
+        """未知级别按最严重处理——宁可多提醒，不可漏掉严重问题。"""
+        return AlertLevel.ORDER.get(level, 99)
+
+
+class AlertCategory:
+    """FR-4.1 十二项健康指标分类。"""
+
+    TORRENT_DELETED = "torrent_deleted"
+    TORRENT_ERROR = "torrent_error"
+    ILLEGAL_TORRENT = "illegal_torrent"
+    ZERO_SEEDS = "zero_seeds"
+    RATIO_LOW = "ratio_low"
+    SEED_TIME_SHORT = "seed_time_short"
+    ZERO_DOWNLOAD_SPEED = "zero_download_speed"
+    CONN_LIMIT = "conn_limit"
+    RATE_LIMIT_CHANGED = "rate_limit_changed"
+    PORT_UNREACHABLE = "port_unreachable"
+    DISK_LOW = "disk_low"
+    CLIENT_ERROR = "client_error"
 
 
 #: 永久免费不参与超时中止（FR-3.0 / R10）
@@ -469,9 +504,17 @@ class Rule(Base):
 
 
 class Alert(Base):
-    """告警记录（FR-4.2 / FR-4.3）。"""
+    """告警记录（FR-4.2 / FR-4.3）。
+
+    ``dedupe_key`` 是 FR-4.3 去重聚合的依据，形式
+    ``category:info_hash``。同一 key 在 ``mute_window`` 内不重复推送。
+    """
 
     __tablename__ = "alerts"
+    __table_args__ = (
+        Index("ix_alerts_dedupe", "dedupe_key", "ts"),
+        Index("ix_alerts_level_ts", "level", "ts"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     ts: Mapped[datetime] = mapped_column(DateTime, default=_utcnow(), index=True)
@@ -480,8 +523,58 @@ class Alert(Base):
     torrent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     info_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     message: Mapped[str] = mapped_column(Text)
+    #: 去重键 ``category:info_hash``（FR-4.3）
+    dedupe_key: Mapped[str] = mapped_column(String(160), default="")
+    #: 静默截止：在此之前不重复推送
     muted_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     acknowledged: Mapped[bool] = mapped_column(Boolean, default=False)
+    #: 已投递的渠道（JSON 列表），用于"已发过就不再发"
+    notified_channels: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+
+class NotifyChannel(Base):
+    """通知渠道配置（FR-4.2，多渠道并行、可单独开关）。
+
+    ``secret_enc`` 存 webhook / bot token / SMTP 密码等敏感项（FR-7）。
+    """
+
+    __tablename__ = "notify_channels"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True)
+    #: wecom | serverchan | telegram | email | bark | webhook | panel
+    type: Mapped[str] = mapped_column(String(24))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    #: 非敏感配置：webhook URL 模板、chat_id、SMTP host 等
+    config: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    secret_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    key_version: Mapped[int] = mapped_column(Integer, default=1)
+    #: 仅接收该级别及以上的告警（info < warning < critical）
+    min_level: Mapped[str] = mapped_column(String(8), default="warning")
+    #: 连续失败次数，超过则临时熔断该渠道（防止坏 webhook 拖慢巡检）
+    fail_count: Mapped[int] = mapped_column(Integer, default=0)
+    breaker_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_ok_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow())
+
+
+class AlertPolicy(Base):
+    """告警策略（FR-4.3，单行全局配置）。"""
+
+    __tablename__ = "alert_policy"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    #: 去重窗口（小时），默认 6
+    mute_window_hours: Mapped[int] = mapped_column(Integer, default=6)
+    #: 🟡 是否每日汇总一次（FR-4.3 分级静默）
+    warning_daily_digest: Mapped[bool] = mapped_column(Boolean, default=True)
+    #: 🔴 是否绕过汇总立即推送
+    critical_immediate: Mapped[bool] = mapped_column(Boolean, default=True)
+    #: 风暴保护阈值：单日告警超过该数即降级为汇总推送
+    storm_threshold: Mapped[int] = mapped_column(Integer, default=50)
+    #: 静默时段，格式 ``HH:MM-HH:MM``（FR-4.3）；🔴 不受此限制
+    quiet_hours: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
 
 class TaskQueue(Base):
