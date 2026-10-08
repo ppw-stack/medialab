@@ -17,15 +17,17 @@ from fastapi.responses import Response
 
 from app import __version__
 from app.core.config import AppSettings, get_settings
+from app.core.crypto import build_cipher
 from app.core.logging import configure_logging, get_logger
 from app.core.metrics import render_metrics, state
 from app.db.session import dispose_db, init_db, writer
+from app.services.factory import AdapterFactory, init_factory
+from app.services.jobs import register_jobs
+from app.services.queue_worker import recover_on_start, replay_once
 from app.services.scheduler import scheduler_center
+from app.services.seed_engine import SeedEngine
 
 logger = get_logger(__name__)
-
-#: 停机时等待在途命令的上限
-DRAIN_TIMEOUT = 60.0
 
 
 @asynccontextmanager
@@ -35,24 +37,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("启动 %s v%s env=%s", settings.app_name, __version__, settings.env)
 
     grace = float(settings.shutdown_grace_seconds)
-    if settings.scheduler_enabled:
-        # 停机第一步：停止新任务调度（M2 起有在途作业时才有实际等待）
-        scheduler_center.start()
-    scheduler_center.accepting_new_work = False
+
+    # 适配器工厂必须先于引擎就绪：凭据解密依赖它（FR-7）
+    factory: AdapterFactory = init_factory(build_cipher(settings))
 
     init_db(settings)
     await writer.create_all()
     state["db_healthy"].set(1 if await writer.healthcheck() else 0)
 
+    # 崩溃恢复：复位中断任务（§6 可靠性、AC-09）
+    await recover_on_start(factory)
+
+    engine = SeedEngine(factory)
+    if settings.scheduler_enabled:
+        scheduler_center.start()
+        register_jobs(engine, lambda: replay_once(factory))
+
     try:
         yield
     finally:
+        scheduler_center.accepting_new_work = False
         pending = scheduler_center.inflight_count()
-        logger.info(
-            "收到停机信号，等待在途作业 %d 个（上限 %.0fs）", pending, grace
-        )
+        logger.info("收到停机信号，等待在途作业 %d 个（上限 %.0fs）", pending, grace)
         if pending:
             await scheduler_center.drain(timeout=grace)
+        await scheduler_center.shutdown(grace_seconds=int(grace))
+        await factory.aclose_all()
         await dispose_db()
         logger.info("已停机")
 
@@ -74,13 +84,14 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 
 
 def _mount_routes(app: FastAPI) -> None:
-    from app.api.routes import alerts, dashboard, sites, torrents
+    from app.api.routes import alerts, cross_seed, dashboard, sites, torrents
 
     for router in (
         dashboard.router,
         sites.router,
         torrents.router,
         alerts.router,
+        cross_seed.router,
     ):
         app.include_router(router, prefix="/api/v1")
 

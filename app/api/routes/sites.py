@@ -13,7 +13,7 @@ from app.adapters.sites.base import SiteProfile
 from app.adapters.sites.generic import GenericSiteAdapter
 from app.core.crypto import mask_secret
 from app.core.timeutils import ClockOffset, parse_duration_seconds
-from app.db.models import Site
+from app.db.models import Feed, Site
 from app.db.session import session_scope
 
 router = APIRouter(prefix="/sites", tags=["sites"])
@@ -24,6 +24,11 @@ class SiteCreate(BaseModel):
     domain: str
     rss_url: str | None = None
     adapter: str = "generic"
+    save_path_template: str = "/data/torrents/{site}/{name}"
+    max_size: int | None = Field(default=None, description="辅种体积上限（字节）")
+    min_interval_minutes: int = Field(default=60, ge=15, description="FR-2.2 下限 15")
+    downloader_id: int | None = None
+    category: str = "cross-seed"
     default_free_duration: str = "72h"
     min_buffer: str = "30m"
     buffer_ratio: float = 0.10
@@ -77,6 +82,11 @@ async def create_site(payload: SiteCreate) -> SiteOut:
             name=payload.name,
             domain=payload.domain,
             adapter=payload.adapter,
+            save_path_template=payload.save_path_template,
+            max_size=payload.max_size,
+            min_interval_minutes=payload.min_interval_minutes,
+            downloader_id=payload.downloader_id,
+            category=payload.category,
             default_free_duration=int(duration.total_seconds()) if duration else 72 * 3600,
             min_buffer=int(buffer.total_seconds()) if buffer else 1800,
             buffer_ratio=payload.buffer_ratio,
@@ -92,6 +102,18 @@ async def create_site(payload: SiteCreate) -> SiteOut:
             )
         session.add(site)
         await session.flush()
+
+        # RSS 源随站点一同创建：引擎只按 feeds 表调度，没有这条记录
+        # 站点就永远不会被拉取（FR-2.2）
+        if payload.rss_url:
+            session.add(
+                Feed(
+                    site_id=site.id,
+                    kind="site_rss",
+                    interval_minutes=payload.min_interval_minutes,
+                    enabled=payload.enabled,
+                )
+            )
         return _to_out(site, payload.rss_url)
 
 

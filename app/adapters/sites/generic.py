@@ -164,18 +164,27 @@ class GenericSiteAdapter(SiteAdapter):
         for node in root.iter():
             if not node.tag.endswith("item") and not node.tag.endswith("entry"):
                 continue
-            fields = {_localname(c.tag): (c.text or "").strip() for c in node}
-            link = fields.get("link") or fields.get("guid") or ""
+            fields = {
+                _localname(c.tag): ((c.get("href") or c.get("url") or c.text) or "").strip()
+                for c in node
+            }
+            link = fields.get("link") or ""
+            guid = fields.get("guid") or fields.get("id") or ""
+            if not link:
+                link = guid
             if not link:
                 continue
             items.append(
                 FeedItem(
                     title=fields.get("title", ""),
                     link=link,
+                    # 多数 PT 站把 InfoHash 放在 guid（isPermaLink=false）
+                    # 或 enclosure url 的 magnet 里；两者都尝试。
+                    info_hash=_hash_from_fields(fields),
                     size=_parse_size(fields.get("size") or fields.get("contentlength") or ""),
                     category=fields.get("category") or None,
                     description=fields.get("description", ""),
-                    torrent_url=fields.get("link") or None,
+                    torrent_url=fields.get("enclosure") or link,
                 )
             )
         return items
@@ -416,6 +425,20 @@ def _safe_parser() -> Any:
 
     parser = ET.XMLParser()
     return parser
+
+
+def _hash_from_fields(fields: dict[str, str]) -> str | None:
+    """从 RSS 字段中提取 InfoHash。
+
+    NexusPHP 系站点的惯例：``<guid isPermaLink="false">`` 放 40 位 hex，
+    或 enclosure 指向 magnet。这里都不做业务判断，只如实回填，
+    由 :mod:`app.services.matcher` 统一归一与校验。
+    """
+    for key in ("infohash", "info_hash", "guid", "id", "torrenthash"):
+        value = fields.get(key)
+        if value and len(value.strip()) == 40:
+            return value.strip()
+    return None
 
 
 def _localname(tag: str) -> str:

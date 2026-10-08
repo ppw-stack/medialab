@@ -45,11 +45,23 @@ def settings(tmp_path_factory, test_key: str):
 
 
 @pytest_asyncio.fixture
-async def db(settings):
-    """独立测试库：建表后交给用例，用例结束关闭连接池。"""
+async def db(settings, tmp_path):
+    """**每个用例独立**的数据库文件。
+
+    必须 function-scoped 且路径唯一：共享库会让用例之间互相污染
+    （例如多个用例都插入 name 相同的 Site，撞唯一约束）。
+    """
+    from app.core.config import AppSettings
     from app.db.session import dispose_db, init_db, writer
 
-    init_db(settings)
+    local = AppSettings(
+        env="test",
+        encryption_key=settings.encryption_key.get_secret_value(),
+        data_dir=tmp_path,
+        log_dir=tmp_path / "logs",
+        db_path=tmp_path / "test.db",
+    )
+    init_db(local)
     await writer.create_all()
     try:
         yield writer

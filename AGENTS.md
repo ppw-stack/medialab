@@ -13,7 +13,7 @@
 ## 必备命令
 ```bash
 uv sync --extra dev         # 装依赖
-uv run pytest               # 跑测试（应有 106 个用例）
+uv run pytest               # 跑测试（应有 269 个用例）
 uv run ruff check app/ tests/
 uv run mypy app/
 ```

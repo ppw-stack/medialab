@@ -107,6 +107,26 @@ class TriggerSource:
     RULE = "rule"
 
 
+class SkipReason:
+    """FR-2.3 七项过滤的跳过原因（逐条可追溯）。"""
+
+    DUPLICATE_LOCAL = "duplicate_local"
+    DUPLICATE_SITE = "duplicate_site"
+    CATEGORY_MISMATCH = "category_mismatch"
+    SIZE_EXCEEDED = "size_exceeded"
+    COOLDOWN = "cooldown"
+    DISK_FULL = "disk_full"
+    PATH_INVALID = "path_invalid"
+    NO_LOCAL_MATCH = "no_local_match"
+
+
+class Decision:
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    SKIPPED = "skipped"
+    FAILED = "failed"
+
+
 #: 永久免费不参与超时中止（FR-3.0 / R10）
 NON_ABORTABLE_FREE_TYPES: Final = frozenset({FreeType.PERMANENT, FreeType.NEUTRAL})
 
@@ -274,6 +294,65 @@ class CooldownHash(Base):
     fail_count: Mapped[int] = mapped_column(Integer, default=1)
     cooldown_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow())
+
+
+class AddHistory(Base):
+    """辅种添加历史（FR-2.3「站点去重」）。
+
+    **与 :class:`CooldownHash` 的职责边界**（FR-2.3.1）：
+
+    - 本表 = **幂等凭证**。"本站在此站添加过这个 hash" 是不可协商的事实，
+      永久保留，是非功能·幂等性的落地。
+    - ``cooldown_hash`` = **临时回避**。到期即失效，某些 ``reason``
+      （``user_removed`` / ``user_blacklisted``）甚至需要人工解除。
+
+    二者不得互相替代：``disk_full`` / ``duplicate`` 记入 history 但**不**冷却，
+    空间恢复或规则变化后必须能重新辅种。
+    """
+
+    __tablename__ = "add_history"
+    __table_args__ = (
+        UniqueConstraint("site_id", "info_hash", name="uq_history_site_hash"),
+        Index("ix_history_torrent", "torrent_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    site_id: Mapped[int] = mapped_column(ForeignKey("sites.id"))
+    info_hash: Mapped[str] = mapped_column(String(64))
+    torrent_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, comment="可空：下载器添加失败时仅有记录"
+    )
+    name: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    source: Mapped[str] = mapped_column(String(16), default=Source.AUTO_SEED)
+    outcome: Mapped[str] = mapped_column(String(24), default="added")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow())
+
+
+class FeedItemRecord(Base):
+    """RSS 拉取到的原始条目（FR-2.2「拉取结果写入本地 SQLite」）。
+
+    与 :class:`AddHistory` 的区别：本表记录的是**看过但未添加**的条目，
+    用于排查"为什么这个种没被辅种"（FR-2.3 每一项过滤都要可追溯）。
+    """
+
+    __tablename__ = "feed_items"
+    __table_args__ = (
+        Index("ix_feed_items_feed_seen", "feed_id", "seen_at"),
+        Index("ix_feed_items_hash", "info_hash"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    feed_id: Mapped[int] = mapped_column(ForeignKey("feeds.id"))
+    info_hash: Mapped[str] = mapped_column(String(64))
+    title: Mapped[str] = mapped_column(String(1024))
+    link: Mapped[str] = mapped_column(String(1024))
+    size: Mapped[int] = mapped_column(BigInteger, default=0)
+    category: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    #: 过滤结果：``accepted`` 或具体 skip 原因（FR-2.3 七项）
+    decision: Mapped[str] = mapped_column(String(32), default="pending")
+    reject_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    torrent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    seen_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow())
 
 
 class Trash(Base):
