@@ -104,3 +104,24 @@ def register_free_seed_jobs(
         FREE_SEED_INTERVAL,
         WATCH_INTERVAL,
     )
+
+
+
+def register_cleanup_jobs(factory: AdapterFactory) -> None:
+    """注册 M5 清理作业（FR-5.1 / FR-5.4）。"""
+
+    from app.services.abort_bridge import execute_pending_aborts
+
+    scheduler_center.register(
+        JobSpec(
+            name="cleanup_aborts",
+            func=lambda: _swallow(execute_pending_aborts(factory)),
+            interval_seconds=ABORT_PIPE_INTERVAL,
+            offset_seconds=37,
+        )
+    )
+    logger.info("已注册 M5 周期作业：cleanup_aborts(%ds)", ABORT_PIPE_INTERVAL)
+
+
+#: M4 中止产物入队后的处理节奏（每 5 分钟消费一次）
+ABORT_PIPE_INTERVAL = 300

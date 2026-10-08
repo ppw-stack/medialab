@@ -154,12 +154,19 @@ def render_save_path(
 def is_within(root: str, candidate: str) -> bool:
     """候选路径是否位于根目录之下（FR-5.2.5c 第三重校验）。
 
-    纯字符串判断，**不**解析符号链接（那由磁盘层用 ``realpath`` 做）。
-    这里只做词法检查，用于快速拒绝明显越界的路径。
+    两侧都做 ``realpath``：macOS 下 ``tempfile`` 给 ``/var/folders/...`` 但
+    ``realpath`` 解析到 ``/private/var/folders/...``，不归一化会让
+    字面前缀匹配失败从而误报越界。
     """
+    import os
     try:
-        root_p = PurePosixPath(root)
-        cand_p = PurePosixPath(candidate)
+        root_abs = os.path.realpath(root)
+        cand_abs = os.path.realpath(candidate)
+    except (TypeError, ValueError, OSError):
+        return False
+    try:
+        root_p = PurePosixPath(root_abs)
+        cand_p = PurePosixPath(cand_abs)
     except (TypeError, ValueError):
         return False
     if not root_p.is_absolute():

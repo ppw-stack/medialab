@@ -23,6 +23,7 @@ from app.core.metrics import render_metrics, state
 from app.db.session import dispose_db, init_db, writer
 from app.services.factory import AdapterFactory, init_factory
 from app.services.jobs import (
+    register_cleanup_jobs,
     register_free_seed_jobs,
     register_inspect_job,
     register_jobs,
@@ -63,6 +64,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         register_jobs(engine, lambda: replay_once(factory))
         register_inspect_job(factory)
         register_free_seed_jobs(hunter, watcher)
+        register_cleanup_jobs(factory)
 
     try:
         yield
@@ -95,7 +97,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 
 
 def _mount_routes(app: FastAPI) -> None:
-    from app.api.routes import alerts, cross_seed, dashboard, free_seed, sites, torrents
+    from app.api.routes import alerts, cleanup, cross_seed, dashboard, free_seed, sites, torrents
 
     for router in (
         dashboard.router,
@@ -104,6 +106,7 @@ def _mount_routes(app: FastAPI) -> None:
         alerts.router,
         cross_seed.router,
         free_seed.router,
+        cleanup.router,
     ):
         app.include_router(router, prefix="/api/v1")
 
