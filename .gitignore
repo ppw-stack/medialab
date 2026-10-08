@@ -1,0 +1,46 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# ---- Tooling ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# ---- Runtime data (FR-8.1 volumes) ----
+data/
+logs/
+config/local.yaml
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+
+# ---- Secrets: 密钥与备份严禁入库 (FR-7.1 / R6) ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+backups/
+
+# ---- Frontend ----
+web/node_modules/
+web/dist/
+web/.vite/
+
+# ---- Editors / OS ----
+.DS_Store
+.idea/
+.vscode/
+*.swp

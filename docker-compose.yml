@@ -1,0 +1,45 @@
+services:
+  seedhelper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: seedhelper/seedhelper:0.1.0
+    container_name: seedhelper
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      TZ: Asia/Shanghai
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_JSON: ${LOG_JSON:-true}
+      WEB_USERNAME: ${WEB_USERNAME:-admin}
+      WEB_PASSWORD: ${WEB_PASSWORD}
+      WEB_TOKEN: ${WEB_TOKEN}
+      # FR-7.1：缺失则启动失败（AC-17），不要留空
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+    env_file:
+      - .env
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data          # SQLite WAL 文件
+      - ./logs:/app/logs
+      - /data/torrents:/data/torrents   # 共享下载目录（空间统计 + 回收站 rename 目标）
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    stop_grace_period: 60s        # 配合 SIGTERM 优雅停机（FR-8.2）
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+        reservations:
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

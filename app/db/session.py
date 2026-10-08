@@ -1,0 +1,150 @@
+"""异步 SQLAlchemy engine 与会话（§8 SQLite 约定）。
+
+三条硬约定：
+
+1. ``journal_mode=WAL`` + ``foreign_keys=ON``：巡检写不阻塞面板读。
+2. **单写者队列**：SQLite 不支持多进程并发写，所有写操作经进程内队列串行化。
+3. 下载器写操作在队列之上再叠加**按实例的操作锁**（非功能·并发安全），
+   见 :mod:`app.adapters.downloaders.locks`。
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from sqlalchemy import event, text
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+
+from app.core.config import AppSettings
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
+
+_engine: AsyncEngine | None = None
+_session_factory: async_sessionmaker[AsyncSession] | None = None
+
+
+def _apply_pragmas(dbapi_conn, _record) -> None:  # type: ignore[no-untyped-def]
+    """连接级 PRAGMA。journal_mode 是库级，只需设置一次但设为幂等。"""
+    cursor = dbapi_conn.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA busy_timeout=10000")
+    finally:
+        cursor.close()
+
+
+def create_db_engine(settings: AppSettings) -> AsyncEngine:
+    """构造 engine。测试可用独立 settings 建内存库。"""
+    settings.ensure_dirs()
+    engine = create_async_engine(
+        settings.db_url,
+        echo=False,
+        pool_pre_ping=True,
+        connect_args={"timeout": 30},
+    )
+    event.listen(engine.sync_engine, "connect", _apply_pragmas)
+    return engine
+
+
+def init_db(settings: AppSettings) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
+    """初始化全局 engine 与 session factory（幂等）。"""
+    global _engine, _session_factory
+    if _engine is not None:
+        return _engine, _session_factory  # type: ignore[return-value]
+    _engine = create_db_engine(settings)
+    _session_factory = async_sessionmaker(
+        _engine, expire_on_commit=False, class_=AsyncSession
+    )
+    return _engine, _session_factory
+
+
+def get_engine() -> AsyncEngine:
+    if _engine is None:
+        raise RuntimeError("数据库未初始化，请先调用 init_db()")
+    return _engine
+
+
+def get_session_factory() -> async_sessionmaker[AsyncSession]:
+    if _session_factory is None:
+        raise RuntimeError("数据库未初始化，请先调用 init_db()")
+    return _session_factory
+
+
+@asynccontextmanager
+async def session_scope() -> AsyncIterator[AsyncSession]:
+    """事务性会话上下文。正常退出提交，异常回滚。"""
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+async def dispose_db() -> None:
+    """关闭连接池（优雅停机）。"""
+    global _engine, _session_factory
+    if _engine is not None:
+        await _engine.dispose()
+        logger.info("数据库连接池已关闭")
+    _engine = None
+    _session_factory = None
+
+
+class SingleWriterQueue:
+    """进程内单写者串行队列（§8 约定 2）。
+
+    SQLite 单写者限制在**多连接**时才会触发 ``database is locked``。巡检、
+    免费种高频看护、WebSocket 推送并发写同一库时，串行化可完全避免该错误，
+    且比依赖 ``busy_timeout`` 重试更可预测。
+    """
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._depth = 0
+
+    @asynccontextmanager
+    async def write(self) -> AsyncIterator[AsyncSession]:
+        """获取写会话。**不要**在持锁期间做网络 IO。"""
+        factory = get_session_factory()
+        async with self._lock, factory() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    async def create_all(self) -> None:
+        """建表（幂等）。"""
+        from app.db.models import Base
+
+        engine = get_engine()
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("数据表已就绪")
+
+    async def healthcheck(self) -> bool:
+        try:
+            async with session_scope() as session:
+                await session.execute(text("SELECT 1"))
+            return True
+        except Exception as exc:
+            logger.warning("数据库健康检查失败：%s", exc)
+            return False
+
+
+#: 全局单写者队列
+writer = SingleWriterQueue()
