@@ -31,8 +31,9 @@ def payload(**kw) -> AlertPayload:
 # ------------------------------------------------------------ Webhook
 async def test_webhook_sends_json_post() -> None:
     adapter = WebhookAdapter({"url": "https://x.example/h"}, secret="Bearer T")
+    response = httpx.Response(200, request=httpx.Request("POST", "https://x.example/h"))
     with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock:
-        mock.return_value = httpx.Response(200, request=httpx.Request("POST", "https://x.example/h"))
+        mock.return_value = response
         result = await adapter.send(payload())
     assert result.ok
     body = mock.call_args.kwargs["json"]
@@ -58,7 +59,8 @@ async def test_webhook_no_url() -> None:
 async def test_webhook_network_error_no_raise() -> None:
     """网络异常不得抛——渠道故障绝不上抛业务层（FR-1.3 精神）。"""
     adapter = WebhookAdapter({"url": "https://x.example/h"})
-    with patch("httpx.AsyncClient.post", side_effect=httpx.ConnectError("x", request=httpx.Request("POST", "x"))):
+    req = httpx.Request("POST", "x")
+    with patch("httpx.AsyncClient.post", side_effect=httpx.ConnectError("x", request=req)):
         result = await adapter.send(payload())
     assert result.ok is False
     assert "ConnectError" in result.error
@@ -77,10 +79,12 @@ async def test_wecom_marks_critical() -> None:
 
 async def test_wecom_errorcode_not_zero() -> None:
     adapter = WeComAdapter({}, secret="https://x/w")
+    bad_req = httpx.Request("POST", "x")
+    bad_resp = httpx.Response(
+        200, json={"errcode": 40001, "errmsg": "invalid token"}, request=bad_req
+    )
     with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock:
-        mock.return_value = httpx.Response(
-            200, json={"errcode": 40001, "errmsg": "invalid token"}, request=httpx.Request("POST", "x")
-        )
+        mock.return_value = bad_resp
         result = await adapter.send(payload())
     assert result.ok is False
     assert "40001" in result.error
@@ -134,8 +138,9 @@ async def test_telegram_missing_chat_id() -> None:
 async def test_bark_time_sensitive_for_critical() -> None:
     adapter = BarkAdapter({}, secret="KEY")
     with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock:
-        mock.return_value = httpx.Response(200, request=httpx.Request("POST", "x"))
-        result = await adapter.send(payload(level="critical"))
+        r = httpx.Response(200, request=httpx.Request("POST", "x"))
+        mock.return_value = r
+        await adapter.send(payload(level="critical"))
     body = mock.call_args.kwargs["json"]
     assert body["level"] == "timeSensitive"
 

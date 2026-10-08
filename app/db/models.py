@@ -310,6 +310,9 @@ class Torrent(Base):
     added_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow())
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     removed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_rescued_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True,
+        comment="FR-3.8 抢救策略最后执行时间，用于限速后冷却"
+    )
     protect_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 

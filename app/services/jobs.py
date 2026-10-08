@@ -7,6 +7,11 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.services.free_seed_hunter import FreeSeedHunter
+    from app.services.window_watcher import WindowWatcher
 
 from app.core.logging import get_logger
 from app.services.factory import AdapterFactory
@@ -66,3 +71,36 @@ def register_inspect_job(factory: AdapterFactory) -> None:
 async def _swallow(result: Awaitable[object]) -> None:
     """作业返回值对调度器无意义；仅确保 await 完成。"""
     await result
+
+#: FR-3.1 默认 10 分钟
+FREE_SEED_INTERVAL = 600
+#: FR-3.4 看护默认 60 秒（按紧迫度内部动态再调；这是上限节奏）
+WATCH_INTERVAL = 60
+
+
+
+def register_free_seed_jobs(
+    engine: FreeSeedHunter, watcher: WindowWatcher
+) -> None:
+    """注册 M4 免费种作业（FR-3 调度：10min 抓取 + 1min 看护）。"""
+    scheduler_center.register(
+        JobSpec(
+            name="free_seed_poll",
+            func=lambda: _swallow(engine.run_all()),
+            interval_seconds=FREE_SEED_INTERVAL,
+            offset_seconds=29,
+        )
+    )
+    scheduler_center.register(
+        JobSpec(
+            name="window_watch",
+            func=lambda: _swallow(watcher.watch_active()),
+            interval_seconds=WATCH_INTERVAL,
+            offset_seconds=11,
+        )
+    )
+    logger.info(
+        "已注册 M4 周期作业：free_seed_poll(%ds) / window_watch(%ds)",
+        FREE_SEED_INTERVAL,
+        WATCH_INTERVAL,
+    )

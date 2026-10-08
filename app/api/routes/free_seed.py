@@ -13,6 +13,9 @@ from app.core.timeutils import remaining_until, utcnow
 from app.core.windows import feasibility, inspect_interval_seconds, urgency_level
 from app.db.models import AbortedReason, Site, Torrent, TorrentStatus
 from app.db.session import session_scope
+from app.services.factory import get_factory
+from app.services.free_seed_hunter import FreeRoundStats, FreeSeedHunter
+from app.services.window_watcher import WindowWatcher
 
 router = APIRouter(prefix="/free-seed", tags=["free-seed"])
 
@@ -197,3 +200,54 @@ def _to_card(t: Torrent, site_name: str, now: datetime) -> FreeSeedCard:
         paused_reason=t.paused_reason,
         status=t.status,
     )
+
+
+
+
+class FreeRoundResult(BaseModel):
+    site: str
+    status: str
+    pulled: int
+    accepted: int
+    skipped: int
+    added: int
+    failed: int
+    permanent: int
+    duration_ms: int
+    skip_reasons: dict[str, int]
+
+
+def _round_out(s: FreeRoundStats) -> FreeRoundResult:
+    return FreeRoundResult(
+        site=s.site,
+        status=s.status,
+        pulled=s.pulled,
+        accepted=s.accepted,
+        skipped=s.skipped,
+        added=s.added,
+        failed=s.failed,
+        permanent=s.permanent,
+        duration_ms=s.duration_ms,
+        skip_reasons=dict(s.skip_reasons),
+    )
+
+
+@router.post("/pull", summary="手动触发免费种捕获（FR-3 全轮）")
+async def pull_free_seeds() -> list[FreeRoundResult]:
+    """立即对所有启用站点跑一轮免费种捕获。"""
+    hunter = FreeSeedHunter(get_factory())
+    return [_round_out(s) for s in await hunter.run_all()]
+
+
+@router.post("/sites/{site_id}/pull", summary="手动触发单站免费种")
+async def pull_one_site(site_id: int) -> FreeRoundResult:
+    """忽略 15 分钟频率下限（用户显式决策，FR-6.1）。"""
+    hunter = FreeSeedHunter(get_factory())
+    return _round_out(await hunter.run_site(site_id, force=True))
+
+
+@router.post("/watch", summary="手动触发窗口看护（FR-3.4）")
+async def watch_now() -> dict[str, int]:
+    """立即执行一轮看护：对所有在途免费种按紧迫度评估。"""
+    watcher = WindowWatcher(get_factory())
+    return await watcher.watch_active()

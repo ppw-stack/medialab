@@ -91,3 +91,29 @@ def random_key() -> str:
 
 
 __all__ = ["AsyncIterator", "Path"]
+
+@pytest_asyncio.fixture
+async def free_seed_env(db) -> dict:
+    """为 free-seed hunter 测试准备站点 + 下载器 + RSS 源。"""
+    from app.db.models import DownloaderInstance, Feed, Site
+    from app.db.session import session_scope
+
+    async with session_scope() as s:
+        dl = DownloaderInstance(name="qbt", type="qbittorrent", url="http://qbt.invalid")
+        s.add(dl)
+        await s.flush()
+        site = Site(
+            name="pt",
+            domain="pt.invalid",
+            save_path_template="/d/{site}/{name}",
+            downloader_id=dl.id,
+            category="free-seed",
+        )
+        s.add(site)
+        await s.flush()
+        feed = Feed(site_id=site.id, kind="site_rss", interval_minutes=15, enabled=True)
+        s.add(feed)
+        await s.flush()
+        result = {"site_id": site.id, "dl_id": dl.id, "feed_id": feed.id}
+
+    return result

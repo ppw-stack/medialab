@@ -22,7 +22,11 @@ from app.core.logging import configure_logging, get_logger
 from app.core.metrics import render_metrics, state
 from app.db.session import dispose_db, init_db, writer
 from app.services.factory import AdapterFactory, init_factory
-from app.services.jobs import register_inspect_job, register_jobs
+from app.services.jobs import (
+    register_free_seed_jobs,
+    register_inspect_job,
+    register_jobs,
+)
 from app.services.queue_worker import recover_on_start, replay_once
 from app.services.scheduler import scheduler_center
 from app.services.seed_engine import SeedEngine
@@ -51,8 +55,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     engine = SeedEngine(factory)
     if settings.scheduler_enabled:
         scheduler_center.start()
+        from app.services.free_seed_hunter import FreeSeedHunter
+        from app.services.window_watcher import WindowWatcher
+
+        hunter = FreeSeedHunter(factory)
+        watcher = WindowWatcher(factory)
         register_jobs(engine, lambda: replay_once(factory))
         register_inspect_job(factory)
+        register_free_seed_jobs(hunter, watcher)
 
     try:
         yield
@@ -85,7 +95,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 
 
 def _mount_routes(app: FastAPI) -> None:
-    from app.api.routes import alerts, cross_seed, dashboard, sites, torrents
+    from app.api.routes import alerts, cross_seed, dashboard, free_seed, sites, torrents
 
     for router in (
         dashboard.router,
@@ -93,6 +103,7 @@ def _mount_routes(app: FastAPI) -> None:
         torrents.router,
         alerts.router,
         cross_seed.router,
+        free_seed.router,
     ):
         app.include_router(router, prefix="/api/v1")
 
