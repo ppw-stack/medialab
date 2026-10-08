@@ -5,10 +5,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
+from app.api.auth import require_session
 from app.core.timeutils import remaining_until, utcnow
 from app.core.windows import feasibility, inspect_interval_seconds, urgency_level
 from app.db.models import AbortedReason, Site, Torrent, TorrentStatus
@@ -17,7 +18,7 @@ from app.services.factory import get_factory
 from app.services.free_seed_hunter import FreeRoundStats, FreeSeedHunter
 from app.services.window_watcher import WindowWatcher
 
-router = APIRouter(prefix="/free-seed", tags=["free-seed"])
+router = APIRouter(prefix="/free-seed", dependencies=[Depends(require_session)], tags=["free-seed"])
 
 
 class FreeSeedCard(BaseModel):

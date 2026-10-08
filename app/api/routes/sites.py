@@ -5,18 +5,19 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from app.adapters.sites.base import SiteProfile
 from app.adapters.sites.generic import GenericSiteAdapter
+from app.api.auth import require_session
 from app.core.crypto import mask_secret
 from app.core.timeutils import ClockOffset, parse_duration_seconds
 from app.db.models import Feed, Site
 from app.db.session import session_scope
 
-router = APIRouter(prefix="/sites", tags=["sites"])
+router = APIRouter(prefix="/sites", dependencies=[Depends(require_session)], tags=["sites"])
 
 
 class SiteCreate(BaseModel):

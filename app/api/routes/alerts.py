@@ -5,11 +5,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from app.adapters.notify import SendResult
+from app.api.auth import require_session
 from app.core.config import get_settings
 from app.core.crypto import build_cipher
 from app.core.timeutils import utcnow
@@ -19,7 +20,7 @@ from app.services.alerter import Alerter
 from app.services.factory import init_factory
 from app.services.inspect_job import inspect_and_alert, load_policy
 
-router = APIRouter(prefix="/alerts", tags=["alerts"])
+router = APIRouter(prefix="/alerts", dependencies=[Depends(require_session)], tags=["alerts"])
 
 
 class AlertOut(BaseModel):

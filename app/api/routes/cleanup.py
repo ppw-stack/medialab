@@ -5,10 +5,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
+from app.api.auth import require_session
 from app.db.models import (
     CleanupConfirmation,
     CleanupLog,
@@ -22,7 +23,7 @@ from app.services.abort_bridge import execute_pending_aborts
 from app.services.cleanup import Cleaner, generate_report
 from app.services.factory import get_factory
 
-router = APIRouter(prefix="/cleanup", tags=["cleanup"])
+router = APIRouter(prefix="/cleanup", dependencies=[Depends(require_session)], tags=["cleanup"])
 
 
 # ---------------------------------------------------------------- 策略

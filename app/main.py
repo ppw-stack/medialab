@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.responses import Response
 
 from app import __version__
+from app.core.auth import hash_password
 from app.core.config import AppSettings, get_settings
 from app.core.crypto import build_cipher
 from app.core.logging import configure_logging, get_logger
@@ -45,6 +46,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # 适配器工厂必须先于引擎就绪：凭据解密依赖它（FR-7）
     factory: AdapterFactory = init_factory(build_cipher(settings))
+
+    # 首次启动：明文密码升级为 PBKDF2 哈希（与 web_password 字段存储兼容）
+    from pydantic import SecretStr
+
+    if settings.web_password and not settings.web_password.get_secret_value().startswith(
+        "pbkdf2$"
+    ):
+        try:
+            plain = settings.web_password.get_secret_value()
+            settings.web_password = SecretStr(hash_password(plain))
+            logger.info("已将默认 WEB_PASSWORD 升级为 PBKDF2 哈希")
+        except Exception as exc:
+            logger.warning("密码升级失败：%s", exc)
 
     init_db(settings)
     await writer.create_all()
@@ -92,11 +106,15 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
+    from app.api.auth import install_static
     _mount_routes(app)
+    import os as _os
+    install_static(app, path=_os.environ.get("FRONTEND_DIST", "/app/web/dist"))
     return app
 
 
 def _mount_routes(app: FastAPI) -> None:
+    from app.api.auth import router as auth_router
     from app.api.routes import alerts, cleanup, cross_seed, dashboard, free_seed, sites, torrents
 
     for router in (
@@ -109,6 +127,7 @@ def _mount_routes(app: FastAPI) -> None:
         cleanup.router,
     ):
         app.include_router(router, prefix="/api/v1")
+    app.include_router(auth_router)  # 自身已含 /api/v1 前缀
 
     @app.get("/healthz", tags=["ops"], summary="健康检查（FR-8.2）")
     async def healthz() -> dict[str, object]:

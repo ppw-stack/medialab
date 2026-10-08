@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 
+from app.api.auth import require_session
 from app.db.models import Site, Torrent, TorrentStatus
 from app.db.session import session_scope
 
-router = APIRouter(tags=["dashboard"])
+router = APIRouter(dependencies=[Depends(require_session)], tags=["dashboard"])
 
 
 @router.get("/dashboard", summary="总览概览")

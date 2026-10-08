@@ -5,14 +5,15 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
+from app.api.auth import require_session
 from app.db.models import ActionLog, Site, Torrent
 from app.db.session import session_scope
 
-router = APIRouter(prefix="/torrents", tags=["torrents"])
+router = APIRouter(prefix="/torrents", dependencies=[Depends(require_session)], tags=["torrents"])
 
 
 class TorrentOut(BaseModel):

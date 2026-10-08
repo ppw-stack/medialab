@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 
+from app.api.auth import require_session
 from app.core.config import get_settings
 from app.core.crypto import build_cipher
 from app.core.logging import get_logger
@@ -18,7 +19,7 @@ from app.services.feed_fetcher import FeedFetcher, PullStatus
 from app.services.seed_engine import RoundStats, SeedEngine
 
 logger = get_logger(__name__)
-router = APIRouter(tags=["cross-seed"])
+router = APIRouter(dependencies=[Depends(require_session)], tags=["cross-seed"])
 
 
 class FeedTestResult(BaseModel):
