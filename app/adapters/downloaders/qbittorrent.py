@@ -5,6 +5,7 @@ WebUI API v2，见 https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-(qB
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -81,22 +82,26 @@ class QbittorrentAdapter(DownloaderAdapter):
             headers={"Referer": self._base, "User-Agent": "SeedHelper/0.1"},
         )
         self._authed = False
+        self._auth_lock = asyncio.Lock()
 
     # ------------------------------------------------------------ 内部
     async def _ensure_auth(self) -> None:
         """登录取 Cookie（附录 A）。401/403 自动重登一次。"""
         if self._authed:
             return
-        try:
-            resp = await self._client.post(
-                "/api/v2/auth/login",
-                data={"username": self._username, "password": self._password},
-            )
-            if resp.status_code != 200 or "Fails" in resp.text:
-                raise DownloaderError("qBittorrent 登录失败", transient=False)
-            self._authed = True
-        except httpx.HTTPError as exc:
-            raise DownloaderError(f"qBittorrent 网络错误：{exc}", transient=True) from exc
+        async with self._auth_lock:
+            if self._authed:  # double-check：其他协程可能已登录
+                return
+            try:
+                resp = await self._client.post(
+                    "/api/v2/auth/login",
+                    data={"username": self._username, "password": self._password},
+                )
+                if resp.status_code != 200 or "Fails" in resp.text:
+                    raise DownloaderError("qBittorrent 登录失败", transient=False)
+                self._authed = True
+            except httpx.HTTPError as exc:
+                raise DownloaderError(f"qBittorrent 网络错误：{exc}", transient=True) from exc
 
     async def _post_retry(self, path: str, **kw: Any) -> httpx.Response:
         await self._ensure_auth()
@@ -133,9 +138,21 @@ class QbittorrentAdapter(DownloaderAdapter):
         if resp.status_code in {401, 403}:
             self._authed = False
             await self._ensure_auth()
-            resp = await self._client.get(path, **kw)
+            try:
+                resp = await self._client.get(path, **kw)
+            except httpx.HTTPError as exc:
+                raise DownloaderError(
+                    f"qBittorrent 重试失败：{exc}", transient=True
+                ) from exc
+        if resp.status_code >= 500:
+            raise DownloaderError(
+                f"qBittorrent 服务端错误 {resp.status_code}", transient=True
+            )
         if resp.status_code >= 400:
-            raise DownloaderError(f"qBittorrent 请求失败 {resp.status_code}")
+            raise DownloaderError(
+                f"qBittorrent 请求失败 {resp.status_code}：{resp.text[:200]}",
+                transient=False,
+            )
         return resp
 
     @staticmethod
@@ -156,7 +173,10 @@ class QbittorrentAdapter(DownloaderAdapter):
 
     async def list_torrents(self, filt: TorrentFilter | None = None) -> list[TorrentInfo]:
         resp = await self._get_retry("/api/v2/torrents/info")
-        rows: list[dict[str, Any]] = resp.json()
+        try:
+            rows: list[dict[str, Any]] = resp.json()
+        except ValueError as exc:
+            raise DownloaderError(f"qBittorrent 响应非 JSON：{exc}", transient=False) from exc
         out: list[TorrentInfo] = []
         for row in rows:
             state = _STATE_MAP.get(row.get("state", ""), TorrentState.UNKNOWN)
@@ -268,7 +288,10 @@ class QbittorrentAdapter(DownloaderAdapter):
 
     async def get_stats(self) -> GlobalStats:
         resp = await self._get_retry("/api/v2/transfer/info")
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise DownloaderError(f"qBittorrent 响应非 JSON：{exc}", transient=False) from exc
         return GlobalStats(
             up_speed=int(data.get("up_info_data") or 0),
             down_speed=int(data.get("dl_info_data") or 0),
@@ -291,9 +314,13 @@ class QbittorrentAdapter(DownloaderAdapter):
             resp = await self._get_retry("/api/v2/torrents/files", params={"hash": info_hash})
         except DownloaderError:
             return []
+        try:
+            data = resp.json()
+        except ValueError:
+            return []
         return [
             TorrentFile(path=row.get("name", ""), size=int(row.get("size") or 0))
-            for row in resp.json()
+            for row in data
             if row.get("name")
         ]
 

@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from app.adapters.notify import SendResult
 from app.api.auth import require_session
@@ -173,14 +173,12 @@ async def acknowledge(alert_id: int) -> dict[str, int | bool]:
 @router.post("/ack-all", summary="一键确认全部告警")
 async def acknowledge_all() -> dict[str, int]:
     async with session_scope() as session:
-        rows = (
-            (await session.execute(select(Alert).where(Alert.acknowledged.is_(False))))
-            .scalars()
-            .all()
+        result = await session.execute(
+            update(Alert)
+            .where(Alert.acknowledged.is_(False))
+            .values(acknowledged=True)
         )
-        for row in rows:
-            row.acknowledged = True
-        return {"acknowledged": len(rows)}
+        return {"acknowledged": result.rowcount or 0}
 
 
 @router.post("/{alert_id}/unmute", summary="解除该告警的静默窗口")
@@ -299,6 +297,7 @@ async def update_channel(channel_id: int, payload: ChannelIn) -> ChannelOut:
         ).scalar_one_or_none()
         if ch is None:
             raise HTTPException(status_code=404, detail="渠道不存在")
+        ch.name = payload.name
         ch.type = payload.type
         ch.enabled = payload.enabled
         ch.config = payload.config
@@ -310,7 +309,6 @@ async def update_channel(channel_id: int, payload: ChannelIn) -> ChannelOut:
             ch.secret_enc = cipher.encrypt(
                 payload.secret, owner_type="notify_channel", owner_id=payload.name
             )
-            ch.name = payload.name
         return _channel_out(ch)
 
 

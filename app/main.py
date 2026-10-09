@@ -16,7 +16,7 @@ from fastapi import FastAPI
 from fastapi.responses import Response
 
 from app import __version__
-from app.core.auth import hash_password
+from app.core.auth import hash_password, init_hmac_key
 from app.core.config import AppSettings, get_settings
 from app.core.crypto import build_cipher
 from app.core.logging import configure_logging, get_logger
@@ -46,6 +46,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # 适配器工厂必须先于引擎就绪：凭据解密依赖它（FR-7）
     factory: AdapterFactory = init_factory(build_cipher(settings))
+
+    # 从 ENCRYPTION_KEY 派生 session HMAC 密钥（防硬编码盐）
+    init_hmac_key(settings.encryption_key.get_secret_value())
 
     # 首次启动：明文密码升级为 PBKDF2 哈希（与 web_password 字段存储兼容）
     from pydantic import SecretStr

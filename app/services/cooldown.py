@@ -117,8 +117,7 @@ class CooldownService:
                 until=row.cooldown_until,
             )
 
-        # 已过期：自动失效
-        await self._session.delete(row)
+        # 已过期：不阻塞（过期记录由 record() 在下次写入时重置计数）
         return CooldownVerdict(blocked=False, reason=row.reason, fail_count=row.fail_count)
 
     async def record(
@@ -150,6 +149,11 @@ class CooldownService:
                 site_id=site_id, info_hash=h, reason=reason, fail_count=1
             )
             self._session.add(row)
+        elif row.cooldown_until is not None and row.cooldown_until <= ref:
+            # 过期后重新计数（is_blocked 不再就地删除，由这里重置）
+            row.reason = reason
+            fail_count = 1
+            row.fail_count = 1
         elif row.reason != reason:
             # reason 变了 → fail_count 独立重新计数（不共享阶梯）。
             # 注意必须**复用同一行**：(site_id, info_hash) 上有唯一约束，

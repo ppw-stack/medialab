@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -102,10 +102,10 @@ class TaskQueueService:
         )
         self._session.add(task)
         try:
-            await self._session.flush()
+            async with self._session.begin_nested():
+                await self._session.flush()
         except IntegrityError:
             # 并发插入同键：唯一约束兜底，视为幂等命中
-            await self._session.rollback()
             row = (
                 await self._session.execute(
                     select(TaskQueue).where(TaskQueue.idem_key == idem_key)
@@ -116,27 +116,37 @@ class TaskQueueService:
             return EnqueueResult(task_id=row.id, created=False)
         return EnqueueResult(task_id=task.id, created=True)
 
-    async def claim_due(self, *, limit: int = 50) -> list[TaskQueue]:
-        """取出到期待执行任务（先标记 running，防重复消费）。"""
+    async def claim_due(self, *, limit: int = 50, kind: str | None = None) -> list[TaskQueue]:
+        """取出到期待执行任务（先标记 running，防重复消费）。
+
+        ``kind`` 过滤确保 replay_once 与 execute_pending_aborts 各自只
+        认领自己负责的任务类型，不会互相消费。
+        """
         now = utcnow()
+        q = (
+            select(TaskQueue)
+            .where(
+                TaskQueue.status.in_([TaskStatus.PENDING, TaskStatus.RUNNING]),
+                TaskQueue.run_at <= now,
+                TaskQueue.attempts < 3,
+            )
+            .order_by(TaskQueue.run_at.asc())
+            .limit(limit)
+        )
+        if kind is not None:
+            q = q.where(TaskQueue.kind == kind)
         rows = (
             (
-                await self._session.execute(
-                    select(TaskQueue)
-                    .where(
-                        TaskQueue.status.in_([TaskStatus.PENDING, TaskStatus.RUNNING]),
-                        TaskQueue.run_at <= now,
-                        TaskQueue.attempts < 3,
-                    )
-                    .order_by(TaskQueue.run_at.asc())
-                    .limit(limit)
-                )
+                await self._session.execute(q)
             )
             .scalars()
             .all()
         )
         for row in rows:
             row.status = TaskStatus.RUNNING
+            # ponytail: 推迟 run_at 防止 RUNNING 任务被并发重复认领，
+            # 处理超时（>300s）则允许重领
+            row.run_at = utcnow() + timedelta(seconds=300)
         await self._session.flush()
         return list(rows)
 
@@ -185,11 +195,10 @@ class TaskQueueService:
         return len(rows)
 
     async def pending_count(self) -> int:
-        rows = (
+        return (
             await self._session.execute(
-                select(TaskQueue).where(
-                    TaskQueue.status.in_([TaskStatus.PENDING, TaskStatus.RUNNING])
-                )
+                select(func.count())
+                .select_from(TaskQueue)
+                .where(TaskQueue.status.in_([TaskStatus.PENDING, TaskStatus.RUNNING]))
             )
-        ).scalars().all()
-        return len(rows)
+        ).scalar_one()

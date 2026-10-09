@@ -18,7 +18,14 @@ from typing import Final
 
 SESSION_COOKIE: Final = "seedhelper_session"
 SESSION_MAX_AGE: Final = 24 * 3600  # 24h
-HMAC_SALT: Final = b"seedhelper-v0.1-salt"  # 演示用；生产应来自 ENCRYPTION_KEY 派生
+#: 默认 HMAC 盐（启动时由 init_hmac_key 从 ENCRYPTION_KEY 派生覆盖）
+_hmac_key: bytes = b"seedhelper-v0.1-salt"
+
+
+def init_hmac_key(encryption_key: str) -> None:
+    """从 ENCRYPTION_KEY 派生 session HMAC 密钥（防硬编码盐伪造 cookie）。"""
+    global _hmac_key
+    _hmac_key = hashlib.sha256(encryption_key.encode() + b"session-hmac").digest()
 
 
 def hash_password(password: str) -> str:
@@ -31,13 +38,13 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, stored: str) -> bool:
     try:
         algo, iters, salt_hex, dk_hex = stored.split("$")
-    except ValueError:
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(dk_hex)
+        got = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, int(iters))
+    except (ValueError, TypeError):
         return False
     if algo != "pbkdf2":
         return False
-    salt = bytes.fromhex(salt_hex)
-    expected = bytes.fromhex(dk_hex)
-    got = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, int(iters))
     return hmac.compare_digest(got, expected)
 
 
@@ -68,4 +75,4 @@ def verify_session(token: str) -> bool:
 
 def _sign(nonce: str, expires: int) -> str:
     msg = f"{nonce}:{expires}".encode()
-    return hmac.new(HMAC_SALT, msg, hashlib.sha256).hexdigest()
+    return hmac.new(_hmac_key, msg, hashlib.sha256).hexdigest()

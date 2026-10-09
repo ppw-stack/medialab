@@ -108,6 +108,6 @@ def audit(
         )
         raise
     else:
-        if ctx.get("hash_count") is not None and count is None:
+        if ctx.get("hash_count") is not None:
             extra["hash_count"] = ctx["hash_count"]
         log.info("操作成功 action=%s", action, extra={**extra, "result": "ok"})

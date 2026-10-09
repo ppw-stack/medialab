@@ -31,13 +31,14 @@ from app.adapters.sites.base import FeedItem
 from app.core.timeutils import utcnow
 from app.db.models import (
     AddHistory,
+    CooldownHash,
     Decision,
     FeedItemRecord,
     SkipReason,
     Torrent,
     TorrentStatus,
 )
-from app.services.cooldown import CooldownService
+from app.services.cooldown import MANUAL_ONLY, CooldownService
 from app.services.disk import check_space
 from app.services.paths import PathRenderError, RenderedPath, render_save_path
 
@@ -159,6 +160,8 @@ class Matcher:
         self._policy = policy
         self._local = local_hashes
         self._cooldown = CooldownService(session)
+        self._seen_hashes: set[str] | None = None
+        self._cooled_hashes: set[str] | None = None
 
     async def load_local_hashes(self) -> frozenset[str]:
         """一次性载入本地未删除的 InfoHash 集合（判定项 1）。"""
@@ -187,15 +190,18 @@ class Matcher:
             )
 
         # 2) 站点去重（幂等凭证，非冷却）
-        seen = (
-            await self._session.execute(
-                select(AddHistory.id).where(
-                    AddHistory.site_id == self._policy.site_id,
-                    AddHistory.info_hash == info_hash,
+        if self._seen_hashes is not None:
+            seen = info_hash in self._seen_hashes
+        else:
+            seen = (
+                await self._session.execute(
+                    select(AddHistory.id).where(
+                        AddHistory.site_id == self._policy.site_id,
+                        AddHistory.info_hash == info_hash,
+                    )
                 )
-            )
-        ).scalar_one_or_none()
-        if seen is not None:
+            ).scalar_one_or_none() is not None
+        if seen:
             return MatchResult.skip(SkipReason.DUPLICATE_SITE, info_hash)
 
         # 3) 分类匹配
@@ -209,8 +215,12 @@ class Matcher:
             return MatchResult.skip(SkipReason.SIZE_EXCEEDED, info_hash)
 
         # 5) 冷却期
-        verdict = await self._cooldown.is_blocked(self._policy.site_id, info_hash)
-        if verdict.blocked:
+        if self._cooled_hashes is not None:
+            blocked = info_hash in self._cooled_hashes
+        else:
+            verdict = await self._cooldown.is_blocked(self._policy.site_id, info_hash)
+            blocked = verdict.blocked
+        if blocked:
             return MatchResult.skip(SkipReason.COOLDOWN, info_hash)
 
         # 6+7) 路径渲染 → 磁盘校验（顺序有意：渲染失败则不必查磁盘）
@@ -239,7 +249,47 @@ class Matcher:
         """批量判定。共享一次本地 hash 载入（性能关键）。"""
         if self._local is None:
             self._local = await self.load_local_hashes()
+        # 批量预取 AddHistory 与 CooldownHash（避免 N+1，2 次查询替代 N×2）
+        hashes = {extract_info_hash(item) for item in items}
+        hashes.discard(None)
+        self._seen_hashes = await self._load_seen(hashes)
+        self._cooled_hashes = await self._load_cooled(hashes)
         return [await self.match(item) for item in items]
+
+    async def _load_seen(self, hashes: set[str]) -> set[str]:
+        if not hashes:
+            return set()
+        rows = (
+            await self._session.execute(
+                select(AddHistory.info_hash).where(
+                    AddHistory.site_id == self._policy.site_id,
+                    AddHistory.info_hash.in_(hashes),
+                )
+            )
+        ).scalars().all()
+        return set(rows)
+
+    async def _load_cooled(self, hashes: set[str]) -> set[str]:
+        if not hashes:
+            return set()
+        now = utcnow()
+        rows = (
+            await self._session.execute(
+                select(
+                    CooldownHash.info_hash,
+                    CooldownHash.reason,
+                    CooldownHash.cooldown_until,
+                ).where(
+                    CooldownHash.site_id == self._policy.site_id,
+                    CooldownHash.info_hash.in_(h.lower() for h in hashes),
+                )
+            )
+        ).all()
+        cooled: set[str] = set()
+        for ih, reason, until in rows:
+            if reason in MANUAL_ONLY or (until is not None and until > now):
+                cooled.add(ih)
+        return cooled
 
 
 async def record_decision(

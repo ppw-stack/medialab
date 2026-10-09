@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
@@ -31,16 +31,20 @@ _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
-def _apply_pragmas(dbapi_conn, _record) -> None:  # type: ignore[no-untyped-def]
-    """连接级 PRAGMA。journal_mode 是库级，只需设置一次但设为幂等。"""
-    cursor = dbapi_conn.cursor()
-    try:
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA synchronous=NORMAL")
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA busy_timeout=10000")
-    finally:
-        cursor.close()
+def _make_pragma_applier(settings: AppSettings):  # type: ignore[no-untyped-def]
+    """连接级 PRAGMA 闭包（读 settings 配置，非硬编码）。"""
+
+    def apply(dbapi_conn, _record) -> None:  # type: ignore[no-untyped-def]
+        cursor = dbapi_conn.cursor()
+        try:
+            cursor.execute(f"PRAGMA journal_mode={settings.db_journal_mode}")
+            cursor.execute(f"PRAGMA synchronous={settings.db_synchronous}")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA busy_timeout=10000")
+        finally:
+            cursor.close()
+
+    return apply
 
 
 def create_db_engine(settings: AppSettings) -> AsyncEngine:
@@ -52,7 +56,7 @@ def create_db_engine(settings: AppSettings) -> AsyncEngine:
         pool_pre_ping=True,
         connect_args={"timeout": 30},
     )
-    event.listen(engine.sync_engine, "connect", _apply_pragmas)
+    event.listen(engine.sync_engine, "connect", _make_pragma_applier(settings))
     return engine
 
 
@@ -134,6 +138,14 @@ class SingleWriterQueue:
         engine = get_engine()
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            # 轻量迁移：create_all 不给已有表加列，补 ALTER（幂等）
+            from sqlalchemy import text
+
+            for stmt in (
+                "ALTER TABLE torrents ADD COLUMN zero_seed_rounds INTEGER DEFAULT 0",
+            ):
+                with suppress(Exception):  # 列已存在
+                    await conn.execute(text(stmt))
         logger.info("数据表已就绪")
 
     async def healthcheck(self) -> bool:

@@ -28,6 +28,7 @@ from app.core.metrics import cross_seed_added, feed_pulls
 from app.core.timeutils import utcnow
 from app.db.models import (
     AddHistory,
+    CooldownReason,
     Feed,
     Site,
     Source,
@@ -223,12 +224,12 @@ class SeedEngine:
             await self._record_skip(session, None, item, "duplicate")
             return
 
-        ok = await self._execute_add(session, site, item, res)
+        ok, fail_reason = await self._execute_add(session, site, item, res)
         if ok:
             stats.added += 1
         else:
             stats.failed += 1
-            await cooldown.record(site.id, res.info_hash, "dead_torrent")
+            await cooldown.record(site.id, res.info_hash, fail_reason)
 
     async def _execute_add(
         self,
@@ -236,8 +237,11 @@ class SeedEngine:
         site: Site,
         item: FeedItem,
         res: MatchResult,
-    ) -> bool:
-        """真正向下载器添加任务，并落库。
+    ) -> tuple[bool, str]:
+        """真正向下载器添加任务，并落库。返回 (ok, fail_reason)。
+
+        fail_reason 为空串表示成功；配置类错误返回 ``manual_skip``（不入
+        冷却，条件修复后立即可重试），下载器添加异常返回 ``dead_torrent``。
 
         FR-2.4：辅种任务统一用独立分类与标签，与手动任务物理隔离。
         """
@@ -245,7 +249,7 @@ class SeedEngine:
         url = item.torrent_url or item.link
         if not url:
             logger.warning("条目无下载链接，跳过：%s", item.title)
-            return False
+            return False, CooldownReason.MANUAL_SKIP
 
         downloader_row = None
         if site.downloader_id:
@@ -260,7 +264,7 @@ class SeedEngine:
             ).scalar_one_or_none()
         if downloader_row is None:
             logger.warning("站点 %s 未绑定下载器，无法辅种", site.name)
-            return False
+            return False, CooldownReason.MANUAL_SKIP
 
         from app.adapters.downloaders.base import AddTorrentPayload
 
@@ -288,7 +292,7 @@ class SeedEngine:
             except Exception as exc:
                 logger.warning("辅种添加失败 %s：%s", item.title, exc)
                 ctx["error"] = str(exc)
-                return False
+                return False, CooldownReason.DEAD_TORRENT
 
         torrent = Torrent(
             info_hash=res.info_hash,
@@ -317,7 +321,7 @@ class SeedEngine:
             )
         )
         cross_seed_added.labels(site=site.name, downloader=downloader_row.name).inc()
-        return True
+        return True, ""
 
     async def _record_skip(
         self,

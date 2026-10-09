@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import smtplib
+import urllib.parse
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from email.message import EmailMessage
@@ -27,6 +28,20 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 DEFAULT_TIMEOUT = 10.0
+
+
+def _validate_http_url(url: str) -> str | None:
+    """校验通知 URL scheme 为 http/https（防 SSRF）。
+
+    PT 工具的 webhook 目标通常是用户自有服务，内网地址合法，故只校验
+    scheme 而不强拒内网。返回错误原因或 None。
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return f"不允许的 URL scheme：{parsed.scheme or '(空)'}"
+    if not parsed.hostname:
+        return "URL 缺少主机名"
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +123,8 @@ class WebhookAdapter(NotifyChannelAdapter):
         url = self.cfg("url")
         if not url:
             return SendResult(False, "缺少 url 配置")
+        if (err := _validate_http_url(url)):
+            return SendResult(False, err)
         body = {
             "level": payload.level,
             "category": payload.category,
@@ -138,6 +155,8 @@ class WeComAdapter(NotifyChannelAdapter):
         url = self._secret or self.cfg("webhook_url")
         if not url:
             return SendResult(False, "缺少 webhook（企业微信机器人地址）")
+        if (err := _validate_http_url(url)):
+            return SendResult(False, err)
         # 企业微信 markdown 上限 4096 字节，超长必须截断否则静默失败
         content = payload.to_text()[:3800]
         body = {"msgtype": "markdown", "markdown": {"content": content}}
@@ -214,6 +233,8 @@ class BarkAdapter(NotifyChannelAdapter):
         if not key:
             return SendResult(False, "缺少 device key")
         url = f"{host.rstrip('/')}/{key}"
+        if (err := _validate_http_url(url)):
+            return SendResult(False, err)
         try:
             async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
                 resp = await client.post(

@@ -113,6 +113,7 @@ class Alerter:
     ) -> None:
         self._session = session
         self._policy = policy or AlertPolicyConfig()
+        self._channels_cache: list[NotifyChannel] | None = None
 
     @property
     def policy(self) -> AlertPolicyConfig:
@@ -182,9 +183,25 @@ class Alerter:
             return plan
 
         by_key: dict[str, int] = defaultdict(int)
+        # 批量预取所有候选 key 的最新 muted_until（避免 N+1 查询）
+        keys = [dedupe_key(category, info_hash) for _, category, info_hash in candidates]
+        muted_map: dict[str, datetime | None] = {}
+        if keys:
+            rows = (
+                await self._session.execute(
+                    select(Alert.dedupe_key, Alert.muted_until)
+                    .where(Alert.dedupe_key.in_(keys))
+                    .order_by(Alert.dedupe_key, Alert.ts.desc())
+                )
+            ).all()
+            for k, mu in rows:
+                if k not in muted_map:  # 取最新（ts desc）的一条
+                    muted_map[k] = mu
+
         for level, category, info_hash in candidates:
             key = dedupe_key(category, info_hash)
-            if await self._is_muted(key, ref):
+            mu = muted_map.get(key)
+            if mu is not None and mu > ref:
                 plan.suppressed += 1
                 continue
 
@@ -264,15 +281,17 @@ class Alerter:
         """
         results: dict[str, bool] = {}
         now = utcnow()
-        channels = (
-            (
-                await self._session.execute(
-                    select(NotifyChannel).where(NotifyChannel.enabled.is_(True))
+        if self._channels_cache is None:
+            self._channels_cache = (
+                (
+                    await self._session.execute(
+                        select(NotifyChannel).where(NotifyChannel.enabled.is_(True))
+                    )
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
-        )
+        channels = self._channels_cache
 
         for ch in channels:
             if ch.breaker_until and ch.breaker_until > now:

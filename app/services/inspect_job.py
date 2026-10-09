@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 from sqlalchemy import select
@@ -22,6 +23,9 @@ from app.services.factory import AdapterFactory
 from app.services.inspector import Inspector, InspectReport
 
 logger = get_logger(__name__)
+
+#: 巡检互斥锁：定时调度与手动触发不可并发（防重复告警投递）
+_inspect_lock = asyncio.Lock()
 
 
 async def load_policy() -> AlertPolicyConfig:
@@ -43,6 +47,11 @@ async def load_policy() -> AlertPolicyConfig:
 
 async def inspect_and_alert(factory: AdapterFactory) -> InspectReport:
     """一轮巡检 + 告警投递。调度作业入口。"""
+    async with _inspect_lock:  # ponytail: 全局锁，多租户时按 scope 分锁
+        return await _inspect_and_alert_impl(factory)
+
+
+async def _inspect_and_alert_impl(factory: AdapterFactory) -> InspectReport:
     started = time.monotonic()
     inspector = Inspector(factory)
     report = await inspector.run_once()

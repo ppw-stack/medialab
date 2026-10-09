@@ -155,6 +155,14 @@ class FeedFetcher:
                 if attempt + 1 < attempts:
                     await asyncio.sleep(self.compute_backoff(attempt))
                 continue
+            except Exception as exc:
+                # 解析类异常（XML ParseError 等）：重试无意义，直接标记
+                logger.warning("站点 %s 解析失败：%s", self._site, exc)
+                return PullResult(
+                    status=PullStatus.PARSE_ERROR,
+                    duration_ms=self._elapsed_ms(started),
+                    error=f"{type(exc).__name__}: {exc}",
+                )
             else:
                 duration = self._elapsed_ms(started)
                 if not items:

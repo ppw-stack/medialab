@@ -349,14 +349,20 @@ async def confirm(confirmation_id: int) -> dict[str, str]:
         policy.space_limit = max(original_space, conf.estimated_space + 1)
         try:
             # 构造一个临时规则，复用 run_rule 管线
+            # dry_run_done=True 跳过干跑门，only_hashes 限定只清理确认的种子
             rule = CleanupRule(
                 id=conf.rule_id or 0,
                 name=conf.rule_name + " [confirmed]",
                 enabled=True,
                 priority=999,
                 when={},
+                dry_run_done=True,
             )
-            out = await cleaner.run_rule(rule, trigger_source=conf.trigger_source)
+            out = await cleaner.run_rule(
+                rule,
+                trigger_source=conf.trigger_source,
+                only_hashes=set(conf.affected_hashes or []),
+            )
             conf.status = CleanupStatus.DONE if out.error == "" else CleanupStatus.FAILED
         finally:
             policy.batch_limit = original_batch

@@ -94,9 +94,12 @@ class WindowPolicy:
             timedelta(seconds=self.min_buffer),
         )
 
-    def deadlines_for(self, free_end_at: datetime) -> WindowDeadlines:
+    def deadlines_for(
+        self, free_end_at: datetime, *, now: datetime | None = None
+    ) -> WindowDeadlines:
         """核心公式。``abort_at`` 即 ``free_end_at``，无任何调整。"""
-        duration = max(free_end_at - utcnow(), timedelta(0))
+        ref = now or utcnow()
+        duration = max(free_end_at - ref, timedelta(0))
         gap = self.safety_gap(duration)
         return WindowDeadlines(
             free_end_at=free_end_at,

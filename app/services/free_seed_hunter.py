@@ -293,31 +293,6 @@ class FreeSeedHunter:
         adapter = self._factory.downloader(dl)
         tags = frozenset({"auto", "free-seed", f"site:{site.name}"})
 
-        with audit(
-            "add_torrent",
-            downloader=dl.name,
-            source=TriggerSource.SCHEDULE,
-            count=1,
-            reason="free_seed",
-            logger=logger,
-        ):
-            try:
-                await adapter.add_torrent(
-                    AddTorrentPayload(
-                        name=item.title,
-                        urls=[url],
-                        category=site.category,
-                        tags=tags,
-                    )
-                )
-            except Exception as exc:
-                logger.warning("免费种添加失败 %s：%s", item.title, exc)
-                stats.failed += 1
-                free_seed_outcomes.labels(
-                    outcome="failed", reason="add_error"
-                ).inc()
-                return
-
         from datetime import timedelta
 
         torrent = Torrent(
@@ -341,8 +316,36 @@ class FreeSeedHunter:
             abort_at=abort_at,
             protect_until=utcnow() + timedelta(hours=PROTECT_HOURS),
         )
+        # 先持久化 DB 记录，再操作下载器：commit 失败时看护仍能发现此种子
         session.add(torrent)
         await session.flush()
+
+        with audit(
+            "add_torrent",
+            downloader=dl.name,
+            source=TriggerSource.SCHEDULE,
+            count=1,
+            reason="free_seed",
+            logger=logger,
+        ):
+            try:
+                await adapter.add_torrent(
+                    AddTorrentPayload(
+                        name=item.title,
+                        urls=[url],
+                        category=site.category,
+                        tags=tags,
+                    )
+                )
+            except Exception as exc:
+                logger.warning("免费种添加失败 %s：%s", item.title, exc)
+                torrent.status = TorrentStatus.ABORTED
+                torrent.aborted_reason = "add_failed"
+                stats.failed += 1
+                free_seed_outcomes.labels(
+                    outcome="failed", reason="add_error"
+                ).inc()
+                return
 
         # 入队便于重放（与 M2 共享 task_queue，但幂等键区分）
         queue = TaskQueueService(session)

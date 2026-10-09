@@ -39,8 +39,8 @@ async def execute_pending_aborts(factory: AdapterFactory) -> CleanupOutcome:
 
     async with session_scope() as session:
         queue = TaskQueueService(session)
-        tasks = await queue.claim_due(limit=50)
-        aborts = [t for t in tasks if t.kind == TaskKind.ABORT_WINDOW]
+        tasks = await queue.claim_due(limit=50, kind=TaskKind.ABORT_WINDOW)
+        aborts = tasks
         if not aborts:
             return out
 

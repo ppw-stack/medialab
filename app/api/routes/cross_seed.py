@@ -15,7 +15,7 @@ from app.core.logging import get_logger
 from app.db.models import Feed, Site
 from app.db.session import session_scope
 from app.services.factory import AdapterFactory, get_factory
-from app.services.feed_fetcher import FeedFetcher, PullStatus
+from app.services.feed_fetcher import FeedFetcher
 from app.services.seed_engine import RoundStats, SeedEngine
 
 logger = get_logger(__name__)
@@ -142,10 +142,7 @@ async def pull_now(site_id: int) -> RoundResult:
             raise HTTPException(status_code=409, detail="站点已禁用")
 
     engine = SeedEngine(get_factory())
-    stats = await engine.run_site(site_id)
-    if stats.status == PullStatus.INTERVAL_NOT_MET:
-        logger.info("手动触发 %s（忽略频率下限）", site_id)
-        stats = await engine.run_site(site_id, force=True)
+    stats = await engine.run_site(site_id, force=True)
     return _stats_out(stats)
 
 

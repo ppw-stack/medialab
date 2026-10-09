@@ -81,6 +81,7 @@ class WindowWatcher:
                                 ]
                             ),
                         )
+                        .order_by(Torrent.abort_at.asc().nullslast())
                         .limit(WATCH_BATCH)
                     )
                 )
@@ -111,8 +112,6 @@ class WindowWatcher:
 
         # 缺锚点（M1 旧数据或种子中途被启用免费种模块）
         if not is_window_anchored(t):
-            if t.abort_at is None:
-                return "no_anchor"
             return "no_anchor"
 
         # 禁删保护期（FR-5.2.6）：刚添加的任务瞬时 abort_at 几乎必然过期，
@@ -201,12 +200,10 @@ class WindowWatcher:
         abort_at 之前**生效（不能突破红线）。任何写入操作都不得接触
         FR-5.2 安全机制。
         """
-        # 抢救策略配置在 sites 表，本任务查站点
+        # 抢救策略配置在 sites 表；session.get 利用 identity map 避免重复查询
         from app.db.models import Site
 
-        site = (
-            await session.execute(select(Site).where(Site.id == t.site_id))
-        ).scalar_one_or_none()
+        site = await session.get(Site, t.site_id)
         if site is None or site.rescue_strategy == "notify_only":
             return False
 

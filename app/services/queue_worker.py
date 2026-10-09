@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.downloaders.base import AddTorrentPayload
@@ -31,7 +32,7 @@ async def replay_once(factory: AdapterFactory) -> int:
     processed = 0
     async with session_scope() as session:
         queue = TaskQueueService(session)
-        tasks = await queue.claim_due(limit=50)
+        tasks = await queue.claim_due(limit=50, kind=TaskKind.ADD_TORRENT)
         if not tasks:
             return 0
 
@@ -148,16 +149,22 @@ async def _execute(
         status=TorrentStatus.ACTIVE,
         protect_until=utcnow() + timedelta(hours=12),
     )
-    session.add(torrent)
-    await session.flush()
-    session.add(
-        AddHistory(
-            site_id=site_id,
-            info_hash=info_hash,
-            torrent_id=torrent.id,
-            name=str(payload.get("name") or info_hash)[:1024],
-            source=Source.AUTO_SEED,
-            outcome="added",
-        )
-    )
+    # savepoint 隔离：flush 失败不毒化整批 session（IntegrityError 回滚至 savepoint）
+    try:
+        async with session.begin_nested():
+            session.add(torrent)
+            await session.flush()
+            session.add(
+                AddHistory(
+                    site_id=site_id,
+                    info_hash=info_hash,
+                    torrent_id=torrent.id,
+                    name=str(payload.get("name") or info_hash)[:1024],
+                    source=Source.AUTO_SEED,
+                    outcome="added",
+                )
+            )
+    except IntegrityError:
+        logger.info("任务 %s 并发冲突，视为幂等完成", info_hash)
+        return True
     return True

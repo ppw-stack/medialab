@@ -413,9 +413,10 @@ class Inspector:
         if torrent.paused_reason == PausedReason.YIELD:
             return  # 让路暂停不是空做种
 
-        counter = getattr(torrent, "_zero_seed_rounds", 0) + 1
-        if counter < ZERO_SEED_ROUNDS:
-            logger.info("任务 %s 空做种第 1 轮，继续观察", torrent.name)
+        torrent.zero_seed_rounds = getattr(torrent, "zero_seed_rounds", 0) + 1
+        await session.flush()
+        if torrent.zero_seed_rounds < ZERO_SEED_ROUNDS:
+            logger.info("任务 %s 空做种第 %d 轮，继续观察", torrent.name, torrent.zero_seed_rounds)
             return
 
         adapter = await self._adapter_for(session, torrent.downloader_id)
@@ -429,6 +430,7 @@ class Inspector:
             return
         torrent.status = TorrentStatus.PAUSED
         torrent.paused_reason = PausedReason.SYSTEM
+        torrent.zero_seed_rounds = 0
         await session.flush()
         logger.info("任务 %s 空做种，已自动暂停（FR-2.5）", torrent.name)
 

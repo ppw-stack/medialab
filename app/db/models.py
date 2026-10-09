@@ -229,9 +229,9 @@ class DownloaderInstance(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     #: 能力声明快照（Set[Feature] 的序列化），含 get_files 是否可用（R12）
     capabilities: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=_utcnow(), onupdate=_utcnow()
+        DateTime, default=_utcnow, onupdate=_utcnow
     )
 
 
@@ -289,9 +289,9 @@ class Site(Base):
     download_factor_map: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     time_unit_multiplier: Mapped[int] = mapped_column(Integer, default=1)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=_utcnow(), onupdate=_utcnow()
+        DateTime, default=_utcnow, onupdate=_utcnow
     )
 
     downloader: Mapped[DownloaderInstance | None] = relationship(
@@ -345,13 +345,15 @@ class Torrent(Base):
     aborted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     trash_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    added_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow())
+    added_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     removed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_rescued_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True,
         comment="FR-3.8 抢救策略最后执行时间，用于限速后冷却"
     )
     protect_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    #: FR-2.5 空做种连续观察轮数（持久化跨轮计数）
+    zero_seed_rounds: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class CooldownHash(Base):
@@ -369,7 +371,7 @@ class CooldownHash(Base):
     reason: Mapped[str] = mapped_column(String(32))
     fail_count: Mapped[int] = mapped_column(Integer, default=1)
     cooldown_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    last_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow())
+    last_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
 class AddHistory(Base):
@@ -401,7 +403,7 @@ class AddHistory(Base):
     name: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     source: Mapped[str] = mapped_column(String(16), default=Source.AUTO_SEED)
     outcome: Mapped[str] = mapped_column(String(24), default="added")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
 class FeedItemRecord(Base):
@@ -428,7 +430,7 @@ class FeedItemRecord(Base):
     decision: Mapped[str] = mapped_column(String(32), default="pending")
     reject_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     torrent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    seen_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow())
+    seen_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
 class Trash(Base):
@@ -445,7 +447,7 @@ class Trash(Base):
     original_path: Mapped[str] = mapped_column(String(1024))
     trash_path: Mapped[str] = mapped_column(String(1024))
     trigger_source: Mapped[str] = mapped_column(String(32), default=TriggerSource.RULE)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     expire_at: Mapped[datetime] = mapped_column(DateTime)
     restored: Mapped[bool] = mapped_column(Boolean, default=False)
     purged: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -509,7 +511,7 @@ class CleanupConfirmation(Base):
     __tablename__ = "cleanup_confirmations"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     rule_id: Mapped[int | None] = mapped_column(
         ForeignKey("cleanup_rules.id"), nullable=True
     )
@@ -533,7 +535,7 @@ class CleanupLog(Base):
     __tablename__ = "cleanup_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    ts: Mapped[datetime] = mapped_column(DateTime, default=_utcnow(), index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
     rule_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     rule_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     action: Mapped[str] = mapped_column(String(32))
@@ -555,7 +557,7 @@ class ActionLog(Base):
     __table_args__ = (Index("ix_action_logs_ts", "ts"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    ts: Mapped[datetime] = mapped_column(DateTime, default=_utcnow())
+    ts: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     action: Mapped[str] = mapped_column(String(64))
     trigger_source: Mapped[str] = mapped_column(String(32))
     downloader_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -602,7 +604,7 @@ class FreeCandidate(Base):
     decision: Mapped[str] = mapped_column(String(32), default="pending")
     reject_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     torrent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    seen_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow())
+    seen_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
 class SiteWindowStat(Base):
@@ -622,7 +624,7 @@ class SiteWindowStat(Base):
     completion_rate: Mapped[float] = mapped_column(Float, default=0.0)
     avg_slack: Mapped[int | None] = mapped_column(Integer, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=_utcnow(), onupdate=_utcnow()
+        DateTime, default=_utcnow, onupdate=_utcnow
     )
 
 
@@ -638,7 +640,7 @@ class Rule(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     dry_run_done: Mapped[bool] = mapped_column(Boolean, default=False)
     when: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
 class Alert(Base):
@@ -655,7 +657,7 @@ class Alert(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    ts: Mapped[datetime] = mapped_column(DateTime, default=_utcnow(), index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
     level: Mapped[str] = mapped_column(String(8))
     category: Mapped[str] = mapped_column(String(32))
     torrent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -694,7 +696,7 @@ class NotifyChannel(Base):
     breaker_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_ok_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
 class AlertPolicy(Base):
@@ -730,9 +732,9 @@ class TaskQueue(Base):
     payload: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(16), default="pending")
     attempts: Mapped[int] = mapped_column(Integer, default=0)
-    run_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow())
+    run_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=_utcnow(), onupdate=_utcnow()
+        DateTime, default=_utcnow, onupdate=_utcnow
     )

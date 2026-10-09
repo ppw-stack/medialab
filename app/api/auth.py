@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hmac
+
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request
 from fastapi.responses import (
     FileResponse,
@@ -46,7 +48,9 @@ async def auth_status(
     # 也接受 Bearer Token（CLI / 脚本入口，FR-6.1）
     if request.headers.get("Authorization", "").startswith("Bearer "):
         provided = request.headers["Authorization"][7:]
-        if settings.web_token and provided == settings.web_token.get_secret_value():
+        if settings.web_token and hmac.compare_digest(
+            provided, settings.web_token.get_secret_value()
+        ):
             return StatusOut(authenticated=True, username="token")
     if session and verify_session(session):
         return StatusOut(authenticated=True, username=settings.web_username)
@@ -99,7 +103,7 @@ async def require_session(
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         token = settings.web_token.get_secret_value() if settings.web_token else ""
-        if token and auth[7:] == token:
+        if token and hmac.compare_digest(auth[7:], token):
             return "token" 
     if session and verify_session(session):
         return settings.web_username

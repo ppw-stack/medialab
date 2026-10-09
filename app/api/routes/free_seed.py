@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from app.api.auth import require_session
 from app.core.timeutils import remaining_until, utcnow
 from app.core.windows import feasibility, inspect_interval_seconds, urgency_level
-from app.db.models import AbortedReason, Site, Torrent, TorrentStatus
+from app.db.models import AbortedReason, Site, Source, Torrent, TorrentStatus
 from app.db.session import session_scope
 from app.services.factory import get_factory
 from app.services.free_seed_hunter import FreeRoundStats, FreeSeedHunter
@@ -76,7 +76,7 @@ async def list_free_seeds(
 ) -> FreeSeedList:
     now = utcnow()
     async with session_scope() as session:
-        base = select(Torrent).where(Torrent.source == "free_seed")
+        base = select(Torrent).where(Torrent.source == Source.FREE_SEED)
         if site_id is not None:
             base = base.where(Torrent.site_id == site_id)
         if in_flight_only:
@@ -110,7 +110,7 @@ async def list_free_seeds(
 async def summary(site_id: int | None = None) -> OutcomeSummary:
     async with session_scope() as session:
         stmt = select(Torrent.status, func.count(Torrent.id)).where(
-            Torrent.source == "free_seed"
+            Torrent.source == Source.FREE_SEED
         )
         if site_id is not None:
             stmt = stmt.where(Torrent.site_id == site_id)
@@ -155,11 +155,14 @@ async def abort_now(torrent_id: int, payload: AbortRequest = AbortRequest()) -> 
     async with session_scope() as session:
         row = (
             await session.execute(
-                select(Torrent).where(Torrent.id == torrent_id)
+                select(Torrent).where(
+                    Torrent.id == torrent_id,
+                    Torrent.source == Source.FREE_SEED,
+                )
             )
         ).scalar_one_or_none()
         if row is None:
-            raise HTTPException(status_code=404, detail="任务不存在")
+            raise HTTPException(status_code=404, detail="免费种任务不存在")
         row.status = TorrentStatus.ABORTED
         row.aborted_reason = payload.reason
         row.aborted_at = now

@@ -155,6 +155,9 @@ class GenericSiteAdapter(SiteAdapter):
         import xml.etree.ElementTree as ET
 
         try:
+            if _has_entity_declaration(xml):
+                logger.warning("站点 %s RSS 包含 DTD/实体声明，拒绝解析", self.name)
+                return []
             root = ET.fromstring(xml.encode("utf-8"), parser=_safe_parser())
         except ET.ParseError as exc:
             logger.warning("站点 %s RSS 解析失败：%s", self.name, exc)
@@ -414,6 +417,9 @@ class GenericSiteAdapter(SiteAdapter):
     def capabilities(self) -> frozenset[SiteFeature]:
         return frozenset({SiteFeature.RSS})
 
+    async def close(self) -> None:
+        await self._client.aclose()
+
 
 class _BreakerTripped(RuntimeError):
     """站点熔断（FR-2.2：429/403 立即熔断）。"""
@@ -425,6 +431,15 @@ def _safe_parser() -> Any:
 
     parser = ET.XMLParser()
     return parser
+
+
+def _has_entity_declaration(xml: str) -> bool:
+    """检测 DTD/内部实体声明（防御 billion laughs 攻击）。
+
+    标准库 ElementTree 不支持 forbid_dtd，解析前检查文本是最小防御。
+    """
+    lower = xml.lower()
+    return "<!doctype" in lower or "<!entity" in lower
 
 
 def _hash_from_fields(fields: dict[str, str]) -> str | None:

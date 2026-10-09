@@ -246,9 +246,12 @@ class TrashGuard:
             for p in paths:
                 base = os.path.basename(p.rstrip("/")) or "file"
                 target = os.path.join(trash_root, base)
-                # 同名覆盖（罕见但可能）
+                # 同名去重：递增后缀避免覆盖
                 if os.path.exists(target):
-                    target = f"{trash_root}/{base}.dup{os.getpid()}"
+                    i = 1
+                    while os.path.exists(f"{target}.dup{i}"):
+                        i += 1
+                    target = f"{target}.dup{i}"
                 shutil.move(p, target)
         except (OSError, shutil.Error) as exc:
             return False, "", f"quarantine_failed: {exc}"
@@ -391,12 +394,13 @@ class Cleaner:
         *,
         trigger_source: str = CleanupTrigger.REPORT,
         dry_run: bool = False,
+        only_hashes: set[str] | None = None,
     ) -> CleanupOutcome:
         out = CleanupOutcome()
         policy = await self._load_policy()
 
         # 干跑门（FR-5.2.2）：首次启用必须先跑
-        if dry_run or DryRunGuard.must_dry_run(rule):
+        if dry_run or (policy.dry_run_on_first_use and DryRunGuard.must_dry_run(rule)):
             dry_run = True
 
         # 解析 default_sources（CSV 字符串）
@@ -405,6 +409,8 @@ class Cleaner:
 
         candidates = await self._candidate_torrents(default_sources)
         matched: list[Torrent] = [t for t in candidates if self._engine.matches(rule, t)]
+        if only_hashes is not None:
+            matched = [t for t in matched if t.info_hash in only_hashes]
 
         out.candidates_total = len(matched)
 
@@ -538,21 +544,8 @@ class Cleaner:
                 reason=cand.reason,
                 logger=logger,
             ):
-                try:
-                    await adapter.remove([t.info_hash], delete_data=False)
-                except Exception as exc:
-                    logger.warning("下载器移除任务失败：%s", exc)
-                    await self._log_action(
-                        rule=cand.rule,
-                        action=CleanupAction.TRASH,
-                        trigger=trigger_source,
-                        affected=[t.info_hash],
-                        freed=0,
-                        result=CleanupStatus.FAILED,
-                        error=str(exc),
-                    )
-                    return False
-                # 移入回收站（绝不退化为删除）
+                # 先移入回收站（绝不退化为删除），成功后再从下载器移除种子。
+                # 顺序保证 quarantine 失败时种子仍在下载器中，可重试。
                 ok2, trash_path, qerr = await TrashGuard.quarantine(
                     download_root,
                     t.info_hash,
@@ -569,6 +562,21 @@ class Cleaner:
                         freed=0,
                         result=CleanupStatus.FAILED,
                         error=qerr,
+                    )
+                    return False
+                # 文件已隔离，再从下载器移除种子（delete_data=false，文件已不在原位）
+                try:
+                    await adapter.remove([t.info_hash], delete_data=False)
+                except Exception as exc:
+                    logger.warning("下载器移除任务失败：%s", exc)
+                    await self._log_action(
+                        rule=cand.rule,
+                        action=CleanupAction.TRASH,
+                        trigger=trigger_source,
+                        affected=[t.info_hash],
+                        freed=0,
+                        result=CleanupStatus.FAILED,
+                        error=str(exc),
                     )
                     return False
 
@@ -636,16 +644,23 @@ class Cleaner:
 
         必须全部一致：不同下载根目录混在一起没法做路径校验（FR-5.2.5c）。
         """
-        roots: set[str] = set()
-        for t in candidates:
-            row = (
+        if not candidates:
+            return None
+        dl_ids = {t.downloader_id for t in candidates}
+        rows = (
+            (
                 await self._session.execute(
                     select(DownloaderInstance).where(
-                        DownloaderInstance.id == t.downloader_id
+                        DownloaderInstance.id.in_(dl_ids)
                     )
                 )
-            ).scalar_one_or_none()
-            if row and row.download_root:
+            )
+            .scalars()
+            .all()
+        )
+        roots: set[str] = set()
+        for row in rows:
+            if row.download_root:
                 roots.add(row.download_root)
         if len(roots) == 1:
             return next(iter(roots))
@@ -686,8 +701,10 @@ async def generate_report(
         by_rule[key_r] = by_rule.get(key_r, 0) + r.affected_count
         freed_total += r.freed_space
         affected_total += r.affected_count
-        for h in r.hashes or []:
-            top.append({"hash": h, "freed": r.freed_space, "rule": r.rule_name})
+        hashes = r.hashes or []
+        per_hash = r.freed_space // len(hashes) if hashes else 0
+        for h in hashes:
+            top.append({"hash": h, "freed": per_hash, "rule": r.rule_name})
 
     top.sort(key=lambda x: int(str(x["freed"] or 0)), reverse=True)
 
