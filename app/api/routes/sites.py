@@ -152,7 +152,9 @@ async def create_site(payload: SiteCreate) -> SiteOut:
 
         # RSS 源随站点一同创建：引擎只按 feeds 表调度，没有这条记录
         # 站点就永远不会被拉取（FR-2.2）
-        if payload.rss_url:
+        # m-team 等 API 站点即使没有 rss_url（走 apikey）也要建 Feed 占位，
+        # 调度层不关心站点用 RSS 还是 API（FR-1.5 适配层收拢差异）
+        if payload.rss_url or payload.apikey:
             session.add(
                 Feed(
                     site_id=site.id,

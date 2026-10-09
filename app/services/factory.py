@@ -159,14 +159,17 @@ class AdapterFactory:
         self._sites[row.id] = adapter
         return adapter
 
-    def site_rss_url(self, row: Site) -> str:
-        """解密站点 RSS 地址（含 passkey，R6 高敏感）。"""
+    def site_rss_url(self, row: Site) -> str | None:
+        """解密站点 RSS 地址（含 passkey，R6 高敏感）。
+
+        API 模式站点（如 m-team 有 apikey）可能未配置 RSS 地址——
+        此时返回 None，由 adapter 内部决定走 API 还是需要 URL。
+        调用方不应假定站点一定有 RSS URL（FR-1.5 适配层收拢差异）。
+        """
         url = decrypt_field(
             self._cipher, row.rss_url_enc, owner_type="site", owner_id=row.name
         )
-        if not url:
-            raise CredentialMissing(f"站点 {row.name} 未配置 RSS 地址")
-        return url
+        return url or None
 
     async def downloader_for_id(self, downloader_id: int) -> object | None:
         """按 id 取下载器，缺失返回 None（Cleaner 用）。

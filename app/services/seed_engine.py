@@ -136,7 +136,9 @@ class SeedEngine:
         """拉取 → 判定 → 投递。"""
         stats = RoundStats(site=site.name)
         adapter = self._factory.site(site)
-        url = self._factory.site_rss_url(site)
+        # 站点可能没有 RSS URL（m-team 等 API 站点有 apikey 就走 API）。
+        # URL 是给 adapter 的提示，adapter 自行决定是否使用（FR-1.5）。
+        url = self._factory.site_rss_url(site) or ""
 
         result = await fetcher.fetch(adapter, url)
         stats.status = str(result.status)
