@@ -97,7 +97,9 @@ class QbittorrentAdapter(DownloaderAdapter):
                     "/api/v2/auth/login",
                     data={"username": self._username, "password": self._password},
                 )
-                if resp.status_code != 200 or "Fails" in resp.text:
+                # qBittorrent 5.x 登录成功返回 200 或 204（No Content）；
+                # 失败时返回 200 但 body 含 "Fails"/"Ok."。
+                if resp.status_code not in (200, 204) or "Fails" in resp.text:
                     raise DownloaderError("qBittorrent 登录失败", transient=False)
                 self._authed = True
             except httpx.HTTPError as exc:

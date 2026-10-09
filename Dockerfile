@@ -1,3 +1,6 @@
+# 网络受限时用本地镜像覆盖（docker build --build-arg PY_IMAGE=python:3.12-bookworm）
+ARG PY_IMAGE=python:3.12-slim
+
 # ---- Frontend builder ----
 FROM node:22-slim AS web-builder
 
@@ -14,7 +17,10 @@ RUN npm run build
 
 
 # ---- Python builder ----
-FROM python:3.12-slim AS builder
+# ARG 可在网络受限时用本地镜像覆盖：
+#   docker build --build-arg PY_IMAGE=python:3.12-bookworm
+#   PY_IMAGE=python:3.12-bookworm docker compose build
+FROM ${PY_IMAGE} AS builder
 
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -33,13 +39,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # 拷贝 README + app，build（hatchling 需要 readme）
 COPY README.md ./
 COPY app ./app
+# --reinstall：强制重装 app，绕开 uv 缓存的旧 wheel
+# （uv sync 只哈希 pyproject.toml/uv.lock，不感知 app/ 源码变化）
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-dev --no-editable \
+    uv sync --no-dev --no-editable --reinstall \
     && /opt/venv/bin/python -c "import app, app.main; print('import ok:', app.__version__)"
 
 
 # ---- Runtime ----
-FROM python:3.12-slim AS runtime
+FROM ${PY_IMAGE} AS runtime
 
 # tini：PID 1 与信号处理（优雅停机、FR-8.2）
 # curl：HEALTHCHECK；ca-certificates：HTTPS 访问 PT 站
