@@ -13,10 +13,7 @@
 ## 必备命令
 ```bash
 uv sync --extra dev         # 装依赖
-uv run pytest               # 后端测试（应有 414 个用例）
-
-# E2E（需先 cd web && npm run build；CI 中可标 .skip）
-cd web && npm run build && npx playwright test  # 35 个用例，端到端验证
+uv run pytest               # 后端测试（应有 426 个用例）
 uv run ruff check app/ tests/
 uv run mypy app/
 ```
