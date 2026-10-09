@@ -99,11 +99,15 @@ class MteamAdapter(SiteAdapter):
         return out
 
     def _api_base(self) -> str:
-        """API 主机。MoviePilot 约定：``api.<注册域名>``，如 ``api.m-team.cc``。"""
+        """API 主机完整 URL。MoviePilot 约定：``https://api.<注册域名>``，如 ``https://api.m-team.cc``。"""
         domain = (self.profile.domain or "").strip()
-        if domain.startswith("api."):
-            return domain
-        return f"api.{domain}" if domain else ""
+        if not domain:
+            return ""
+        # 如果配置已含 api. 前缀，直接用
+        host = domain if domain.startswith("api.") else f"api.{domain}"
+        # 去掉可能已有的协议前缀再加 https://
+        host = host.replace("https://", "").replace("http://", "")
+        return f"https://{host}"
 
     def _detail_url(self, item_id: str) -> str:
         if self.profile.detail_path_template:

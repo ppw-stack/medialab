@@ -342,6 +342,9 @@ def test_registry_rejects_unknown():
 # ---- 联调：真实 m-team search API（需用户提供 apikey + sign/t） ----
 
 #: 联调占位符——用户提供有效 apikey 后替换
+#: 联调占位符——用户提供有效 apikey + 可访问 m-team 的网络后替换
+#: 警告：当前环境 m-team 所有域名（kp.m-team.cc、api.m-team.cc、m-team.io）
+#: DNS 解析到 RFC6890 保留地址（198.18.0.0/15），无法做端到端集成测试
 INTEGRATION_APIKEY = "REPLACE_ME"
 INTEGRATION_DOMAIN = "kp.m-team.cc"
 
