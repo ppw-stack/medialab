@@ -47,8 +47,22 @@ async def dashboard() -> dict[str, Any]:
             )
         ).scalar_one()
 
+    # 下载器统计
+    from app.db.models import DownloaderInstance
+    dl_total = (
+        await session.execute(select(func.count(DownloaderInstance.id)))
+    ).scalar_one()
+    dl_enabled = (
+        await session.execute(
+            select(func.count(DownloaderInstance.id)).where(
+                DownloaderInstance.enabled.is_(True)
+            )
+        )
+    ).scalar_one()
+
     return {
         "sites": {"total": site_total, "enabled": site_enabled},
+        "downloaders": {"total": dl_total, "enabled": dl_enabled},
         "torrents": {
             "by_status": dict(by_status),
             "by_source": dict(by_source),

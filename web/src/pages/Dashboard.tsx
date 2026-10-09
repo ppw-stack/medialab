@@ -37,6 +37,8 @@ export default function Dashboard() {
     count,
   }));
 
+  const downloadersTotal = (data as { downloaders?: { total: number; enabled: number } }).downloaders?.total ?? 0;
+  const downloadersEnabled = (data as { downloaders?: { total: number; enabled: number } }).downloaders?.enabled ?? 0;
   return (
     <div>
       <Typography.Title level={4}>总览仪表盘</Typography.Title>
@@ -44,6 +46,11 @@ export default function Dashboard() {
         <Col span={6}>
           <Card>
             <Statistic title="站点（在线 / 总数）" value={data.sites.enabled} suffix={`/ ${data.sites.total}`} />
+          </Card>
+        </Col>
+        <Col span={6}>
+          <Card>
+            <Statistic title="下载器（启用 / 总数）" value={downloadersEnabled} suffix={`/ ${downloadersTotal}`} />
           </Card>
         </Col>
         <Col span={6}>
