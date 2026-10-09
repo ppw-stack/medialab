@@ -1,40 +1,36 @@
 """m-team 站点适配器（FR-1.5）。
 
-m-team 的 RSS 是标准 RSS2 XML（不是 JSON API），端点：
-    GET https://<domain>/api/rss/fetch?dl=1&uid=<u>&t=<ts>&sign=<s>&tkeys=<k>
+m-team 公开 JSON API 走 ``x-api-key`` 鉴权（不是 cookie，MoviePilot 同款）。
 
-响应格式（顶层）：RSS 2.0
-每条 item 字段：
-    title / link / description     # 标准 RSS
-    guid isPermaLink=false         # 数字种子 ID（不是 InfoHash）
-    pubDate                       # 发布时间
-    category domain=... text=...  # 主分类（9 个：TV/Movie/Anime/AV/PCGame 等）
-    enclosure url=... length=...   # 下载 URL（含 sign/tid/uid）
-    author / comments             # 标准 RSS 元数据
+核心端点（host = ``api.<注册域名>``，如 ``api.m-team.cc``）：
 
-**m-team RSS 列表不包含免费标记**：category 只有主分类，enclosure URL
- 也不带 discount / free / free_deadline 字段。免费信息**只在详情页**
-  ``https://kp.m-team.cc/detail/<id>`` 里（HTML 页面，需 cookie）。
+- ``POST /api/member/profile``   测连/取用户信息
+- ``POST /api/torrent/search``    搜索/列表（body: keyword/categories/pageNumber/pageSize/visible）
+- ``POST /api/torrent/genDlToken``  生成下载 URL（body: {id}，响应 {data: {url}}）
 
-影响：列表层识别率 = 0。``parse_window`` 走字符串路径时只能猜（"剩余 X" 文案
-m-team 不在 description 里放），实际也是 0。
+下载流程：
+  1. ``POST /api/torrent/genDlToken``  body={id: <torrent_id>}
+  2. 响应 ``data.url`` 是带 sign/t 的临时下载 URL
+  3. 直接 ``GET`` 该 URL 拿 bencoded torrent
 
-诚实声明：
-- capabilities = {RSS}（不加 DETAIL_API 因为列表场景拉详情页 N+1 不现实）
-- parse_window(str) 保留"剩余 X"文案兜底（兼容 HTML 详情页场景）
-- parse_window(dict) 走结构化字段，适配 m-team 未来如果提供 JSON 详情 API
+免费字段在 search 响应里（不需要解析详情页/HTML）：
+
+- ``status.discount`` (int): 0=无折扣，100=永久免费
+- ``status.discountEndTime`` (Unix 秒): 限时截止
+- ``status.mallSingleFree.status == "ONGOING"``: 单种特别免费
+- ``promotionRule.discount`` + ``endTime``: 全站促销
+
+RSS 兜底：当 ``apikey`` 缺失时降级到 RSS（无免费标记，识别率 0）。
 """
-
 
 from __future__ import annotations
 
 import json
-import re
 from datetime import UTC, datetime, timedelta
-from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
+import xml.etree.ElementTree as ET
 
 from app.adapters.sites.base import (
     FeedItem,
@@ -44,22 +40,25 @@ from app.adapters.sites.base import (
     TorrentBrief,
 )
 from app.core.logging import get_logger
-from app.core.timeutils import ClockOffset, utcnow
+from app.core.timeutils import ClockOffset
 from app.core.windows import FreeWindow
 from app.db.models import FreeSource, FreeType
 
 logger = get_logger(__name__)
 
-
-#: 临时限制单次拉取的最大条目数（防止恶意站返回巨大响应撑爆内存）
+#: 单次拉取上限（防止恶意站返回巨大响应撑爆内存）
 _MAX_ITEMS_PER_PULL = 500
 
-#: 详情页路径模板（保留为占位符；按需覆盖）
-_DEFAULT_DETAIL_PATH = "/detail/{id}"
+#: 默认搜索参数可见性：1=正常，2=仅下载过的，3=未下载的（M-Team 官方值）
+_DEFAULT_VISIBILITY = 1
+
+#: m-team 影片类目（MoviePilot 总结的 cat id）
+_MOVIE_CATEGORIES = ("401", "419", "420", "421", "439", "404", "405")
+_TV_CATEGORIES = ("403", "402", "435", "438", "404", "405")
 
 
 class MteamAdapter(SiteAdapter):
-    """m-team 站点 RSS 2.0 XML 适配器。"""
+    """m-team 站点 JSON API 适配器（x-api-key 鉴权）。"""
 
     adapter_type = "mteam"
 
@@ -68,18 +67,23 @@ class MteamAdapter(SiteAdapter):
         profile,
         *,
         cookies: str | None = None,
+        apikey: str | None = None,
         timeout: float = 20.0,
         clock_offset: ClockOffset | None = None,
     ) -> None:
         super().__init__(profile)
         self._cookies = cookies
+        self._apikey = apikey
         self._timeout = timeout
         self._clock_offset = clock_offset or ClockOffset.zero()
         self._client = httpx.AsyncClient(
             timeout=timeout,
             follow_redirects=True,
             cookies=self._parse_cookies(cookies),
-            headers={"User-Agent": "SeedHelper/0.1 (+https://example.invalid/seedhelper)"},
+            headers={
+                "User-Agent": "SeedHelper/0.1 (+https://example.invalid/seedhelper)",
+                "Accept": "application/json, text/plain, */*",
+            },
         )
 
     # ------------------------------------------------------------ 内部工具
@@ -94,31 +98,36 @@ class MteamAdapter(SiteAdapter):
                 out[k.strip()] = v.strip()
         return out
 
-    def _base_url(self) -> str:
-        return f"https://{self.profile.domain}"
+    def _api_base(self) -> str:
+        """API 主机。MoviePilot 约定：``api.<注册域名>``，如 ``api.m-team.cc``。"""
+        domain = (self.profile.domain or "").strip()
+        if domain.startswith("api."):
+            return domain
+        return f"api.{domain}" if domain else ""
 
-    def _detail_url(self, item_id: str) -> str | None:
+    def _detail_url(self, item_id: str) -> str:
         if self.profile.detail_path_template:
             path = self.profile.detail_path_template.format(
                 id=item_id, hash=item_id
             )
         else:
-            path = _DEFAULT_DETAIL_PATH.format(id=item_id)
+            path = f"/detail/{item_id}"
         if not path.startswith("/"):
             path = "/" + path
-        return f"{self._base_url()}{path}"
+        return f"https://{self.profile.domain}{path}"
 
-    @staticmethod
-    def _info_hash_from(item: dict[str, Any]) -> str | None:
-        for key in ("infohash", "info_hash", "hash", "torrent_hash"):
-            v = item.get(key)
-            if isinstance(v, str) and len(v.strip()) == 40:
-                return v.strip().lower()
-        return None
+    def _auth_headers(self) -> dict[str, str]:
+        """带 ``x-api-key`` 的鉴权头。"""
+        h: dict[str, str] = {}
+        if self._apikey:
+            h["x-api-key"] = self._apikey
+        if self._cookies:
+            h["Cookie"] = self._cookies
+        return h
 
     @staticmethod
     def _parse_iso_dt(value: object) -> datetime | None:
-        """把 ISO 8601 / Unix 秒 / 数字字符串解析为 naive UTC datetime。"""
+        """Unix 秒 / ISO 8601 / 数字字符串 → naive UTC datetime。"""
         if value is None or value == "":
             return None
         if isinstance(value, bool):
@@ -141,82 +150,173 @@ class MteamAdapter(SiteAdapter):
             return dt.astimezone(UTC).replace(tzinfo=None) if dt.tzinfo else dt
         return None
 
+    # ------------------------------------------------------------ 免费窗口解析
     @staticmethod
-    def _classify_free(item: dict[str, Any]) -> tuple[str, datetime | None]:
-        """根据 discount / free / free_deadline 字段返回 (free_type, end_at)。
+    def _classify_from_status(status: dict[str, Any]) -> tuple[str, datetime | None]:
+        """从 m-team search API 的 status 块提取免费窗口。
 
-        判定顺序：永久 > 限时 > 中性 > 2X > 未知。
+        优先级：mallSingleFree > discountEndTime > discount 100。
         """
-        # discount: m-team 的 "免费下载" 折扣（百分比），常规 0 = 付费、100 = 永久免费
-        # 负数 = 收费乘数（如 -50 表示 1/0.5 = 2x 上传）
-        discount = item.get("discount")
-        free_flag = item.get("free")  # 布尔或数字
-        deadline_raw = (
-            item.get("free_deadline")
-            or item.get("free_end")
-            or item.get("free_until")
-        )
-        deadline = MteamAdapter._parse_iso_dt(deadline_raw)
+        # 1) 单种特别免费（最优先：m-team 显式标记）
+        mall = status.get("mallSingleFree")
+        if isinstance(mall, dict) and mall.get("status") == "ONGOING":
+            return FreeType.TIMED, MteamAdapter._parse_iso_dt(mall.get("endDate"))
 
-        # 1) 永久免费
-        if discount == 100 or discount == "100":
+        # 2) 全站促销（promotionRule.discount + endTime）
+        promo = status.get("promotionRule")
+        if isinstance(promo, dict):
+            disc = promo.get("discount", "NORMAL")
+            end = MteamAdapter._parse_iso_dt(promo.get("endTime"))
+            if disc == "FREE" or disc == 100 or disc == "100":
+                return FreeType.PERMANENT, None
+            if end is not None:
+                return FreeType.TIMED, end
+
+        # 3) 标准 discount 字段
+        try:
+            disc_val = int(status.get("discount", 0))
+        except (TypeError, ValueError):
+            disc_val = 0
+        if disc_val >= 100:
             return FreeType.PERMANENT, None
-        if isinstance(free_flag, bool) and free_flag and deadline is None:
-            # 标记为 free 但无截止 → 视作永久
-            return FreeType.PERMANENT, None
-
-        # 2) 限时免费
-        if deadline is not None:
-            # discount 0 是常规默认；有截止 = 限时
-            return FreeType.TIMED, deadline
-
-        # 3) 中性种：discount 接近 -50（约等于 2x 但仅 50% 下载）
-        if isinstance(discount, (int, float)) and discount < 0 and discount >= -75:
+        if disc_val < 0 and disc_val >= -75:
             return FreeType.NEUTRAL, None
-
-        # 4) 2X：discount 接近 -100
-        if isinstance(discount, (int, float)) and discount < -75:
+        if disc_val < -75:
             return FreeType.TWOU_TIMED, None
-
-        # 5) 默认：未知
+        end = MteamAdapter._parse_iso_dt(status.get("discountEndTime"))
+        if end is not None:
+            return FreeType.TIMED, end
         return FreeType.UNKNOWN, None
 
-    # ------------------------------------------------------------ 接口实现
+    # ------------------------------------------------------------ 接口
     async def ping(self) -> SiteHealth:
+        """测连：调 ``/api/member/profile``。"""
+        if not self._apikey:
+            return SiteHealth(reachable=False, detail="缺少 API key（apikey）")
         try:
-            resp = await self._client.get(f"{self._base_url()}/", timeout=self._timeout)
+            resp = await self._client.post(
+                f"{self._api_base()}/api/member/profile",
+                headers=self._auth_headers(),
+                timeout=self._timeout,
+            )
         except httpx.HTTPError as exc:
             return SiteHealth(reachable=False, detail=str(exc))
+        if resp.status_code in (401, 403):
+            return SiteHealth(reachable=False, detail="鉴权失败（apikey 无效或过期）")
         if resp.status_code >= 500:
             return SiteHealth(reachable=False, detail=f"HTTP {resp.status_code}")
-        return SiteHealth(
-            reachable=True,
-            logged_in="text/html" in resp.headers.get("content-type", ""),
-            detail="",
-        )
+        try:
+            data = resp.json()
+        except (TypeError, ValueError):
+            return SiteHealth(reachable=False, detail="响应非 JSON")
+        if data.get("code") == 0 and data.get("data"):
+            return SiteHealth(reachable=True, detail="ok")
+        return SiteHealth(reachable=False, detail=data.get("message", "鉴权已过期或无效"))
 
-    async def fetch_feed(self, url: str) -> list[FeedItem]:
-        """拉取 JSON API RSS 并归一化。"""
+    async def fetch_feed(
+        self,
+        url: str,
+        *,
+        page_size: int = 100,
+        page_number: int = 1,
+        categories: list[str] | None = None,
+    ) -> list[FeedItem]:
+        """拉取种子列表。
+
+        ``url`` 参数兼容 RSS 模式（向后兼容）：当有 apikey 时忽略 url 走 API 模式；
+        否则降级到 RSS 解析（识别率 0）。
+        """
+        if self._apikey and self._api_base():
+            return await self._fetch_via_api(
+                page_size=page_size,
+                page_number=page_number,
+                categories=categories,
+            )
+        return await self._fetch_via_rss(url)
+
+    async def _fetch_via_api(
+        self,
+        *,
+        page_size: int = 100,
+        page_number: int = 1,
+        categories: list[str] | None = None,
+    ) -> list[FeedItem]:
+        """调 ``/api/torrent/search`` 拉取 JSON 列表。"""
+        body: dict[str, Any] = {
+            "pageNumber": page_number,
+            "pageSize": min(page_size, _MAX_ITEMS_PER_PULL),
+            "visible": _DEFAULT_VISIBILITY,
+        }
+        if categories:
+            body["categories"] = categories
+        try:
+            resp = await self._client.post(
+                f"{self._api_base()}/api/torrent/search",
+                headers={**self._auth_headers(), "Content-Type": "application/json"},
+                json=body,
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("m-team %s 搜索失败：%s", self.name, exc)
+            return []
+        if resp.status_code in (403, 429):
+            raise _BreakerTripped(f"m-team {self.name} 返回 {resp.status_code}，需熔断")
+        if resp.status_code >= 400:
+            logger.warning("m-team %s 搜索返回 %s", self.name, resp.status_code)
+            return []
+        try:
+            payload = resp.json()
+        except (TypeError, ValueError) as exc:
+            logger.warning("m-team %s 搜索响应非 JSON：%s", self.name, exc)
+            return []
+        if payload.get("code") != 0:
+            logger.warning(
+                "m-team %s 搜索 code=%s message=%s",
+                self.name, payload.get("code"), payload.get("message"),
+            )
+            return []
+        data = (payload.get("data") or {}).get("data") or []
+        items: list[FeedItem] = []
+        for raw in data:
+            if not isinstance(raw, dict):
+                continue
+            status = raw.get("status") or {}
+            torrent_id = str(raw.get("id") or "")
+            if not torrent_id:
+                continue
+            items.append(
+                FeedItem(
+                    title=raw.get("name") or "",
+                    link=self._detail_url(torrent_id),
+                    info_hash=None,  # m-team search API 不返回 infohash
+                    size=int(raw.get("size") or 0),
+                    category=str(raw.get("category") or ""),
+                    description=raw.get("smallDescr") or "",
+                    published_at=MteamAdapter._parse_iso_dt(raw.get("createdDate")),
+                    torrent_url=f"api://gen/{torrent_id}",  # 占位，torrent_detail 实际生成
+                )
+            )
+            if len(items) >= _MAX_ITEMS_PER_PULL:
+                break
+        return items
+
+    async def _fetch_via_rss(self, url: str) -> list[FeedItem]:
+        """RSS 兜底（无 apikey 时）。识别率 = 0。"""
         try:
             resp = await self._client.get(url, timeout=self._timeout)
         except httpx.HTTPError as exc:
             logger.warning("m-team %s RSS 拉取失败：%s", self.name, exc)
             return []
-        if resp.status_code in {403, 429}:
-            raise _BreakerTripped(f"m-team {self.name} 返回 {resp.status_code}，需熔断")
         if resp.status_code >= 400:
-            logger.warning("m-team %s RSS 返回 %s", self.name, resp.status_code)
             return []
-        return self.parse_feed(resp.text)
+        return self._parse_rss(resp.text)
 
-    def parse_feed(self, raw_text: str) -> list[FeedItem]:
-        """解析 m-team RSS 2.0 XML 响应。"""
-        import xml.etree.ElementTree as ET
-
+    @staticmethod
+    def _parse_rss(xml_text: str) -> list[FeedItem]:
         try:
-            root = ET.fromstring(raw_text.encode("utf-8"))
+            root = ET.fromstring(xml_text.encode("utf-8"))
         except ET.ParseError as exc:
-            logger.warning("m-team %s RSS XML 解析失败：%s", self.name, exc)
+            logger.warning("m-team RSS XML 解析失败：%s", exc)
             return []
         items: list[FeedItem] = []
         for node in root.iter("item"):
@@ -226,44 +326,27 @@ class MteamAdapter(SiteAdapter):
                 val = (c.get("href") or c.get("url") or c.text or "").strip()
                 if local not in fields:
                     fields[local] = val
-            title = fields.get("title", "")
-            link = fields.get("link") or fields.get("guid", "")
+            link = fields.get("link") or fields.get("guid") or ""
             if not link:
                 continue
-            desc = fields.get("description", "")
-            if isinstance(desc, str):
-                desc = desc[:20000]
+            desc = fields.get("description", "")[:20000]
             cat_node = node.find("category")
-            category = (cat_node.text if cat_node is not None and cat_node.text else None)
             enc_node = node.find("enclosure")
-            torrent_url = (
-                enc_node.get("url") if enc_node is not None and enc_node.get("url") else link
-            )
-            size = 0
-            if enc_node is not None and enc_node.get("length"):
-                try:
-                    size = int(enc_node.get("length"))
-                except (TypeError, ValueError):
-                    pass
-            # InfoHash：m-team 的 guid 是数字 ID，enclosure URL 也不含 hash
-            # 真正的 InfoHash 需要拉详情页（m-team 的下载 URL 也不含 hash）
-            # → 列表层无法拿到，置 None 由匹配层用 title+size 兜底
             items.append(
                 FeedItem(
-                    title=title,
+                    title=fields.get("title", ""),
                     link=link,
                     info_hash=None,
-                    size=size,
-                    category=category,
+                    size=int(enc_node.get("length") or 0) if enc_node is not None and enc_node.get("length") else 0,
+                    category=cat_node.text if cat_node is not None and cat_node.text else None,
                     description=desc,
-                    published_at=self._parse_iso_dt(fields.get("pubdate") or fields.get("pub_date")),
-                    torrent_url=torrent_url,
+                    published_at=None,
+                    torrent_url=enc_node.get("url") if enc_node is not None and enc_node.get("url") else link,
                 )
             )
-            if len(items) >= _MAX_ITEMS_PER_PULL:
-                break
-        return items
+        return items[:_MAX_ITEMS_PER_PULL]
 
+    # ------------------------------------------------------------ 解析
     async def parse_window(
         self,
         raw: str | dict[str, object],
@@ -272,15 +355,13 @@ class MteamAdapter(SiteAdapter):
     ) -> FreeWindow:
         """FR-1.5.3：解析单条目的免费窗口。
 
-        入参形态：
-        - ``str``：是 RSS description 或列表页文案（仍走文案解析，但 m-team
-          列表页实际返回的是 JSON，文案入口主要用于搜索结果页）
-        - ``dict``：是 JSON API 单条目的完整 dict
+        dict 路径（API 搜索结果）：从 status 块提取 discount / discountEndTime /
+        promotionRule / mallSingleFree。
+        str 路径（HTML 详情页或 RSS 描述）：保留"剩余 X"文案兜底。
         """
-        # dict 路径：直接读结构化字段
         if isinstance(raw, dict):
-            free_type, end_at = self._classify_free(raw)
-            # permanent 必须 free_end_at=None（__post_init__ 会校验）
+            status = raw.get("status") if isinstance(raw.get("status"), dict) else raw
+            free_type, end_at = MteamAdapter._classify_from_status(status)
             if free_type == FreeType.PERMANENT:
                 return FreeWindow(
                     free_type=FreeType.PERMANENT,
@@ -297,7 +378,6 @@ class MteamAdapter(SiteAdapter):
                     raw_text=_stringify_safe(raw),
                     confidence=0.95,
                 )
-            # 没有截止时刻：unknown，让业务层兜底
             return FreeWindow(
                 free_type=free_type,
                 free_end_at=None,
@@ -305,8 +385,7 @@ class MteamAdapter(SiteAdapter):
                 raw_text=_stringify_safe(raw),
                 confidence=0.3,
             )
-
-        # str 路径：旧版 HTML 列表页的兜底（保留"剩余 X" 正则）
+        # str 路径（兼容 HTML 详情页或 RSS description）
         text = raw or ""
         lowered = text.lower()
         if any(m in lowered for m in ("永久免费", "free forever", "lifetime", "permanent")):
@@ -317,6 +396,7 @@ class MteamAdapter(SiteAdapter):
                 raw_text=text,
                 confidence=0.9,
             )
+        import re
         m = re.search(
             r"(?:剩余|剩|left|remaining)\s*"
             r"(?:(?P<d>\d+)\s*(?:天|日|d|days?)\s*)?"
@@ -346,11 +426,34 @@ class MteamAdapter(SiteAdapter):
             confidence=0.0,
         )
 
+    # ------------------------------------------------------------ 详情与下载
     async def torrent_detail(self, item_id: str) -> dict[str, object]:
-        """拉取详情页/详情 API。m-team 详情页含完整 discount/free/free_deadline 字段。
+        """拉取详情：调 ``/api/torrent/genDlToken`` 拿下载 URL，返回 ``{id, download_url}``。
 
-        返回 dict 后，调用方（``FreeSeedHunter``）会再次调 ``parse_window`` 二次精化。
+        也支持 RSS 详情页 HTML 解析（向后兼容）。
         """
+        if self._apikey and self._api_base():
+            try:
+                resp = await self._client.post(
+                    f"{self._api_base()}/api/torrent/genDlToken",
+                    headers={**self._auth_headers(), "Content-Type": "application/json"},
+                    json={"id": item_id},
+                    timeout=self._timeout,
+                )
+            except httpx.HTTPError as exc:
+                return {"id": item_id, "_error": f"genDlToken 网络错误：{exc}"}
+            if resp.status_code in (401, 403):
+                return {"id": item_id, "_error": "鉴权失败"}
+            if resp.status_code >= 400:
+                return {"id": item_id, "_error": f"HTTP {resp.status_code}"}
+            try:
+                data = resp.json()
+            except (TypeError, ValueError):
+                return {"id": item_id, "_error": "响应非 JSON"}
+            if data.get("code") != 0:
+                return {"id": item_id, "_error": data.get("message", "genDlToken 失败")}
+            return {"id": item_id, "download_url": (data.get("data") or {}).get("url") or ""}
+        # 兜底：HTML 详情页
         url = self._detail_url(item_id)
         if not url:
             return {}
@@ -360,31 +463,21 @@ class MteamAdapter(SiteAdapter):
             return {}
         if resp.status_code >= 400:
             return {}
-        try:
-            data = json.loads(resp.text)
-        except ValueError:
-            return {"_html": resp.text[:20000]}
-        return data if isinstance(data, dict) else {}
+        return {"_html": resp.text[:20000]}
 
     async def verify_status(self, info_hash: str) -> TorrentBrief:
-        detail = await self.torrent_detail(info_hash)
-        if not detail:
-            return TorrentBrief.UNKNOWN
-        if detail.get("deleted") or detail.get("is_deleted"):
-            return TorrentBrief.DELETED
-        if detail.get("banned") or detail.get("violation"):
-            return TorrentBrief.VIOLATION
-        return TorrentBrief.EXISTS
+        """m-team search API 不暴露删除/违规状态 → UNKNOWN。"""
+        return TorrentBrief.UNKNOWN
 
     async def site_clock(self) -> datetime | None:
-        """探测站点服务器时间（FR-3.0.2）。m-team 无公开时间 API，
-        从 ``Date`` 响应头抓（秒级精度足够）。"""
+        """探测站点服务器时间（FR-3.0.2）。m-team 公开响应头可用。"""
         try:
             resp = await self._client.head(
-                f"{self._base_url()}/", timeout=self._timeout
+                f"https://{self.profile.domain}/", timeout=self._timeout
             )
         except httpx.HTTPError:
             return None
+        from email.utils import parsedate_to_datetime
         raw = resp.headers.get("date")
         if not raw:
             return None
@@ -395,11 +488,10 @@ class MteamAdapter(SiteAdapter):
         return parsed.astimezone(UTC).replace(tzinfo=None) if parsed.tzinfo else parsed
 
     def capabilities(self) -> frozenset[SiteFeature]:
-        # m-team 列表不含免费字段；详情页是 HTML 需 cookie 鉴权。
-        # 诚实声明：不宣称 DETAIL_API 能力（无法在不抓详情页前提下获取免费标记）。
         return frozenset(
             {
                 SiteFeature.RSS,
+                SiteFeature.DETAIL_API,
                 SiteFeature.CLOCK_API,
                 SiteFeature.TIMESTAMP_FIELD,
             }
@@ -416,7 +508,8 @@ class _BreakerTripped(RuntimeError):
 def _stringify_safe(raw: dict[str, Any]) -> str:
     """把 dict 压成可读字符串，便于 FreeWindow.raw_text 调试。"""
     parts: list[str] = []
-    for k in ("title", "name", "small_descr", "discount", "free", "free_deadline"):
+    for k in ("id", "name", "smallDescr", "discount", "discountEndTime",
+              "mallSingleFree", "promotionRule"):
         if k in raw and raw[k] is not None:
             parts.append(f"{k}={raw[k]}")
     return " ".join(parts)[:2000]

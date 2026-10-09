@@ -26,6 +26,7 @@ class SiteCreate(BaseModel):
     domain: str
     rss_url: str | None = None
     adapter: Literal["mteam"] = "mteam"  # FR-1.5 站点 adapter 名（注册中心约束）
+    apikey: str | None = Field(default=None, max_length=256, description="m-team 等的 API key（x-api-key），加密存储")
     save_path_template: str = "/data/torrents/{site}/{name}"
     max_size: int | None = Field(default=None, description="辅种体积上限（字节）")
     min_interval_minutes: int = Field(default=60, ge=15, description="FR-2.2 下限 15")
@@ -45,6 +46,7 @@ class SiteUpdate(BaseModel):
     name: str | None = None
     domain: str | None = None
     rss_url: str | None = None  # 留空字符串表示不修改
+    apikey: str | None = Field(default=None, max_length=256, description="留空字符串 = 不修改")
     adapter: str | None = None
     save_path_template: str | None = None
     max_size: int | None = None
@@ -68,6 +70,7 @@ class SiteOut(BaseModel):
     adapter: str
     enabled: bool
     rss_url_masked: str
+    has_apikey: bool  # 是否配置了 API key（不暴露 key 内容）
     default_free_duration: int
     min_buffer: int
     buffer_ratio: float
@@ -140,6 +143,10 @@ async def create_site(payload: SiteCreate) -> SiteOut:
             site.rss_url_enc = cipher.encrypt(
                 payload.rss_url, owner_type="site", owner_id=payload.name
             )
+        if payload.apikey:
+            site.apikey_enc = cipher.encrypt(
+                payload.apikey, owner_type="site", owner_id=payload.name
+            )
         session.add(site)
         await session.flush()
 
@@ -168,7 +175,7 @@ async def update_site(payload: SiteUpdate) -> SiteOut:
         if site is None:
             raise HTTPException(status_code=404, detail="站点不存在")
 
-        updates = payload.model_dump(exclude={"id", "rss_url"}, exclude_unset=True)
+        updates = payload.model_dump(exclude={"id", "rss_url", "apikey"}, exclude_unset=True)
         for key, value in updates.items():
             setattr(site, key, value)
         if payload.default_free_duration is not None:
@@ -183,6 +190,11 @@ async def update_site(payload: SiteUpdate) -> SiteOut:
         if payload.rss_url:
             site.rss_url_enc = cipher.encrypt(
                 payload.rss_url, owner_type="site", owner_id=site.name
+            )
+        # apikey：同上，空字符串 = 不修改
+        if payload.apikey:
+            site.apikey_enc = cipher.encrypt(
+                payload.apikey, owner_type="site", owner_id=site.name
             )
         await session.flush()
         return _to_out(site, None)
@@ -220,7 +232,18 @@ async def test_site(site_id: int) -> dict[str, Any]:
         offset = ClockOffset(offset=timedelta(seconds=site.clock_offset))
 
     adapter_cls = resolve_site_adapter(site.adapter)
-    adapter = adapter_cls(profile, clock_offset=offset)
+    # 解密 apikey 注入 adapter（m-team 等现代站点必需）
+    from app.core.config import get_settings
+    from app.core.crypto import build_cipher
+    apikey = None
+    if site.apikey_enc:
+        try:
+            apikey = build_cipher(get_settings()).try_decrypt(
+                site.apikey_enc, owner_type="site", owner_id=site.name
+            )
+        except Exception:
+            apikey = None
+    adapter = adapter_cls(profile, apikey=apikey, clock_offset=offset)
     try:
         health = await adapter.ping()
         # 字符串路径：mteam 也保留"剩余 X" 文案兜底，便于搜索结果页场景
@@ -281,6 +304,7 @@ def _to_out(site: Site, raw: str | None) -> SiteOut:
         adapter=site.adapter,
         enabled=site.enabled,
         rss_url_masked=mask_secret(raw or (site.rss_url_enc or ""), keep=8),
+        has_apikey=bool(site.apikey_enc),
         default_free_duration=site.default_free_duration,
         min_buffer=site.min_buffer,
         buffer_ratio=site.buffer_ratio,

@@ -63,7 +63,7 @@ def profile_from_site(site: Site) -> SiteProfile:
             str(k): str(v) for k, v in (site.download_factor_map or {}).items()
         },
         time_unit_multiplier=site.time_unit_multiplier,
-        features=frozenset({SiteFeature.RSS}),
+        features=frozenset({SiteFeature.RSS, SiteFeature.CLOCK_API, SiteFeature.TIMESTAMP_FIELD}),
     )
 
 
@@ -141,9 +141,19 @@ class AdapterFactory:
         if cached is not None:
             return cached
         adapter_cls = resolve_site_adapter(row.adapter)
+        # m-team 等现代站点的 API key（FR-1.5.1：解密后注入，不暴露到日志）
+        apikey = None
+        if row.apikey_enc:
+            apikey = decrypt_field(
+                self._cipher,
+                row.apikey_enc,
+                owner_type="site",
+                owner_id=row.name,
+            )
         adapter = adapter_cls(
             profile_from_site(row),
             cookies=cookies,
+            apikey=apikey,
             clock_offset=clock_offset_for(row),
         )
         self._sites[row.id] = adapter

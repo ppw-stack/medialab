@@ -253,6 +253,8 @@ class Site(Base):
     username: Mapped[str | None] = mapped_column(String(128), nullable=True)
     password_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     key_version: Mapped[int] = mapped_column(Integer, default=1)
+    # m-team 等现代站点的 API key（x-api-key 鉴权，FR-1.5.1）
+    apikey_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # 辅种策略
     downloader_id: Mapped[int | None] = mapped_column(

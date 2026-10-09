@@ -7,6 +7,7 @@ interface Site {
   id: number; name: string; domain: string; adapter: string;
   enabled: boolean;
   rss_url_masked: string;
+  has_apikey: boolean;
   default_free_duration: number;
   min_buffer: number;
   buffer_ratio: number;
@@ -68,6 +69,7 @@ function onCreate() {
     name: '',
     domain: '',
     rss_url: '',
+    apikey: '',
     max_size: undefined,
   })
 }
@@ -82,6 +84,7 @@ function onEdit(s: Site) {
     default_free_duration: s.default_free_duration / 3600,
     min_buffer: s.min_buffer / 60,
     rss_url: '',
+    apikey: '',  // 永远不清空原 key，留空 = 不修改
   })
 }
 
@@ -147,6 +150,7 @@ const columns = [
   { title: '名称', dataIndex: 'name', key: 'name' },
   { title: '适配器', dataIndex: 'adapter', key: 'adapter' },
   { title: 'RSS', dataIndex: 'rss_url_masked', key: 'rss' },
+  { title: '凭据', key: 'credentials' },
   { title: '时钟偏差', dataIndex: 'clock_offset', key: 'clock' },
   { title: '免费窗口', dataIndex: 'default_free_duration', key: 'dur' },
   { title: '缓冲', dataIndex: 'buffer_ratio', key: 'buf' },
@@ -185,6 +189,13 @@ const columns = [
             <a-tooltip :title="record.rss_url_masked">
               <a-typography-text code style="font-size: 12px">{{ record.rss_url_masked || '-' }}</a-typography-text>
             </a-tooltip>
+          </template>
+          <template v-else-if="column.key === 'credentials'">
+            <a-space :size="4">
+              <a-tag v-if="record.rss_url_masked" color="cyan">RSS</a-tag>
+              <a-tag v-if="record.has_apikey" color="purple">API key</a-tag>
+              <a-tag v-if="!record.rss_url_masked && !record.has_apikey">—</a-tag>
+            </a-space>
           </template>
           <template v-else-if="column.key === 'clock'">
             <a-space :size="4">
@@ -253,6 +264,16 @@ const columns = [
           <a-input-password
             v-model:value="formState.rss_url"
             placeholder="https://example.com/rss.php?feedkey=..."
+          />
+        </a-form-item>
+        <a-form-item
+          label="API Key（m-team 等现代站点 x-api-key 鉴权，留空=不修改）"
+          name="apikey"
+        >
+          <a-input-password
+            v-model:value="formState.apikey"
+            :placeholder="editing && (editing as any).has_apikey ? '已配置（留空保留）' : '在 m-team 控制台 → API 令牌获取'"
+            autocomplete="new-password"
           />
         </a-form-item>
         <a-form-item
