@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.adapters.sites.base import SiteProfile
 from app.adapters.sites.generic import GenericSiteAdapter
@@ -21,7 +21,7 @@ router = APIRouter(prefix="/sites", dependencies=[Depends(require_session)], tag
 
 
 class SiteCreate(BaseModel):
-    name: str
+    name: str = Field(..., pattern=r"^[a-zA-Z0-9_-]+$", description="字母/数字/下划线/连字符")
     domain: str
     rss_url: str | None = None
     adapter: str = "generic"
@@ -60,6 +60,20 @@ async def list_sites() -> list[SiteOut]:
     async with session_scope() as session:
         rows = (await session.execute(select(Site))).scalars().all()
     return [_to_out(s, raw=None) for s in rows]
+
+
+@router.delete("/{site_id}", summary="删除站点")
+async def delete_site(site_id: int) -> dict[str, int]:
+    async with session_scope() as session:
+        site = (
+            await session.execute(select(Site).where(Site.id == site_id))
+        ).scalar_one_or_none()
+        if site is None:
+            raise HTTPException(status_code=404, detail="站点不存在")
+        # 级联删除关联的 feeds
+        await session.execute(delete(Feed).where(Feed.site_id == site_id))
+        await session.delete(site)
+    return {"id": site_id}
 
 
 @router.post("", status_code=201, summary="新增站点")
