@@ -415,7 +415,7 @@ class FreeSeedHunter:
         logger.debug("永久免费 %s 登记转辅种池", info_hash[:8])
 
     # ------------------------------------------------------------ 整站全轮
-    async def run_all(self) -> list[FreeRoundStats]:
+    async def run_all(self, *, force: bool = False) -> list[FreeRoundStats]:
         async with session_scope() as session:
             site_ids = (
                 (
@@ -429,7 +429,7 @@ class FreeSeedHunter:
         out: list[FreeRoundStats] = []
         for sid in site_ids:
             try:
-                out.append(await self.run_site(sid))
+                out.append(await self.run_site(sid, force=force))
             except Exception as exc:
                 logger.exception("免费种站点 %s 轮次失败：%s", sid, exc)
         return out

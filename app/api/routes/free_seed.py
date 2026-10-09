@@ -238,9 +238,12 @@ def _round_out(s: FreeRoundStats) -> FreeRoundResult:
 
 @router.post("/pull", summary="手动触发免费种捕获（FR-3 全轮）")
 async def pull_free_seeds() -> list[FreeRoundResult]:
-    """立即对所有启用站点跑一轮免费种捕获。"""
+    """立即对所有启用站点跑一轮免费种捕获。
+
+    手动触发（FR-6.1）绕过 FR-2.2 频率下限——用户显式决策。
+    """
     hunter = FreeSeedHunter(get_factory())
-    return [_round_out(s) for s in await hunter.run_all()]
+    return [_round_out(s) for s in await hunter.run_all(force=True)]
 
 
 @router.post("/sites/{site_id}/pull", summary="手动触发单站免费种")
