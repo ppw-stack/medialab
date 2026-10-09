@@ -44,3 +44,7 @@ web/.vite/
 .idea/
 .vscode/
 *.swp
+# Playwright artifacts
+web/test-results/
+web/playwright-report/
+web/blob-report/
