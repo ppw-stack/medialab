@@ -16,8 +16,8 @@ from datetime import timedelta
 
 from app.adapters.downloaders.base import DownloaderAdapter
 from app.adapters.downloaders.qbittorrent import QbittorrentAdapter
+from app.adapters.sites import resolve as resolve_site_adapter
 from app.adapters.sites.base import SiteAdapter, SiteProfile
-from app.adapters.sites.generic import GenericSiteAdapter
 from app.core.crypto import CredentialCipher
 from app.core.logging import get_logger
 from app.core.timeutils import ClockOffset, utcnow
@@ -132,11 +132,16 @@ class AdapterFactory:
 
     # ------------------------------------------------------------ 站点
     def site(self, row: Site, *, cookies: str | None = None) -> SiteAdapter:
-        """获取（或创建）站点适配器。"""
+        """获取（或创建）站点适配器。
+
+        :class:`Site.adapter` 字段决定具体类（默认 ``mteam``），
+        不可识别的值抛 :class:`ValueError`（注册中心不存兜底）。
+        """
         cached = self._sites.get(row.id)
         if cached is not None:
             return cached
-        adapter = GenericSiteAdapter(
+        adapter_cls = resolve_site_adapter(row.adapter)
+        adapter = adapter_cls(
             profile_from_site(row),
             cookies=cookies,
             clock_offset=clock_offset_for(row),

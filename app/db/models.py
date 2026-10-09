@@ -245,7 +245,7 @@ class Site(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(64), unique=True)
     domain: Mapped[str] = mapped_column(String(255))
-    adapter: Mapped[str] = mapped_column(String(64), default="generic")
+    adapter: Mapped[str] = mapped_column(String(64), default="mteam")
 
     # 认证与凭据（加密存储）
     rss_url_enc: Mapped[str | None] = mapped_column(Text, nullable=True)

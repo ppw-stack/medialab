@@ -107,6 +107,40 @@ async def dispose_db() -> None:
     _session_factory = None
 
 
+#: 站点 adapter 迁移：从旧值映射到新值。空 dict 表示无迁移。
+ADAPTER_VALUE_MIGRATIONS: dict[str, str] = {
+    "generic": "mteam",  # 旧通用 adapter → m-team 专用 adapter（重构后唯一支持的实现）
+}
+
+
+async def migrate_adapter_values() -> None:
+    """把 :data:`ADAPTER_VALUE_MIGRATIONS` 指定的旧值批量改写为新值（幂等）。
+
+    启动时跑一次：若旧值已不存在则无副作用。
+    """
+    if not ADAPTER_VALUE_MIGRATIONS:
+        return
+    factory = get_session_factory()
+    from sqlalchemy import update
+
+    from app.db.models import Site
+
+    async with factory() as session:
+        for old_value, new_value in ADAPTER_VALUE_MIGRATIONS.items():
+            stmt = (
+                update(Site)
+                .where(Site.adapter == old_value)
+                .values(adapter=new_value)
+            )
+            result = await session.execute(stmt)
+            if result.rowcount:
+                logger.info(
+                    "站点 adapter 迁移：%s → %s，影响 %d 行",
+                    old_value, new_value, result.rowcount,
+                )
+        await session.commit()
+
+
 class SingleWriterQueue:
     """进程内单写者串行队列（§8 约定 2）。
 

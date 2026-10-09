@@ -44,6 +44,9 @@ include = ["app", "tests", "README.md", "pyproject.toml"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
+markers = [
+    "integration: 联调测试（需真实外部依赖，默认跳过）",
+]
 filterwarnings = ["error::DeprecationWarning:seedhelper.*"]
 
 [tool.ruff]

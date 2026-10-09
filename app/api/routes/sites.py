@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 
+from app.adapters.sites import resolve as resolve_site_adapter
 from app.adapters.sites.base import SiteProfile
-from app.adapters.sites.generic import GenericSiteAdapter
 from app.api.auth import require_session
 from app.core.config import get_settings
 from app.core.crypto import build_cipher, mask_secret
@@ -25,7 +25,7 @@ class SiteCreate(BaseModel):
     name: str = Field(..., pattern=r"^[a-zA-Z0-9_-]+$", description="字母/数字/下划线/连字符")
     domain: str
     rss_url: str | None = None
-    adapter: str = "generic"
+    adapter: Literal["mteam"] = "mteam"  # FR-1.5 站点 adapter 名（注册中心约束）
     save_path_template: str = "/data/torrents/{site}/{name}"
     max_size: int | None = Field(default=None, description="辅种体积上限（字节）")
     min_interval_minutes: int = Field(default=60, ge=15, description="FR-2.2 下限 15")
@@ -58,6 +58,7 @@ class SiteUpdate(BaseModel):
     rss_time_pattern: str | None = None
     grab_short_window: bool | None = None
     enabled: bool | None = None
+    adapter: Literal["mteam"] | None = None  # 改名时也允许提供
 
 
 class SiteOut(BaseModel):
@@ -218,9 +219,11 @@ async def test_site(site_id: int) -> dict[str, Any]:
         profile = _profile_from_site(site)
         offset = ClockOffset(offset=timedelta(seconds=site.clock_offset))
 
-    adapter = GenericSiteAdapter(profile, clock_offset=offset)
+    adapter_cls = resolve_site_adapter(site.adapter)
+    adapter = adapter_cls(profile, clock_offset=offset)
     try:
         health = await adapter.ping()
+        # 字符串路径：mteam 也保留"剩余 X" 文案兜底，便于搜索结果页场景
         probe = await adapter.parse_window("剩余 2 天 6 小时")
         return {
             "reachable": health.reachable,

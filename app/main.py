@@ -65,6 +65,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     init_db(settings)
     await writer.create_all()
+    # FR-1.5 站点 adapter 重构后的轻量数据迁移（幂等）
+    from app.db.session import migrate_adapter_values
+    await migrate_adapter_values()
     state["db_healthy"].set(1 if await writer.healthcheck() else 0)
 
     # 崩溃恢复：复位中断任务（§6 可靠性、AC-09）

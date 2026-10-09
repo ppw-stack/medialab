@@ -17,7 +17,7 @@ interface Site {
 }
 
 const ADAPTERS = [
-  { value: 'generic', label: 'GenericSiteAdapter (推荐)' },
+  { value: 'mteam', label: 'M-team（m-team.cc）' },
 ]
 
 const RESCUE_STRATEGIES = [
