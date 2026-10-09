@@ -26,7 +26,7 @@ test.describe("Alerts (M3)", () => {
   });
 
   test("手动巡检返回 findings", async ({ apiCtx }) => {
-    const r = await apiCtx.post("/alerts/inspect");
+    const r = await apiCtx.post("/api/v1/alerts/inspect");
     expect(r.ok()).toBeTruthy();
     const body = await r.json();
     expect(body).toHaveProperty("findings");
@@ -34,7 +34,7 @@ test.describe("Alerts (M3)", () => {
   });
 
   test("stats 接口返回计数", async ({ apiCtx }) => {
-    const r = await apiCtx.get("/alerts/stats");
+    const r = await apiCtx.get("/api/v1/alerts/stats");
     expect(r.ok()).toBeTruthy();
     const body = await r.json();
     expect(body).toHaveProperty("today_by_level");
@@ -42,30 +42,30 @@ test.describe("Alerts (M3)", () => {
   });
 
   test("策略修改并读取回原值", async ({ apiCtx }) => {
-    const before = await (await apiCtx.get("/alerts/policy")).json();
+    const before = await (await apiCtx.get("/api/v1/alerts/policy")).json();
     const original = before.storm_threshold;
-    await apiCtx.put("/alerts/policy", { data: { storm_threshold: 99 } });
-    const after = await (await apiCtx.get("/alerts/policy")).json();
+    await apiCtx.put("/api/v1/alerts/policy", { data: { storm_threshold: 99 } });
+    const after = await (await apiCtx.get("/api/v1/alerts/policy")).json();
     expect(after.storm_threshold).toBe(99);
     // 改回避免影响其它测试
-    await apiCtx.put("/alerts/policy", { data: { storm_threshold: original } });
+    await apiCtx.put("/api/v1/alerts/policy", { data: { storm_threshold: original } });
   });
 });
 
 test.describe("Cleanup (M5)", () => {
   test("policy 加载 + 修改保护期", async ({ apiCtx }) => {
-    const before = await (await apiCtx.get("/cleanup/policy")).json();
+    const before = await (await apiCtx.get("/api/v1/cleanup/policy")).json();
     const orig = before.protect_hours;
-    await apiCtx.put("/cleanup/policy", { data: { protect_hours: 6 } });
-    const after = await (await apiCtx.get("/cleanup/policy")).json();
+    await apiCtx.put("/api/v1/cleanup/policy", { data: { protect_hours: 6 } });
+    const after = await (await apiCtx.get("/api/v1/cleanup/policy")).json();
     expect(after.protect_hours).toBe(6);
-    await apiCtx.put("/cleanup/policy", { data: { protect_hours: orig } });
+    await apiCtx.put("/api/v1/cleanup/policy", { data: { protect_hours: orig } });
   });
 
   test("规则 CRUD：JSON DSL → 干跑 → 执行（空场景）", async ({ authedPage, apiCtx }) => {
     const ruleName = `e2e-rule-${Date.now()}`;
     // 创建规则
-    const cr = await apiCtx.post("/cleanup/rules", {
+    const cr = await apiCtx.post("/api/v1/cleanup/rules", {
       data: {
         name: ruleName,
         when: { ratio_gte: 3.0, seeding_days_gte: 30 },
@@ -77,24 +77,24 @@ test.describe("Cleanup (M5)", () => {
     const ruleId = (await cr.json()).id;
 
     // 干跑（空 DB 匹配 0，但应不报错）
-    const dry = await apiCtx.post(`/cleanup/rules/${ruleId}/dry-run`);
+    const dry = await apiCtx.post(`/api/v1/cleanup/rules/${ruleId}/dry-run`);
     expect(dry.ok()).toBeTruthy();
     const dryBody = await dry.json();
     expect(dryBody.matched).toBe(0);
 
     // 执行
-    const run = await apiCtx.post(`/cleanup/rules/${ruleId}/run`);
+    const run = await apiCtx.post(`/api/v1/cleanup/rules/${ruleId}/run`);
     expect(run.ok()).toBeTruthy();
     const runBody = await run.json();
     expect(runBody.candidates_total).toBe(0);
     expect(runBody.candidates_executed).toBe(0);
 
     // 删除
-    const del = await apiCtx.delete(`/cleanup/rules/${ruleId}`);
+    const del = await apiCtx.delete(`/api/v1/cleanup/rules/${ruleId}`);
     expect(del.ok()).toBeTruthy();
 
     // 验证：再次列出应找不到
-    const list = await (await apiCtx.get("/cleanup/rules")).json();
+    const list = await (await apiCtx.get("/api/v1/cleanup/rules")).json();
     expect(list.find((r: { id: number }) => r.id === ruleId)).toBeUndefined();
   });
 
@@ -105,21 +105,21 @@ test.describe("Cleanup (M5)", () => {
     // 实际上服务端会接受 schema 校验失败，pydantic 会拒绝
     // 改测：name 重复
     const ruleName = `e2e-dup-${Date.now()}`;
-    await apiCtx.post("/cleanup/rules", {
+    await apiCtx.post("/api/v1/cleanup/rules", {
       data: { name: ruleName, when: {}, enabled: true, priority: 10 },
     });
-    const r = await apiCtx.post("/cleanup/rules", {
+    const r = await apiCtx.post("/api/v1/cleanup/rules", {
       data: { name: ruleName, when: {}, enabled: true, priority: 10 },
     });
     expect(r.status()).toBe(409);
     // 清理
-    const created = await (await apiCtx.get("/cleanup/rules")).json();
+    const created = await (await apiCtx.get("/api/v1/cleanup/rules")).json();
     const dup = created.find((r: { name: string }) => r.name === ruleName);
-    if (dup) await apiCtx.delete(`/cleanup/rules/${dup.id}`);
+      if (dup) await apiCtx.delete(`/api/v1/cleanup/rules/${dup.id}`);
   });
 
   test("report 接口返回汇总", async ({ apiCtx }) => {
-    const r = await apiCtx.get("/cleanup/report");
+    const r = await apiCtx.get("/api/v1/cleanup/report");
     expect(r.ok()).toBeTruthy();
     const body = await r.json();
     expect(body).toHaveProperty("total_affected");
@@ -128,14 +128,14 @@ test.describe("Cleanup (M5)", () => {
   });
 
   test("execute-aborts 安全（无任务时）", async ({ apiCtx }) => {
-    const r = await apiCtx.post("/cleanup/execute-aborts");
+    const r = await apiCtx.post("/api/v1/cleanup/execute-aborts");
     expect(r.ok()).toBeTruthy();
     const body = await r.json();
     expect(body.candidates_total).toBe(0);
   });
 
   test("日志列表（最近 100 条）", async ({ apiCtx }) => {
-    const r = await apiCtx.get("/cleanup/logs");
+    const r = await apiCtx.get("/api/v1/cleanup/logs");
     expect(r.ok()).toBeTruthy();
     const body = await r.json();
     expect(Array.isArray(body)).toBeTruthy();

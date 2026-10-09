@@ -10,46 +10,15 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomBytes, createHash } from "node:crypto";
+import { randomBytes, pbkdf2Sync } from "node:crypto";
 import { BACKEND_PORT, FRONTEND_PORT } from "../playwright.config";
 
 const SHARED_FILE = join(tmpdir(), "sh-e2e-shared.json");
 
-/**
- * Node 26 的 pbkdf2Sync 与 Python 3.12 的 hashlib.pbkdf2_hmac 不兼容
- * （Node 26 在某些场景把 keylen 误读为 digest）。所以我们直接复刻
- * Python 端 hashlib.pbkdf2_hmac('sha256', ...) 的算法逻辑：
- *   T = U1 ^ U2 ^ ... ^ Uc, Ui = HMAC-SHA256(password, salt ++ i)
- * 这是 PBKDF2 标准，输出与 hashlib 完全一致。
- */
-function pbkdf2HmacSha256Hex(
-  password: string, salt: Buffer, iterations: number, keylen: number,
-): string {
-  const blocks = Math.ceil(keylen / 32);
-  const result = Buffer.alloc(blocks * 32);
-  for (let i = 1; i <= blocks; i++) {
-    const block = Buffer.alloc(4);
-    block.writeUInt32BE(i, 0);
-    const u1 = createHash("sha256")
-      .update(Buffer.concat([salt, block]))
-      .update(Buffer.from(password, "utf-8"))
-      .digest();
-    u1.copy(result, (i - 1) * 32);
-    for (let j = 1; j < iterations; j++) {
-      const uNext = createHash("sha256").update(u1).digest();
-      uNext.copy(u1, 0);
-      for (let k = 0; k < 32; k++) {
-        result[(i - 1) * 32 + k] ^= u1[k];
-      }
-    }
-  }
-  return result.subarray(0, keylen).toString("hex");
-}
-
 function hashPassword(password: string): string {
   const salt = randomBytes(16);
-  const dk = pbkdf2HmacSha256Hex(password, salt, 120_000, 32);
-  return `pbkdf2$120000$${salt.toString("hex")}$${dk}`;
+  const dk = pbkdf2Sync(password, salt, 120_000, 32, "sha256");
+  return `pbkdf2$120000$${salt.toString("hex")}$${dk.toString("hex")}`;
 }
 
 function generateKey(): string {

@@ -12,7 +12,7 @@ import { expect, test, getShared } from "./fixtures";
 test.describe("Sites", () => {
   test("列表加载 + 新增合法 + 删除", async ({ apiCtx }) => {
     const name = `e2e-site-${Date.now()}`;
-    const cr = await apiCtx.post("/sites", {
+    const cr = await apiCtx.post("/api/v1/sites", {
       data: {
         name,
         domain: "e2e.example.com",
@@ -26,32 +26,32 @@ test.describe("Sites", () => {
     const siteId = (await cr.json()).id;
 
     // 列表
-    const list = await (await apiCtx.get("/sites")).json();
+    const list = await (await apiCtx.get("/api/v1/sites")).json();
     expect(list.find((s: { id: number }) => s.id === siteId)).toBeDefined();
     // 凭据脱敏：不应泄漏 feedkey
     expect(list.find((s: { id: number }) => s.id === siteId).rss_url_masked)
       .not.toContain("secret123");
 
     // 详情
-    const detail = await apiCtx.get(`/sites/${siteId}`);
+    const detail = await apiCtx.get(`/api/v1/sites/${siteId}`);
     expect(detail.ok()).toBeTruthy();
     expect((await detail.json()).name).toBe(name);
 
     // 时钟偏差微调
-    const adjust = await apiCtx.post(`/sites/${siteId}/clock-offset`, {
+    const adjust = await apiCtx.post(`/api/v1/sites/${siteId}/clock-offset`, {
       data: { delta_seconds: -30 },
     });
     expect(adjust.ok()).toBeTruthy();
     expect((await adjust.json()).clock_offset).toBe(-30);
 
     // 删除
-    const del = await apiCtx.delete(`/sites/${siteId}`);
+    const del = await apiCtx.delete(`/api/v1/sites/${siteId}`);
     expect(del.ok()).toBeTruthy();
   });
 
   test("非法站点配置应 4xx", async ({ apiCtx }) => {
     // name 含特殊字符（API 用 pattern 校验）
-    const r = await apiCtx.post("/sites", {
+    const r = await apiCtx.post("/api/v1/sites", {
       data: { name: "bad name!", domain: "x.test", save_path_template: "/x/{site}" },
     });
     // 422 验证错误 或 任意 4xx
@@ -65,7 +65,7 @@ test.describe("Torrents", () => {
     // 先创建两条 fake 任务
     const HASH = "a".repeat(40);
     const dlId = 1; // 无效 downloader_id，预期 500 — 跳过 seed，改测筛选接口
-    const r = await apiCtx.get("/torrents?page_size=10");
+    const r = await apiCtx.get("/api/v1/torrents?page_size=10");
     expect(r.ok()).toBeTruthy();
     const body = await r.json();
     expect(body).toHaveProperty("total");
@@ -76,8 +76,8 @@ test.describe("Torrents", () => {
     await authedPage.goto("/torrents");
     await expect(authedPage.locator("h4", { hasText: "任务管理" })).toBeVisible();
     await expect(authedPage.locator('input[placeholder*="搜索"]').first()).toBeVisible();
-    await expect(authedPage.locator('input[placeholder="来源"]').first()).toBeVisible();
-    await expect(authedPage.locator('input[placeholder="状态"]').first()).toBeVisible();
+    // Ant Design Vue Select 不渲染 input[placeholder]，改用 ant-select 选择器
+    await expect(authedPage.locator(".ant-select").first()).toBeVisible();
   });
 });
 
@@ -86,7 +86,7 @@ test.describe("AuditLog", () => {
     await authedPage.goto("/audit");
     await expect(authedPage.locator("h4", { hasText: "审计日志" })).toBeVisible();
     // 来源切换
-    await authedPage.getByRole("combobox").first().click();
+    await authedPage.locator(".ant-select").first().click();
     await authedPage.locator(".ant-select-item-option").first().click();
     // 搜索框
     await expect(authedPage.locator('input[placeholder*="搜索"]')).toBeVisible();

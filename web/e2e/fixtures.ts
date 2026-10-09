@@ -44,7 +44,7 @@ export const test = base.extend<{
     await page.goto(s.frontendUrl + "/login");
     await page.locator('input[placeholder="用户名"]').fill("admin");
     await page.locator('input[placeholder="密码"]').fill(s.password);
-    await page.getByRole("button", { name: /登录/ }).click();
+    await page.getByRole("button", { name: /登.*录/ }).click();
     await page.waitForURL(s.frontendUrl + "/", { timeout: 10_000 });
     await use(ctx);
     await ctx.close();

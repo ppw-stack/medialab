@@ -32,11 +32,11 @@ test.describe("Settings / 告警策略", () => {
     await expect(muteInput).toHaveValue("6", { timeout: 5_000 });
 
     // 修改：风暴阈值从 50 改到 30
-    const stormInput = authedPage.locator('input[role="spinbutton"]').nth(3);
+    const stormInput = authedPage.locator('input[role="spinbutton"]').nth(1);
     // 用 .fill 强制写
     await stormInput.click({ clickCount: 3 });
     await stormInput.fill("30");
-    await authedPage.getByRole("button", { name: "保存" }).click();
+    await authedPage.getByRole("button", { name: /保.*存/ }).click();
 
     // 验证：再次访问 /alerts/policy 应当读到 30
     const r = await authedPage.request.get("/api/v1/alerts/policy");
@@ -46,7 +46,7 @@ test.describe("Settings / 告警策略", () => {
     // 改回去（不影响其它测试）
     await stormInput.click({ clickCount: 3 });
     await stormInput.fill("50");
-    await authedPage.getByRole("button", { name: "保存" }).click();
+    await authedPage.getByRole("button", { name: /保.*存/ }).click();
   });
 });
 
@@ -58,7 +58,8 @@ test.describe("Settings / 通知渠道 CRUD", () => {
 
     // 新增
     await authedPage.getByRole("button", { name: /新增渠道/ }).click();
-    await authedPage.locator('input#name').fill(uniqueName);
+    // 对话框内"名称"输入框
+    await authedPage.getByRole("dialog").getByRole("textbox").first().fill(uniqueName);
     // 提交（type 默认 webhook，secret 留空）
     await authedPage.getByRole("button", { name: "确 定" }).click({ timeout: 5_000 });
 
@@ -66,19 +67,18 @@ test.describe("Settings / 通知渠道 CRUD", () => {
     await expect(authedPage.locator(`text=${uniqueName}`)).toBeVisible({ timeout: 5_000 });
 
     // 通过 API 测试：未配置 secret 时应失败
-    const id = (await apiCtx.get("/alerts/channels"))
-      .then((r) => r.json())
-      .then((cs) => cs.find((c: { name: string }) => c.name === uniqueName)?.id);
+    const channels = (await apiCtx.get("/api/v1/alerts/channels")).json();
+    const id = (await channels).find((c: { name: string }) => c.name === uniqueName)?.id;
     expect(id).toBeTruthy();
-    const r = await apiCtx.post(`/alerts/channels/${id}/test`);
+    const r = await apiCtx.post(`/api/v1/alerts/channels/${id}/test`);
     expect(r.ok()).toBeTruthy();
     const body = await r.json();
     // 缺少 url 应当失败
     expect(body.ok).toBe(false);
 
     // 删除
-    await apiCtx.delete(`/alerts/channels/${id}`);
-    const after = await (await apiCtx.get("/alerts/channels")).json();
+    await apiCtx.delete(`/api/v1/alerts/channels/${id}`);
+    const after = await (await apiCtx.get("/api/v1/alerts/channels")).json();
     expect(after.find((c: { id: number }) => c.id === id)).toBeUndefined();
   });
 });
@@ -97,7 +97,7 @@ test.describe("Settings / 调度作业", () => {
     }
 
     // 启停 cross_seed
-    const before = await (await apiCtx.get("/scheduler")).json();
+    const before = await (await apiCtx.get("/api/v1/scheduler")).json();
     const beforeJob = before.jobs.find((j: { name: string }) => j.name === "cross_seed");
     expect(beforeJob.enabled).toBe(true);
 
@@ -108,7 +108,7 @@ test.describe("Settings / 调度作业", () => {
     await expect(authedPage.locator("text=cross_seed → 暂停")).toBeVisible({ timeout: 3_000 });
 
     // API 验证
-    const after = await (await apiCtx.get("/scheduler")).json();
+    const after = await (await apiCtx.get("/api/v1/scheduler")).json();
     const afterJob = after.jobs.find((j: { name: string }) => j.name === "cross_seed");
     expect(afterJob.enabled).toBe(false);
 

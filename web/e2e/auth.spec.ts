@@ -19,7 +19,7 @@ test.describe("Authentication (FR-6.1)", () => {
     await page.goto(s.frontendUrl + "/login");
     await page.locator('input[placeholder="用户名"]').fill("admin");
     await page.locator('input[placeholder="密码"]').fill("wrong-password");
-    await page.getByRole("button", { name: /登录/ }).click();
+    await page.getByRole("button", { name: /登.*录/ }).click();
     await expect(page.locator("text=用户名或密码错误")).toBeVisible({ timeout: 5_000 });
     await expect(page).toHaveURL(/\/login$/);
     await ctx.close();
