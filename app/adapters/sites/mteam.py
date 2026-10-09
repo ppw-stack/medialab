@@ -1,35 +1,30 @@
 """m-team 站点适配器（FR-1.5）。
 
-m-team 的 RSS 是 JSON API（不是 XML），端点：
-    GET https://<domain>/api/rss/fetch?uid=<u>&t=<ts>&sign=<s>&tkeys=<k>
+m-team 的 RSS 是标准 RSS2 XML（不是 JSON API），端点：
+    GET https://<domain>/api/rss/fetch?dl=1&uid=<u>&t=<ts>&sign=<s>&tkeys=<k>
 
-响应格式（顶层）：
-    {
-        "code": 0,            # 0 = 成功
-        "message": "success",
-        "data": [ {<item>}, ... ]
-    }
+响应格式（顶层）：RSS 2.0
+每条 item 字段：
+    title / link / description     # 标准 RSS
+    guid isPermaLink=false         # 数字种子 ID（不是 InfoHash）
+    pubDate                       # 发布时间
+    category domain=... text=...  # 主分类（9 个：TV/Movie/Anime/AV/PCGame 等）
+    enclosure url=... length=...   # 下载 URL（含 sign/tid/uid）
+    author / comments             # 标准 RSS 元数据
 
-每条 item 关键字段（待联调核实，可能命名略不同）：
-    id / tid / hash / infohash    # 种子 ID 与 InfoHash
-    title / small_descr / name     # 标题与描述
-    size                           # 字节
-    category / classification       # 主分类
-    link / download / url          # 详情页 / 下载 URL
-    discount / free / free_deadline / free_until
-                                    # 折扣 / 限免 / 限免截止
-    status / seeders / leechers / completed
+**m-team RSS 列表不包含免费标记**：category 只有主分类，enclosure URL
+ 也不带 discount / free / free_deadline 字段。免费信息**只在详情页**
+  ``https://kp.m-team.cc/detail/<id>`` 里（HTML 页面，需 cookie）。
 
-免费类型识别优先级（FR-1.5.3 顺序）：
-1. discount == 100 → 永久免费（FreeType.PERMANENT）
-2. discount in {0} → 限时免费（FreeType.TIMED）
-3. discount in {50, -50} → 中性种（FreeType.NEUTRAL，2x 100% 算永久 + 2x）
-4. discount > 0 且 < 100 → 限时免费（FreeType.TIMED）
-5. discount > 100 → 2X（FreeType.TWOU_TIMED）
+影响：列表层识别率 = 0。``parse_window`` 走字符串路径时只能猜（"剩余 X" 文案
+m-team 不在 description 里放），实际也是 0。
 
-注意：仅 discount 字段不够（很多条目 discount=0 但 free 字段是 true），
-       需结合 ``free`` 字段与 ``free_deadline`` 一并判断。
+诚实声明：
+- capabilities = {RSS}（不加 DETAIL_API 因为列表场景拉详情页 N+1 不现实）
+- parse_window(str) 保留"剩余 X"文案兜底（兼容 HTML 详情页场景）
+- parse_window(dict) 走结构化字段，适配 m-team 未来如果提供 JSON 详情 API
 """
+
 
 from __future__ import annotations
 
@@ -64,7 +59,7 @@ _DEFAULT_DETAIL_PATH = "/detail/{id}"
 
 
 class MteamAdapter(SiteAdapter):
-    """m-team 站点 JSON API 适配器。"""
+    """m-team 站点 RSS 2.0 XML 适配器。"""
 
     adapter_type = "mteam"
 
@@ -215,62 +210,58 @@ class MteamAdapter(SiteAdapter):
         return self.parse_feed(resp.text)
 
     def parse_feed(self, raw_text: str) -> list[FeedItem]:
-        """解析 m-team JSON RSS 响应。"""
+        """解析 m-team RSS 2.0 XML 响应。"""
+        import xml.etree.ElementTree as ET
+
         try:
-            payload = json.loads(raw_text)
-        except (TypeError, ValueError) as exc:
-            logger.warning("m-team %s RSS 非 JSON：%s", self.name, exc)
-            return []
-        if not isinstance(payload, dict):
-            return []
-        if payload.get("code") not in (0, "0", None):
-            logger.warning(
-                "m-team %s RSS code=%s message=%s",
-                self.name, payload.get("code"), payload.get("message"),
-            )
-            return []
-        data = payload.get("data")
-        if not isinstance(data, list):
+            root = ET.fromstring(raw_text.encode("utf-8"))
+        except ET.ParseError as exc:
+            logger.warning("m-team %s RSS XML 解析失败：%s", self.name, exc)
             return []
         items: list[FeedItem] = []
-        for raw in data[:_MAX_ITEMS_PER_PULL]:
-            if not isinstance(raw, dict):
-                continue
-            title = (
-                raw.get("title")
-                or raw.get("name")
-                or raw.get("small_descr")
-                or ""
-            )
-            link = (
-                raw.get("link")
-                or raw.get("url")
-                or (raw.get("id") and f"https://{self.profile.domain}/detail/{raw['id']}")
-                or ""
-            )
+        for node in root.iter("item"):
+            fields: dict[str, str] = {}
+            for c in node:
+                local = c.tag.rsplit("}", 1)[-1].lower()
+                val = (c.get("href") or c.get("url") or c.text or "").strip()
+                if local not in fields:
+                    fields[local] = val
+            title = fields.get("title", "")
+            link = fields.get("link") or fields.get("guid", "")
             if not link:
                 continue
-            description = (
-                raw.get("small_descr")
-                or raw.get("description")
-                or ""
+            desc = fields.get("description", "")
+            if isinstance(desc, str):
+                desc = desc[:20000]
+            cat_node = node.find("category")
+            category = (cat_node.text if cat_node is not None and cat_node.text else None)
+            enc_node = node.find("enclosure")
+            torrent_url = (
+                enc_node.get("url") if enc_node is not None and enc_node.get("url") else link
             )
-            if isinstance(description, str):
-                description = description[:20000]
+            size = 0
+            if enc_node is not None and enc_node.get("length"):
+                try:
+                    size = int(enc_node.get("length"))
+                except (TypeError, ValueError):
+                    pass
+            # InfoHash：m-team 的 guid 是数字 ID，enclosure URL 也不含 hash
+            # 真正的 InfoHash 需要拉详情页（m-team 的下载 URL 也不含 hash）
+            # → 列表层无法拿到，置 None 由匹配层用 title+size 兜底
             items.append(
                 FeedItem(
-                    title=str(title),
-                    link=str(link),
-                    info_hash=self._info_hash_from(raw),
-                    size=int(raw.get("size") or 0),
-                    category=raw.get("category") or raw.get("classification") or None,
-                    description=str(description),
-                    published_at=self._parse_iso_dt(
-                        raw.get("created_at") or raw.get("pub_date")
-                    ),
-                    torrent_url=raw.get("download") or raw.get("torrent_url") or link,
+                    title=title,
+                    link=link,
+                    info_hash=None,
+                    size=size,
+                    category=category,
+                    description=desc,
+                    published_at=self._parse_iso_dt(fields.get("pubdate") or fields.get("pub_date")),
+                    torrent_url=torrent_url,
                 )
             )
+            if len(items) >= _MAX_ITEMS_PER_PULL:
+                break
         return items
 
     async def parse_window(
@@ -404,10 +395,11 @@ class MteamAdapter(SiteAdapter):
         return parsed.astimezone(UTC).replace(tzinfo=None) if parsed.tzinfo else parsed
 
     def capabilities(self) -> frozenset[SiteFeature]:
+        # m-team 列表不含免费字段；详情页是 HTML 需 cookie 鉴权。
+        # 诚实声明：不宣称 DETAIL_API 能力（无法在不抓详情页前提下获取免费标记）。
         return frozenset(
             {
                 SiteFeature.RSS,
-                SiteFeature.DETAIL_API,
                 SiteFeature.CLOCK_API,
                 SiteFeature.TIMESTAMP_FIELD,
             }

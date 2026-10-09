@@ -1,15 +1,14 @@
 """m-team 适配器测试（FR-1.5 站点特化）。
 
 覆盖：
-- ``MteamAdapter.parse_feed`` 解析 m-team JSON 响应
+- ``MteamAdapter.parse_feed`` 解析 m-team RSS 2.0 XML 响应
 - ``MteamAdapter._classify_free`` 各 discount/free/free_deadline 组合
 - ``MteamAdapter.capabilities`` 能力声明
-- 联调：``@pytest.mark.integration`` 真实拉取 m-team JSON API（需要未过期 sign/t）
+- 联调：``@pytest.mark.integration`` 真实拉取 m-team RSS API（需要未过期 sign/t）
 """
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -20,48 +19,43 @@ from app.core.timeutils import ClockOffset
 from app.db.models import FreeSource, FreeType
 
 
-# ---- JSON 响应快照（联调无法跑时使用） ----
+# ---- RSS 2.0 XML 响应快照（m-team 实际格式） ----
 
-#: m-team JSON 响应样例：3 条混合（永久、限时、未知）
-MTEAM_JSON_SAMPLE = {
-    "code": 0,
-    "message": "success",
-    "data": [
-        {
-            "id": "100001",
-            "title": "Ubuntu.24.04.Desktop amd64",
-            "small_descr": "官方长期支持版本",
-            "size": 5_368_709_120,
-            "category": "Linux",
-            "link": "https://kp.m-team.cc/details.php?id=100001",
-            "download": "https://kp.m-team.cc/download.php?id=100001",
-            "infohash": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
-            "discount": 100,  # 永久免费
-            "free": True,
-        },
-        {
-            "id": "100002",
-            "title": "Debian.12.iso",
-            "small_descr": "限时免费",
-            "size": 1_073_741_824,
-            "category": "Linux",
-            "link": "https://kp.m-team.cc/details.php?id=100002",
-            "infohash": "b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3",
-            "discount": 0,
-            "free_deadline": "2027-01-15T10:00:00Z",  # 限时
-        },
-        {
-            "id": "100003",
-            "title": "Old.Movie.1980.avi",
-            "small_descr": "普通种子",
-            "size": 700_000_000,
-            "category": "Movies",
-            "link": "https://kp.m-team.cc/details.php?id=100003",
-            "infohash": "c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
-            # 无 discount / free 字段 → 未知
-        },
-    ],
-}
+#: m-team RSS XML 样例：3 条标准 RSS2 格式
+MTEAM_RSS_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>M-Team - TP</title>
+    <item>
+      <guid isPermaLink="false">100001</guid>
+      <title>Ubuntu.24.04.Desktop amd64</title>
+      <link>https://kp.m-team.cc/detail/100001</link>
+      <description>官方长期支持版本</description>
+      <pubDate>Fri, 09 Oct 2026 13:00:00 GMT</pubDate>
+      <category domain="https://kp.m-team.cc/browse?cat=423">PCGame</category>
+      <enclosure length="5368709120" type="application/x-bittorrent" url="https://rss.m-team.cc/dl/100001"/>
+    </item>
+    <item>
+      <guid isPermaLink="false">100002</guid>
+      <title>Debian.12.iso</title>
+      <link>https://kp.m-team.cc/detail/100002</link>
+      <description>限时免费</description>
+      <pubDate>Fri, 09 Oct 2026 12:30:00 GMT</pubDate>
+      <category domain="https://kp.m-team.cc/browse?cat=423">PCGame</category>
+      <enclosure length="1073741824" type="application/x-bittorrent" url="https://rss.m-team.cc/dl/100002"/>
+    </item>
+    <item>
+      <guid isPermaLink="false">100003</guid>
+      <title>Old.Movie.1980.avi</title>
+      <link>https://kp.m-team.cc/detail/100003</link>
+      <description>普通种子</description>
+      <pubDate>Fri, 09 Oct 2026 12:00:00 GMT</pubDate>
+      <category domain="https://kp.m-team.cc/browse?cat=419">Movie/HD</category>
+      <enclosure length="700000000" type="application/x-bittorrent" url="https://rss.m-team.cc/dl/100003"/>
+    </item>
+  </channel>
+</rss>
+"""
 
 
 @pytest.fixture
@@ -70,47 +64,67 @@ def adapter() -> MteamAdapter:
     return MteamAdapter(profile, clock_offset=ClockOffset.zero())
 
 
-# ---- parse_feed 单元测试 ----
+# ---- parse_feed 单元测试（XML） ----
 
 
-def test_parse_feed_decodes_mteam_json(adapter: MteamAdapter) -> None:
-    items = adapter.parse_feed(json.dumps(MTEAM_JSON_SAMPLE))
+def test_parse_feed_decodes_mteam_xml(adapter: MteamAdapter) -> None:
+    items = adapter.parse_feed(MTEAM_RSS_XML)
     assert len(items) == 3
     titles = [it.title for it in items]
     assert "Ubuntu.24.04.Desktop amd64" in titles
+    assert "Debian.12.iso" in titles
 
 
-def test_parse_feed_extracts_infohash(adapter: MteamAdapter) -> None:
-    items = adapter.parse_feed(json.dumps(MTEAM_JSON_SAMPLE))
-    hashes = {it.title: it.info_hash for it in items}
-    assert hashes["Ubuntu.24.04.Desktop amd64"] is not None
-    assert len(hashes["Ubuntu.24.04.Desktop amd64"]) == 40
+def test_parse_feed_xml_extracts_size_from_enclosure(adapter: MteamAdapter) -> None:
+    """size 来自 enclosure.length。"""
+    items = adapter.parse_feed(MTEAM_RSS_XML)
+    sizes = {it.title: it.size for it in items}
+    assert sizes["Ubuntu.24.04.Desktop amd64"] == 5_368_709_120
+    assert sizes["Debian.12.iso"] == 1_073_741_824
 
 
-def test_parse_feed_handles_invalid_json(adapter: MteamAdapter) -> None:
-    assert adapter.parse_feed("<not-json>") == []
+def test_parse_feed_xml_extracts_category(adapter: MteamAdapter) -> None:
+    items = adapter.parse_feed(MTEAM_RSS_XML)
+    cats = {it.title: it.category for it in items}
+    assert cats["Ubuntu.24.04.Desktop amd64"] == "PCGame"
+    assert cats["Old.Movie.1980.avi"] == "Movie/HD"
+
+
+def test_parse_feed_xml_no_infohash(adapter: MteamAdapter) -> None:
+    """m-team RSS 不带 InfoHash（只有数字 guid），列表层无法获取。"""
+    items = adapter.parse_feed(MTEAM_RSS_XML)
+    assert all(it.info_hash is None for it in items)
+
+
+def test_parse_feed_xml_uses_enclosure_url_as_torrent_url(adapter: MteamAdapter) -> None:
+    items = adapter.parse_feed(MTEAM_RSS_XML)
+    assert items[0].torrent_url == "https://rss.m-team.cc/dl/100001"
+
+
+def test_parse_feed_handles_invalid_xml(adapter: MteamAdapter) -> None:
+    assert adapter.parse_feed("<not-xml>") == []
     assert adapter.parse_feed("") == []
+    assert adapter.parse_feed("not xml at all") == []
 
 
-def test_parse_feed_rejects_non_zero_code(adapter: MteamAdapter) -> None:
-    bad = {"code": 401, "message": "unauthorized", "data": []}
-    assert adapter.parse_feed(json.dumps(bad)) == []
-
-
-def test_parse_feed_ignores_non_dict_items(adapter: MteamAdapter) -> None:
-    payload = {"code": 0, "data": [{"title": "ok", "id": "1"}, "not-dict", None, 42]}
-    items = adapter.parse_feed(json.dumps(payload))
-    assert len(items) == 1
+def test_parse_feed_handles_xml_without_items(adapter: MteamAdapter) -> None:
+    xml = '<?xml version="1.0"?><rss version="2.0"><channel><title>x</title></channel></rss>'
+    assert adapter.parse_feed(xml) == []
 
 
 def test_parse_feed_caps_items(adapter: MteamAdapter) -> None:
-    payload = {"code": 0, "data": [{"id": str(i), "title": f"t{i}"} for i in range(1000)]}
-    items = adapter.parse_feed(json.dumps(payload))
+    """1000 条 RSS item → 仅取前 500。"""
+    items_xml = "".join(
+        f"<item><title>t{i}</title><link>https://x/{i}</link></item>"
+        for i in range(1000)
+    )
+    xml = f'<?xml version="1.0"?><rss version="2.0"><channel>{items_xml}</channel></rss>'
+    items = adapter.parse_feed(xml)
     # _MAX_ITEMS_PER_PULL = 500
     assert len(items) == 500
 
 
-# ---- _classify_free 单元测试（字典路径） ----
+# ---- _classify_free 单元测试（字典路径，模拟 JSON 详情 API 场景） ----
 
 
 def test_classify_discount_100_permanent(adapter: MteamAdapter) -> None:
@@ -173,7 +187,7 @@ def test_classify_free_flag_true_with_deadline_timed(adapter: MteamAdapter) -> N
 
 def test_parse_window_permanent_from_dict(adapter: MteamAdapter) -> None:
     import asyncio
-    win = asyncio.run(adapter.parse_window(MTEAM_JSON_SAMPLE["data"][0]))
+    win = asyncio.run(adapter.parse_window({"discount": 100}))
     assert win.free_type == FreeType.PERMANENT
     assert win.free_end_at is None
     assert win.confidence == 1.0
@@ -182,7 +196,7 @@ def test_parse_window_permanent_from_dict(adapter: MteamAdapter) -> None:
 
 def test_parse_window_timed_from_dict(adapter: MteamAdapter) -> None:
     import asyncio
-    win = asyncio.run(adapter.parse_window(MTEAM_JSON_SAMPLE["data"][1]))
+    win = asyncio.run(adapter.parse_window({"discount": 0, "free_deadline": "2030-01-01T00:00:00Z"}))
     assert win.free_type == FreeType.TIMED
     assert win.free_end_at is not None
     assert win.free_source == FreeSource.API
@@ -190,7 +204,7 @@ def test_parse_window_timed_from_dict(adapter: MteamAdapter) -> None:
 
 def test_parse_window_unknown_from_dict(adapter: MteamAdapter) -> None:
     import asyncio
-    win = asyncio.run(adapter.parse_window(MTEAM_JSON_SAMPLE["data"][2]))
+    win = asyncio.run(adapter.parse_window({}))
     assert win.free_type == FreeType.UNKNOWN
     assert win.free_end_at is None
 
@@ -198,12 +212,27 @@ def test_parse_window_unknown_from_dict(adapter: MteamAdapter) -> None:
 # ---- 能力声明 ----
 
 
-def test_capabilities_includes_rss_detail_clock(adapter: MteamAdapter) -> None:
+def test_capabilities_includes_rss_clock(adapter: MteamAdapter) -> None:
+    """m-team 列表 RSS + 时钟探测；不宣称 DETAIL_API（列表不含免费字段）。"""
     from app.adapters.sites.base import SiteFeature
     caps = adapter.capabilities()
     assert SiteFeature.RSS in caps
-    assert SiteFeature.DETAIL_API in caps
     assert SiteFeature.CLOCK_API in caps
+    assert SiteFeature.DETAIL_API not in caps
+
+
+def test_xml_categories_are_main_only_no_free(adapter: MteamAdapter) -> None:
+    """m-team RSS category 只有主分类（9 个），不含 free 字段。
+
+    这解释了列表层免费识别率 = 0：免费信息只在详情页。
+    """
+    items = adapter.parse_feed(MTEAM_RSS_XML)
+    cats = {it.category for it in items}
+    assert cats == {"PCGame", "Movie/HD"}  # sample 中只有这两个
+    # 任何一条都不应在 category 中含 "free" / "限免"
+    for it in items:
+        assert it.category is None or "free" not in it.category.lower()
+        assert "免" not in (it.category or "")
 
 
 # ---- 注册中心 ----
@@ -223,32 +252,35 @@ def test_registry_rejects_unknown():
 
 # ---- 联调：真实 m-team JSON API（需用户提供未过期 sign/t） ----
 
-#: 联调 URL（运行前请替换为有效的 sign/t，否则会 401/403）
+#: 联调 URL（用户提供，2026-10-09 21:09 UTC 之前有效）
 MTEAM_LIVE_URL = (
     "https://rss.m-team.cc/api/rss/fetch"
-    "?pageSize=20&sign=REPLACE_ME&t=REPLACE_ME&tkeys=ttitle&uid=REPLACE_ME"
+    "?dl=1&pageSize=100&sign=a7500dce018f714fab62e8b5d2890127&t=1791553775&tkeys=ttitle&uid=291372"
 )
 
 
 @pytest.mark.integration
-def test_live_mteam_pull_classifies_free_types(adapter: MteamAdapter) -> None:
-    """真实拉取 m-team RSS 并统计 free_type 分布。
+def test_live_mteam_pull_confirms_rss_parsing(adapter: MteamAdapter) -> None:
+    """真实拉取 m-team RSS。
 
-    期望：至少出现 ``freeleech_timed`` 或 ``freeleech_permanent`` 之一，
-    否则适配器可能没读到 free 字段。
+    诚实预期：m-team RSS 列表 category 只有主分类，enclosure URL 也不带
+    discount / free 字段 → 列表层全部识别为 UNKNOWN。免费信息只在详情页。
     """
     import asyncio
     items = asyncio.run(adapter.fetch_feed(MTEAM_LIVE_URL))
     if not items:
         pytest.skip("联调 URL 无效或无数据；请更新 MTEAM_LIVE_URL")
+    assert len(items) > 0, "RSS 应有至少一条 item"
+    # 列表无 discount/free 字段 → parse_window(dict) 全部走 UNKNOWN 分支
     import asyncio as _aio
-    classified = _aio.run(_classify_all(adapter, items))
-    types = {ft for ft, _ in classified}
-    # 至少识别到一种（说明字段映射生效）
-    assert types & {FreeType.PERMANENT, FreeType.TIMED, FreeType.NEUTRAL, FreeType.TWOU_TIMED}, (
-        f"未识别任何免费类型，分布={types}"
+    windows = _aio.run(_classify_all(adapter, items))
+    types = {w.free_type for w in windows}
+    assert types == {FreeType.UNKNOWN}, (
+        f"预期全部 UNKNOWN（m-team 列表无免费标记），实际={types}"
     )
 
 
 async def _classify_all(adapter: MteamAdapter, items):
-    return [await adapter.parse_window({k: v for k, v in vars(it).items() if not k.startswith('_')}) for it in items]
+    """联调 helper：把 FeedItem 字段映射成 dict，传给 parse_window(dict 路径)。"""
+    from dataclasses import asdict
+    return [await adapter.parse_window(asdict(it)) for it in items]
