@@ -76,13 +76,30 @@ class MteamAdapter(SiteAdapter):
         self._apikey = apikey
         self._timeout = timeout
         self._clock_offset = clock_offset or ClockOffset.zero()
+        # MoviePilot 同款：浏览器风格 UA + Referer，绕 Cloudflare WAF
+        # 注意：只发 Referer，**不要发 Origin**（同花顺会触发 WAF）
+        # m-team 实际有 3 个域：
+        #   - 前端 kp.m-team.cc / m-team.io（用户登录的页面）
+        #   - RSS  rss.m-team.cc / rss.m-team.io
+        #   - API  api.m-team.io（仅 .io）
+        referer_host = self.profile.domain or "m-team.io"
+        if "rss." in referer_host:
+            referer_host = referer_host.replace("rss.", "", 1)
+        if "api." in referer_host:
+            referer_host = referer_host.replace("api.", "", 1)
         self._client = httpx.AsyncClient(
             timeout=timeout,
             follow_redirects=True,
             cookies=self._parse_cookies(cookies),
             headers={
-                "User-Agent": "SeedHelper/0.1 (+https://example.invalid/seedhelper)",
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/126.0.0.0 Safari/537.36"
+                ),
                 "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+                "Referer": f"https://{referer_host}/browse",
             },
         )
 
@@ -159,7 +176,14 @@ class MteamAdapter(SiteAdapter):
     def _classify_from_status(status: dict[str, Any]) -> tuple[str, datetime | None]:
         """从 m-team search API 的 status 块提取免费窗口。
 
-        优先级：mallSingleFree > discountEndTime > discount 100。
+        实际响应（m-team 2026-10）：
+        - ``discount`` 是字符串 ``"FREE"`` / ``"NORMAL"`` / 数字（0/100/负数）
+        - ``discountEndTime`` 是 ``"2026-10-11 00:33:25"`` 格式（无 T）
+        - ``mallSingleFree``: {status: "ONGOING", endDate: ...}
+        - ``promotionRule``: {discount: "FREE"/"NORMAL", endTime: ...}
+        - ``toppingLevel``/``toppingEndTime``: 置顶（也会免费加速下载）
+
+        优先级：mallSingleFree > discount="FREE" > discountEndTime > discount 数值。
         """
         # 1) 单种特别免费（最优先：m-team 显式标记）
         mall = status.get("mallSingleFree")
@@ -176,17 +200,39 @@ class MteamAdapter(SiteAdapter):
             if end is not None:
                 return FreeType.TIMED, end
 
-        # 3) 标准 discount 字段
-        try:
-            disc_val = int(status.get("discount", 0))
-        except (TypeError, ValueError):
+        # 3) 标准 discount 字段（可能是字符串 "FREE"/"PERCENT_50" 或数字）
+        disc_raw = status.get("discount")
+        if isinstance(disc_raw, str):
+            if disc_raw == "FREE":
+                return FreeType.PERMANENT, None
+            if disc_raw.upper().startswith("PERCENT_"):
+                # "PERCENT_50" = 50% 折扣 → 中性种；"PERCENT_25" = 25% 折扣
+                try:
+                    pct = int(disc_raw.split("_", 1)[1])
+                except (IndexError, ValueError):
+                    pct = 0
+                if pct <= 0:
+                    return FreeType.PERMANENT, None
+                if 1 <= pct <= 75:
+                    return FreeType.NEUTRAL, None
+                if pct >= 100:
+                    return FreeType.PERMANENT, None
+            # 其他字符串（"NORMAL" 等）→ 不是免费
             disc_val = 0
+        else:
+            try:
+                disc_val = int(disc_raw or 0)
+            except (TypeError, ValueError):
+                disc_val = 0
+
         if disc_val >= 100:
             return FreeType.PERMANENT, None
         if disc_val < 0 and disc_val >= -75:
             return FreeType.NEUTRAL, None
         if disc_val < -75:
             return FreeType.TWOU_TIMED, None
+
+        # discountEndTime（"2026-10-11 00:33:25"）
         end = MteamAdapter._parse_iso_dt(status.get("discountEndTime"))
         if end is not None:
             return FreeType.TIMED, end
@@ -213,7 +259,7 @@ class MteamAdapter(SiteAdapter):
             data = resp.json()
         except (TypeError, ValueError):
             return SiteHealth(reachable=False, detail="响应非 JSON")
-        if data.get("code") == 0 and data.get("data"):
+        if str(data.get("code")) == "0" and data.get("data"):
             return SiteHealth(reachable=True, detail="ok")
         return SiteHealth(reachable=False, detail=data.get("message", "鉴权已过期或无效"))
 
@@ -273,7 +319,7 @@ class MteamAdapter(SiteAdapter):
         except (TypeError, ValueError) as exc:
             logger.warning("m-team %s 搜索响应非 JSON：%s", self.name, exc)
             return []
-        if payload.get("code") != 0:
+        if str(payload.get("code")) != "0":
             logger.warning(
                 "m-team %s 搜索 code=%s message=%s",
                 self.name, payload.get("code"), payload.get("message"),
@@ -298,6 +344,8 @@ class MteamAdapter(SiteAdapter):
                     description=raw.get("smallDescr") or "",
                     published_at=MteamAdapter._parse_iso_dt(raw.get("createdDate")),
                     torrent_url=f"api://gen/{torrent_id}",  # 占位，torrent_detail 实际生成
+                    # m-team API 免费字段直接塞进 free_payload（不污染 description）
+                    free_payload={"status": status} if status else None,
                 )
             )
             if len(items) >= _MAX_ITEMS_PER_PULL:
@@ -454,7 +502,7 @@ class MteamAdapter(SiteAdapter):
                 data = resp.json()
             except (TypeError, ValueError):
                 return {"id": item_id, "_error": "响应非 JSON"}
-            if data.get("code") != 0:
+            if str(data.get("code")) != "0":
                 return {"id": item_id, "_error": data.get("message", "genDlToken 失败")}
             return {"id": item_id, "download_url": (data.get("data") or {}).get("url") or ""}
         # 兜底：HTML 详情页

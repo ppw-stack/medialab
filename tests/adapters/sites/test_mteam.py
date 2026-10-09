@@ -131,6 +131,34 @@ def test_classify_discount_50_neutral(adapter: MteamAdapter) -> None:
     assert end is None
 
 
+def test_classify_discount_string_percent_50_neutral(adapter: MteamAdapter) -> None:
+    """m-team 实际返回字符串 'PERCENT_50' = 50% 折扣（中性种）。"""
+    ft, end = adapter._classify_from_status({"discount": "PERCENT_50"})
+    assert ft == FreeType.NEUTRAL
+    assert end is None
+
+
+def test_classify_discount_string_free_permanent(adapter: MteamAdapter) -> None:
+    """m-team 实际返回字符串 'FREE' = 永久免费。"""
+    ft, end = adapter._classify_from_status({"discount": "FREE"})
+    assert ft == FreeType.PERMANENT
+    assert end is None
+
+
+def test_classify_discount_string_normal_unknown(adapter: MteamAdapter) -> None:
+    """m-team 字符串 'NORMAL' = 无折扣。"""
+    ft, end = adapter._classify_from_status({"discount": "NORMAL"})
+    assert ft == FreeType.UNKNOWN
+    assert end is None
+
+
+def test_classify_discount_string_percent_100_permanent(adapter: MteamAdapter) -> None:
+    """m-team 字符串 'PERCENT_100' = 100% 折扣 = 永久免费。"""
+    ft, end = adapter._classify_from_status({"discount": "PERCENT_100"})
+    assert ft == FreeType.PERMANENT
+    assert end is None
+
+
 def test_classify_discount_100_with_deadline_permanent(adapter: MteamAdapter) -> None:
     """discount=100 永远视作永久，截止时刻被忽略。"""
     ft, end = adapter._classify_from_status({"discount": 100, "discountEndTime": 1793000000})
@@ -342,11 +370,8 @@ def test_registry_rejects_unknown():
 # ---- 联调：真实 m-team search API（需用户提供 apikey + sign/t） ----
 
 #: 联调占位符——用户提供有效 apikey 后替换
-#: 联调占位符——用户提供有效 apikey + 可访问 m-team 的网络后替换
-#: 警告：当前环境 m-team 所有域名（kp.m-team.cc、api.m-team.cc、m-team.io）
-#: DNS 解析到 RFC6890 保留地址（198.18.0.0/15），无法做端到端集成测试
-INTEGRATION_APIKEY = "REPLACE_ME"
-INTEGRATION_DOMAIN = "kp.m-team.cc"
+INTEGRATION_APIKEY = "ebabd78f-9c78-463b-a91f-690a70091049"
+INTEGRATION_DOMAIN = "m-team.io"  # 联调用 .io 域名（当前环境 .cc DNS 不可达）
 
 
 @pytest.mark.integration
@@ -366,10 +391,12 @@ async def test_live_mteam_search_with_apikey() -> None:
         from collections import Counter
         type_counter: Counter[str] = Counter()
         for it in items:
-            win = await a.parse_window({"status": it.description, "id": it.link.rsplit("/", 1)[-1]})
-            type_counter[win.free_type.value] += 1
+            # free_payload 是适配层已填充的 status dict
+            win = await a.parse_window(it.free_payload or {"id": it.link.rsplit("/", 1)[-1]})
+            # FreeType 是 StrEnum，win.free_type 已是 str
+            type_counter[str(win.free_type)] += 1
         # 至少识别出 1 条免费种
-        free_count = sum(c for ft, c in type_counter.items() if ft != FreeType.UNKNOWN.value)
+        free_count = sum(c for ft, c in type_counter.items() if str(ft) != str(FreeType.UNKNOWN))
         assert free_count > 0, f"未识别任何免费种，分布={dict(type_counter)}"
         print(f"\n联调统计：{dict(type_counter)}")
     finally:

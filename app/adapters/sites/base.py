@@ -61,6 +61,9 @@ class FeedItem:
     description: str = ""
     torrent_url: str | None = None
     download_factor: float | None = None
+    #: 站点适配层已解析好的免费窗口信息（m-team 等 API 站点直接塞 status dict），
+    #: 供 :meth:`SiteAdapter.parse_window` 用结构化字段精确识别（不污染 description）
+    free_payload: dict[str, object] | None = None
 
 
 @dataclass(slots=True)

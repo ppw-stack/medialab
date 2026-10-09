@@ -458,6 +458,9 @@ class FreeSeedHunter:
         多数站点 RSS 在 description 里嵌 JSON，这里用 description 优先、
         title + link 兜底，最大化命中不同站点的窗口提取策略。
         """
+        # m-team 等 API 站点：适配层已把 status 塞进 free_payload，优先用它
+        if item.free_payload:
+            return item.free_payload
         if item.description and item.description.strip().startswith("{"):
             return item.description
         return {
