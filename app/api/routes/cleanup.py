@@ -73,7 +73,7 @@ async def get_policy() -> CleanupPolicyOut:
         )
 
 
-@router.put("/policy", summary="修改清理策略")
+@router.post("/policy/update", summary="修改清理策略")
 async def update_policy(payload: CleanupPolicyIn) -> CleanupPolicyOut:
     async with session_scope() as session:
         row = (
@@ -92,6 +92,7 @@ async def update_policy(payload: CleanupPolicyIn) -> CleanupPolicyOut:
 
 # ---------------------------------------------------------------- 规则
 class RuleIn(BaseModel):
+    id: int | None = None  # 更新/删除时携带
     name: str
     when: dict[str, Any] = Field(
         default_factory=dict,
@@ -168,8 +169,11 @@ async def create_rule(payload: RuleIn) -> RuleOut:
         )
 
 
-@router.put("/rules/{rule_id}", summary="修改规则")
-async def update_rule(rule_id: int, payload: RuleIn) -> RuleOut:
+@router.post("/rules/update", summary="修改规则")
+async def update_rule(payload: RuleIn) -> RuleOut:
+    rule_id = payload.id
+    if rule_id is None:
+        raise HTTPException(status_code=400, detail="id 必填")
     async with session_scope() as session:
         rule = (
             await session.execute(
@@ -195,8 +199,11 @@ async def update_rule(rule_id: int, payload: RuleIn) -> RuleOut:
         )
 
 
-@router.delete("/rules/{rule_id}", summary="删除规则")
-async def delete_rule(rule_id: int) -> dict[str, bool]:
+@router.post("/rules/delete", summary="删除规则")
+async def delete_rule(payload: dict) -> dict[str, bool]:
+    rule_id = payload.get("id") if isinstance(payload, dict) else None
+    if rule_id is None:
+        raise HTTPException(status_code=400, detail="id 必填")
     async with session_scope() as session:
         rule = (
             await session.execute(

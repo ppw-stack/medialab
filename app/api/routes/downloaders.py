@@ -48,6 +48,7 @@ class DownloaderIn(BaseModel):
 
 
 class DownloaderUpdate(BaseModel):
+    id: int  # 必填：标识要更新的下载器
     name: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
     url: str | None = Field(default=None, min_length=1, max_length=512)
     username: str | None = Field(default=None, max_length=128)
@@ -144,8 +145,9 @@ async def get_downloader(downloader_id: int) -> DownloaderOut:
         return _to_out(row)
 
 
-@router.put("/{downloader_id}", summary="更新下载器")
-async def update_downloader(downloader_id: int, payload: DownloaderUpdate) -> DownloaderOut:
+@router.post("/update", summary="更新下载器")
+async def update_downloader(payload: DownloaderUpdate) -> DownloaderOut:
+    downloader_id = payload.id
     cipher = build_cipher(get_settings())
     settings = get_settings()
     async with session_scope() as session:
@@ -179,8 +181,11 @@ async def update_downloader(downloader_id: int, payload: DownloaderUpdate) -> Do
         return _to_out(row)
 
 
-@router.delete("/{downloader_id}", summary="删除下载器")
-async def delete_downloader(downloader_id: int) -> dict[str, int]:
+@router.post("/delete", summary="删除下载器")
+async def delete_downloader(payload: dict) -> dict[str, int]:
+    downloader_id = payload.get("id") if isinstance(payload, dict) else None
+    if downloader_id is None:
+        raise HTTPException(status_code=400, detail="id 必填")
     async with session_scope() as session:
         row = (await session.execute(select(DownloaderInstance).where(DownloaderInstance.id == downloader_id))).scalar_one_or_none()
         if row is None:

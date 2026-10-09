@@ -37,7 +37,7 @@ onMounted(load)
 async function onSave() {
   saving.value = true
   try {
-    await api.put('/alerts/policy', { ...formState })
+    await api.post('/alerts/policy/update', { ...formState })
     message.success('已保存')
   } finally {
     saving.value = false

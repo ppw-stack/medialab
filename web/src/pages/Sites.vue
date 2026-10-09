@@ -86,7 +86,7 @@ function onEdit(s: Site) {
 }
 
 async function onDelete(id: number) {
-  await api.del(`/sites/${id}`)
+  await api.post('/sites/delete', { id })
   message.success('已删除')
   load()
 }
@@ -102,7 +102,7 @@ async function onSave() {
     await api.post('/sites', payload)
     message.success('已创建')
   } else if (editing.value) {
-    await api.put(`/sites/${editing.value.id}`, payload)
+    await api.post('/sites/update', { id: editing.value.id, ...payload })
     message.success('已更新')
   }
   creating.value = false

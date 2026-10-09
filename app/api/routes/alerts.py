@@ -36,6 +36,7 @@ class AlertOut(BaseModel):
 
 
 class ChannelIn(BaseModel):
+    id: int | None = None  # 更新/删除时携带
     name: str
     type: str
     enabled: bool = False
@@ -224,7 +225,7 @@ async def get_policy() -> PolicyOut:
     )
 
 
-@router.put("/policy", summary="修改告警策略")
+@router.post("/policy/update", summary="修改告警策略")
 async def update_policy(payload: PolicyIn) -> PolicyOut:
     async with session_scope() as session:
         row = (
@@ -286,8 +287,11 @@ async def create_channel(payload: ChannelIn) -> ChannelOut:
         return _channel_out(ch)
 
 
-@router.put("/channels/{channel_id}", summary="修改通知渠道")
-async def update_channel(channel_id: int, payload: ChannelIn) -> ChannelOut:
+@router.post("/channels/update", summary="修改通知渠道")
+async def update_channel(payload: ChannelIn) -> ChannelOut:
+    channel_id = payload.id
+    if channel_id is None:
+        raise HTTPException(status_code=400, detail="id 必填")
     cipher = build_cipher(get_settings())
     async with session_scope() as session:
         ch = (
@@ -312,8 +316,11 @@ async def update_channel(channel_id: int, payload: ChannelIn) -> ChannelOut:
         return _channel_out(ch)
 
 
-@router.delete("/channels/{channel_id}", summary="删除通知渠道")
-async def delete_channel(channel_id: int) -> dict[str, bool]:
+@router.post("/channels/delete", summary="删除通知渠道")
+async def delete_channel(payload: dict) -> dict[str, bool]:
+    channel_id = payload.get("id") if isinstance(payload, dict) else None
+    if channel_id is None:
+        raise HTTPException(status_code=400, detail="id 必填")
     async with session_scope() as session:
         ch = (
             await session.execute(

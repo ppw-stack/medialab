@@ -130,10 +130,10 @@ async def test_update_keeps_password_when_blank(dl_app) -> None:
             assert r.json()["has_password"] is True
 
             # URL 改 + 密码留空
-            r = await c.put(
-                f"/api/v1/downloaders/{dl_id}",
+            r = await c.post(
+                "/api/v1/downloaders/update",
                 headers=_bearer(c),
-                json={"url": "http://q2", "password": ""},
+                json={"id": dl_id, "url": "http://q2", "password": ""},
             )
             assert r.status_code == 200
             assert r.json()["url"] == "http://q2"
@@ -154,10 +154,10 @@ async def test_update_renames_with_uniqueness(dl_app) -> None:
             )
             assert r1.status_code == 201 and r2.status_code == 201
             # 试图把 a 改名为 b
-            r = await c.put(
-                f"/api/v1/downloaders/{r1.json()['id']}",
+            r = await c.post(
+                "/api/v1/downloaders/update",
                 headers=_bearer(c),
-                json={"name": "b"},
+                json={"id": r1.json()["id"], "name": "b"},
             )
             assert r.status_code == 409
 
@@ -184,16 +184,22 @@ async def test_delete_blocks_when_bound_to_site(dl_app) -> None:
                     downloader_id=dl_id,
                 ))
 
-            r = await c.delete(f"/api/v1/downloaders/{dl_id}", headers=_bearer(c))
+            r = await c.post(
+                "/api/v1/downloaders/delete",
+                headers=_bearer(c),
+                json={"id": dl_id},
+            )
             assert r.status_code == 409
 
             # 解绑后再删
+            from sqlalchemy import update
             async with session_scope() as s:
-                site = (await s.execute(Site.__table__.select().where(Site.name == "bound-site"))).first()
-                # 直接重置 downloader_id
-                from sqlalchemy import update
                 await s.execute(update(Site).where(Site.name == "bound-site").values(downloader_id=None))
-            r = await c.delete(f"/api/v1/downloaders/{dl_id}", headers=_bearer(c))
+            r = await c.post(
+                "/api/v1/downloaders/delete",
+                headers=_bearer(c),
+                json={"id": dl_id},
+            )
             assert r.status_code == 200
 
 
@@ -201,7 +207,11 @@ async def test_delete_404(dl_app) -> None:
     transport = ASGITransport(app=dl_app)
     async with dl_app.router.lifespan_context(dl_app):
         async with AsyncClient(transport=transport, base_url="http://test") as c:
-            r = await c.delete("/api/v1/downloaders/99999", headers=_bearer(c))
+            r = await c.post(
+                "/api/v1/downloaders/delete",
+                headers=_bearer(c),
+                json={"id": 99999},
+            )
     assert r.status_code == 404
 
 

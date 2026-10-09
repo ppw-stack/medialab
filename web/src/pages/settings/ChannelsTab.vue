@@ -74,7 +74,7 @@ function onEdit(c: Channel) {
 }
 
 async function onDelete(id: number) {
-  await api.del(`/alerts/channels/${id}`)
+  await api.post('/alerts/channels/delete', { id })
   message.success('已删除')
   load()
 }
@@ -103,7 +103,7 @@ async function onSave() {
       await api.post('/alerts/channels', payload)
       message.success('渠道已创建')
     } else if (editing.value) {
-      await api.put(`/alerts/channels/${editing.value.id}`, { ...formState })
+      await api.post('/alerts/channels/update', { id: editing.value.id, ...formState })
       message.success('渠道已更新')
     }
     closeModal()

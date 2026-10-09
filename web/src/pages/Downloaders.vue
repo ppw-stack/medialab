@@ -99,7 +99,7 @@ function onEdit(d: Downloader) {
 }
 
 async function onDelete(id: number) {
-  await api.del(`/downloaders/${id}`)
+  await api.post('/downloaders/delete', { id })
   message.success('已删除')
   load()
 }
@@ -119,7 +119,7 @@ async function onSave() {
       await api.post('/downloaders', payload)
       message.success('已创建')
     } else if (editing.value) {
-      await api.put(`/downloaders/${editing.value.id}`, payload)
+      await api.post('/downloaders/update', { id: editing.value.id, ...payload })
       message.success('已更新')
     }
     closeModal()

@@ -38,6 +38,12 @@ export async function apiFetch<T = unknown>(
   return resp.json();
 }
 
+/**
+ * 只允许 GET / POST（避免部分代理/防火墙丢 PUT/DELETE）。
+ * 更新/删除走专用 POST 端点，id 放 body：
+ *   POST /{resource}/update   body={id, ...fields}
+ *   POST /{resource}/delete   body={id}
+ */
 export const api = {
   get: <T = unknown>(path: string) => apiFetch<T>(path),
   post: <T = unknown>(path: string, body?: unknown) =>
@@ -45,11 +51,4 @@ export const api = {
       method: "POST",
       body: body ? JSON.stringify(body) : undefined,
     }),
-  put: <T = unknown>(path: string, body: unknown) =>
-    apiFetch<T>(path, {
-      method: "PUT",
-      body: JSON.stringify(body),
-    }),
-  del: <T = unknown>(path: string) =>
-    apiFetch<T>(path, { method: "DELETE" }),
 };

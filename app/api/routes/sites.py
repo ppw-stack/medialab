@@ -12,7 +12,8 @@ from sqlalchemy import delete, select
 from app.adapters.sites.base import SiteProfile
 from app.adapters.sites.generic import GenericSiteAdapter
 from app.api.auth import require_session
-from app.core.crypto import mask_secret
+from app.core.config import get_settings
+from app.core.crypto import build_cipher, mask_secret
 from app.core.timeutils import ClockOffset, parse_duration_seconds
 from app.db.models import Feed, Site
 from app.db.session import session_scope
@@ -39,6 +40,26 @@ class SiteCreate(BaseModel):
     enabled: bool = True
 
 
+class SiteUpdate(BaseModel):
+    id: int  # 必填：标识要更新的站点
+    name: str | None = None
+    domain: str | None = None
+    rss_url: str | None = None  # 留空字符串表示不修改
+    adapter: str | None = None
+    save_path_template: str | None = None
+    max_size: int | None = None
+    min_interval_minutes: int | None = Field(default=None, ge=15)
+    downloader_id: int | None = None
+    category: str | None = None
+    default_free_duration: str | None = None
+    min_buffer: str | None = None
+    buffer_ratio: float | None = None
+    detail_path_template: str | None = None
+    rss_time_pattern: str | None = None
+    grab_short_window: bool | None = None
+    enabled: bool | None = None
+
+
 class SiteOut(BaseModel):
     id: int
     name: str
@@ -62,8 +83,11 @@ async def list_sites() -> list[SiteOut]:
     return [_to_out(s, raw=None) for s in rows]
 
 
-@router.delete("/{site_id}", summary="删除站点")
-async def delete_site(site_id: int) -> dict[str, int]:
+@router.post("/delete", summary="删除站点")
+async def delete_site(payload: dict) -> dict[str, int]:
+    site_id = payload.get("id") if isinstance(payload, dict) else None
+    if site_id is None:
+        raise HTTPException(status_code=400, detail="id 必填")
     async with session_scope() as session:
         site = (
             await session.execute(select(Site).where(Site.id == site_id))
@@ -130,6 +154,37 @@ async def create_site(payload: SiteCreate) -> SiteOut:
                 )
             )
         return _to_out(site, payload.rss_url)
+
+
+@router.post("/update", summary="更新站点")
+async def update_site(payload: SiteUpdate) -> SiteOut:
+    """更新站点配置（id 在 body）。rss_url 留空字符串 = 不修改。"""
+    site_id = payload.id
+    cipher = build_cipher(get_settings())
+    settings = get_settings()
+    async with session_scope() as session:
+        site = (await session.execute(select(Site).where(Site.id == site_id))).scalar_one_or_none()
+        if site is None:
+            raise HTTPException(status_code=404, detail="站点不存在")
+
+        updates = payload.model_dump(exclude={"id", "rss_url"}, exclude_unset=True)
+        for key, value in updates.items():
+            setattr(site, key, value)
+        if payload.default_free_duration is not None:
+            duration = parse_duration_seconds(payload.default_free_duration)
+            if duration is not None:
+                site.default_free_duration = int(duration.total_seconds())
+        if payload.min_buffer is not None:
+            buffer = parse_duration_seconds(payload.min_buffer)
+            if buffer is not None:
+                site.min_buffer = int(buffer.total_seconds())
+        # rss_url：空字符串视为"不修改"，非空才覆盖加密
+        if payload.rss_url:
+            site.rss_url_enc = cipher.encrypt(
+                payload.rss_url, owner_type="site", owner_id=site.name
+            )
+        await session.flush()
+        return _to_out(site, None)
 
 
 @router.get("/{site_id}", summary="站点详情")
