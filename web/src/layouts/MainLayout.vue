@@ -12,6 +12,7 @@ import {
   SettingOutlined,
   LogoutOutlined,
   UserOutlined,
+  ApiOutlined,
 } from '@ant-design/icons-vue'
 import { useAuthStore } from '../stores/auth'
 
@@ -23,6 +24,7 @@ const collapsed = ref(false)
 const menuItems = [
   { key: '/', icon: DashboardOutlined, label: '总览' },
   { key: '/sites', icon: CloudServerOutlined, label: '站点' },
+  { key: '/downloaders', icon: ApiOutlined, label: '下载器' },
   { key: '/torrents', icon: DownloadOutlined, label: '任务' },
   { key: '/free-seed', icon: GiftOutlined, label: '免费种' },
   { key: '/alerts', icon: BellOutlined, label: '告警' },

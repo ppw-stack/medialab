@@ -227,6 +227,8 @@ class DownloaderInstance(Base):
     max_upload: Mapped[str | None] = mapped_column(String(32), nullable=True)
     max_download: Mapped[str | None] = mapped_column(String(32), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    #: 是否校验 TLS 证书（自签名 qBittorrent 可关闭，FR-1 安全建议保持 True）
+    verify_tls: Mapped[bool] = mapped_column(Boolean, default=True)
     #: 能力声明快照（Set[Feature] 的序列化），含 get_files 是否可用（R12）
     capabilities: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)

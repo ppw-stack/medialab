@@ -19,6 +19,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'cleanup', name: 'cleanup', component: () => import('./pages/Cleanup.vue') },
       { path: 'audit', name: 'audit', component: () => import('./pages/AuditLog.vue') },
       { path: 'settings', name: 'settings', component: () => import('./pages/Settings.vue') },
+      { path: 'downloaders', name: 'downloaders', component: () => import('./pages/Downloaders.vue') },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/' },

@@ -118,12 +118,22 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 
 def _mount_routes(app: FastAPI) -> None:
     from app.api.auth import router as auth_router
-    from app.api.routes import alerts, cleanup, cross_seed, dashboard, free_seed, sites, torrents
+    from app.api.routes import (
+        alerts,
+        cleanup,
+        cross_seed,
+        dashboard,
+        downloaders,
+        free_seed,
+        sites,
+        torrents,
+    )
 
     for router in (
         dashboard.router,
         sites.router,
         torrents.router,
+        downloaders.router,
         alerts.router,
         cross_seed.router,
         free_seed.router,

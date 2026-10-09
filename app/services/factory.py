@@ -116,7 +116,11 @@ class AdapterFactory:
         match row.type:
             case "qbittorrent":
                 return QbittorrentAdapter(
-                    row.name, row.url, row.username or "", password or ""
+                    row.name,
+                    row.url,
+                    row.username or "",
+                    password or "",
+                    verify_tls=row.verify_tls,
                 )
             case "transmission" | "deluge" | "aria2":
                 # M2 仅实现 qBittorrent；其余按 FR-1.3 声明能力后降级
