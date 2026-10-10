@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """HHanClub 适配器测试（FR-1.5 站点特化 + NexusPHP cookie 鉴权）。
 
 覆盖：
