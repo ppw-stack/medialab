@@ -455,24 +455,34 @@ class Feed(Base):
 
 
 class FreeCandidate(Base):
-    """免费种候选与结果（FR-3.1/FR-3.2）。"""
+    """免费种候选池（用户手动选择推送）。"""
 
     __tablename__ = "free_candidates"
+    __table_args__ = (
+        UniqueConstraint("site_id", "item_id", name="uq_candidate_site_item"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     site_id: Mapped[int] = mapped_column(ForeignKey("sites.id"))
-    info_hash: Mapped[str] = mapped_column(String(64), index=True)
+    #: 站内 ID（m-team 数字 ID / NexusPHP details.php?id=X）。允许 None（id 缺失跳过）
+    item_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    #: m-team search 不返回 hash，download_torrent 后回填
+    info_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(1024))
     size: Mapped[int] = mapped_column(BigInteger, default=0)
     free_type: Mapped[str] = mapped_column(String(32), default=FreeType.UNKNOWN)
     free_end_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     free_source: Mapped[str | None] = mapped_column(String(24), nullable=True)
     free_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
-    source: Mapped[str] = mapped_column(String(32))
-    decision: Mapped[str] = mapped_column(String(32), default="pending")
+    #: 原始免费标记（m-team status dict / NexusPHP free_classes + remaining_*）
+    free_payload: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    #: pending / pushed / skipped / failed
+    status: Mapped[str] = mapped_column(String(32), default="pending")
     reject_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: 推送成功后回填（torrents.id）
     torrent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     seen_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    pushed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class SiteWindowStat(Base):

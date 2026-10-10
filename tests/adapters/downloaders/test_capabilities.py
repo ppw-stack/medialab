@@ -10,7 +10,6 @@ from app.adapters.downloaders.base import (
     AddTorrentPayload,
     DownloaderAdapter,
     DownloaderError,
-    TorrentFile,
     TorrentFilter,
     TorrentInfo,
     TorrentState,
@@ -106,7 +105,7 @@ def test_close_default_noop() -> None:
 
 def test_qbittorrent_implements_all_abstracts() -> None:
     """QbittorrentAdapter 必须实现全部抽象方法（FR-1.3）。"""
-    ad = QbittorrentAdapter("qbt", "http://localhost:8080", "admin", "pass")
+    QbittorrentAdapter("qbt", "http://localhost:8080", "admin", "pass")
     import inspect
 
     abstracts = {

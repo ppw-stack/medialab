@@ -1,211 +1,75 @@
-"""免费种任务 API（FR-6.3 / FR-6.4）。"""
+"""免费种候选池 API：拉取入候选池 + 手动选择推送。"""
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from app.api.auth import require_session
-from app.core.timeutils import remaining_until, utcnow
-from app.core.windows import feasibility, inspect_interval_seconds, urgency_level
-from app.db.models import AbortedReason, Site, Source, Torrent, TorrentStatus
+from app.db.models import FreeCandidate, Site
 from app.db.session import session_scope
 from app.services.factory import get_factory
-from app.services.free_seed_hunter import FreeRoundStats, FreeSeedHunter
-from app.services.window_watcher import WindowWatcher
+from app.services.free_seed_hunter import (
+    CandidateStatus,
+    FreeRoundStats,
+    FreeSeedHunter,
+    PushResult,
+)
 
 router = APIRouter(prefix="/free-seed", dependencies=[Depends(require_session)], tags=["free-seed"])
 
 
-class FreeSeedCard(BaseModel):
-    """FR-6.3 卡片字段。"""
+#: 候选状态对应的展示颜色
+CANDIDATE_STATUS_COLORS: dict[str, str] = {
+    CandidateStatus.PENDING: "blue",
+    CandidateStatus.PUSHED: "green",
+    CandidateStatus.SKIPPED: "default",
+    CandidateStatus.FAILED: "red",
+}
+
+
+class CandidateCard(BaseModel):
+    """免费种候选卡片。"""
 
     id: int
-    name: str
+    site_id: int
     site: str
+    item_id: str | None
+    name: str
     size: int
-    free_type: str | None = None
-    free_end_at: datetime | None = None
-    free_source: str | None = None
-    free_confidence: float | None = None
-    remaining_seconds: float | None = None
-    urgency: str = "normal"
-    next_inspect_seconds: int = 900
-    progress: float = 0.0
-    downloaded: int = 0
-    dlspeed: int = 0
-    feasibility: str = "ok"
-    eta_hours: float | None = None
-    seconds_to_abort: float | None = None
-    abort_at: datetime | None = None
-    paused_reason: str | None = None
+    free_type: str
+    free_end_at: datetime | None
+    free_source: str | None
+    free_confidence: float | None
+    remaining_seconds: float | None
     status: str
+    reject_reason: str | None
+    info_hash: str | None
+    torrent_id: int | None
+    seen_at: datetime
+    pushed_at: datetime | None
 
 
-class FreeSeedList(BaseModel):
+class CandidateList(BaseModel):
     total: int
-    items: list[FreeSeedCard]
+    items: list[CandidateCard]
 
 
-class AbortRequest(BaseModel):
-    """手动中止入参。"""
-
-    reason: str = Field(default=AbortedReason.MANUAL, max_length=32)
-
-
-class OutcomeSummary(BaseModel):
-    """FR-6.4 收益归属统计。"""
-
-    window_completed: int = 0
-    late_completed: int = 0
-    missed: int = 0
-    aborted: int = 0
-    window_completion_rate: float | None = None
+class PushResultOut(BaseModel):
+    candidate_id: int
+    success: bool
+    info_hash: str | None = None
+    error: str | None = None
 
 
-@router.get("", summary="免费种任务列表（含窗口倒计时与可行性）")
-async def list_free_seeds(
-    site_id: int | None = None,
-    in_flight_only: bool = True,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=200),
-) -> FreeSeedList:
-    now = utcnow()
-    async with session_scope() as session:
-        base = select(Torrent).where(Torrent.source == Source.FREE_SEED)
-        if site_id is not None:
-            base = base.where(Torrent.site_id == site_id)
-        if in_flight_only:
-            base = base.where(
-                Torrent.status.in_([TorrentStatus.ACTIVE, TorrentStatus.PAUSED])
-            )
-
-        total = (
-            await session.execute(
-                select(func.count(Torrent.id)).select_from(base.subquery())
-            )
-        ).scalar_one()
-
-        joined = base.add_columns(Site.name).join(Site, Site.id == Torrent.site_id)
-        rows = (
-            (
-                await session.execute(
-                    joined.order_by(Torrent.free_end_at.asc().nullslast())
-                    .offset((page - 1) * page_size)
-                    .limit(page_size)
-                )
-            )
-            .all()
-        )
-        items = [_to_card(t, site_name, now) for t, site_name in rows]
-
-    return FreeSeedList(total=total, items=items)
-
-
-@router.get("/summary", summary="免费种收益归属统计（FR-6.4）")
-async def summary(site_id: int | None = None) -> OutcomeSummary:
-    async with session_scope() as session:
-        stmt = select(Torrent.status, func.count(Torrent.id)).where(
-            Torrent.source == Source.FREE_SEED
-        )
-        if site_id is not None:
-            stmt = stmt.where(Torrent.site_id == site_id)
-        counts = dict((await session.execute(stmt)).all())
-
-    done = (
-        counts.get(TorrentStatus.FREE_COMPLETED, 0),
-        counts.get(TorrentStatus.FREE_COMPLETED_LATE, 0),
-        counts.get(TorrentStatus.FREE_MISSED, 0),
-        counts.get(TorrentStatus.ABORTED, 0),
-    )
-    total = sum(done)
-    return OutcomeSummary(
-        window_completed=done[0],
-        late_completed=done[1],
-        missed=done[2],
-        aborted=done[3],
-        window_completion_rate=(done[0] / total) if total else None,
-    )
-
-
-@router.get("/{torrent_id}", summary="免费种任务详情")
-async def get_free_seed(torrent_id: int) -> FreeSeedCard:
-    now = utcnow()
-    async with session_scope() as session:
-        row = (
-            await session.execute(
-                select(Torrent, Site.name)
-                .join(Site, Site.id == Torrent.site_id)
-                .where(Torrent.id == torrent_id)
-            )
-        ).first()
-        if row is None:
-            raise HTTPException(status_code=404, detail="任务不存在")
-        return _to_card(row[0], row[1], now)
-
-
-@router.post("/{torrent_id}/abort", summary="手动中止免费种（FR-3.5 管线）")
-async def abort_now(torrent_id: int, payload: AbortRequest = AbortRequest()) -> dict[str, Any]:
-    """M1 仅落库标记；实际移除与数据隔离由 Cleaner 管线执行（M4 接入）。"""
-    now = utcnow()
-    async with session_scope() as session:
-        row = (
-            await session.execute(
-                select(Torrent).where(
-                    Torrent.id == torrent_id,
-                    Torrent.source == Source.FREE_SEED,
-                )
-            )
-        ).scalar_one_or_none()
-        if row is None:
-            raise HTTPException(status_code=404, detail="免费种任务不存在")
-        row.status = TorrentStatus.ABORTED
-        row.aborted_reason = payload.reason
-        row.aborted_at = now
-        return {"id": row.id, "status": row.status, "aborted_reason": row.aborted_reason}
-
-
-def _to_card(t: Torrent, site_name: str, now: datetime) -> FreeSeedCard:
-    """构造卡片。紧迫度与可行性均基于 ``free_end_at`` 与实时进度。"""
-    remaining = remaining_until(t.free_end_at, now=now)
-    level = urgency_level(remaining)
-    to_abort = (t.abort_at - now).total_seconds() if t.abort_at else None
-
-    dlspeed = 0  # M2 起由巡检写入 torrents.last_dlspeed
-    remaining_bytes = max(t.size - t.downloaded, 0)
-    feasibility_state = feasibility(remaining_bytes, dlspeed, window=remaining)
-    eta_hours = (
-        round(remaining_bytes / dlspeed / 3600, 2) if dlspeed > 0 and remaining_bytes else None
-    )
-
-    return FreeSeedCard(
-        id=t.id,
-        name=t.name,
-        site=site_name,
-        size=t.size,
-        free_type=t.free_type,
-        free_end_at=t.free_end_at,
-        free_source=t.free_source,
-        free_confidence=t.free_confidence,
-        remaining_seconds=remaining.total_seconds() if remaining else None,
-        urgency=level,
-        next_inspect_seconds=inspect_interval_seconds(level),
-        progress=(t.downloaded / t.size) if t.size else 0.0,
-        downloaded=t.downloaded,
-        dlspeed=dlspeed,
-        feasibility=feasibility_state,
-        eta_hours=eta_hours,
-        seconds_to_abort=to_abort,
-        abort_at=t.abort_at,
-        paused_reason=t.paused_reason,
-        status=t.status,
-    )
-
-
+class PushBatchResult(BaseModel):
+    total: int
+    success: int
+    failed: int
+    results: list[PushResultOut]
 
 
 class FreeRoundResult(BaseModel):
@@ -214,11 +78,131 @@ class FreeRoundResult(BaseModel):
     pulled: int
     accepted: int
     skipped: int
-    added: int
     failed: int
-    permanent: int
     duration_ms: int
     skip_reasons: dict[str, int]
+
+
+class PullBatchResult(BaseModel):
+    total: int
+    site_results: list[FreeRoundResult]
+
+
+def _to_card(c: FreeCandidate, site_name: str) -> CandidateCard:
+    """构造候选卡片。"""
+    remaining: float | None = None
+    if c.free_end_at is not None:
+        remaining = (c.free_end_at - datetime.now()).total_seconds()
+    return CandidateCard(
+        id=c.id,
+        site_id=c.site_id,
+        site=site_name,
+        item_id=c.item_id,
+        name=c.name,
+        size=c.size,
+        free_type=c.free_type,
+        free_end_at=c.free_end_at,
+        free_source=c.free_source,
+        free_confidence=c.free_confidence,
+        remaining_seconds=remaining,
+        status=c.status,
+        reject_reason=c.reject_reason,
+        info_hash=c.info_hash,
+        torrent_id=c.torrent_id,
+        seen_at=c.seen_at,
+        pushed_at=c.pushed_at,
+    )
+
+
+@router.get("/candidates", summary="免费种候选列表")
+async def list_candidates(
+    site_id: int | None = None,
+    status: str | None = Query(default=None, description="pending/pushed/skipped/failed"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+) -> CandidateList:
+    async with session_scope() as session:
+        base = select(FreeCandidate, Site.name).join(
+            Site, Site.id == FreeCandidate.site_id
+        )
+        if site_id is not None:
+            base = base.where(FreeCandidate.site_id == site_id)
+        if status is not None:
+            base = base.where(FreeCandidate.status == status)
+
+        total = (
+            await session.execute(
+                select(func.count()).select_from(base.subquery())
+            )
+        ).scalar_one()
+        rows = (
+            await session.execute(
+                base.order_by(FreeCandidate.seen_at.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+        ).all()
+        items = [_to_card(c, site_name) for c, site_name in rows]
+
+    return CandidateList(total=total, items=items)
+
+
+@router.post("/candidates/{candidate_id}/push", summary="单条推送")
+async def push_one(candidate_id: int) -> PushResultOut:
+    hunter = FreeSeedHunter(get_factory())
+    result: PushResult = await hunter.push_candidate(candidate_id)
+    return PushResultOut(
+        candidate_id=result.candidate_id,
+        success=result.success,
+        info_hash=result.info_hash,
+        error=result.error,
+    )
+
+
+class PushBatchRequest(BaseModel):
+    """批量推送入参。"""
+
+    ids: list[int] = Field(..., min_length=1, max_length=200)
+
+
+@router.post("/candidates/push-batch", summary="批量推送")
+async def push_batch(payload: PushBatchRequest) -> PushBatchResult:
+    hunter = FreeSeedHunter(get_factory())
+    results = await hunter.push_batch(payload.ids)
+    out = [
+        PushResultOut(
+            candidate_id=r.candidate_id,
+            success=r.success,
+            info_hash=r.info_hash,
+            error=r.error,
+        )
+        for r in results
+    ]
+    success = sum(1 for r in out if r.success)
+    return PushBatchResult(
+        total=len(out),
+        success=success,
+        failed=len(out) - success,
+        results=out,
+    )
+
+
+@router.post("/pull", summary="触发全部站点抓取")
+async def pull_all() -> PullBatchResult:
+    """所有启用站点执行抓取，结果入 free_candidates。"""
+    hunter = FreeSeedHunter(get_factory())
+    results = await hunter.pull_all(force=True)
+    return PullBatchResult(
+        total=len(results),
+        site_results=[_round_out(r) for r in results],
+    )
+
+
+@router.post("/sites/{site_id}/pull", summary="触发单站抓取")
+async def pull_one_site(site_id: int) -> FreeRoundResult:
+    """用户显式决策（FR-6.1），绕过 15 分钟频率下限。"""
+    hunter = FreeSeedHunter(get_factory())
+    return _round_out(await hunter.pull_site(site_id, force=True))
 
 
 def _round_out(s: FreeRoundStats) -> FreeRoundResult:
@@ -228,33 +212,7 @@ def _round_out(s: FreeRoundStats) -> FreeRoundResult:
         pulled=s.pulled,
         accepted=s.accepted,
         skipped=s.skipped,
-        added=s.added,
         failed=s.failed,
-        permanent=s.permanent,
         duration_ms=s.duration_ms,
         skip_reasons=dict(s.skip_reasons),
     )
-
-
-@router.post("/pull", summary="手动触发免费种捕获（FR-3 全轮）")
-async def pull_free_seeds() -> list[FreeRoundResult]:
-    """立即对所有启用站点跑一轮免费种捕获。
-
-    手动触发（FR-6.1）绕过 FR-2.2 频率下限——用户显式决策。
-    """
-    hunter = FreeSeedHunter(get_factory())
-    return [_round_out(s) for s in await hunter.run_all(force=True)]
-
-
-@router.post("/sites/{site_id}/pull", summary="手动触发单站免费种")
-async def pull_one_site(site_id: int) -> FreeRoundResult:
-    """忽略 15 分钟频率下限（用户显式决策，FR-6.1）。"""
-    hunter = FreeSeedHunter(get_factory())
-    return _round_out(await hunter.run_site(site_id, force=True))
-
-
-@router.post("/watch", summary="手动触发窗口看护（FR-3.4）")
-async def watch_now() -> dict[str, int]:
-    """立即执行一轮看护：对所有在途免费种按紧迫度评估。"""
-    watcher = WindowWatcher(get_factory())
-    return await watcher.watch_active()

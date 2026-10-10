@@ -71,7 +71,7 @@ def register_free_seed_jobs(
     scheduler_center.register(
         JobSpec(
             name="free_seed_poll",
-            func=lambda: _swallow(engine.run_all()),
+            func=lambda: _swallow(engine.pull_all()),
             interval_seconds=FREE_SEED_INTERVAL,
             offset_seconds=29,
         )

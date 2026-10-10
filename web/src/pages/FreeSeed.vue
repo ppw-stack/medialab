@@ -1,33 +1,75 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { api } from '../api'
 import { message } from 'ant-design-vue'
 
-interface FreeSeedCard {
-  id: number; name: string; site: string; size: number;
-  free_type: string | null; free_end_at: string | null;
+interface Candidate {
+  id: number; site_id: number; site: string; item_id: string | null;
+  name: string; size: number; free_type: string; free_end_at: string | null;
   free_source: string | null; free_confidence: number | null;
-  remaining_seconds: number | null; urgency: string;
-  next_inspect_seconds: number; progress: number; downloaded: number;
-  dlspeed: number; feasibility: string; eta_hours: number | null;
-  seconds_to_abort: number | null; abort_at: string | null;
-  paused_reason: string | null; status: string;
+  remaining_seconds: number | null; status: string; reject_reason: string | null;
+  info_hash: string | null; torrent_id: number | null;
+  seen_at: string; pushed_at: string | null
+}
+interface CandidateList { total: number; items: Candidate[] }
+
+interface PushResult {
+  candidate_id: number; success: boolean; info_hash: string | null; error: string | null
+}
+interface PushBatchResult {
+  total: number; success: number; failed: number; results: PushResult[]
 }
 
-interface FreeSeedList { total: number; items: FreeSeedCard[] }
-interface OutcomeSummary {
-  window_completed: number; late_completed: number; missed: number; aborted: number;
-  window_completion_rate: number | null;
+interface Site { id: number; name: string }
+
+const STATUS_COLORS: Record<string, string> = {
+  pending: 'blue', pushed: 'green', skipped: 'default', failed: 'red',
 }
 
-const urgencyColor: Record<string, string> = {
-  normal: 'green', notice: 'blue', approaching: 'gold',
-  urgent: 'volcano', critical: 'magenta', expired: 'red', permanent: 'green',
+const STATUS_LABELS: Record<string, string> = {
+  pending: '待推送', pushed: '已推送', skipped: '已跳过', failed: '失败',
 }
 
-const freeTypeLabel: Record<string, string> = {
-  freeleech_timed: '限时免费', freeleech_permanent: '永久免费',
-  twoup_timed: '限时 2X', neutral_leech: '中性种', unknown: '未知',
+const FREE_TYPE_LABELS: Record<string, string> = {
+  freeleech_permanent: '永久免费',
+  freeleech_timed: '限时免费',
+  twoup_timed: '限时 2X',
+  neutral_leech: '中性种',
+  unknown: '未知',
+}
+
+const data = ref<CandidateList>({ total: 0, items: [] })
+const sites = ref<Site[]>([])
+const selectedIds = ref<number[]>([])
+const siteFilter = ref<number | undefined>(undefined)
+const statusFilter = ref<string | undefined>(undefined)
+const searchKeyword = ref('')
+const pulling = ref(false)
+const pushing = ref(false)
+
+async function loadSites() {
+  try { sites.value = await api.get<Site[]>('/sites') } catch {}
+}
+
+async function loadData() {
+  try {
+    const qs = new URLSearchParams()
+    if (siteFilter.value !== undefined) qs.set('site_id', String(siteFilter.value))
+    if (statusFilter.value) qs.set('status', statusFilter.value)
+    qs.set('page_size', '200')
+    data.value = await api.get<CandidateList>(`/free-seed/candidates?${qs}`)
+  } catch { /* ignore */ }
+}
+
+onMounted(() => {
+  loadSites()
+  loadData()
+})
+
+function formatSize(b: number): string {
+  if (b < 1024 ** 2) return `${(b / 1024).toFixed(0)} KB`
+  if (b < 1024 ** 3) return `${(b / 1024 ** 2).toFixed(0)} MB`
+  return `${(b / 1024 ** 3).toFixed(1)} GB`
 }
 
 function formatRemaining(seconds: number | null): string {
@@ -38,199 +80,217 @@ function formatRemaining(seconds: number | null): string {
   const m = Math.floor((seconds % 3600) / 60)
   if (d > 0) return `${d}天 ${h}小时`
   if (h > 0) return `${h}小时 ${m}分`
-  const s = Math.floor(seconds % 60)
-  if (m > 0) return `${m}分 ${s}秒`
-  return `${s}秒`
+  return `${m}分`
 }
 
-function formatSize(b: number): string {
-  if (b < 1024 ** 2) return `${(b / 1024).toFixed(0)} KB`
-  if (b < 1024 ** 3) return `${(b / 1024 ** 2).toFixed(0)} MB`
-  return `${(b / 1024 ** 3).toFixed(1)} GB`
-}
-
-const data = ref<FreeSeedList>({ total: 0, items: [] })
-const summary = ref<OutcomeSummary | null>(null)
-const urgencyFilter = ref<string | undefined>(undefined)
-const typeFilter = ref<string | undefined>(undefined)
-const q = ref('')
-
-let timer: ReturnType<typeof setInterval> | null = null
-
-async function loadData() {
-  try {
-    data.value = await api.get<FreeSeedList>('/free-seed?in_flight_only=true&page_size=200')
-  } catch { /* ignore */ }
-  try {
-    summary.value = await api.get<OutcomeSummary>('/free-seed/summary')
-  } catch { /* ignore */ }
-}
-
-onMounted(() => {
-  loadData()
-  timer = setInterval(loadData, 10000)
-})
-
-onUnmounted(() => {
-  if (timer) clearInterval(timer)
-})
-
-async function abort(id: number) {
-  try {
-    await api.post(`/free-seed/${id}/abort`, { reason: 'manual' })
-    message.success('已提交中止')
-    loadData()
-  } catch (e) {
-    message.error(e instanceof Error ? e.message : '中止失败')
-  }
-}
-
-const urgencyOrder: Record<string, number> = {
-  expired: 0, critical: 1, urgent: 2, approaching: 3, notice: 4, normal: 5, permanent: 6,
-}
-
-const sortedItems = computed(() => {
+const filteredItems = computed(() => {
   let items = data.value.items
-  if (urgencyFilter.value) items = items.filter((r) => r.urgency === urgencyFilter.value)
-  if (typeFilter.value) items = items.filter((r) => r.free_type === typeFilter.value)
-  if (q.value) {
-    const ql = q.value.toLowerCase()
-    items = items.filter((r) => r.name.toLowerCase().includes(ql) || r.site.toLowerCase().includes(ql))
+  if (searchKeyword.value) {
+    const q = searchKeyword.value.toLowerCase()
+    items = items.filter(
+      (r) => r.name.toLowerCase().includes(q) || r.site.toLowerCase().includes(q)
+    )
   }
-  return [...items].sort((a, b) => (urgencyOrder[a.urgency] ?? 9) - (urgencyOrder[b.urgency] ?? 9))
+  return items
 })
 
-async function manualPull() {
-  await api.post('/free-seed/pull')
-  loadData()
+async function pullSite(siteId: number) {
+  pulling.value = true
+  try {
+    const r = await api.post<{
+      site: string; status: string; pulled: number; accepted: number;
+      skipped: number; failed: number; duration_ms: number; skip_reasons: Record<string, number>
+    }>(`/free-seed/sites/${siteId}/pull`)
+    if (r.status === 'ok' || r.status === 'empty') {
+      message.success(`${r.site} 抓取完成：接受 ${r.accepted}，跳过 ${r.skipped}`)
+    } else {
+      message.warning(`${r.site} 抓取状态：${r.status}`)
+    }
+    await loadData()
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '抓取失败')
+  } finally {
+    pulling.value = false
+  }
 }
 
-async function manualWatch() {
-  await api.post('/free-seed/watch')
-  message.success('看护已执行')
+async function pullAll() {
+  pulling.value = true
+  try {
+    const r = await api.post<{ total: number; site_results: any[] }>('/free-seed/pull')
+    const summary = r.site_results
+      .map((s) => `${s.site}: ${s.accepted}/${s.pulled}`)
+      .join(', ')
+    message.success(`已抓取 ${r.total} 个站点（${summary}）`)
+    await loadData()
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '抓取失败')
+  } finally {
+    pulling.value = false
+  }
+}
+
+async function pushOne(id: number) {
+  pushing.value = true
+  try {
+    const r = await api.post<PushResult>(`/free-seed/candidates/${id}/push`)
+    if (r.success) {
+      message.success(`推送成功（${r.info_hash?.slice(0, 8)}）`)
+    } else {
+      message.error(r.error || '推送失败')
+    }
+    await loadData()
+    selectedIds.value = selectedIds.value.filter((x) => x !== id)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '推送失败')
+  } finally {
+    pushing.value = false
+  }
+}
+
+async function pushBatch() {
+  if (selectedIds.value.length === 0) {
+    message.warning('请先勾选候选')
+    return
+  }
+  pushing.value = true
+  try {
+    const r = await api.post<PushBatchResult>('/free-seed/candidates/push-batch', {
+      ids: selectedIds.value,
+    })
+    message.success(`批量推送：成功 ${r.success}，失败 ${r.failed}`)
+    selectedIds.value = []
+    await loadData()
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '批量推送失败')
+  } finally {
+    pushing.value = false
+  }
 }
 
 const columns = [
-  { title: '种子名', dataIndex: 'name', key: 'name', ellipsis: true },
-  { title: '类型', dataIndex: 'free_type', key: 'free_type' },
-  { title: '窗口来源', dataIndex: 'free_source', key: 'src' },
-  { title: '紧迫度', key: 'urgency' },
-  { title: '进度', key: 'progress' },
-  { title: '大小', dataIndex: 'size', key: 'size', width: 80 },
-  { title: '距中止', key: 'abort' },
-  { title: '状态', dataIndex: 'status', key: 'status' },
-  { title: '操作', key: 'action' },
+  { title: '种子名', key: 'name', width: 320 },
+  { title: '站点', key: 'site', width: 90 },
+  { title: '大小', key: 'size', width: 80 },
+  { title: '免费类型', key: 'free_type', width: 110 },
+  { title: '剩余/截止', key: 'remaining', width: 110 },
+  { title: '状态', key: 'status', width: 100 },
+  { title: '操作', key: 'action', width: 100 },
 ]
 </script>
 
 <template>
   <div>
-    <a-typography-title :level="4">免费种管理</a-typography-title>
+    <a-typography-title :level="4">免费种候选池</a-typography-title>
 
-    <a-space v-if="summary" size="middle" wrap style="margin-bottom: 16px">
-      <a-card size="small"><b>窗口内完成：</b>{{ summary.window_completed }}</a-card>
-      <a-card size="small"><b>边界超期：</b>{{ summary.late_completed }}</a-card>
-      <a-card size="small"><b>看护失效：</b>{{ summary.missed }}</a-card>
-      <a-card size="small"><b>已中止：</b>{{ summary.aborted }}</a-card>
-      <a-card size="small">
-        <b>窗口内完成率：</b>
-        {{ summary.window_completion_rate !== null ? `${(summary.window_completion_rate * 100).toFixed(1)}%` : '-' }}
-      </a-card>
-    </a-space>
-
-    <a-card :title="`在途任务（${data.total}）`">
+    <a-card :title="`候选（${data.total}）`" style="margin-bottom: 16px">
       <template #extra>
         <a-space>
           <a-select
+            v-model:value="siteFilter"
+            placeholder="按站点筛选"
             allow-clear
-            placeholder="紧迫度"
-            style="width: 110px"
-            :value="urgencyFilter"
-            @change="(v: string) => urgencyFilter = v"
-            :options="[
-              { value: 'critical', label: '🔴 临界' },
-              { value: 'urgent', label: '🟠 紧急' },
-              { value: 'approaching', label: '🟡 临近' },
-              { value: 'notice', label: '🔵 注意' },
-              { value: 'normal', label: '🟢 正常' },
-              { value: 'permanent', label: '♾️ 永久' },
-            ]"
+            style="width: 160px"
+            :options="sites.map((s) => ({ value: s.id, label: s.name }))"
+            @change="loadData"
           />
           <a-select
+            v-model:value="statusFilter"
+            placeholder="按状态筛选"
             allow-clear
-            placeholder="免费类型"
-            style="width: 130px"
-            :value="typeFilter"
-            @change="(v: string) => typeFilter = v"
-            :options="Object.entries(freeTypeLabel).map(([v, l]) => ({ value: v, label: l }))"
+            style="width: 120px"
+            :options="Object.entries(STATUS_LABELS).map(([v, l]) => ({ value: v, label: l }))"
+            @change="loadData"
           />
           <a-input-search
-            allow-clear
+            v-model:value="searchKeyword"
             placeholder="搜索名称/站点"
             style="width: 200px"
-            @change="(e: Event) => q = (e.target as HTMLInputElement).value"
+            allow-clear
           />
-          <a-button @click="manualPull">手动抓取</a-button>
-          <a-button @click="manualWatch">手动看护</a-button>
+          <a-button :loading="pulling" @click="pullAll">全部抓取</a-button>
+          <a-button
+            type="primary"
+            :loading="pushing"
+            :disabled="selectedIds.length === 0"
+            @click="pushBatch"
+          >
+            批量推送 ({{ selectedIds.length }})
+          </a-button>
         </a-space>
       </template>
-      <a-empty v-if="sortedItems.length === 0" description="暂无在途免费种" />
+      <a-empty v-if="sites.length === 0" description="请先在「站点」页面配置站点" />
+      <a-space v-else wrap style="margin-bottom: 16px">
+        <a-button
+          v-for="s in sites"
+          :key="s.id"
+          :loading="pulling"
+          @click="pullSite(s.id)"
+        >
+          抓取 {{ s.name }}
+        </a-button>
+      </a-space>
+
       <a-table
-        v-else
-        :data-source="sortedItems"
+        :data-source="filteredItems"
         :columns="columns"
         row-key="id"
-        :pagination="false"
+        :pagination="{ pageSize: 50, showSizeChanger: true }"
+        :row-selection="{
+          selectedRowKeys: selectedIds,
+          onChange: (keys: number[]) => { selectedIds = keys },
+          getCheckboxProps: (record: Candidate) => ({
+            disabled: record.status !== 'pending',
+          }),
+        }"
         size="middle"
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'name'">
             <div>
-              <span style="font-weight: 500">{{ record.name }}</span>
-              <a-typography-text type="secondary" style="font-size: 11px">{{ record.site }}</a-typography-text>
-            </div>
-          </template>
-          <template v-else-if="column.key === 'free_type'">
-            <a-tag v-if="record.free_type" :color="record.free_type === 'freeleech_permanent' ? 'green' : 'purple'">
-              {{ freeTypeLabel[record.free_type] || record.free_type }}
-            </a-tag>
-            <span v-else>-</span>
-          </template>
-          <template v-else-if="column.key === 'src'">
-            <a-tooltip v-if="record.free_source" title="confidence 越低越需关注">
-              <a-tag color="blue">{{ record.free_source }}</a-tag>
-            </a-tooltip>
-            <span v-else>-</span>
-          </template>
-          <template v-else-if="column.key === 'urgency'">
-            <a-tag :color="urgencyColor[record.urgency] || 'default'">
-              {{ record.urgency === 'permanent' ? '永久' : formatRemaining(record.remaining_seconds) }}
-            </a-tag>
-          </template>
-          <template v-else-if="column.key === 'progress'">
-            <div style="width: 140px">
-              <a-progress
-                :percent="Math.round(record.progress * 100)"
-                size="small"
-                :status="record.feasibility === 'ok' ? 'normal' : record.feasibility === 'critical' ? 'exception' : 'active'"
-              />
-              <a-typography-text type="secondary" style="font-size: 12px">
-                {{ record.feasibility === 'ok' ? '✅' : record.feasibility === 'critical' ? '⚠️ 临界' : '❌' }}
-                {{ record.eta_hours ? ` ${record.eta_hours}h` : '' }}
+              <a style="font-weight: 500">{{ record.name }}</a>
+              <a-typography-text
+                v-if="record.reject_reason"
+                type="secondary"
+                code
+                style="font-size: 11px; margin-left: 8px"
+              >
+                {{ record.reject_reason }}
               </a-typography-text>
             </div>
+          </template>
+          <template v-else-if="column.key === 'site'">
+            <a-tag>{{ record.site }}</a-tag>
           </template>
           <template v-else-if="column.key === 'size'">
             {{ formatSize(record.size) }}
           </template>
-          <template v-else-if="column.key === 'abort'">
-            {{ record.seconds_to_abort !== null ? formatRemaining(record.seconds_to_abort) : '-' }}
+          <template v-else-if="column.key === 'free_type'">
+            <a-tag :color="record.free_type === 'freeleech_permanent' ? 'green' : 'purple'">
+              {{ FREE_TYPE_LABELS[record.free_type] || record.free_type }}
+            </a-tag>
+          </template>
+          <template v-else-if="column.key === 'remaining'">
+            {{ record.free_type === 'freeleech_permanent' ? '永久' : formatRemaining(record.remaining_seconds) }}
           </template>
           <template v-else-if="column.key === 'status'">
-            <a-tag color="default">{{ record.status }}</a-tag>
+            <a-tag :color="STATUS_COLORS[record.status] || 'default'">
+              {{ STATUS_LABELS[record.status] || record.status }}
+            </a-tag>
           </template>
           <template v-else-if="column.key === 'action'">
-            <a-button size="small" danger @click="abort(record.id)">中止</a-button>
+            <a-button
+              v-if="record.status === 'pending'"
+              size="small"
+              type="primary"
+              :loading="pushing"
+              @click="pushOne(record.id)"
+            >
+              推送
+            </a-button>
+            <span v-else-if="record.status === 'pushed'" style="color: rgba(255,255,255,0.45)">
+              ✓
+            </span>
           </template>
         </template>
       </a-table>
