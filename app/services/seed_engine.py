@@ -23,7 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.sites.base import FeedItem
-from app.core.logging import audit, get_logger
+from app.core.logging import get_logger
 from app.core.metrics import cross_seed_added, feed_pulls
 from app.core.timeutils import utcnow
 from app.db.models import (
@@ -34,7 +34,6 @@ from app.db.models import (
     Source,
     Torrent,
     TorrentStatus,
-    TriggerSource,
 )
 from app.db.session import session_scope
 from app.services.cooldown import CooldownService
@@ -273,28 +272,22 @@ class SeedEngine:
         adapter = self._factory.downloader(downloader_row)
         tags = frozenset({"auto", f"site:{site.name}"})
 
-        with audit(
-            "add_torrent",
-            downloader=downloader_row.name,
-            source=TriggerSource.SCHEDULE,
-            count=1,
-            reason="cross_seed",
-            logger=logger,
-        ) as ctx:
-            try:
-                await adapter.add_torrent(
-                    AddTorrentPayload(
-                        name=item.title,
-                        urls=[url],
-                        save_path=str(res.save_path.path),
-                        category=site.category,
-                        tags=tags,
-                    )
+        logger.info(
+            "添加种子 downloader=%s reason=cross_seed", downloader_row.name,
+        )
+        try:
+            await adapter.add_torrent(
+                AddTorrentPayload(
+                    name=item.title,
+                    urls=[url],
+                    save_path=str(res.save_path.path),
+                    category=site.category,
+                    tags=tags,
                 )
-            except Exception as exc:
-                logger.warning("辅种添加失败 %s：%s", item.title, exc)
-                ctx["error"] = str(exc)
-                return False, CooldownReason.DEAD_TORRENT
+            )
+        except Exception as exc:
+            logger.warning("辅种添加失败 %s：%s", item.title, exc)
+            return False, CooldownReason.DEAD_TORRENT
 
         torrent = Torrent(
             info_hash=res.info_hash,

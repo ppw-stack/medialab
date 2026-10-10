@@ -6,9 +6,7 @@ import {
   CloudServerOutlined,
   DownloadOutlined,
   GiftOutlined,
-  BellOutlined,
   DeleteOutlined,
-  AuditOutlined,
   SettingOutlined,
   LogoutOutlined,
   UserOutlined,
@@ -27,9 +25,7 @@ const menuItems = [
   { key: '/downloaders', icon: ApiOutlined, label: '下载器' },
   { key: '/torrents', icon: DownloadOutlined, label: '任务' },
   { key: '/free-seed', icon: GiftOutlined, label: '免费种' },
-  { key: '/alerts', icon: BellOutlined, label: '告警' },
   { key: '/cleanup', icon: DeleteOutlined, label: '清理' },
-  { key: '/audit', icon: AuditOutlined, label: '审计' },
   { key: '/settings', icon: SettingOutlined, label: '设置' },
 ]
 

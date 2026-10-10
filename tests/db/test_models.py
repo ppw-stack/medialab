@@ -13,8 +13,6 @@ from app.db.models import Base, DownloaderInstance, Site, Torrent
 def test_all_expected_tables_registered() -> None:
     """§8 要求的核心表必须齐备。"""
     expected = {
-        "action_logs",
-        "alerts",
         "cooldown_hash",
         "downloader_instances",
         "feeds",
@@ -78,13 +76,13 @@ def test_foreign_keys_declared(table: str) -> None:
     assert Base.metadata.tables[table].foreign_keys, f"{table} 缺少外键声明"
 
 
-@pytest.mark.parametrize("table", ["downloader_instances", "trash", "action_logs"])
+@pytest.mark.parametrize("table", ["downloader_instances", "trash"])
 def test_weak_reference_tables_use_plain_ints(table: str) -> None:
-    """这三张表故意**不**建外键。
+    """这两张表故意**不**建外键。
 
-    理由：站点/下载器被删除后，回收站条目与审计日志必须**保留**（FR-5.2.7
-    可回溯）。若用外键 + 级联删除，历史会随主记录一起消失。
-    因此它们存的是裸 id，删除由业务层显式处理。
+    理由：站点/下载器被删除后，回收站条目必须**保留**。若用外键 +
+    级联删除，历史会随主记录一起消失。因此它们存的是裸 id，
+    删除由业务层显式处理。
     """
     assert not Base.metadata.tables[table].foreign_keys
 

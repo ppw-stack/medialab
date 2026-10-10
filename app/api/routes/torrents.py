@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from app.api.auth import require_session
-from app.db.models import ActionLog, Site, Torrent, TorrentStatus
+from app.db.models import Site, Torrent, TorrentStatus
 from app.db.session import session_scope
 
 router = APIRouter(prefix="/torrents", dependencies=[Depends(require_session)], tags=["torrents"])
@@ -36,16 +36,6 @@ class TorrentOut(BaseModel):
     protect_until: datetime | None
 
 
-class ActionLogOut(BaseModel):
-    ts: datetime
-    action: str
-    trigger_source: str
-    hash_count: int
-    freed_space: int
-    result: str
-    reason: str | None
-
-
 @router.get("", summary="任务列表（多维筛选 + 服务端分页）")
 async def list_torrents(
     site_id: int | None = None,
@@ -64,7 +54,6 @@ async def list_torrents(
         if status:
             base = base.where(Torrent.status == status)
         elif not include_deleted:
-            # 默认不展示"已删除"（下载器中已移除）的任务，除非显式请求
             base = base.where(Torrent.status != TorrentStatus.DELETED)
 
         total = (
@@ -89,37 +78,6 @@ async def list_torrents(
         "page_size": page_size,
         "items": [_to_out(t, site_name) for t, site_name in rows],
     }
-
-
-@router.get("/audit", summary="操作审计检索（FR-2.6）")
-async def list_audit(
-    action: str | None = None,
-    trigger_source: str | None = None,
-    limit: int = Query(100, ge=1, le=1000),
-) -> list[ActionLogOut]:
-    stmt = select(ActionLog)
-    if action:
-        stmt = stmt.where(ActionLog.action == action)
-    if trigger_source:
-        stmt = stmt.where(ActionLog.trigger_source == trigger_source)
-    async with session_scope() as session:
-        rows = (
-            (await session.execute(stmt.order_by(ActionLog.ts.desc()).limit(limit)))
-            .scalars()
-            .all()
-        )
-    return [
-        ActionLogOut(
-            ts=r.ts,
-            action=r.action,
-            trigger_source=r.trigger_source,
-            hash_count=r.hash_count,
-            freed_space=r.freed_space,
-            result=r.result,
-            reason=r.reason,
-        )
-        for r in rows
-    ]
 
 
 @router.get("/{torrent_id}", summary="任务详情")

@@ -37,12 +37,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.downloaders.base import DownloaderAdapter
 from app.adapters.downloaders.locks import locks
-from app.core.logging import audit, get_logger
+from app.core.logging import get_logger
 from app.core.timeutils import utcnow
 from app.db.models import (
     CleanupAction,
     CleanupConfirmation,
-    CleanupLog,
     CleanupPolicy,
     CleanupRule,
     CleanupStatus,
@@ -536,49 +535,45 @@ class Cleaner:
                 return False
 
             # 移入回收站（FR-5.2.3）：先 remove(delete_data=false)
-            with audit(
-                "trash",
-                downloader=adapter.name,
-                source=trigger_source,
-                count=1,
-                reason=cand.reason,
-                logger=logger,
-            ):
-                # 先移入回收站（绝不退化为删除），成功后再从下载器移除种子。
-                # 顺序保证 quarantine 失败时种子仍在下载器中，可重试。
-                ok2, trash_path, qerr = await TrashGuard.quarantine(
-                    download_root,
-                    t.info_hash,
-                    paths,
-                    retention_days=policy.trash_retention_days,
+            logger.info(
+                "移入回收站 action=trash downloader=%s source=%s reason=%s",
+                adapter.name, trigger_source, cand.reason,
+            )
+            # 先移入回收站（绝不退化为删除），成功后再从下载器移除种子。
+            # 顺序保证 quarantine 失败时种子仍在下载器中，可重试。
+            ok2, trash_path, qerr = await TrashGuard.quarantine(
+                download_root,
+                t.info_hash,
+                paths,
+                retention_days=policy.trash_retention_days,
+            )
+            if not ok2:
+                logger.warning("移入回收站失败 %s：%s", t.name, qerr)
+                await self._log_action(
+                    rule=cand.rule,
+                    action=CleanupAction.TRASH,
+                    trigger=trigger_source,
+                    affected=[t.info_hash],
+                    freed=0,
+                    result=CleanupStatus.FAILED,
+                    error=qerr,
                 )
-                if not ok2:
-                    logger.warning("移入回收站失败 %s：%s", t.name, qerr)
-                    await self._log_action(
-                        rule=cand.rule,
-                        action=CleanupAction.TRASH,
-                        trigger=trigger_source,
-                        affected=[t.info_hash],
-                        freed=0,
-                        result=CleanupStatus.FAILED,
-                        error=qerr,
-                    )
-                    return False
-                # 文件已隔离，再从下载器移除种子（delete_data=false，文件已不在原位）
-                try:
-                    await adapter.remove([t.info_hash], delete_data=False)
-                except Exception as exc:
-                    logger.warning("下载器移除任务失败：%s", exc)
-                    await self._log_action(
-                        rule=cand.rule,
-                        action=CleanupAction.TRASH,
-                        trigger=trigger_source,
-                        affected=[t.info_hash],
-                        freed=0,
-                        result=CleanupStatus.FAILED,
-                        error=str(exc),
-                    )
-                    return False
+                return False
+            # 文件已隔离，再从下载器移除种子（delete_data=false，文件已不在原位）
+            try:
+                await adapter.remove([t.info_hash], delete_data=False)
+            except Exception as exc:
+                logger.warning("下载器移除任务失败：%s", exc)
+                await self._log_action(
+                    rule=cand.rule,
+                    action=CleanupAction.TRASH,
+                    trigger=trigger_source,
+                    affected=[t.info_hash],
+                    freed=0,
+                    result=CleanupStatus.FAILED,
+                    error=str(exc),
+                )
+                return False
 
             # 写 trash 表
             from app.db.models import Trash
@@ -622,22 +617,12 @@ class Cleaner:
         result: str,
         error: str = "",
     ) -> None:
-        rule_id = getattr(rule, "id", None) if rule else None
         rule_name = getattr(rule, "name", "") if rule else ""
-        self._session.add(
-            CleanupLog(
-                rule_id=rule_id,
-                rule_name=rule_name,
-                action=action,
-                trigger_source=trigger,
-                affected_count=len(affected),
-                freed_space=freed,
-                hashes=affected,
-                result=result,
-                error=error[:2000] or None,
-            )
+        logger.info(
+            "清理动作 action=%s trigger=%s rule=%s affected=%d freed=%d result=%s%s",
+            action, trigger, rule_name, len(affected), freed, result,
+            f" error={error}" if error else "",
         )
-        await self._session.flush()
 
     async def _resolve_download_root(self, candidates: list[Torrent]) -> str | None:
         """从候选任务的下载器配置里取 download_root。
@@ -677,38 +662,6 @@ async def generate_report(
     session: AsyncSession, *, since: datetime | None = None
 ) -> dict[str, object]:
     """FR-5.4 每日清理报告。"""
-    since = since or (utcnow() - timedelta(days=1))
-    rows = (
-        (
-            await session.execute(
-                select(CleanupLog)
-                .where(CleanupLog.ts >= since)
-                .order_by(CleanupLog.ts.desc())
-            )
-        )
-        .scalars()
-        .all()
-    )
-    by_action: dict[str, int] = {}
-    by_rule: dict[str, int] = {}
-    freed_total = 0
-    affected_total = 0
-    top: list[dict[str, object]] = []
-    for r in rows:
-        key_a = r.action or ""
-        by_action[key_a] = by_action.get(key_a, 0) + r.affected_count
-        key_r = r.rule_name or ""
-        by_rule[key_r] = by_rule.get(key_r, 0) + r.affected_count
-        freed_total += r.freed_space
-        affected_total += r.affected_count
-        hashes = r.hashes or []
-        per_hash = r.freed_space // len(hashes) if hashes else 0
-        for h in hashes:
-            top.append({"hash": h, "freed": per_hash, "rule": r.rule_name})
-
-    top.sort(key=lambda x: int(str(x["freed"] or 0)), reverse=True)
-
-    # 7 天后到期彻底删除清单（FR-5.4）
     from app.db.models import Trash
 
     expire_at = utcnow()
@@ -729,13 +682,8 @@ async def generate_report(
     )
 
     return {
-        "since": since,
+        "since": since or (utcnow() - timedelta(days=1)),
         "until": utcnow(),
-        "total_affected": affected_total,
-        "total_freed": freed_total,
-        "by_action": by_action,
-        "by_rule": by_rule,
-        "top_freed": top[:10],
         "pending_purge_7d": [
             {
                 "id": t.id,

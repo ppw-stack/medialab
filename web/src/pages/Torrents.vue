@@ -10,11 +10,6 @@ interface Torrent {
   protect_until: string | null;
 }
 
-interface AuditEntry {
-  id: number; ts: string; action: string; trigger_source: string;
-  hash_count: number; freed_space: number; result: string; reason: string | null;
-}
-
 const STATUS_COLOR: Record<string, string> = {
   active: 'green', paused: 'orange', completed: 'blue', aborted: 'red', deleted: 'gray',
   free_completed: 'green', free_completed_late: 'orange', free_missed: 'red',
@@ -42,7 +37,6 @@ const filters = ref<{ site_id?: number; source?: string; status?: string; q?: st
 const page = ref(1)
 const pageSize = ref(20)
 const detail = ref<Torrent | null>(null)
-const audit = ref<AuditEntry[]>([])
 const stats = ref<{ by_status: Record<string, number>; by_source: Record<string, number> } | null>(null)
 
 async function load() {
@@ -67,12 +61,6 @@ onMounted(() => {
 
 async function onShowDetail(t: Torrent) {
   detail.value = t
-  try {
-    const r = await api.get<{ items: AuditEntry[] }>('/torrents/audit?limit=50')
-    audit.value = r.items.filter((a) => a.action === 'add_torrent' || a.action === 'trash' || a.action === 'remove')
-  } catch {
-    audit.value = []
-  }
 }
 
 const filtered = computed(() => {
@@ -245,30 +233,6 @@ const columns = [
             <a-col :span="16">{{ formatDate(detail.protect_until) }}</a-col>
           </template>
         </a-row>
-
-        <a-typography-title :level="5" style="margin-top: 24px">审计 (近 50 条)</a-typography-title>
-        <a-table
-          :data-source="audit"
-          :pagination="false"
-          size="small"
-          row-key="id"
-          :columns="[
-            { title: '时间', dataIndex: 'ts', key: 'ts', width: 160 },
-            { title: '动作', dataIndex: 'action', key: 'action' },
-            { title: '触发源', dataIndex: 'trigger_source', key: 'ts2' },
-            { title: '数量', dataIndex: 'hash_count', key: 'count', width: 60 },
-            { title: '释放', dataIndex: 'freed_space', key: 'free' },
-            { title: '结果', dataIndex: 'result', key: 'r' },
-          ]"
-        >
-          <template #bodyCell="{ column, record }">
-            <template v-if="column.key === 'ts'">{{ formatDate(record.ts) }}</template>
-            <template v-else-if="column.key === 'free'">{{ formatSize(record.freed_space) }}</template>
-            <template v-else-if="column.key === 'r'">
-              <a-tag :color="record.result === 'done' ? 'green' : 'red'">{{ record.result }}</a-tag>
-            </template>
-          </template>
-        </a-table>
       </div>
     </a-modal>
   </div>

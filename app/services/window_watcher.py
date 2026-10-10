@@ -32,7 +32,6 @@ from app.db.models import (
     TorrentStatus,
 )
 from app.db.session import session_scope
-from app.services.alerter import Alerter
 from app.services.factory import AdapterFactory
 from app.services.free_seed_hunter import win_policy  # noqa: F401
 from app.services.task_queue import TaskQueueService
@@ -58,10 +57,8 @@ class WindowWatcher:
     def __init__(
         self,
         factory: AdapterFactory,
-        alerter: Alerter | None = None,
     ) -> None:
         self._factory = factory
-        self._alerter = alerter
 
     async def watch_active(self) -> dict[str, int]:
         """对所有在途免费种执行一轮看护。"""
@@ -143,9 +140,8 @@ class WindowWatcher:
             )
             return "aborted"
 
-        # 3) 接近红线（deadline_at ≤ now < abort_at）：预警 + 抢救
+        # 3) 接近红线（deadline_at ≤ now < abort_at）：抢救
         if t.deadline_at is not None and now >= t.deadline_at:
-            await self._alert_warning(session, t, remaining)
             rescued = await self._maybe_rescue(session, t, remaining)
             if rescued:
                 return "rescued"
@@ -273,33 +269,6 @@ class WindowWatcher:
         except Exception as exc:
             logger.warning("提速失败 %s：%s", t.name, exc)
             return False
-
-    # ---------------------------------------------------------------- 预警
-    async def _alert_warning(
-        self,
-        session: AsyncSession,
-        t: Torrent,
-        remaining: timedelta,
-    ) -> None:
-        """接近红线：🟡 告警 + 速率可行性评估。FR-3.4 巡检行表。"""
-        # 复用 M3 告警中心（如果 lifespan 初始化过）
-        if self._alerter is None:
-            return
-        level = "warning" if remaining > timedelta(minutes=30) else "critical"
-        msg = (
-            f"{t.name} 进入 deadline_at 预警区间，"
-            f"剩余 {int(remaining.total_seconds() // 60)} 分钟"
-        )
-        try:
-            await self._alerter.record(
-                level,
-                "free_seed_warning",
-                msg,
-                info_hash=t.info_hash,
-                torrent_id=t.id,
-            )
-        except Exception as exc:
-            logger.debug("告警失败：%s", exc)
 
 
 def CooldownReasonClass(reason: str) -> str:

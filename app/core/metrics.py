@@ -34,14 +34,6 @@ free_seed_outcomes = Counter(
     registry=REGISTRY,
 )
 
-#: 告警数
-alerts_sent = Counter(
-    "seedhelper_alerts_total",
-    "告警发送数",
-    labelnames=("level", "channel"),
-    registry=REGISTRY,
-)
-
 #: 清理任务数
 cleanup_actions = Counter(
     "seedhelper_cleanup_actions_total",

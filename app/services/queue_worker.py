@@ -11,14 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.downloaders.base import AddTorrentPayload
 from app.adapters.downloaders.locks import locks
-from app.core.logging import audit, get_logger
+from app.core.logging import get_logger
 from app.db.models import (
     AddHistory,
     DownloaderInstance,
     Source,
     Torrent,
     TorrentStatus,
-    TriggerSource,
 )
 from app.db.session import session_scope
 from app.services.factory import AdapterFactory
@@ -114,24 +113,17 @@ async def _execute(
     if not url:
         return False
 
-    with audit(
-        "add_torrent",
-        downloader=dl.name,
-        source=TriggerSource.SCHEDULE,
-        count=1,
-        reason="queue_replay",
-        logger=logger,
-    ):
-        async with locks.acquire(dl.name):
-            await adapter.add_torrent(
-                AddTorrentPayload(
-                    name=str(payload.get("name") or info_hash),
-                    urls=[url],
-                    save_path=str(payload.get("save_path") or ""),
-                    category=str(payload.get("category") or site.category),
-                    tags=frozenset({"auto", f"site:{site.name}"}),
-                )
+    logger.info("添加种子 downloader=%s reason=queue_replay", dl.name)
+    async with locks.acquire(dl.name):
+        await adapter.add_torrent(
+            AddTorrentPayload(
+                name=str(payload.get("name") or info_hash),
+                urls=[url],
+                save_path=str(payload.get("save_path") or ""),
+                category=str(payload.get("category") or site.category),
+                tags=frozenset({"auto", f"site:{site.name}"}),
             )
+        )
 
     from datetime import timedelta
 

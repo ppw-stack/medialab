@@ -12,7 +12,6 @@ from sqlalchemy import select
 from app.api.auth import require_session
 from app.db.models import (
     CleanupConfirmation,
-    CleanupLog,
     CleanupPolicy,
     CleanupRule,
     CleanupStatus,
@@ -420,32 +419,3 @@ async def execute_aborts() -> RunResult:
         blocked_reasons=out.blocked_reasons,
         error=out.error,
     )
-
-
-# ---------------------------------------------------------------- 审计
-@router.get("/logs", summary="清理审计日志（FR-5.2.7）")
-async def list_logs(limit: int = 100) -> list[dict[str, Any]]:
-    async with session_scope() as session:
-        rows = (
-            (
-                await session.execute(
-                    select(CleanupLog).order_by(CleanupLog.ts.desc()).limit(limit)
-                )
-            )
-            .scalars()
-            .all()
-        )
-        return [
-            {
-                "id": r.id,
-                "ts": r.ts,
-                "rule_name": r.rule_name,
-                "action": r.action,
-                "trigger_source": r.trigger_source,
-                "affected_count": r.affected_count,
-                "freed_space": r.freed_space,
-                "result": r.result,
-                "error": r.error,
-            }
-            for r in rows
-        ]

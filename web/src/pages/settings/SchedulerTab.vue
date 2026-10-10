@@ -20,7 +20,6 @@ interface SchedulerInfo {
 const JOB_LABELS: Record<string, { name: string; desc: string }> = {
   cross_seed:     { name: '辅种拉取',     desc: 'FR-2：每小时从各站点 RSS 拉取一次（受 FR-2.2 频率下限约束）' },
   queue_replay:   { name: '队列重放',     desc: '§6：每 5 分钟消费 task_queue 中 pending 任务（崩溃恢复）' },
-  inspect:        { name: '巡检',         desc: 'FR-4.1：每 15 分钟巡检全部任务 + 触发告警' },
   free_seed_poll: { name: '免费种拉取',   desc: 'FR-3：每 10 分钟捕获免费种候选 + 添加到下载器' },
   window_watch:   { name: '窗口看护',     desc: 'FR-3.4：每 60 秒检查在途免费种，按紧迫度调整' },
   cleanup_aborts: { name: '中止处理',     desc: 'M5：每 5 分钟消费 M4 中止产物走 Cleaner 管线' },

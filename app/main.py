@@ -26,7 +26,6 @@ from app.services.factory import AdapterFactory, init_factory
 from app.services.jobs import (
     register_cleanup_jobs,
     register_free_seed_jobs,
-    register_inspect_job,
     register_jobs,
 )
 from app.services.queue_worker import recover_on_start, replay_once
@@ -82,7 +81,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         hunter = FreeSeedHunter(factory)
         watcher = WindowWatcher(factory)
         register_jobs(engine, lambda: replay_once(factory))
-        register_inspect_job(factory)
         register_free_seed_jobs(hunter, watcher)
         register_cleanup_jobs(factory)
 
@@ -122,7 +120,6 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 def _mount_routes(app: FastAPI) -> None:
     from app.api.auth import router as auth_router
     from app.api.routes import (
-        alerts,
         cleanup,
         cross_seed,
         dashboard,
@@ -137,7 +134,6 @@ def _mount_routes(app: FastAPI) -> None:
         sites.router,
         torrents.router,
         downloaders.router,
-        alerts.router,
         cross_seed.router,
         free_seed.router,
         cleanup.router,

@@ -181,13 +181,6 @@ async def test_dry_run_does_not_touch_torrent(env_with_dl) -> None:
     assert out.candidates_total == 1
     assert out.candidates_executed == 0
 
-    async with session_scope() as s:
-
-        from app.db.models import CleanupLog
-
-        logs = (await s.execute(select(CleanupLog))).scalars().all()
-        assert logs == []  # 干跑不写日志
-
 
 async def test_dry_run_required_first_use(env_with_dl) -> None:
     """首次启用强制干跑：dry_run_done=False 时即使不传 dry_run 也走干跑。"""

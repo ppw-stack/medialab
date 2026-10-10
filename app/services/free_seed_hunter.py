@@ -19,14 +19,14 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.downloaders.base import AddTorrentPayload
 from app.adapters.sites.base import FeedItem
-from app.core.logging import audit, get_logger
+from app.core.logging import get_logger
 from app.core.metrics import free_seed_outcomes
 from app.core.timeutils import utcnow
 from app.core.windows import FreeWindow, WindowPolicy
@@ -41,7 +41,6 @@ from app.db.models import (
     Source,
     Torrent,
     TorrentStatus,
-    TriggerSource,
 )
 from app.db.session import session_scope
 from app.services.cooldown import CooldownService
@@ -323,8 +322,6 @@ class FreeSeedHunter:
         adapter = self._factory.downloader(dl)
         tags = frozenset({"auto", "free-seed", f"site:{site.name}"})
 
-        from datetime import timedelta
-
         now = utcnow()
         torrent = Torrent(
             info_hash=info_hash,
@@ -385,32 +382,25 @@ class FreeSeedHunter:
                     url = real
             except Exception as exc:
                 logger.debug("取真实下载 URL 失败 %s：%s", item_id, exc)
-        with audit(
-            "add_torrent",
-            downloader=dl.name,
-            source=TriggerSource.SCHEDULE,
-            count=1,
-            reason="free_seed",
-            logger=logger,
-        ):
-            try:
-                await adapter.add_torrent(
-                    AddTorrentPayload(
-                        name=item.title,
-                        urls=[url] if url else [],
-                        category=site.category,
-                        tags=tags,
-                    )
+        logger.info("添加种子 downloader=%s reason=free_seed", dl.name)
+        try:
+            await adapter.add_torrent(
+                AddTorrentPayload(
+                    name=item.title,
+                    urls=[url] if url else [],
+                    category=site.category,
+                    tags=tags,
                 )
-            except Exception as exc:
-                logger.warning("免费种添加失败 %s：%s", item.title, exc)
-                torrent.status = TorrentStatus.ABORTED
-                torrent.aborted_reason = "add_failed"
-                stats.failed += 1
-                free_seed_outcomes.labels(
-                    outcome="failed", reason="add_error"
-                ).inc()
-                return
+            )
+        except Exception as exc:
+            logger.warning("免费种添加失败 %s：%s", item.title, exc)
+            torrent.status = TorrentStatus.ABORTED
+            torrent.aborted_reason = "add_failed"
+            stats.failed += 1
+            free_seed_outcomes.labels(
+                outcome="failed", reason="add_error"
+            ).inc()
+            return
 
         if url:
             queue = TaskQueueService(session)
