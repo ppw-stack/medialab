@@ -25,9 +25,13 @@ RSS 兜底：当 ``apikey`` 缺失时降级到 RSS（无免费标记，识别率
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 import xml.etree.ElementTree as ET
@@ -51,6 +55,9 @@ _MAX_ITEMS_PER_PULL = 500
 
 #: 默认搜索参数可见性：1=正常，2=仅下载过的，3=未下载的（M-Team 官方值）
 _DEFAULT_VISIBILITY = 1
+
+#: m-team API 签名密钥（从前端 JS bundle 逆向，公开值）
+_API_SECRET = "HLkPcWmycL57mfJt"
 
 #: m-team 影片类目（MoviePilot 总结的 cat id）
 _MOVIE_CATEGORIES = ("401", "419", "420", "421", "439", "404", "405")
@@ -145,6 +152,20 @@ class MteamAdapter(SiteAdapter):
         if self._cookies:
             h["Cookie"] = self._cookies
         return h
+
+    @staticmethod
+    def _api_sign(path: str, ts_ms: int, method: str = "POST") -> str:
+        """m-team API 签名：HMAC-SHA1("{METHOD}&{path}&{ts}")，密钥从前端 JS 逆向。"""
+        msg = f"{method}&{path}&{ts_ms}"
+        return hmac.new(_API_SECRET.encode(), msg.encode(), hashlib.sha1).hexdigest()
+
+    def _signed_form(self, path: str, **fields: Any) -> str:
+        """构造带 ``_timestamp``/``_sign`` 的 form body（MoviePilot 同款）。"""
+        ts = int(time.time() * 1000)
+        data: dict[str, Any] = {"_timestamp": str(ts), "_sign": self._api_sign(path, ts)}
+        for k, v in fields.items():
+            data[k] = str(v) if v is not None else ""
+        return urlencode(data)
 
     @staticmethod
     def _parse_iso_dt(value: object) -> datetime | None:
@@ -482,14 +503,17 @@ class MteamAdapter(SiteAdapter):
     async def torrent_detail(self, item_id: str) -> dict[str, object]:
         """拉取详情：调 ``/api/torrent/genDlToken`` 拿下载 URL，返回 ``{id, download_url}``。
 
-        也支持 RSS 详情页 HTML 解析（向后兼容）。
+        注意：genDlToken 必须用 form POST（application/x-www-form-urlencoded）
+        + ``_timestamp``/``_sign`` 签名（MoviePilot 同款），JSON body 会返回"參數錯誤"。
         """
         if self._apikey and self._api_base():
+            path = "/api/torrent/genDlToken"
+            body = self._signed_form(path, id=str(item_id))
             try:
                 resp = await self._client.post(
-                    f"{self._api_base()}/api/torrent/genDlToken",
-                    headers={**self._auth_headers(), "Content-Type": "application/json"},
-                    json={"id": item_id},
+                    f"{self._api_base()}{path}",
+                    headers={**self._auth_headers(), "Content-Type": "application/x-www-form-urlencoded"},
+                    content=body,
                     timeout=self._timeout,
                 )
             except httpx.HTTPError as exc:
@@ -504,7 +528,7 @@ class MteamAdapter(SiteAdapter):
                 return {"id": item_id, "_error": "响应非 JSON"}
             if str(data.get("code")) != "0":
                 return {"id": item_id, "_error": data.get("message", "genDlToken 失败")}
-            return {"id": item_id, "download_url": (data.get("data") or {}).get("url") or ""}
+            return {"id": item_id, "download_url": str(data.get("data") or "")}
         # 兜底：HTML 详情页
         url = self._detail_url(item_id)
         if not url:
@@ -516,6 +540,102 @@ class MteamAdapter(SiteAdapter):
         if resp.status_code >= 400:
             return {}
         return {"_html": resp.text[:20000]}
+
+    async def download_torrent(self, item_id: str) -> tuple[bytes | None, str | None]:
+        """下载 torrent 文件，返回 ``(torrent_bytes, infohash)``。
+
+        infohash = torrent 文件 info dict 的 bencoded 表示的 SHA1。
+        获取 infohash 的唯一可靠途径（m-team search API 的 ``infoHash`` 恒为 None）。
+        """
+        detail = await self.torrent_detail(item_id)
+        download_url = detail.get("download_url")
+        if not download_url:
+            return None, detail.get("_error")
+        try:
+            resp = await self._client.get(
+                str(download_url),
+                headers=self._auth_headers(),
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            return None, f"下载 torrent 失败：{exc}"
+        if resp.status_code >= 400:
+            return None, f"HTTP {resp.status_code}"
+        content = resp.content
+        if not content.startswith(b"d"):
+            return None, "响应不是 bencoded torrent"
+        info_hash = self._infohash_from_torrent(content)
+        return content, info_hash
+
+    async def fetch_infohash(self, item_id: str) -> str | None:
+        """m-team search API 不返回 hash，通过下载 torrent 文件解析。
+
+        错误情况返回 None（错误信息丢弃，不影响业务）。
+        """
+        _content, info_hash = await self.download_torrent(item_id)
+        if not info_hash or not isinstance(info_hash, str) or len(info_hash) != 40:
+            return None
+        return info_hash
+
+    @staticmethod
+    def _infohash_from_torrent(torrent_bytes: bytes) -> str | None:
+        """从 torrent 文件解析 infohash（info dict 的 bencoded SHA1）。"""
+        try:
+            info = MteamAdapter._bdecode_info(torrent_bytes)
+        except (ValueError, IndexError):
+            return None
+        encoded = MteamAdapter._bencode(info)
+        return hashlib.sha1(encoded).hexdigest()
+
+    @staticmethod
+    def _bdecode_info(data: bytes) -> dict[bytes, Any]:
+        """解析 torrent 的 info dict。"""
+        def _decode(idx: int) -> tuple[Any, int]:
+            c = data[idx:idx + 1]
+            if c == b'd':
+                idx += 1
+                d: dict[bytes, Any] = {}
+                while data[idx:idx + 1] != b'e':
+                    k, idx = _decode(idx)
+                    v, idx = _decode(idx)
+                    d[k] = v
+                return d, idx + 1
+            if c == b'l':
+                idx += 1
+                lst: list[Any] = []
+                while data[idx:idx + 1] != b'e':
+                    v, idx = _decode(idx)
+                    lst.append(v)
+                return lst, idx + 1
+            if c == b'i':
+                idx += 1
+                end = data.index(b'e', idx)
+                return int(data[idx:end]), end + 1
+            if c in b'0123456789':
+                end = data.index(b':', idx)
+                n = int(data[idx:end])
+                return data[end + 1:end + 1 + n], end + 1 + n
+            raise ValueError(f"bad bencode char {c!r} at {idx}")
+
+        root, _ = _decode(0)
+        if not isinstance(root, dict) or b'info' not in root:
+            raise ValueError("missing info dict")
+        return root[b'info']
+
+    @staticmethod
+    def _bencode(obj: Any) -> bytes:
+        if isinstance(obj, int):
+            return b'i' + str(obj).encode() + b'e'
+        if isinstance(obj, bytes):
+            return str(len(obj)).encode() + b':' + obj
+        if isinstance(obj, str):
+            return MteamAdapter._bencode(obj.encode())
+        if isinstance(obj, dict):
+            items = sorted(obj.items(), key=lambda x: x[0])
+            return b'd' + b''.join(MteamAdapter._bencode(k) + MteamAdapter._bencode(v) for k, v in items) + b'e'
+        if isinstance(obj, list):
+            return b'l' + b''.join(MteamAdapter._bencode(v) for v in obj) + b'e'
+        raise ValueError(f"bad bencode type {type(obj)}")
 
     async def verify_status(self, info_hash: str) -> TorrentBrief:
         """m-team search API 不暴露删除/违规状态 → UNKNOWN。"""

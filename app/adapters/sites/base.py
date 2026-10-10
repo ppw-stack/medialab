@@ -123,6 +123,14 @@ class SiteAdapter(ABC):
         """详情页/API 原始字段。不支持时返回空 dict。"""
         return {}
 
+    async def fetch_infohash(self, item_id: str) -> str | None:
+        """获取单一种子的 InfoHash（FR-1.5）。
+
+        多数站点 RSS 自带 hash；m-team 等 API 站点 search 不返回 hash，
+        需下载 torrent 文件解析。不支持时返回 None，由业务层按无 hash 处理。
+        """
+        return None
+
     @abstractmethod
     async def parse_window(
         self, raw: str | dict[str, object], *, source_hint: str | None = None

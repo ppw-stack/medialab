@@ -35,6 +35,7 @@ from app.db.models import (
     CooldownReason,
     DownloaderInstance,
     Feed,
+    FreeSource,
     FreeType,
     Site,
     Source,
@@ -192,6 +193,9 @@ class FreeSeedHunter:
         """单条目完整处理：解析 → 过滤 → 落库 → 投递 → 审计。"""
         info_hash = extract_info_hash(item)
         if info_hash is None:
+            # m-team 等 API 站点 search 不返回 hash——惰性下载 torrent 解析
+            info_hash = await self._resolve_infohash(site, item)
+        if info_hash is None:
             stats.note_skip("no_info_hash")
             return
 
@@ -205,7 +209,7 @@ class FreeSeedHunter:
 
         # 永久免费：直接转辅种池（FR-3.0 表 + R10）
         if window.is_permanent:
-            await self._record_permanent(session, site, info_hash, item, stats)
+            await self._record_permanent(session, site, info_hash, item, stats, dl)
             return
 
         # 窗口未知：低置信度降级，按 unknown 处理（FR-1.5.3）
@@ -290,11 +294,38 @@ class FreeSeedHunter:
             return
 
         # 投递
+        await self._add_to_downloader(
+            session, site, dl, item, info_hash, stats,
+            free_type=window.free_type,
+            free_source=window.free_source,
+            free_end_at=free_end_at,
+            deadline_at=deadline_at,
+            abort_at=abort_at,
+        )
+        return
+
+    async def _add_to_downloader(
+        self,
+        session: AsyncSession,
+        site: Site,
+        dl: DownloaderInstance,
+        item: FeedItem,
+        info_hash: str,
+        stats: FreeRoundStats,
+        *,
+        free_type: str = FreeType.PERMANENT,
+        free_source: str = FreeSource.API,
+        free_end_at: datetime | None = None,
+        deadline_at: datetime | None = None,
+        abort_at: datetime | None = None,
+    ) -> None:
+        """落库 + add_torrent + 入队便于重放。供限时免费与永久免费复用。"""
         adapter = self._factory.downloader(dl)
         tags = frozenset({"auto", "free-seed", f"site:{site.name}"})
 
         from datetime import timedelta
 
+        now = utcnow()
         torrent = Torrent(
             info_hash=info_hash,
             name=item.title[:1024],
@@ -306,20 +337,32 @@ class FreeSeedHunter:
             source=Source.FREE_SEED,
             status=TorrentStatus.ACTIVE,
             is_free=True,
-            free_type=window.free_type or FreeType.TIMED,
+            free_type=free_type,
             free_end_at=free_end_at,
-            free_source=window.free_source,
-            free_confidence=window.confidence,
-            free_duration=int((free_end_at - utcnow()).total_seconds()),
+            free_source=free_source,
+            free_confidence=1.0,
+            free_duration=0,
             clock_offset=site.clock_offset,
-            deadline_at=deadline_at,
-            abort_at=abort_at,
-            protect_until=utcnow() + timedelta(hours=PROTECT_HOURS),
+            deadline_at=deadline_at or (now + timedelta(hours=1)),
+            abort_at=abort_at or (now + timedelta(hours=1)),
+            protect_until=now + timedelta(hours=PROTECT_HOURS),
         )
-        # 先持久化 DB 记录，再操作下载器：commit 失败时看护仍能发现此种子
+        # 先持久化 DB 记录，再操作下载器
         session.add(torrent)
         await session.flush()
 
+        url = item.torrent_url or item.link
+        # m-team 适配层把 torrent_url 设为占位符 "api://gen/<id>"。
+        # add_torrent 需要真实 URL；惰性通过适配器 torrent_detail 拿。
+        if isinstance(url, str) and url.startswith("api://gen/"):
+            item_id = url.rsplit("/", 1)[-1]
+            try:
+                detail = await self._factory.site(site).torrent_detail(item_id)
+                real = detail.get("download_url")
+                if real:
+                    url = real
+            except Exception as exc:
+                logger.debug("取真实下载 URL 失败 %s：%s", item_id, exc)
         with audit(
             "add_torrent",
             downloader=dl.name,
@@ -332,7 +375,7 @@ class FreeSeedHunter:
                 await adapter.add_torrent(
                     AddTorrentPayload(
                         name=item.title,
-                        urls=[url],
+                        urls=[url] if url else [],
                         category=site.category,
                         tags=tags,
                     )
@@ -347,34 +390,33 @@ class FreeSeedHunter:
                 ).inc()
                 return
 
-        # 入队便于重放（与 M2 共享 task_queue，但幂等键区分）
-        queue = TaskQueueService(session)
-        await queue.enqueue(
-            TaskKind.ADD_TORRENT,
-            {
-                "site_id": site.id,
-                "downloader_id": dl.id,
-                "info_hash": info_hash,
-                "name": item.title,
-                "url": url,
-                "category": site.category,
-                "tags": list(tags),
-                "free_seed": True,
-            },
-            idem_key=free_idem_key(site.id, info_hash),
-        )
-
-        # 永久的历史幂等凭证（FR-2.3）：与辅种共用
-        session.add(
-            AddHistory(
-                site_id=site.id,
-                info_hash=info_hash,
-                torrent_id=torrent.id,
-                name=item.title[:1024],
-                source=Source.FREE_SEED,
-                outcome="added",
+        if url:
+            queue = TaskQueueService(session)
+            await queue.enqueue(
+                TaskKind.ADD_TORRENT,
+                {
+                    "site_id": site.id,
+                    "downloader_id": dl.id,
+                    "info_hash": info_hash,
+                    "name": item.title,
+                    "url": url,
+                    "category": site.category,
+                    "tags": list(tags),
+                    "free_seed": True,
+                },
+                idem_key=free_idem_key(site.id, info_hash),
             )
-        )
+
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+        stmt = sqlite_insert(AddHistory).values(
+            site_id=site.id,
+            info_hash=info_hash,
+            torrent_id=torrent.id,
+            name=item.title[:1024],
+            source=Source.FREE_SEED,
+            outcome="added",
+        ).on_conflict_do_nothing(index_elements=["site_id", "info_hash"])
+        await session.execute(stmt)
         stats.added += 1
         stats.accepted += 1
         free_seed_outcomes.labels(outcome="added", reason="").inc()
@@ -386,11 +428,13 @@ class FreeSeedHunter:
         info_hash: str,
         item: FeedItem,
         stats: FreeRoundStats,
+        dl: DownloaderInstance | None = None,
     ) -> None:
-        """永久免费：直接转辅种池（R10），不挂看护。
+        """永久免费：转辅种池（R10），有下载器时立即投递。
 
-        这里不下载——辅种引擎的 RSS 拉取会自然命中。
-        仅落库历史与本次统计。
+        优先：若站点配置了下载器且 m-team 模式（适配层有 torrent_url/dlc），
+        立即 add_torrent 投递（避免等辅种轮询）；否则只登记历史，依赖
+        辅种轮询命中。
         """
         existing = (
             await session.execute(
@@ -401,18 +445,25 @@ class FreeSeedHunter:
             )
         ).scalar_one_or_none()
         if existing is None:
-            session.add(
-                AddHistory(
-                    site_id=site.id,
-                    info_hash=info_hash,
-                    name=item.title[:1024],
-                    source=Source.FREE_SEED,
-                    outcome="permanent_free",
-                )
-            )
+            # INSERT OR IGNORE：同 (site_id, info_hash) 已存在不抛错
+            from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+            stmt = sqlite_insert(AddHistory).values(
+                site_id=site.id,
+                info_hash=info_hash,
+                name=item.title[:1024],
+                source=Source.FREE_SEED,
+                outcome="permanent_free",
+            ).on_conflict_do_nothing(index_elements=["site_id", "info_hash"])
+            await session.execute(stmt)
         stats.permanent += 1
         free_seed_outcomes.labels(outcome="permanent", reason="").inc()
         logger.debug("永久免费 %s 登记转辅种池", info_hash[:8])
+        # 有下载器：立即 add_torrent 投递（m-team API 站有 torrent_url）
+        if dl is not None and item.torrent_url:
+            try:
+                await self._add_to_downloader(session, site, dl, item, info_hash, stats)
+            except Exception as exc:
+                logger.debug("永久免费投递失败 %s：%s", item.title[:30], exc)
 
     # ------------------------------------------------------------ 整站全轮
     async def run_all(self, *, force: bool = False) -> list[FreeRoundStats]:
@@ -450,6 +501,29 @@ class FreeSeedHunter:
                 )
             )
         ).scalar_one_or_none()
+
+    @staticmethod
+    def _item_id(item: FeedItem) -> str | None:
+        """从 link 提取站点种子 ID（m-team 详情 URL 末段）。"""
+        if not item.link:
+            return None
+        tail = item.link.rstrip("/").rsplit("/", 1)[-1]
+        return tail or None
+
+    async def _resolve_infohash(self, site: Site, item: FeedItem) -> str | None:
+        """info_hash 缺失时，让站点适配器惰性下载 torrent 解析（m-team 等）。"""
+        item_id = self._item_id(item)
+        if not item_id:
+            return None
+        try:
+            adapter = self._factory.site(site)
+        except Exception:
+            return None
+        try:
+            return await adapter.fetch_infohash(item_id)
+        except Exception as exc:
+            logger.debug("站点 %s 获取 %s 的 infohash 失败：%s", site.name, item_id, exc)
+            return None
 
     @staticmethod
     def _feed_item_to_raw(item: FeedItem) -> str | dict[str, object]:
