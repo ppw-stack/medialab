@@ -20,6 +20,7 @@ from app.adapters.sites.base import SiteAdapter
 #: 键 = Site.adapter 字段值（小写字母数字，下划线），值 = "module.path.ClassName"。
 _BUILTIN: dict[str, str] = {
     "mteam": "app.adapters.sites.mteam.MteamAdapter",
+    "hhanclub": "app.adapters.sites.hhanclub.HhanclubAdapter",
 }
 
 
@@ -43,4 +44,4 @@ def list_available() -> list[str]:
     return list(_BUILTIN.keys())
 
 
-__all__ = ["resolve", "list_available"]
+__all__ = ["list_available", "resolve"]

@@ -8,6 +8,7 @@ interface Site {
   enabled: boolean;
   rss_url_masked: string;
   has_apikey: boolean;
+  has_cookies: boolean;
   default_free_duration: number;
   min_buffer: number;
   buffer_ratio: number;
@@ -19,6 +20,7 @@ interface Site {
 
 const ADAPTERS = [
   { value: 'mteam', label: 'M-team（m-team.cc）' },
+  { value: 'hhanclub', label: 'HHanClub（hhanclub.net）' },
 ]
 
 const RESCUE_STRATEGIES = [
@@ -70,6 +72,7 @@ function onCreate() {
     domain: '',
     rss_url: '',
     apikey: '',
+    cookies: '',
     max_size: undefined,
   })
 }
@@ -85,6 +88,7 @@ function onEdit(s: Site) {
     min_buffer: s.min_buffer / 60,
     rss_url: '',
     apikey: '',  // 永远不清空原 key，留空 = 不修改
+    cookies: '',  // 永远不清空原 cookies，留空 = 不修改
   })
 }
 
@@ -194,7 +198,8 @@ const columns = [
             <a-space :size="4">
               <a-tag v-if="record.rss_url_masked" color="cyan">RSS</a-tag>
               <a-tag v-if="record.has_apikey" color="purple">API key</a-tag>
-              <a-tag v-if="!record.rss_url_masked && !record.has_apikey">—</a-tag>
+              <a-tag v-if="record.has_cookies" color="cyan">Cookies</a-tag>
+              <a-tag v-if="!record.rss_url_masked && !record.has_apikey && !record.has_cookies">—</a-tag>
             </a-space>
           </template>
           <template v-else-if="column.key === 'clock'">
@@ -273,6 +278,16 @@ const columns = [
           <a-input-password
             v-model:value="formState.apikey"
             :placeholder="editing && (editing as any).has_apikey ? '已配置（留空保留）' : '在 m-team 控制台 → API 令牌获取'"
+            autocomplete="new-password"
+          />
+        </a-form-item>
+        <a-form-item
+          label="Cookies（NexusPHP 站点 session cookies，留空=不修改）"
+          name="cookies"
+        >
+          <a-input-password
+            v-model:value="formState.cookies"
+            :placeholder="editing && (editing as any).has_cookies ? '已配置（留空保留）' : '浏览器 DevTools → Application → Cookies，复制 c_secure_uid=...; c_secure_pass=...'"
             autocomplete="new-password"
           />
         </a-form-item>
