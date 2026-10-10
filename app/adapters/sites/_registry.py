@@ -22,6 +22,7 @@ _BUILTIN: dict[str, str] = {
     "mteam": "app.adapters.sites.mteam.MteamAdapter",
     "hhanclub": "app.adapters.sites.hhanclub.HhanclubAdapter",
     "hdsky": "app.adapters.sites.hdsky.HdskyAdapter",
+    "ourbits": "app.adapters.sites.ourbits.OurbitsAdapter",
 }
 
 

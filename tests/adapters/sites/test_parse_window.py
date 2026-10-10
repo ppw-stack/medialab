@@ -1,15 +1,16 @@
 """``SiteAdapter.parse_window`` 单元测试（FR-1.5.3 / AC-16）。
 
-测试三个适配器的 str 路径（HTML 详情页或 RSS description）："剩余 X 天" 文案兜底。
+测试四个适配器的 str 路径（HTML 详情页或 RSS description）："剩余 X 天" 文案兜底。
 
 - MteamAdapter（m-team JSON API 站点）
 - HhanclubAdapter（NexusPHP cookie 鉴权站点）
 - HdskyAdapter（NexusPHP v1.5 cookie 鉴权站点）
+- OurbitsAdapter（NexusPHP 1.10.x cookie 鉴权站点）
 
-str 路径逻辑在三个适配器间共享相同正则（简体/繁体/英文），确保新适配器不破坏现有契约。
+str 路径逻辑在四个适配器间共享相同正则（简体/繁体/英文），确保新适配器不破坏现有契约。
 
 dict 路径的覆盖已迁到各适配器的专属测试文件（test_mteam.py / test_hhanclub.py /
-test_hdsky.py），本文件只保留 str 路径 + 契约保护测试。
+test_hdsky.py / test_ourbits.py），本文件只保留 str 路径 + 契约保护测试。
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from app.adapters.sites.base import SiteProfile
 from app.adapters.sites.hdsky import HdskyAdapter
 from app.adapters.sites.hhanclub import HhanclubAdapter
 from app.adapters.sites.mteam import MteamAdapter
+from app.adapters.sites.ourbits import OurbitsAdapter
 from app.core.timeutils import ClockOffset
 from app.db.models import FreeSource, FreeType
 
@@ -44,8 +46,14 @@ def hdsky_adapter() -> HdskyAdapter:
     return HdskyAdapter(profile, clock_offset=ClockOffset.zero())
 
 
+@pytest.fixture
+def ourbits_adapter() -> OurbitsAdapter:
+    profile = SiteProfile(name="ourbits", domain="ourbits.club")
+    return OurbitsAdapter(profile, clock_offset=ClockOffset.zero())
+
+
 #: 所有需要测试 str 路径的适配器（参数化）
-ALL_ADAPTERS = ["mteam_adapter", "hhanclub_adapter", "hdsky_adapter"]
+ALL_ADAPTERS = ["mteam_adapter", "hhanclub_adapter", "hdsky_adapter", "ourbits_adapter"]
 
 
 def _parse(adapter, text: str):

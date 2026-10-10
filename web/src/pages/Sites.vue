@@ -22,6 +22,7 @@ const ADAPTERS = [
   { value: 'mteam', label: 'M-team（m-team.cc）' },
   { value: 'hhanclub', label: 'HHanClub（hhanclub.net）' },
   { value: 'hdsky', label: 'HDSky（hdsky.me）' },
+  { value: 'ourbits', label: 'OurBits（ourbits.club）' },
 ]
 
 const RESCUE_STRATEGIES = [

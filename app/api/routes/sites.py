@@ -25,7 +25,7 @@ class SiteCreate(BaseModel):
     name: str = Field(..., pattern=r"^[a-zA-Z0-9_-]+$", description="字母/数字/下划线/连字符")
     domain: str
     rss_url: str | None = None
-    adapter: Literal["mteam", "hhanclub", "hdsky"] = "mteam"  # FR-1.5 站点 adapter（注册中心约束）
+    adapter: Literal["mteam", "hhanclub", "hdsky", "ourbits"] = "mteam"  # FR-1.5 adapter 名
     apikey: str | None = Field(
         default=None, max_length=256,
         description="m-team 等的 API key（x-api-key），加密存储",
@@ -72,7 +72,7 @@ class SiteUpdate(BaseModel):
     rss_time_pattern: str | None = None
     grab_short_window: bool | None = None
     enabled: bool | None = None
-    adapter: Literal["mteam", "hhanclub", "hdsky"] | None = None
+    adapter: Literal["mteam", "hhanclub", "hdsky", "ourbits"] | None = None
 
 
 class SiteOut(BaseModel):
