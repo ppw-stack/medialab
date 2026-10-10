@@ -347,8 +347,30 @@ class FreeSeedHunter:
             abort_at=abort_at or (now + timedelta(hours=1)),
             protect_until=now + timedelta(hours=PROTECT_HOURS),
         )
-        # 先持久化 DB 记录，再操作下载器
-        session.add(torrent)
+        # 先持久化 DB 记录（幂等：同 info_hash 已存在不抛错）
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+        stmt = sqlite_insert(Torrent).values(
+            info_hash=info_hash,
+            name=item.title[:1024],
+            site_id=site.id,
+            downloader_id=dl.id,
+            category=site.category,
+            tags=",".join(sorted(tags)),
+            size=item.size,
+            source=Source.FREE_SEED,
+            status=TorrentStatus.ACTIVE,
+            is_free=True,
+            free_type=free_type,
+            free_end_at=free_end_at,
+            free_source=free_source,
+            free_confidence=1.0,
+            free_duration=0,
+            clock_offset=site.clock_offset,
+            deadline_at=deadline_at or (utcnow() + timedelta(hours=1)),
+            abort_at=abort_at or (utcnow() + timedelta(hours=1)),
+            protect_until=utcnow() + timedelta(hours=PROTECT_HOURS),
+        ).on_conflict_do_nothing(index_elements=["info_hash"])
+        await session.execute(stmt)
         await session.flush()
 
         url = item.torrent_url or item.link

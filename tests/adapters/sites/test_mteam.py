@@ -257,29 +257,75 @@ async def test_fetch_via_api_returns_empty_on_non_zero_code(adapter: MteamAdapte
     assert items == []
 
 
-# ---- torrent_detail 调 genDlToken ----
+# ---- torrent_detail 调 detail 端点（POST id, 无签名）----
+
+MTEAM_DETAIL_RESPONSE: dict[str, Any] = {
+    "code": "0",
+    "message": "SUCCESS",
+    "data": {
+        "id": "1267974",
+        "name": "Xu Haidong Bleeding Town Store 2009",
+        "smallDescr": "测试种子",
+        "descr": "[b]完整描述[/b]",
+        "mediainfo": "General\nFormat: Matroska",
+        "size": "8189389792",
+        "category": "419",
+        "imdb": "",
+        "douban": "https://movie.douban.com/subject/4074210/",
+        "infoHash": None,
+        "status": {
+            "id": "1267974",
+            "discount": "FREE",
+            "discountEndTime": "2026-10-10 19:43:47",
+            "seeders": "599",
+            "leechers": "169",
+            "mallSingleFree": None,
+        },
+    },
+}
 
 
-async def test_torrent_detail_calls_genDlToken(adapter: MteamAdapter) -> None:
-    """torrent_detail 应 POST /api/torrent/genDlToken，body={id}。"""
+async def test_torrent_detail_calls_detail_endpoint(adapter: MteamAdapter) -> None:
+    """torrent_detail 应 POST /api/torrent/detail，body=id=...，无签名。"""
     mock_resp = MagicMock()
     mock_resp.status_code = 200
-    mock_resp.json.return_value = MTEAM_DOWNLOAD_RESPONSE
+    mock_resp.json.return_value = MTEAM_DETAIL_RESPONSE
     adapter._client.post = AsyncMock(return_value=mock_resp)
 
-    result = await adapter.torrent_detail("100001")
-    assert result["id"] == "100001"
-    assert "download_url" in result
-    assert "rss.m-team.cc" in result["download_url"]
+    result = await adapter.torrent_detail("1267974")
+    assert result["id"] == "1267974"
+    assert result["name"] == "Xu Haidong Bleeding Town Store 2009"
+    assert result["status"]["discount"] == "FREE"  # status 嵌套
+    assert result["status"]["seeders"] == "599"
+    # 验证调的是 detail 端点
+    call = adapter._client.post.call_args
+    assert "/api/torrent/detail" in call.args[0]
+    assert "id=1267974" in call.kwargs.get("content", "")
 
 
 async def test_torrent_detail_returns_error_on_401(adapter: MteamAdapter) -> None:
     mock_resp = MagicMock()
     mock_resp.status_code = 401
     adapter._client.post = AsyncMock(return_value=mock_resp)
-    result = await adapter.torrent_detail("100001")
-    assert result["id"] == "100001"
+    result = await adapter.torrent_detail("1267974")
+    assert result["id"] == "1267974"
     assert "鉴权失败" in result.get("_error", "")
+
+
+async def test_torrent_detail_keeps_status_nested(adapter: MteamAdapter) -> None:
+    """status 字典嵌套在返回里（不展平），保留 descr/mediainfo 等完整信息。"""
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = MTEAM_DETAIL_RESPONSE
+    adapter._client.post = AsyncMock(return_value=mock_resp)
+    result = await adapter.torrent_detail("1267974")
+    # 嵌套结构保留
+    assert result["status"]["discount"] == "FREE"
+    assert result["status"]["seeders"] == "599"
+    assert result["status"]["mallSingleFree"] is None
+    # descr/mediainfo 可访问
+    assert "[b]完整描述[/b]" in result["descr"]
+    assert "Matroska" in result["mediainfo"]
 
 
 # ---- RSS 兜底（无 apikey 时） ----

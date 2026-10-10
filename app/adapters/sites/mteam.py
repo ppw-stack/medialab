@@ -160,8 +160,12 @@ class MteamAdapter(SiteAdapter):
         return hmac.new(_API_SECRET.encode(), msg.encode(), hashlib.sha1).hexdigest()
 
     def _signed_form(self, path: str, **fields: Any) -> str:
-        """构造带 ``_timestamp``/``_sign`` 的 form body（MoviePilot 同款）。"""
-        ts = int(time.time() * 1000)
+        """构造带 ``_timestamp``/``_sign`` 的 form body（MoviePilot 同款）。
+
+        m-team 端点要求 ``_timestamp`` 为 unix 秒（不是毫秒），且 ``_sign`` 用
+        ``{METHOD}&{path}&{ts}`` 字符串的 HMAC-SHA1，密钥为前端 JS 逆向值。
+        """
+        ts = int(time.time())  # unix seconds（注意是秒，不是毫秒）
         data: dict[str, Any] = {"_timestamp": str(ts), "_sign": self._api_sign(path, ts)}
         for k, v in fields.items():
             data[k] = str(v) if v is not None else ""
@@ -501,23 +505,22 @@ class MteamAdapter(SiteAdapter):
 
     # ------------------------------------------------------------ 详情与下载
     async def torrent_detail(self, item_id: str) -> dict[str, object]:
-        """拉取详情：调 ``/api/torrent/genDlToken`` 拿下载 URL，返回 ``{id, download_url}``。
+        """拉取详情：调 ``/api/torrent/detail``，返回完整种子数据。
 
-        注意：genDlToken 必须用 form POST（application/x-www-form-urlencoded）
-        + ``_timestamp``/``_sign`` 签名（MoviePilot 同款），JSON body 会返回"參數錯誤"。
+        包含 descr/mediainfo/status（discount/discountEndTime/seeders 等）。
+        无需签名——detail 端点只校验 apikey。
         """
         if self._apikey and self._api_base():
-            path = "/api/torrent/genDlToken"
-            body = self._signed_form(path, id=str(item_id))
+            path = "/api/torrent/detail"
             try:
                 resp = await self._client.post(
                     f"{self._api_base()}{path}",
                     headers={**self._auth_headers(), "Content-Type": "application/x-www-form-urlencoded"},
-                    content=body,
+                    content=f"id={item_id}",
                     timeout=self._timeout,
                 )
             except httpx.HTTPError as exc:
-                return {"id": item_id, "_error": f"genDlToken 网络错误：{exc}"}
+                return {"id": item_id, "_error": f"detail 网络错误：{exc}"}
             if resp.status_code in (401, 403):
                 return {"id": item_id, "_error": "鉴权失败"}
             if resp.status_code >= 400:
@@ -527,8 +530,12 @@ class MteamAdapter(SiteAdapter):
             except (TypeError, ValueError):
                 return {"id": item_id, "_error": "响应非 JSON"}
             if str(data.get("code")) != "0":
-                return {"id": item_id, "_error": data.get("message", "genDlToken 失败")}
-            return {"id": item_id, "download_url": str(data.get("data") or "")}
+                return {"id": item_id, "_error": data.get("message", "detail 失败")}
+            d = data.get("data") or {}
+            if isinstance(d, dict):
+                d["id"] = d.get("id") or item_id
+                return d
+            return {"id": item_id, "data": d}
         # 兜底：HTML 详情页
         url = self._detail_url(item_id)
         if not url:
@@ -544,16 +551,15 @@ class MteamAdapter(SiteAdapter):
     async def download_torrent(self, item_id: str) -> tuple[bytes | None, str | None]:
         """下载 torrent 文件，返回 ``(torrent_bytes, infohash)``。
 
-        infohash = torrent 文件 info dict 的 bencoded 表示的 SHA1。
-        获取 infohash 的唯一可靠途径（m-team search API 的 ``infoHash`` 恒为 None）。
+        走 ``/api/torrent/genDlToken``（form POST + HMAC-SHA1 签名）拿临时下载 URL，
+        再下载 torrent 文件，bencode 解析 info dict 取 SHA1 infohash。
         """
-        detail = await self.torrent_detail(item_id)
-        download_url = detail.get("download_url")
-        if not download_url:
-            return None, detail.get("_error")
+        url = await self._gen_dl_token(item_id)
+        if not url:
+            return None, "genDlToken 失败"
         try:
             resp = await self._client.get(
-                str(download_url),
+                str(url),
                 headers=self._auth_headers(),
                 timeout=self._timeout,
             )
@@ -567,11 +573,55 @@ class MteamAdapter(SiteAdapter):
         info_hash = self._infohash_from_torrent(content)
         return content, info_hash
 
+    async def _gen_dl_token(self, item_id: str) -> str | None:
+        """调 ``/api/torrent/genDlToken`` 拿临时下载 URL。
+
+        form POST + ``_timestamp``/``_sign`` HMAC-SHA1 签名（密钥从前端 JS 逆向）。
+        sign/t 有效期短（秒级），并发调用易失败。
+        """
+        if not (self._apikey and self._api_base()):
+            return None
+        path = "/api/torrent/genDlToken"
+        body = self._signed_form(path, id=str(item_id))
+        try:
+            resp = await self._client.post(
+                f"{self._api_base()}{path}",
+                headers={**self._auth_headers(), "Content-Type": "application/x-www-form-urlencoded"},
+                content=body,
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError:
+            return None
+        if resp.status_code >= 400:
+            return None
+        try:
+            data = resp.json()
+        except (TypeError, ValueError):
+            return None
+        if str(data.get("code")) != "0":
+            return None
+        return str(data.get("data") or "") or None
+
     async def fetch_infohash(self, item_id: str) -> str | None:
-        """m-team search API 不返回 hash，通过下载 torrent 文件解析。
+        """m-team search API 不返回 hash——优先查 detail 端点，否则下载 torrent 解析。
 
         错误情况返回 None（错误信息丢弃，不影响业务）。
         """
+        # 路径 1：detail 端点可能含 infoHash（实测恒为 null，但接口在）
+        detail = await self.torrent_detail(item_id)
+        if isinstance(detail, dict):
+            # detail.status 嵌套的 status 字典（如果未来 detail 给 hash）
+            nested = detail.get("status") or {}
+            for k in ("infoHash", "hash", "torrentHash"):
+                v = nested.get(k) if isinstance(nested, dict) else None
+                if isinstance(v, str) and len(v) == 40:
+                    return v
+            # 顶层也查一下
+            for k in ("infoHash", "hash", "torrentHash"):
+                v = detail.get(k)
+                if isinstance(v, str) and len(v) == 40:
+                    return v
+        # 路径 2：下载 torrent 文件 bencode 解析
         _content, info_hash = await self.download_torrent(item_id)
         if not info_hash or not isinstance(info_hash, str) or len(info_hash) != 40:
             return None
