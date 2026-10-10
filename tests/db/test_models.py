@@ -27,19 +27,18 @@ def test_all_expected_tables_registered() -> None:
     assert expected <= set(Base.metadata.tables)
 
 
-def test_downloader_sites_relationship_points_to_site() -> None:
-    """``DownloaderInstance.sites`` 必须指向 Site，而不是自引用。"""
-    assert DownloaderInstance.sites.property.mapper.class_ is Site
-
-
-def test_site_downloader_relationship_points_to_downloader() -> None:
-    assert Site.downloader.property.mapper.class_ is DownloaderInstance
-
-
-def test_relationship_back_populates_is_symmetric() -> None:
-    """双向关系必须互为 back_populates，否则赋值会报错或静默失效。"""
-    assert DownloaderInstance.sites.property.back_populates == "downloader"
-    assert Site.downloader.property.back_populates == "sites"
+def test_site_config_columns_exist() -> None:
+    """站点配置字段存在性。"""
+    cols = Base.metadata.tables["sites"].columns
+    for name in (
+        "adapter",
+        "rss_url_enc",
+        "apikey_enc",
+        "cookies_enc",
+        "min_interval_minutes",
+        "enabled",
+    ):
+        assert name in cols, name
 
 
 def test_required_indexes_present() -> None:
@@ -64,7 +63,6 @@ def test_cooldown_unique_per_site_hash() -> None:
     "table",
     [
         "torrents",
-        "sites",
         "cooldown_hash",
         "feeds",
         "free_candidates",
@@ -103,21 +101,6 @@ def test_torrent_window_columns_exist() -> None:
         assert name in cols, name
 
 
-def test_site_config_columns_exist() -> None:
-    """站点差异配置化字段（FR-1.5.2）。"""
-    cols = Base.metadata.tables["sites"].columns
-    for name in (
-        "adapter",
-        "rss_url_enc",
-        "apikey_enc",
-        "cookies_enc",
-        "downloader_id",
-        "min_interval_minutes",
-        "enabled",
-    ):
-        assert name in cols, name
-
-
 def test_metadata_creates_all_without_error() -> None:
     """建表语句可在 SQLite 方言下生成。"""
     from sqlalchemy.dialects import sqlite
@@ -126,44 +109,6 @@ def test_metadata_creates_all_without_error() -> None:
     dialect = sqlite.dialect()
     for table in Base.metadata.tables.values():
         str(CreateTable(table).compile(dialect=dialect))
-
-
-async def test_join_downloader_to_site_executes(db) -> None:
-    """真实执行一次 join 查询。
-
-    这条用例直接捕获 ``DownloaderInstance.sites`` 被误配成自引用导致的
-    ``NoForeignKeysError``（该缺陷曾让 /api/v1/dashboard 在容器内返回 500）。
-    """
-    from app.db.session import session_scope
-    from sqlalchemy import select
-    from sqlalchemy.orm import selectinload
-
-    dl_id = None
-    async with session_scope() as session:
-        dl = DownloaderInstance(name="qbt-main", type="qbittorrent", url="http://x")
-        session.add(dl)
-        await session.flush()
-        dl_id = dl.id
-        session.add(Site(name="example-pt", domain="example.test", downloader_id=dl.id))
-
-    async with session_scope() as session:
-        rows = (
-            await session.execute(
-                select(Torrent, Site.name)
-                .join(Site, Site.id == Torrent.site_id)
-                .where(Torrent.source == "free_seed")
-            )
-        ).all()
-        assert rows == []
-
-        dl_loaded = (
-            await session.execute(
-                select(DownloaderInstance)
-                .where(DownloaderInstance.id == dl_id)
-                .options(selectinload(DownloaderInstance.sites))
-            )
-        ).scalars().one()
-        assert [s.name for s in dl_loaded.sites] == ["example-pt"]
 
 
 async def test_torrent_window_persists_and_indexes(db) -> None:
@@ -177,10 +122,10 @@ async def test_torrent_window_persists_and_indexes(db) -> None:
 
     abort_at = utcnow() + timedelta(hours=6)
     async with session_scope() as session:
-        dl = DownloaderInstance(name="dl1", type="qbittorrent", url="http://x")
+        dl = DownloaderInstance(name="dl1", type="qbittorrent", url="http://x", is_default=True)
         session.add(dl)
         await session.flush()
-        site = Site(name="s1", domain="d1.test", downloader_id=dl.id)
+        site = Site(name="s1", domain="d1.test")
         session.add(site)
         await session.flush()
         session.add(

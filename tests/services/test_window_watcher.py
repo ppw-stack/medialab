@@ -35,7 +35,6 @@ async def _seed(
         site = Site(
             name="pt",
             domain="pt.invalid",
-            downloader_id=dl.id,
         )
         s.add(site)
         await s.flush()
@@ -112,7 +111,6 @@ async def test_completed_inside_window_marked_completed(db) -> None:
         site = Site(
             name="pt",
             domain="p.invalid",
-            downloader_id=dl.id,
         )
         s.add(site)
         await s.flush()

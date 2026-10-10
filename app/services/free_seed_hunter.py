@@ -496,16 +496,25 @@ class FreeSeedHunter:
     async def _resolve_downloader(
         self, session: AsyncSession, site: Site
     ) -> DownloaderInstance | None:
-        from app.db.models import DownloaderInstance
-
-        if not site.downloader_id:
-            return None
-        return (
+        """取默认下载器：is_default 优先；否则第一个 enabled。"""
+        row = (
             await session.execute(
-                select(DownloaderInstance).where(
-                    DownloaderInstance.id == site.downloader_id,
+                select(DownloaderInstance)
+                .where(
+                    DownloaderInstance.is_default.is_(True),
                     DownloaderInstance.enabled.is_(True),
                 )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if row is not None:
+            return row
+        return (
+            await session.execute(
+                select(DownloaderInstance)
+                .where(DownloaderInstance.enabled.is_(True))
+                .order_by(DownloaderInstance.id.asc())
+                .limit(1)
             )
         ).scalar_one_or_none()
 

@@ -10,13 +10,8 @@ interface Site {
   has_apikey: boolean;
   has_cookies: boolean;
   min_interval_minutes: number;
-  downloader_id: number | null;
   created_at: string;
   updated_at: string;
-}
-
-interface Downloader {
-  id: number; name: string;
 }
 
 const ADAPTERS: { value: string; label: string; domain: string }[] = [
@@ -31,7 +26,6 @@ function domainFor(adapter: string): string {
 }
 
 const data = ref<Site[]>([])
-const downloaders = ref<Downloader[]>([])
 const editing = ref<Site | null>(null)
 const creating = ref(false)
 const testing = ref(false)
@@ -43,9 +37,6 @@ const formState = reactive<Record<string, unknown>>({})
 async function load() {
   try {
     data.value = await api.get<Site[]>('/sites')
-  } catch { /* ignore */ }
-  try {
-    downloaders.value = await api.get<Downloader[]>('/downloaders')
   } catch { /* ignore */ }
 }
 
@@ -65,7 +56,6 @@ function onCreate() {
     rss_url: '',
     apikey: '',
     cookies: '',
-    downloader_id: undefined,
   })
 }
 
@@ -132,15 +122,9 @@ const columns = [
   { title: '适配器', dataIndex: 'adapter', key: 'adapter' },
   { title: '域名', dataIndex: 'domain', key: 'domain' },
   { title: '凭据', key: 'credentials' },
-  { title: '下载器', dataIndex: 'downloader_id', key: 'dl' },
   { title: '启用', dataIndex: 'enabled', key: 'enabled' },
   { title: '操作', key: 'action' },
 ]
-
-function downloaderName(id: number | null): string {
-  if (id == null) return '-'
-  return downloaders.value.find((d) => d.id === id)?.name ?? `#${id}`
-}
 </script>
 
 <template>
@@ -173,9 +157,6 @@ function downloaderName(id: number | null): string {
               <a-tag v-if="record.has_cookies" color="cyan">Cookies</a-tag>
               <a-tag v-if="!record.rss_url_masked && !record.has_apikey && !record.has_cookies">—</a-tag>
             </a-space>
-          </template>
-          <template v-else-if="column.key === 'dl'">
-            {{ downloaderName(record.downloader_id) }}
           </template>
           <template v-else-if="column.key === 'enabled'">
             <a-tag v-if="record.enabled" color="green">✓</a-tag>
@@ -244,14 +225,6 @@ function downloaderName(id: number | null): string {
             v-model:value="formState.cookies"
             :placeholder="editing && (editing as any).has_cookies ? '已配置（留空保留）' : '浏览器 DevTools → Application → Cookies'"
             autocomplete="new-password"
-          />
-        </a-form-item>
-
-        <a-form-item label="下载器" name="downloader_id">
-          <a-select
-            v-model:value="formState.downloader_id"
-            :options="[{ value: undefined, label: '不绑定' }].concat(downloaders.map(d => ({ value: d.id, label: d.name })))"
-            allow-clear
           />
         </a-form-item>
 

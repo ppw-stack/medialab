@@ -7,12 +7,13 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.downloaders.base import DownloaderError
 from app.api.auth import require_session
-from app.core.config import get_settings
 from app.core.crypto import build_cipher
-from app.db.models import DownloaderInstance, Site
+from app.core.config import get_settings
+from app.db.models import DownloaderInstance
 from app.db.session import session_scope
 from app.services.factory import get_factory
 
@@ -34,6 +35,7 @@ class DownloaderIn(BaseModel):
     username: str | None = Field(default=None, max_length=128)
     password: str | None = Field(default=None, max_length=512)
     download_root: str | None = Field(default=None, max_length=512)
+    is_default: bool = False
     enabled: bool = True
     verify_tls: bool = True
 
@@ -45,6 +47,7 @@ class DownloaderUpdate(BaseModel):
     username: str | None = Field(default=None, max_length=128)
     password: str | None = Field(default=None, max_length=512)
     download_root: str | None = Field(default=None, max_length=512)
+    is_default: bool | None = None
     enabled: bool | None = None
     verify_tls: bool | None = None
 
@@ -57,6 +60,7 @@ class DownloaderOut(BaseModel):
     username: str | None
     has_password: bool
     download_root: str | None
+    is_default: bool
     enabled: bool
     verify_tls: bool
     created_at: str
@@ -72,11 +76,26 @@ def _to_out(row: DownloaderInstance) -> DownloaderOut:
         username=row.username,
         has_password=bool(row.password_enc),
         download_root=row.download_root,
+        is_default=row.is_default,
         enabled=row.enabled,
         verify_tls=row.verify_tls,
         created_at=row.created_at.isoformat() if row.created_at else "",
         updated_at=row.updated_at.isoformat() if row.updated_at else "",
     )
+
+
+async def _apply_default(session: AsyncSession, target_id: int) -> None:
+    """确保只有一个 is_default=True（将其他全部置 False）。"""
+    rows = (
+        await session.execute(
+            select(DownloaderInstance).where(
+                DownloaderInstance.id != target_id,
+                DownloaderInstance.is_default.is_(True),
+            )
+        )
+    ).scalars().all()
+    for r in rows:
+        r.is_default = False
 
 
 @router.get("", summary="下载器列表")
@@ -122,6 +141,7 @@ async def create_downloader(payload: DownloaderIn) -> DownloaderOut:
             url=payload.url,
             username=payload.username,
             download_root=payload.download_root,
+            is_default=payload.is_default,
             enabled=payload.enabled,
             verify_tls=payload.verify_tls,
         )
@@ -131,6 +151,8 @@ async def create_downloader(payload: DownloaderIn) -> DownloaderOut:
             )
         session.add(row)
         await session.flush()
+        if payload.is_default:
+            await _apply_default(session, row.id)
         return _to_out(row)
 
 
@@ -165,6 +187,8 @@ async def update_downloader(payload: DownloaderUpdate) -> DownloaderOut:
             row.password_enc = cipher.encrypt(
                 payload.password, owner_type="downloader", owner_id=row.name
             )
+        if payload.is_default:
+            await _apply_default(session, row.id)
         return _to_out(row)
 
 
@@ -174,13 +198,6 @@ async def delete_downloader(payload: dict) -> dict[str, int]:
     if downloader_id is None:
         raise HTTPException(status_code=400, detail="id 必填")
     async with session_scope() as session:
-        bound = (
-            await session.execute(
-                select(Site.id).where(Site.downloader_id == downloader_id).limit(1)
-            )
-        ).first()
-        if bound is not None:
-            raise HTTPException(status_code=409, detail="仍有站点绑定，请先解绑")
         row = (
             await session.execute(
                 select(DownloaderInstance).where(

@@ -99,13 +99,14 @@ async def free_seed_env(db) -> dict:
     from app.db.session import session_scope
 
     async with session_scope() as s:
-        dl = DownloaderInstance(name="qbt", type="qbittorrent", url="http://qbt.invalid")
+        dl = DownloaderInstance(
+            name="qbt", type="qbittorrent", url="http://qbt.invalid", is_default=True,
+        )
         s.add(dl)
         await s.flush()
         site = Site(
             name="pt",
             domain="pt.invalid",
-            downloader_id=dl.id,
         )
         s.add(site)
         await s.flush()

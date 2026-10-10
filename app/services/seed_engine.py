@@ -29,6 +29,7 @@ from app.core.timeutils import utcnow
 from app.db.models import (
     AddHistory,
     CooldownReason,
+    DownloaderInstance,
     Feed,
     Site,
     Source,
@@ -80,6 +81,32 @@ class SeedEngine:
 
     def __init__(self, factory: AdapterFactory) -> None:
         self._factory = factory
+
+    @staticmethod
+    async def _resolve_default_downloader(
+        session: AsyncSession,
+    ) -> DownloaderInstance | None:
+        """取默认下载器：is_default 优先；否则第一个 enabled。"""
+        row = (
+            await session.execute(
+                select(DownloaderInstance)
+                .where(
+                    DownloaderInstance.is_default.is_(True),
+                    DownloaderInstance.enabled.is_(True),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if row is not None:
+            return row
+        return (
+            await session.execute(
+                select(DownloaderInstance)
+                .where(DownloaderInstance.enabled.is_(True))
+                .order_by(DownloaderInstance.id.asc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
 
     # ------------------------------------------------------------ 单站一轮
     async def run_site(self, site_id: int, *, force: bool = False) -> RoundStats:
@@ -249,19 +276,9 @@ class SeedEngine:
             logger.warning("条目无下载链接，跳过：%s", item.title)
             return False, CooldownReason.MANUAL_SKIP
 
-        downloader_row = None
-        if site.downloader_id:
-            from app.db.models import DownloaderInstance
-
-            downloader_row = (
-                await session.execute(
-                    select(DownloaderInstance).where(
-                        DownloaderInstance.id == site.downloader_id
-                    )
-                )
-            ).scalar_one_or_none()
+        downloader_row = await self._resolve_default_downloader(session)
         if downloader_row is None:
-            logger.warning("站点 %s 未绑定下载器，无法辅种", site.name)
+            logger.warning("未配置可用下载器，无法辅种：%s", site.name)
             return False, CooldownReason.MANUAL_SKIP
 
         from app.adapters.downloaders.base import AddTorrentPayload

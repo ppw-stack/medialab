@@ -21,7 +21,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class Base(DeclarativeBase):
@@ -168,7 +168,6 @@ class DownloaderInstance(Base):
     __tablename__ = "downloader_instances"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    sites: Mapped[list[Site]] = relationship(back_populates="downloader")
     name: Mapped[str] = mapped_column(String(64), unique=True)
     type: Mapped[str] = mapped_column(String(32))
     url: Mapped[str] = mapped_column(String(512))
@@ -178,6 +177,7 @@ class DownloaderInstance(Base):
         String(512), nullable=True,
         comment="路径根目录校验基准；无此值则禁用数据删除",
     )
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     verify_tls: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
@@ -201,20 +201,12 @@ class Site(Base):
     apikey_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     cookies_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # 绑定下载器
-    downloader_id: Mapped[int | None] = mapped_column(
-        ForeignKey("downloader_instances.id"), nullable=True
-    )
     min_interval_minutes: Mapped[int] = mapped_column(Integer, default=60)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=_utcnow, onupdate=_utcnow
-    )
-
-    downloader: Mapped[DownloaderInstance | None] = relationship(
-        back_populates="sites"
     )
 
 

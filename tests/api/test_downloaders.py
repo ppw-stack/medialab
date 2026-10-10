@@ -163,10 +163,7 @@ async def test_update_renames_with_uniqueness(dl_app) -> None:
 
 
 async def test_delete_blocks_when_bound_to_site(dl_app) -> None:
-    """被 Site 引用的下载器禁止删除。"""
-    from app.db.models import Site
-    from app.db.session import session_scope
-
+    """删除下载器：已不再有"站点绑定"检查（全局默认下载器模式）。"""
     transport = ASGITransport(app=dl_app)
     async with dl_app.router.lifespan_context(dl_app):
         async with AsyncClient(transport=transport, base_url="http://test") as c:
@@ -176,30 +173,14 @@ async def test_delete_blocks_when_bound_to_site(dl_app) -> None:
             )
             dl_id = r.json()["id"]
 
-            async with session_scope() as s:
-                s.add(Site(
-                    name="bound-site",
-                    domain="b.test",
-                    downloader_id=dl_id,
-                ))
-
-            r = await c.post(
-                "/api/v1/downloaders/delete",
-                headers=_bearer(c),
-                json={"id": dl_id},
-            )
-            assert r.status_code == 409
-
-            # 解绑后再删
-            from sqlalchemy import update
-            async with session_scope() as s:
-                await s.execute(update(Site).where(Site.name == "bound-site").values(downloader_id=None))
+            # 删除时应直接成功（200）
             r = await c.post(
                 "/api/v1/downloaders/delete",
                 headers=_bearer(c),
                 json={"id": dl_id},
             )
             assert r.status_code == 200
+            assert r.json()["id"] == dl_id
 
 
 async def test_delete_404(dl_app) -> None:

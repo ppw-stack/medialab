@@ -28,7 +28,6 @@ class SiteCreate(BaseModel):
     apikey: str | None = Field(default=None, max_length=256)
     cookies: str | None = Field(default=None, max_length=4096)
     min_interval_minutes: int = Field(default=60, ge=15)
-    downloader_id: int | None = None
     enabled: bool = True
 
 
@@ -40,7 +39,6 @@ class SiteUpdate(BaseModel):
     apikey: str | None = None
     cookies: str | None = None
     min_interval_minutes: int | None = Field(default=None, ge=15)
-    downloader_id: int | None = None
     enabled: bool | None = None
     adapter: Literal["mteam", "hhanclub", "hdsky", "ourbits"] | None = None
 
@@ -55,7 +53,6 @@ class SiteOut(BaseModel):
     has_apikey: bool
     has_cookies: bool
     min_interval_minutes: int
-    downloader_id: int | None
     created_at: str
     updated_at: str
 
@@ -101,7 +98,6 @@ async def create_site(payload: SiteCreate) -> SiteOut:
             domain=payload.domain or "",
             adapter=payload.adapter,
             min_interval_minutes=payload.min_interval_minutes,
-            downloader_id=payload.downloader_id,
             enabled=payload.enabled,
         )
         if payload.rss_url:
@@ -237,7 +233,6 @@ def _to_out(site: Site, raw: str | None) -> SiteOut:
         has_apikey=bool(site.apikey_enc),
         has_cookies=bool(site.cookies_enc),
         min_interval_minutes=site.min_interval_minutes,
-        downloader_id=site.downloader_id,
         created_at=site.created_at.isoformat() if site.created_at else "",
         updated_at=site.updated_at.isoformat() if site.updated_at else "",
     )
