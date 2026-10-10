@@ -1,41 +1,29 @@
 """下载器适配层（FR-1）。
 
-统一接口屏蔽 qBittorrent / Transmission / Deluge / aria2 的 API 差异。
+5 个核心契约方法：
+1. ping: 连通性检测
+2. add_torrent: 新增种子
+3. list_torrents: 查询种子列表
+4. set_pause: 修改状态（暂停/恢复）
+5. get_files: 获取种子详情（文件清单）
 
-设计约束（FR-1.3）：适配器**必须实现全部方法**，不支持的能力用
-:class:`Capabilities` 声明并由业务层降级，**不允许**抛 ``NotImplementedError``
-上抛业务层。
+附加可选：
+- close: 释放连接池（优雅停机用）
+
+设计约束（FR-1.3）：子类**必须**实现全部抽象方法，不支持的能力返回安全默认值。
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 
 
-class Feature(StrEnum):
-    """下载器能力枚举（FR-1 ``capabilities()``）。"""
-
-    ADD_TORRENT = "add_torrent"
-    CATEGORY = "category"
-    TAGS = "tags"
-    SAVE_PATH = "save_path"
-    RATE_LIMIT_PER_TASK = "rate_limit_per_task"
-    RATE_LIMIT_GLOBAL = "rate_limit_global"
-    NATIVE_RSS = "native_rss"
-    TORRENT_STATS_DETAIL = "torrent_stats_detail"
-    #: 逐任务文件清单。**数据安全的硬依赖**（R12 / FR-5.2.5a）：
-    #: 缺失则该客户端禁止启用任何数据删除能力。
-    GET_FILES = "get_files"
-
-
-#: 可删除数据所必需的能力集（FR-5.2.5a）
-DATA_DELETION_REQUIRED: frozenset[Feature] = frozenset({Feature.GET_FILES})
-
-
 class TorrentState(StrEnum):
+    """下载器任务状态。"""
+
     DOWNLOADING = "downloading"
     STALLED_DL = "stalledDL"
     PAUSED_DL = "pausedDL"
@@ -107,29 +95,8 @@ class TorrentInfo:
 
 
 @dataclass(frozen=True, slots=True)
-class Capabilities:
-    """能力声明（FR-1）。缺失能力由业务层降级，绝不抛异常。"""
-
-    features: frozenset[Feature] = field(default_factory=frozenset)
-
-    def has(self, feature: Feature) -> bool:
-        return feature in self.features
-
-    def supports_data_deletion(self) -> bool:
-        """能否安全执行数据隔离（FR-5.2.5a / R12）。"""
-        return self.features >= DATA_DELETION_REQUIRED
-
-    def degrade_reason(self) -> str | None:
-        missing = DATA_DELETION_REQUIRED - self.features
-        if not missing:
-            return None
-        names = "、".join(m.value for m in sorted(missing, key=str))
-        return f"缺少能力 [{names}]，已禁用数据删除，仅移除任务并保留数据"
-
-
-@dataclass(frozen=True, slots=True)
 class TorrentFilter:
-    """任务列表过滤条件（FR-1 ``list_torrents(filter)``）。"""
+    """任务列表过滤条件（list_torrents 入参）。"""
 
     states: frozenset[TorrentState] = frozenset()
     category: str | None = None
@@ -159,15 +126,6 @@ class TorrentHandle:
     raw: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class GlobalStats:
-    up_speed: int = 0
-    down_speed: int = 0
-    num_connections: int = 0
-    upload_limit: int = 0
-    download_limit: int = 0
-
-
 class DownloaderError(RuntimeError):
     """下载器交互错误。``transient=True`` 表示可重试（FR-1.2 重试队列）。"""
 
@@ -177,11 +135,7 @@ class DownloaderError(RuntimeError):
 
 
 class DownloaderAdapter(ABC):
-    """下载器统一接口（FR-1）。
-
-    子类**必须**实现全部抽象方法；不支持的能力返回安全默认值并在
-    :meth:`capabilities` 中声明。
-    """
+    """下载器统一接口（FR-1）。"""
 
     #: 客户端类型标识
     client_type: str = "unknown"
@@ -190,65 +144,30 @@ class DownloaderAdapter(ABC):
 
     @abstractmethod
     async def ping(self) -> bool:
-        """连通性检测。地址/账号/密码任一不可用返回 False。"""
-
-    @abstractmethod
-    async def list_torrents(self, filt: TorrentFilter | None = None) -> list[TorrentInfo]:
-        """列出任务，支持按状态/分类/标签过滤。"""
+        """1. 连通性检测。地址/账号/密码任一不可用返回 False。"""
 
     @abstractmethod
     async def add_torrent(self, payload: AddTorrentPayload) -> TorrentHandle:
-        """添加任务（magnet / 文件 / URL）。"""
+        """2. 添加任务（magnet / 文件 / URL）。"""
+
+    @abstractmethod
+    async def list_torrents(self, filt: TorrentFilter | None = None) -> list[TorrentInfo]:
+        """3. 列出任务，支持按状态/分类/标签过滤。"""
 
     @abstractmethod
     async def remove(self, hashes: Sequence[str], *, delete_data: bool) -> bool:
-        """删除任务。``delete_data`` 必须独立可控（FR-5.2.3 先 false）。"""
+        """4. 删除任务。``delete_data`` 必须独立可控（FR-5.2.3 先 false）。"""
 
     @abstractmethod
     async def set_pause(self, hashes: Sequence[str], paused: bool) -> bool:
-        """批量暂停/恢复。"""
-
-    async def set_category_tags(
-        self,
-        hashes: Sequence[str],
-        *,
-        category: str | None = None,
-        tags: frozenset[str] = frozenset(),
-    ) -> bool:
-        """设置分类标签。不支持时返回 False。"""
-        return False
-
-    async def set_save_path(self, hashes: Sequence[str], path: str) -> bool:
-        """设置保存路径。不支持时返回 False。"""
-        return False
-
-    async def set_rate_limit(self, up: int | None = None, down: int | None = None) -> bool:
-        """全局限速。不支持时返回 False。"""
-        return False
-
-    async def get_stats(self) -> GlobalStats:
-        """全局统计。不支持时返回空统计。"""
-        return GlobalStats()
-
-    async def get_log(self, last_n: int = 200) -> list[str]:
-        """排障日志。不支持时返回空列表。"""
-        return []
+        """5. 批量暂停/恢复。"""
 
     async def get_files(self, info_hash: str) -> list[TorrentFile]:
-        """逐任务文件清单。**数据删除的硬依赖**（FR-5.2.5a）。
+        """6. 获取种子详情（文件清单）。
 
-        不支持时返回空列表并由 :meth:`capabilities` 声明缺失，
-        业务层据此禁用该客户端的数据删除能力（R12）。
+        不支持时返回空列表，由调用方决定是否启用数据删除。
         """
         return []
 
-    @abstractmethod
-    def capabilities(self) -> Capabilities:
-        """声明能力集合。"""
-
     async def close(self) -> None:
         """释放连接池。子类按需覆盖。"""
-
-    @property
-    def can_delete_data(self) -> bool:
-        return self.capabilities().supports_data_deletion()

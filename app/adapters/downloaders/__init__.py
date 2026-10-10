@@ -4,11 +4,8 @@ from __future__ import annotations
 
 from app.adapters.downloaders.base import (
     AddTorrentPayload,
-    Capabilities,
     DownloaderAdapter,
     DownloaderError,
-    Feature,
-    GlobalStats,
     TorrentFile,
     TorrentFilter,
     TorrentHandle,
@@ -20,11 +17,8 @@ from app.adapters.downloaders.qbittorrent import QbittorrentAdapter
 
 __all__ = [
     "AddTorrentPayload",
-    "Capabilities",
     "DownloaderAdapter",
     "DownloaderError",
-    "Feature",
-    "GlobalStats",
     "QbittorrentAdapter",
     "TorrentFile",
     "TorrentFilter",

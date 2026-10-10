@@ -226,12 +226,9 @@ async def test_downloader(downloader_id: int) -> dict[str, Any]:
         adapter = get_factory().downloader(row)
     try:
         reachable = await adapter.ping()
-        caps = [str(f) for f in adapter.capabilities().features]
         return {
             "reachable": reachable,
             "detail": "ok" if reachable else "unreachable",
-            "capabilities": caps,
-            "supports_data_deletion": adapter.can_delete_data,
         }
     except DownloaderError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

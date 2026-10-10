@@ -14,11 +14,8 @@ import httpx
 
 from app.adapters.downloaders.base import (
     AddTorrentPayload,
-    Capabilities,
     DownloaderAdapter,
     DownloaderError,
-    Feature,
-    GlobalStats,
     TorrentFile,
     TorrentFilter,
     TorrentHandle,
@@ -250,66 +247,6 @@ class QbittorrentAdapter(DownloaderAdapter):
         )
         return True
 
-    async def set_category_tags(
-        self,
-        hashes: Sequence[str],
-        *,
-        category: str | None = None,
-        tags: frozenset[str] = frozenset(),
-    ) -> bool:
-        if category:
-            await self._post_retry(
-                "/api/v2/torrents/setCategory",
-                data={"hashes": "|".join(hashes), "category": category},
-            )
-        if tags:
-            await self._post_retry(
-                "/api/v2/torrents/addTags",
-                data={"hashes": "|".join(hashes), "tags": ",".join(sorted(tags))},
-            )
-        return True
-
-    async def set_save_path(self, hashes: Sequence[str], path: str) -> bool:
-        await self._post_retry(
-            "/api/v2/torrents/setLocation",
-            data={"hashes": "|".join(hashes), "location": path},
-        )
-        return True
-
-    async def set_rate_limit(self, up: int | None = None, down: int | None = None) -> bool:
-        """附录 A：``/api/v2/transfer/setUploadLimit`` 等。"""
-        if up is not None:
-            await self._post_retry(
-                "/api/v2/transfer/setUploadLimit", data={"limit": str(up)}
-            )
-        if down is not None:
-            await self._post_retry(
-                "/api/v2/transfer/setDownloadLimit", data={"limit": str(down)}
-            )
-        return True
-
-    async def get_stats(self) -> GlobalStats:
-        resp = await self._get_retry("/api/v2/transfer/info")
-        try:
-            data = resp.json()
-        except ValueError as exc:
-            raise DownloaderError(f"qBittorrent 响应非 JSON：{exc}", transient=False) from exc
-        return GlobalStats(
-            up_speed=int(data.get("up_info_data") or 0),
-            down_speed=int(data.get("dl_info_data") or 0),
-            upload_limit=int(data.get("up_info_limit") or 0),
-            download_limit=int(data.get("dl_info_limit") or 0),
-        )
-
-    async def get_log(self, last_n: int = 200) -> list[str]:
-        try:
-            resp = await self._get_retry(
-                "/api/v2/log/main", params={"last_known_id": -1, "lines": last_n}
-            )
-            return [line for line in resp.text.splitlines() if line.strip()][-last_n:]
-        except DownloaderError:
-            return []
-
     async def get_files(self, info_hash: str) -> list[TorrentFile]:
         """FR-5.2.5a 的数据来源。删除目标只能来自此返回值。"""
         try:
@@ -326,30 +263,5 @@ class QbittorrentAdapter(DownloaderAdapter):
             if row.get("name")
         ]
 
-    def capabilities(self) -> Capabilities:
-        return Capabilities(
-            frozenset(
-                {
-                    Feature.ADD_TORRENT,
-                    Feature.CATEGORY,
-                    Feature.TAGS,
-                    Feature.SAVE_PATH,
-                    Feature.RATE_LIMIT_PER_TASK,
-                    Feature.RATE_LIMIT_GLOBAL,
-                    Feature.NATIVE_RSS,
-                    Feature.TORRENT_STATS_DETAIL,
-                    Feature.GET_FILES,
-                }
-            )
-        )
-
     async def close(self) -> None:
         await self._client.aclose()
-
-
-def _matches(info: TorrentInfo, filt: TorrentFilter) -> bool:
-    if filt.states and info.state not in filt.states:
-        return False
-    if filt.category and info.category != filt.category:
-        return False
-    return not (filt.tags and not (filt.tags & info.tags))

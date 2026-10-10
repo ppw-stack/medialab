@@ -77,10 +77,9 @@ class AdapterFactory:
         adapter = self._build_downloader(row, password)
         self._downloaders[row.id] = adapter
         logger.info(
-            "已连接下载器 %s(%s)，可删除数据=%s",
+            "已连接下载器 %s(%s)",
             row.name,
             row.type,
-            adapter.can_delete_data,
         )
         return adapter
 
