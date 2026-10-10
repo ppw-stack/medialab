@@ -43,12 +43,9 @@ def decrypt_field(
 
 def profile_from_site(site: Site) -> SiteProfile:
     """DB 行 → 站点配置对象。"""
-    from app.adapters.sites.base import SiteFeature
-
     return SiteProfile(
         name=site.name,
         domain=site.domain,
-        features=frozenset({SiteFeature.RSS, SiteFeature.CLOCK_API, SiteFeature.TIMESTAMP_FIELD}),
     )
 
 

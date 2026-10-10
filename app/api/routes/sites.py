@@ -113,16 +113,16 @@ async def create_site(payload: SiteCreate) -> SiteOut:
             )
         session.add(site)
         await session.flush()
-
-        if payload.rss_url or payload.apikey or payload.cookies:
-            session.add(
-                Feed(
-                    site_id=site.id,
-                    kind="site_rss",
-                    interval_minutes=payload.min_interval_minutes,
-                    enabled=payload.enabled,
-                )
+        # 每个 site 都创建 Feed 占位（调度需要 enabled 记录）
+        # 凭据可后续通过 update_site 补齐
+        session.add(
+            Feed(
+                site_id=site.id,
+                kind="site_rss",
+                interval_minutes=payload.min_interval_minutes,
+                enabled=payload.enabled,
             )
+        )
         return _to_out(site, payload.rss_url)
 
 
