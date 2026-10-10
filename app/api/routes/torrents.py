@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from app.api.auth import require_session
-from app.db.models import ActionLog, Site, Torrent
+from app.db.models import ActionLog, Site, Torrent, TorrentStatus
 from app.db.session import session_scope
 
 router = APIRouter(prefix="/torrents", dependencies=[Depends(require_session)], tags=["torrents"])
@@ -51,6 +51,7 @@ async def list_torrents(
     site_id: int | None = None,
     source: str | None = None,
     status: str | None = None,
+    include_deleted: bool = False,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
 ) -> dict[str, Any]:
@@ -62,6 +63,9 @@ async def list_torrents(
             base = base.where(Torrent.source == source)
         if status:
             base = base.where(Torrent.status == status)
+        elif not include_deleted:
+            # 默认不展示"已删除"（下载器中已移除）的任务，除非显式请求
+            base = base.where(Torrent.status != TorrentStatus.DELETED)
 
         total = (
             await session.execute(

@@ -317,23 +317,35 @@ class Inspector:
 
             # 逐下载器串行拉取（单实例操作锁，非功能·并发安全）
             live: dict[int, list[TorrentInfo]] = {}
+            # 成功列出清单的下载器 id——只有这些才允许判定"任务不存在"
+            # （拉取失败的下载器清单为空，误判会把全部任务标删除）
+            listed_ok: set[int] = set()
             for dl_id, adapter in adapters.items():
                 async with _instance_lock(adapter):
                     try:
                         live[dl_id] = await adapter.list_torrents()
+                        listed_ok.add(dl_id)
                     except Exception as exc:
                         logger.warning("拉取任务列表失败（%s）：%s", dl_id, exc)
                         live[dl_id] = []
 
-            await self._evaluate(session, live, report)
+            await self._evaluate(session, live, report, listed_ok=listed_ok)
 
     async def _evaluate(
         self,
         session: AsyncSession,
         live: dict[int, list[TorrentInfo]],
         report: InspectReport,
+        *,
+        listed_ok: set[int] | None = None,
     ) -> None:
-        """比对下载器实时状态与本地记录，产出 findings。"""
+        """比对下载器实时状态与本地记录，产出 findings。
+
+        ``listed_ok``：成功列出清单的下载器 id 集合。仅当任务的下载器
+        在 ``listed_ok`` 中，才判定"任务不存在"并同步 ``status=deleted``
+        （拉取失败导致清单为空时不得误判）。
+        """
+        safe_listed = listed_ok or set()
         rows = (
             (
                 await session.execute(
@@ -358,15 +370,20 @@ class Inspector:
             seen_hashes.add(torrent.info_hash)
             info = by_hash.get(torrent.info_hash)
             if info is None:
-                # 本地有记录但下载器里没有 → 人工确认，不自动处理
+                # 下载器清单拉取失败的，不能判定（避免瞬态故障误删）
+                if torrent.downloader_id not in safe_listed:
+                    continue
+                # 本地有记录但下载器里没有 → 同步状态为"已删除"
+                torrent.status = TorrentStatus.DELETED
+                torrent.removed_at = utcnow()
                 report.findings.append(
                     Finding(
                         level=AlertLevel.WARNING,
                         category=AlertCategory.ILLEGAL_TORRENT,
-                        message=f"任务 {torrent.name} 在下载器中不存在",
+                        message=f"任务 {torrent.name} 在下载器中不存在，已标记为已删除",
                         info_hash=torrent.info_hash,
                         torrent_id=torrent.id,
-                        action="人工确认",
+                        action="状态同步",
                     )
                 )
                 continue
