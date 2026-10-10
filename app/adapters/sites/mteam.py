@@ -134,15 +134,7 @@ class MteamAdapter(SiteAdapter):
         return f"https://{host}"
 
     def _detail_url(self, item_id: str) -> str:
-        if self.profile.detail_path_template:
-            path = self.profile.detail_path_template.format(
-                id=item_id, hash=item_id
-            )
-        else:
-            path = f"/detail/{item_id}"
-        if not path.startswith("/"):
-            path = "/" + path
-        return f"https://{self.profile.domain}{path}"
+        return f"https://{self.profile.domain}/detail/{item_id}"
 
     def _auth_headers(self) -> dict[str, str]:
         """带 ``x-api-key`` 的鉴权头。"""

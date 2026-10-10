@@ -80,14 +80,10 @@ class MatchResult:
 
 @dataclass(frozen=True, slots=True)
 class SiteMatchPolicy:
-    """站点级辅种策略（来自 sites 表）。"""
+    """站点级辅种策略（简化为最小字段）。"""
 
     site_id: int
     site_name: str
-    save_path_template: str
-    max_size: int | None = None
-    category: str = "cross-seed"
-    #: 只辅种分类白名单（FR-2.3 分类匹配）；空集合 = 不限制
     category_whitelist: frozenset[str] = field(default_factory=frozenset)
     tags: frozenset[str] = frozenset()
 
@@ -210,10 +206,6 @@ class Matcher:
             if cat not in self._policy.category_whitelist:
                 return MatchResult.skip(SkipReason.CATEGORY_MISMATCH, info_hash)
 
-        # 4) 体积上限
-        if self._policy.max_size is not None and item.size > self._policy.max_size:
-            return MatchResult.skip(SkipReason.SIZE_EXCEEDED, info_hash)
-
         # 5) 冷却期
         if self._cooled_hashes is not None:
             blocked = info_hash in self._cooled_hashes
@@ -226,10 +218,10 @@ class Matcher:
         # 6+7) 路径渲染 → 磁盘校验（顺序有意：渲染失败则不必查磁盘）
         try:
             rendered = render_save_path(
-                self._policy.save_path_template,
+                "/data/torrents/{site}/{name}",
                 site=self._policy.site_name,
                 name=item.title or info_hash,
-                category=self._policy.category,
+                category="cross-seed",
                 info_hash=info_hash,
             )
         except PathRenderError:

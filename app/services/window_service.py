@@ -2,7 +2,6 @@
 
 把 :mod:`app.core.windows` 的纯函数层扩展为**领域服务层**：
 
-- :class:`SiteWindowService`：管理 ``sites.clock_offset`` 的探测 / 手动校正
 - :class:`DeadlineCalculator`：把 ``FreeWindow`` 落库为 ``Torrent`` 的窗口字段
 - :class:`UrgencyClassifier`：把紧迫度映射到实际巡检频率（FR-3.4.1）
 - :func:`classify_completion_at`：把 ``completed_at`` 归入四分类（FR-3.4.3）
@@ -16,10 +15,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Final
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.timeutils import ClockOffset, utcnow
+from app.core.timeutils import utcnow
 from app.core.windows import (
     WindowPolicy,
     classify_completion,
@@ -36,8 +32,6 @@ URGENT_INTERVAL_FLOOR: Final = 60
 URGENT_INTERVAL_CEIL: Final = 900
 #: 完成容差（FR-3.4.3 巡检滞后）
 COMPLETION_TOLERANCE_SECONDS: Final = 120
-#: 窗口校准再探测间隔（FR-3.0.2 第 1 条：每次首次访问都记录）
-CLOCK_PROBE_TOLERANCE: Final = 600
 
 
 def is_permanent_free(free_type: str | None) -> bool:
@@ -51,10 +45,7 @@ def urgency_for_remaining(remaining: timedelta | None) -> str:
 
 
 def next_inspect_in(level: str) -> int:
-    """当前紧迫度下下次巡检前应等多少秒（FR-3.4.1）。
-
-    返回 0 表示"不需要主动巡检"（永久免费、已完成）。
-    """
+    """当前紧迫度下下次巡检前应等多少秒（FR-3.4.1）。"""
     secs = inspect_interval_seconds(level)
     if secs == 0:
         return 0
@@ -62,7 +53,7 @@ def next_inspect_in(level: str) -> int:
 
 
 class SiteWindowService:
-    """站点级窗口服务：时钟探测 / 手动校正 / 看护门槛。"""
+    """站点级窗口服务（策略参数统一用默认 WindowPolicy）。"""
 
     def __init__(
         self,
@@ -77,37 +68,8 @@ class SiteWindowService:
         return self._policy
 
     def get_policy_for(self, site: Site) -> WindowPolicy:
-        """从站点配置派生策略：单位换算 + 缓冲 + 永久免费行为。"""
-        return WindowPolicy(
-            min_buffer=site.min_buffer,
-            buffer_ratio=site.buffer_ratio,
-            default_free_duration=site.default_free_duration,
-            clock_offset=ClockOffset(offset=timedelta(seconds=site.clock_offset)),
-            grab_short_window=site.grab_short_window,
-        )
-
-    async def record_clock_probe(self, site_id: int, offset_seconds: int) -> Site:
-        """首次访问或手动校正后写入：clock_offset + probed_at（FR-3.0.2）。"""
-        site = (
-            await self._session.execute(
-                select(Site).where(Site.id == site_id)
-            )
-        ).scalar_one_or_none()
-        if site is None:
-            raise ValueError(f"站点 {site_id} 不存在")
-        site.clock_offset = offset_seconds
-        site.clock_offset_probed_at = utcnow()
-        await self._session.flush()
-        return site
-
-    def adjust_clock_offset(self, site: Site, delta_seconds: int) -> int:
-        """手动校正（FR-3.0.2 第 2 条）：返回新偏移量。
-
-        不写库——由调用方在事务内 commit。
-        """
-        site.clock_offset = (site.clock_offset or 0) + delta_seconds
-        site.clock_offset_probed_at = None  # 重新探测
-        return site.clock_offset
+        """站点级策略：当前统一返回默认 WindowPolicy。"""
+        return WindowPolicy()
 
     def should_skip_short_candidate(
         self,
@@ -118,8 +80,7 @@ class SiteWindowService:
     ) -> tuple[bool, str]:
         """FR-3.2：剩余窗口不足 ``min_buffer × 3``（默认 90min）直接跳过。
 
-        同一个条件只有一种动作（FR-3.0.1 修订后禁止"仍抓取但高优先级看护"分支）。
-        永久免费 / 中性种永不被此路径拦截。
+        永久免费/中性种永不被此路径拦截。
         """
         if is_permanent_free(free_type):
             return False, ""
@@ -130,7 +91,7 @@ class SiteWindowService:
         if remaining <= timedelta(0):
             return True, "window_expired"
         skip_threshold = timedelta(seconds=self._policy.min_buffer * 3)
-        if remaining < skip_threshold and not self._policy.grab_short_window:
+        if remaining < skip_threshold:
             return True, "remaining_window_too_short"
         return False, ""
 
@@ -174,11 +135,7 @@ async def enqueue_abort(
     info_hash: str,
     reason: str,
 ) -> bool:
-    """为 ``now ≥ abort_at`` 的任务入队"中止"指令。
-
-    幂等键 = ``abort_window|site_id|info_hash|reason``。同 hash 同 reason
-    重复入队时只入一次，避免重放产生多个中止事件。
-    """
+    """为 ``now ≥ abort_at`` 的任务入队"中止"指令。"""
     enq = await queue.enqueue(
         TaskKind.ABORT_WINDOW,
         {"site_id": site_id, "info_hash": info_hash, "reason": reason},

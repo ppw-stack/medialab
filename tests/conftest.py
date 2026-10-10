@@ -105,9 +105,7 @@ async def free_seed_env(db) -> dict:
         site = Site(
             name="pt",
             domain="pt.invalid",
-            save_path_template="/d/{site}/{name}",
             downloader_id=dl.id,
-            category="free-seed",
         )
         s.add(site)
         await s.flush()

@@ -233,11 +233,6 @@ class FreeSeedHunter:
             stats.note_skip("cooldown")
             return
 
-        # 体积上限（与 M2 共享配置）
-        if site.max_size is not None and item.size > site.max_size:
-            stats.note_skip("size_exceeded")
-            return
-
         if dl is None:
             stats.note_skip("no_downloader")
             return
@@ -328,7 +323,7 @@ class FreeSeedHunter:
             name=item.title[:1024],
             site_id=site.id,
             downloader_id=dl.id,
-            category=site.category,
+            category="cross-seed",
             tags=",".join(sorted(tags)),
             size=item.size,
             source=Source.FREE_SEED,
@@ -339,7 +334,7 @@ class FreeSeedHunter:
             free_source=free_source,
             free_confidence=1.0,
             free_duration=0,
-            clock_offset=site.clock_offset,
+            clock_offset=0,
             deadline_at=deadline_at or (now + timedelta(hours=1)),
             abort_at=abort_at or (now + timedelta(hours=1)),
             protect_until=now + timedelta(hours=PROTECT_HOURS),
@@ -351,7 +346,7 @@ class FreeSeedHunter:
             name=item.title[:1024],
             site_id=site.id,
             downloader_id=dl.id,
-            category=site.category,
+            category="cross-seed",
             tags=",".join(sorted(tags)),
             size=item.size,
             source=Source.FREE_SEED,
@@ -362,7 +357,7 @@ class FreeSeedHunter:
             free_source=free_source,
             free_confidence=1.0,
             free_duration=0,
-            clock_offset=site.clock_offset,
+            clock_offset=0,
             deadline_at=deadline_at or (utcnow() + timedelta(hours=1)),
             abort_at=abort_at or (utcnow() + timedelta(hours=1)),
             protect_until=utcnow() + timedelta(hours=PROTECT_HOURS),
@@ -388,7 +383,7 @@ class FreeSeedHunter:
                 AddTorrentPayload(
                     name=item.title,
                     urls=[url] if url else [],
-                    category=site.category,
+                    category="cross-seed",
                     tags=tags,
                 )
             )
@@ -412,7 +407,7 @@ class FreeSeedHunter:
                     "info_hash": info_hash,
                     "name": item.title,
                     "url": url,
-                    "category": site.category,
+                    "category": "cross-seed",
                     "tags": list(tags),
                     "free_seed": True,
                 },
@@ -558,16 +553,8 @@ class FreeSeedHunter:
 
 
 def win_policy(site: Site) -> WindowPolicy:
-    """把站点配置转 WindowPolicy 的便利函数。"""
-    from app.core.timeutils import ClockOffset
-
-    return WindowPolicy(
-        min_buffer=site.min_buffer,
-        buffer_ratio=site.buffer_ratio,
-        default_free_duration=site.default_free_duration,
-        clock_offset=ClockOffset(offset=timedelta(seconds=site.clock_offset)),
-        grab_short_window=site.grab_short_window,
-    )
+    """免费种窗口策略（统一用默认 WindowPolicy）。"""
+    return WindowPolicy()
 
 
 #: 公共 re-export，让调用方不必 import 两个模块

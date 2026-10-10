@@ -39,18 +39,12 @@ async def env(db):
         site = Site(
             name="example-pt",
             domain="example.test",
-            save_path_template=str(db_path()),
-            max_size=100 * 1024**3,
-            category="cross-seed",
         )
         session.add(site)
         await session.flush()
         policy = SiteMatchPolicy(
             site_id=site.id,
             site_name=site.name,
-            save_path_template=site.save_path_template,
-            max_size=site.max_size,
-            category=site.category,
         )
         site_id = site.id
 
@@ -184,18 +178,6 @@ async def test_skip_category_mismatch(env) -> None:
         assert result.reason == SkipReason.CATEGORY_MISMATCH
 
 
-async def test_skip_size_exceeded(env) -> None:
-    from dataclasses import replace
-
-    from app.db.session import session_scope
-
-    _, policy, _, _ = env
-    small = replace(policy, max_size=1024)
-    async with session_scope() as s2:
-        result = await Matcher(s2, small).match(item(size=10 * 1024**3))
-        assert result.reason == SkipReason.SIZE_EXCEEDED
-
-
 async def test_skip_cooldown(env) -> None:
     from app.db.session import session_scope
 
@@ -208,27 +190,25 @@ async def test_skip_cooldown(env) -> None:
 
 
 async def test_skip_invalid_path(env) -> None:
-    from dataclasses import replace
+    """无效路径模板应被 ``render_save_path`` 拒绝。"""
+    from app.services.paths import PathRenderError, render_save_path
 
-    from app.db.session import session_scope
-
-    _, policy, _, _ = env
-    bad = replace(policy, save_path_template="relative/{name}")
-    async with session_scope() as s2:
-        assert (await Matcher(s2, bad).match(item())).reason == SkipReason.PATH_INVALID
+    try:
+        render_save_path("relative/{name}", site="x", name="y", category="z")
+    except PathRenderError:
+        pass
+    else:
+        pytest.fail("应抛 PathRenderError")
 
 
 async def test_skip_disk_full(env) -> None:
     """体积超过分区可用空间时跳过（FR-2.3 磁盘校验）。"""
-    from dataclasses import replace
-
     from app.db.session import session_scope
 
     _, policy, _, _ = env
-    # 请求远超分区容量的体积
     huge = item(size=10**15)
     async with session_scope() as s2:
-        result = await Matcher(s2, replace(policy, max_size=None)).match(huge)
+        result = await Matcher(s2, policy).match(huge)
         assert result.reason == SkipReason.DISK_FULL
 
 
@@ -237,13 +217,12 @@ async def test_disabled_site_still_matches(db) -> None:
     from app.db.session import session_scope
 
     async with session_scope() as s:
-        site = Site(name="off", domain="o.test", save_path_template=db_path())
+        site = Site(name="off", domain="o.test")
         s.add(site)
         await s.flush()
         policy = SiteMatchPolicy(
             site_id=site.id,
             site_name=site.name,
-            save_path_template=site.save_path_template,
         )
         assert (await Matcher(s, policy).match(item())).outcome is MatchOutcome.ACCEPT
 

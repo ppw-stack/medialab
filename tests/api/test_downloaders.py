@@ -164,7 +164,7 @@ async def test_update_renames_with_uniqueness(dl_app) -> None:
 
 async def test_delete_blocks_when_bound_to_site(dl_app) -> None:
     """被 Site 引用的下载器禁止删除。"""
-    from app.db.models import DownloaderInstance, Site
+    from app.db.models import Site
     from app.db.session import session_scope
 
     transport = ASGITransport(app=dl_app)
@@ -180,7 +180,6 @@ async def test_delete_blocks_when_bound_to_site(dl_app) -> None:
                 s.add(Site(
                     name="bound-site",
                     domain="b.test",
-                    save_path_template="/d/{site}/{name}",
                     downloader_id=dl_id,
                 ))
 
@@ -217,10 +216,9 @@ async def test_delete_404(dl_app) -> None:
 
 async def test_password_encrypted_at_rest(dl_app) -> None:
     """DB 中 password_enc 不可逆：必须是密文，不是明文。"""
-    from sqlalchemy import select
-
     from app.db.models import DownloaderInstance
     from app.db.session import session_scope
+    from sqlalchemy import select
 
     transport = ASGITransport(app=dl_app)
     async with dl_app.router.lifespan_context(dl_app):

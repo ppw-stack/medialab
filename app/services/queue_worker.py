@@ -120,7 +120,7 @@ async def _execute(
                 name=str(payload.get("name") or info_hash),
                 urls=[url],
                 save_path=str(payload.get("save_path") or ""),
-                category=str(payload.get("category") or site.category),
+                category=str(payload.get("category") or "cross-seed"),
                 tags=frozenset({"auto", f"site:{site.name}"}),
             )
         )
@@ -134,7 +134,7 @@ async def _execute(
         name=str(payload.get("name") or info_hash)[:1024],
         site_id=site_id,
         downloader_id=downloader_id,
-        category=str(payload.get("category") or site.category),
+        category=str(payload.get("category") or "cross-seed"),
         save_path=str(payload.get("save_path") or ""),
         size=int(str(payload.get("size") or 0)),
         source=Source.AUTO_SEED,

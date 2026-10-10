@@ -92,13 +92,6 @@ class PausedReason:
     SYSTEM = "system"
 
 
-class RescueStrategy:
-    NOTIFY_ONLY = "notify_only"
-    SPEED_UP = "speed_up"
-    YIELD_THEN_RETRY = "yield_then_retry"
-    ABORT_NOW = "abort_now"
-
-
 class TriggerSource:
     SCHEDULE = "schedule"
     MANUAL = "manual"
@@ -170,31 +163,23 @@ NON_ABORTABLE_FREE_TYPES: Final = frozenset({FreeType.PERMANENT, FreeType.NEUTRA
 
 # ---------------------------------------------------------------- 基础表
 class DownloaderInstance(Base):
-    """下载器实例（FR-1.1：≥3 个实例，独立配置与开关）。"""
+    """下载器实例。"""
 
     __tablename__ = "downloader_instances"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    #: 反向关系：指向 sites.downloader_id（M2 用）
     sites: Mapped[list[Site]] = relationship(back_populates="downloader")
     name: Mapped[str] = mapped_column(String(64), unique=True)
-    type: Mapped[str] = mapped_column(String(32))  # qbittorrent/transmission/deluge/aria2
+    type: Mapped[str] = mapped_column(String(32))
     url: Mapped[str] = mapped_column(String(512))
     username: Mapped[str | None] = mapped_column(String(128), nullable=True)
     password_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
-    key_version: Mapped[int] = mapped_column(Integer, default=1)
     download_root: Mapped[str | None] = mapped_column(
-        String(512),
-        nullable=True,
-        comment="FR-5.2.5c 路径根目录校验基准；无此值则禁用数据删除",
+        String(512), nullable=True,
+        comment="路径根目录校验基准；无此值则禁用数据删除",
     )
-    max_upload: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    max_download: Mapped[str | None] = mapped_column(String(32), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    #: 是否校验 TLS 证书（自签名 qBittorrent 可关闭，FR-1 安全建议保持 True）
     verify_tls: Mapped[bool] = mapped_column(Boolean, default=True)
-    #: 能力声明快照（Set[Feature] 的序列化），含 get_files 是否可用（R12）
-    capabilities: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=_utcnow, onupdate=_utcnow
@@ -202,7 +187,7 @@ class DownloaderInstance(Base):
 
 
 class Site(Base):
-    """站点配置（FR-2.1 + FR-1.5.2 站点差异配置化）。"""
+    """站点配置。"""
 
     __tablename__ = "sites"
 
@@ -213,51 +198,15 @@ class Site(Base):
 
     # 认证与凭据（加密存储）
     rss_url_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
-    webui_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    username: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    password_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
-    key_version: Mapped[int] = mapped_column(Integer, default=1)
-    # m-team 等现代站点的 API key（x-api-key 鉴权，FR-1.5.1）
     apikey_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
-    #: NexusPHP 等站点 session cookies（加密存储）
     cookies_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # 辅种策略
+    # 绑定下载器
     downloader_id: Mapped[int | None] = mapped_column(
         ForeignKey("downloader_instances.id"), nullable=True
     )
-    category: Mapped[str] = mapped_column(String(64), default="cross-seed")
-    save_path_template: Mapped[str] = mapped_column(
-        String(512), default="/data/torrents/{site}/{name}"
-    )
-    max_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     min_interval_minutes: Mapped[int] = mapped_column(Integer, default=60)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-
-    # 免费窗口（FR-3.0 / FR-3.0.1 / FR-3.0.2）
-    default_free_duration: Mapped[int] = mapped_column(Integer, default=72 * 3600)
-    min_buffer: Mapped[int] = mapped_column(Integer, default=1800)
-    buffer_ratio: Mapped[float] = mapped_column(Float, default=0.10)
-    clock_offset: Mapped[int] = mapped_column(Integer, default=0)
-    clock_offset_probed_at: Mapped[datetime | None] = mapped_column(
-        DateTime, nullable=True
-    )
-    rescue_strategy: Mapped[str] = mapped_column(
-        String(32), default=RescueStrategy.NOTIFY_ONLY
-    )
-    grab_short_window: Mapped[bool] = mapped_column(Boolean, default=False)
-    free_size_min: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    free_size_max: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-
-    # 站点差异配置化（FR-1.5.2）
-    detail_path_template: Mapped[str | None] = mapped_column(
-        String(512), nullable=True
-    )
-    rss_time_pattern: Mapped[str | None] = mapped_column(Text, nullable=True)
-    window_field_map: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
-    free_type_map: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
-    download_factor_map: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
-    time_unit_multiplier: Mapped[int] = mapped_column(Integer, default=1)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(

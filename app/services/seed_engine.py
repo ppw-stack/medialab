@@ -169,9 +169,6 @@ class SeedEngine:
         policy = SiteMatchPolicy(
             site_id=site.id,
             site_name=site.name,
-            save_path_template=site.save_path_template,
-            max_size=site.max_size,
-            category=site.category,
         )
         matcher = Matcher(session, policy)
         results = await matcher.match_many(items[:MAX_ADD_PER_ROUND])
@@ -209,7 +206,7 @@ class SeedEngine:
             "name": item.title,
             "url": item.torrent_url or item.link,
             "save_path": str(res.save_path.path),
-            "category": site.category,
+            "category": "cross-seed",
             "size": item.size,
         }
         enqueued = await queue.enqueue(
@@ -281,7 +278,7 @@ class SeedEngine:
                     name=item.title,
                     urls=[url],
                     save_path=str(res.save_path.path),
-                    category=site.category,
+                    category="cross-seed",
                     tags=tags,
                 )
             )
@@ -294,7 +291,7 @@ class SeedEngine:
             name=item.title[:1024],
             site_id=site.id,
             downloader_id=downloader_row.id,
-            category=site.category,
+            category="cross-seed",
             tags=",".join(sorted(tags)),
             save_path=str(res.save_path.path),
             size=item.size,

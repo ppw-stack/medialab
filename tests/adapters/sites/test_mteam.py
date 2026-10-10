@@ -21,7 +21,6 @@ from app.adapters.sites.mteam import MteamAdapter
 from app.core.timeutils import ClockOffset
 from app.db.models import FreeSource, FreeType
 
-
 # ---- m-team search API 响应快照（MoviePilot 风格） ----
 
 MTEAM_SEARCH_RESPONSE: dict[str, Any] = {

@@ -12,22 +12,16 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
-
 from app.adapters.downloaders.base import DownloaderAdapter
 from app.adapters.downloaders.qbittorrent import QbittorrentAdapter
 from app.adapters.sites import resolve as resolve_site_adapter
 from app.adapters.sites.base import SiteAdapter, SiteProfile
 from app.core.crypto import CredentialCipher
 from app.core.logging import get_logger
-from app.core.timeutils import ClockOffset, utcnow
+from app.core.timeutils import ClockOffset
 from app.db.models import DownloaderInstance, Site
 
 logger = get_logger(__name__)
-
-#: 时钟偏差重新探测的间隔（FR-3.0.2 自动探测，24h 足够）
-CLOCK_PROBE_INTERVAL = timedelta(hours=24)
-
 
 class CredentialMissing(RuntimeError):
     """凭据无法解密（密钥不匹配或记录被篡改，R6）。"""
@@ -49,30 +43,19 @@ def decrypt_field(
 
 
 def profile_from_site(site: Site) -> SiteProfile:
-    """DB 行 → 站点配置对象（FR-1.5.2）。"""
+    """DB 行 → 站点配置对象。"""
     from app.adapters.sites.base import SiteFeature
 
     return SiteProfile(
         name=site.name,
         domain=site.domain,
-        detail_path_template=site.detail_path_template,
-        rss_time_pattern=site.rss_time_pattern,
-        window_field_map=dict(site.window_field_map or {}),
-        free_type_map={str(k): str(v) for k, v in (site.free_type_map or {}).items()},
-        download_factor_map={
-            str(k): str(v) for k, v in (site.download_factor_map or {}).items()
-        },
-        time_unit_multiplier=site.time_unit_multiplier,
         features=frozenset({SiteFeature.RSS, SiteFeature.CLOCK_API, SiteFeature.TIMESTAMP_FIELD}),
     )
 
 
 def clock_offset_for(site: Site) -> ClockOffset:
-    """站点的时钟偏差；超过 24h 未探测则视为过期。"""
-    probed = site.clock_offset_probed_at
-    if probed and (utcnow() - probed) < CLOCK_PROBE_INTERVAL:
-        return ClockOffset(offset=timedelta(seconds=site.clock_offset), probed_at=probed)
-    return ClockOffset(offset=timedelta(seconds=site.clock_offset))
+    """站点时钟偏差（当前固定为 zero，不再可配置）。"""
+    return ClockOffset.zero()
 
 
 class AdapterFactory:

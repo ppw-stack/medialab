@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
@@ -68,30 +68,14 @@ class FeedItem:
 
 @dataclass(slots=True)
 class SiteProfile:
-    """站点差异配置（FR-1.5.2）。
-
-    全部为配置驱动：新增站点通常**只改配置不改代码**（AC-16）。
-    """
+    """站点配置。"""
 
     name: str
     domain: str
-    detail_path_template: str | None = None
-    rss_time_pattern: str | None = None
-    window_field_map: dict[str, object] = field(default_factory=dict)
-    free_type_map: dict[str, str] = field(default_factory=dict)
-    download_factor_map: dict[str, str] = field(default_factory=dict)
-    time_unit_multiplier: int = 1
     features: frozenset[SiteFeature] = frozenset()
 
     def detail_url(self, **kw: str) -> str | None:
-        """渲染详情页 URL。模板中未提供的占位符会被忽略。"""
-        if not self.detail_path_template:
-            return None
-        try:
-            path = self.detail_path_template.format(**kw)
-        except KeyError:
-            return None
-        return f"https://{self.domain}{path}" if path.startswith("/") else path
+        return None
 
 
 class SiteAdapter(ABC):

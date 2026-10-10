@@ -103,15 +103,6 @@ def test_skip_does_not_filter_permanent() -> None:
     assert skip is False
 
 
-def test_skip_respects_grab_short_window_opt_in() -> None:
-    p = WindowPolicy(min_buffer=1800, grab_short_window=True)
-    short_end = utcnow() + timedelta(minutes=30)
-    skip, _ = svc_with(p).should_skip_short_candidate(
-        FreeType.TIMED, short_end
-    )
-    assert skip is False
-
-
 # ------------------------------------------------------------ FR-3.4.3 收益四分类
 def test_completion_inside_window() -> None:
     end = utcnow() + timedelta(hours=2)

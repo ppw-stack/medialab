@@ -205,10 +205,7 @@ class HdskyAdapter(SiteAdapter):
         return f"https://{domain}"
 
     def _detail_url(self, item_id: str) -> str:
-        if self.profile.detail_path_template:
-            path = self.profile.detail_path_template.format(id=item_id, hash=item_id)
-        else:
-            path = f"/details.php?id={item_id}"
+        path = f"/details.php?id={item_id}"
         if not path.startswith("/"):
             path = "/" + path
         return f"{self._base_url()}{path}"

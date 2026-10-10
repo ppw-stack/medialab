@@ -146,7 +146,7 @@ async def env_with_dl(db):
         s.add(dl)
         await s.flush()
         site = Site(
-            name="pt", domain="p.invalid", save_path_template="/d/{site}/{name}"
+            name="pt", domain="p.invalid"
         )
         s.add(site)
         await s.flush()

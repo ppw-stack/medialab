@@ -108,14 +108,12 @@ def test_site_config_columns_exist() -> None:
     cols = Base.metadata.tables["sites"].columns
     for name in (
         "adapter",
-        "rss_time_pattern",
-        "window_field_map",
-        "free_type_map",
-        "download_factor_map",
-        "detail_path_template",
-        "time_unit_multiplier",
-        "clock_offset",
-        "grab_short_window",
+        "rss_url_enc",
+        "apikey_enc",
+        "cookies_enc",
+        "downloader_id",
+        "min_interval_minutes",
+        "enabled",
     ):
         assert name in cols, name
 

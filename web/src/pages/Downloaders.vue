@@ -11,17 +11,12 @@ interface Downloader {
   username: string | null
   has_password: boolean
   download_root: string | null
-  max_upload: string | null
-  max_download: string | null
   enabled: boolean
   verify_tls: boolean
-  capabilities: Record<string, unknown>
   created_at: string
   updated_at: string
 }
 
-// 与后端保持一致：当前仅 qBittorrent 实现，transmission/deluge/aria2
-// 已声明但未实现，UI 展示但创建时会被 501 拒绝。
 const TYPES = [
   { value: 'qbittorrent', label: 'qBittorrent', implemented: true },
   { value: 'transmission', label: 'Transmission', implemented: false },
@@ -44,8 +39,6 @@ const formState = reactive<Record<string, unknown>>({
   username: '',
   password: '',
   download_root: '',
-  max_upload: '',
-  max_download: '',
   enabled: true,
   verify_tls: true,
 })
@@ -72,8 +65,6 @@ function onCreate() {
     username: 'admin',
     password: '',
     download_root: '',
-    max_upload: '',
-    max_download: '',
     enabled: true,
     verify_tls: true,
   })
@@ -89,10 +80,8 @@ function onEdit(d: Downloader) {
     type: d.type,
     url: d.url,
     username: d.username || '',
-    password: '',  // 留空 = 保留旧凭据
+    password: '',
     download_root: d.download_root || '',
-    max_upload: d.max_upload || '',
-    max_download: d.max_download || '',
     enabled: d.enabled,
     verify_tls: d.verify_tls,
   })
@@ -109,12 +98,9 @@ async function onSave() {
   saving.value = true
   try {
     const payload: Record<string, unknown> = { ...formState }
-    // 空字符串转 null（密码留空在编辑模式表示保留）
     if (!payload.password) delete payload.password
     if (!payload.username) payload.username = null
     if (!payload.download_root) payload.download_root = null
-    if (!payload.max_upload) payload.max_upload = null
-    if (!payload.max_download) payload.max_download = null
     if (creating.value) {
       await api.post('/downloaders', payload)
       message.success('已创建')
@@ -143,19 +129,18 @@ async function onTest() {
   testing.value = true
   testResult.value = null
   try {
-    const r = await api.post<{ reachable: boolean; detail: string; capabilities?: { features: string[] }; supports_data_deletion?: boolean }>(
+    const r = await api.post<{ reachable: boolean; detail: string; capabilities?: string[]; supports_data_deletion?: boolean }>(
       `/downloaders/${editing.value.id}/test`,
       {},
     )
     testResult.value = {
       reachable: r.reachable,
       detail: r.detail,
-      capabilities: r.capabilities?.features,
+      capabilities: r.capabilities,
       supports_data_deletion: r.supports_data_deletion,
     }
     if (r.reachable) {
       message.success('测连成功')
-      load()  // 刷新以拉取最新的 capabilities 快照
     } else {
       message.error(`测连失败：${r.detail}`)
     }
@@ -174,12 +159,6 @@ function isImplemented(type: string): boolean {
   return TYPES.find((t) => t.value === type)?.implemented ?? false
 }
 
-function capFeatures(cap: Record<string, unknown> | null | undefined): string[] {
-  if (!cap) return []
-  const features = (cap as { features?: unknown }).features
-  return Array.isArray(features) ? (features as string[]) : []
-}
-
 const columns = [
   { title: '名称', dataIndex: 'name', key: 'name' },
   { title: '类型', dataIndex: 'type', key: 'type' },
@@ -187,8 +166,6 @@ const columns = [
   { title: '用户名', key: 'username' },
   { title: '凭据', key: 'password' },
   { title: '存储根', key: 'download_root' },
-  { title: '限速', key: 'rate' },
-  { title: '能力', key: 'capabilities' },
   { title: '启用', dataIndex: 'enabled', key: 'enabled' },
   { title: '操作', key: 'action' },
 ]
@@ -197,9 +174,7 @@ const columns = [
 <template>
   <div>
     <a-typography-title :level="4">下载器管理</a-typography-title>
-    <a-card
-      title="FR-1.1 下载器实例（凭据脱敏）"
-    >
+    <a-card title="下载器实例（凭据脱敏）">
       <template #extra>
         <a-button type="primary" @click="onCreate">新增下载器</a-button>
       </template>
@@ -228,32 +203,6 @@ const columns = [
             <a-typography-text v-if="record.download_root" code style="font-size: 12px">
               {{ record.download_root }}
             </a-typography-text>
-            <span v-else>—</span>
-          </template>
-          <template v-else-if="column.key === 'rate'">
-            <span v-if="record.max_upload || record.max_download">
-              ↑ {{ record.max_upload || '∞' }} / ↓ {{ record.max_download || '∞' }}
-            </span>
-            <span v-else>—</span>
-          </template>
-          <template v-else-if="column.key === 'capabilities'">
-            <a-tooltip v-if="capFeatures(record.capabilities).length > 0">
-              <a-space size="small" wrap>
-                <a-tag
-                  v-for="f in capFeatures(record.capabilities).slice(0, 3)"
-                  :key="f"
-                  color="cyan"
-                  style="font-size: 11px"
-                >{{ f }}</a-tag>
-                <a-tag
-                  v-if="capFeatures(record.capabilities).length > 3"
-                  style="font-size: 11px"
-                >+{{ capFeatures(record.capabilities).length - 3 }}</a-tag>
-              </a-space>
-              <template #title>
-                {{ capFeatures(record.capabilities).join(', ') }}
-              </template>
-            </a-tooltip>
             <span v-else>—</span>
           </template>
           <template v-else-if="column.key === 'enabled'">
@@ -320,19 +269,11 @@ const columns = [
           </a-form-item>
         </a-space>
         <a-form-item
-          label="下载根目录（FR-5.2.5c 路径校验基准；空 = 禁用数据删除）"
+          label="下载根目录（路径校验基准；空 = 禁用数据删除）"
           name="download_root"
         >
           <a-input v-model:value="formState.download_root" placeholder="/downloads" />
         </a-form-item>
-        <a-space style="width: 100%" size="middle">
-          <a-form-item label="上传限速（如 5M）" name="max_upload" style="flex: 1">
-            <a-input v-model:value="formState.max_upload" placeholder="留空不限速" />
-          </a-form-item>
-          <a-form-item label="下载限速（如 50M）" name="max_download" style="flex: 1">
-            <a-input v-model:value="formState.max_download" placeholder="留空不限速" />
-          </a-form-item>
-        </a-space>
         <a-form-item label="校验 TLS 证书" name="verify_tls" tooltip="自签名证书场景下关闭">
           <a-switch v-model:checked="formState.verify_tls" />
         </a-form-item>
