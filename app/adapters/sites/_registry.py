@@ -21,6 +21,7 @@ from app.adapters.sites.base import SiteAdapter
 _BUILTIN: dict[str, str] = {
     "mteam": "app.adapters.sites.mteam.MteamAdapter",
     "hhanclub": "app.adapters.sites.hhanclub.HhanclubAdapter",
+    "hdsky": "app.adapters.sites.hdsky.HdskyAdapter",
 }
 
 

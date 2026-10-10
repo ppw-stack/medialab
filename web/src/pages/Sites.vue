@@ -21,6 +21,7 @@ interface Site {
 const ADAPTERS = [
   { value: 'mteam', label: 'M-team（m-team.cc）' },
   { value: 'hhanclub', label: 'HHanClub（hhanclub.net）' },
+  { value: 'hdsky', label: 'HDSky（hdsky.me）' },
 ]
 
 const RESCUE_STRATEGIES = [
