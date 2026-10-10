@@ -177,6 +177,7 @@ class SingleWriterQueue:
 
             for stmt in (
                 "ALTER TABLE torrents ADD COLUMN zero_seed_rounds INTEGER DEFAULT 0",
+                "ALTER TABLE sites ADD COLUMN cookies_enc TEXT",
             ):
                 with suppress(Exception):  # 列已存在
                     await conn.execute(text(stmt))

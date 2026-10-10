@@ -25,8 +25,15 @@ class SiteCreate(BaseModel):
     name: str = Field(..., pattern=r"^[a-zA-Z0-9_-]+$", description="字母/数字/下划线/连字符")
     domain: str
     rss_url: str | None = None
-    adapter: Literal["mteam"] = "mteam"  # FR-1.5 站点 adapter 名（注册中心约束）
-    apikey: str | None = Field(default=None, max_length=256, description="m-team 等的 API key（x-api-key），加密存储")
+    adapter: Literal["mteam", "hhanclub", "hdsky", "ourbits"] = "mteam"  # FR-1.5 adapter 名
+    apikey: str | None = Field(
+        default=None, max_length=256,
+        description="m-team 等的 API key（x-api-key），加密存储",
+    )
+    cookies: str | None = Field(
+        default=None, max_length=4096,
+        description="NexusPHP 等站点 session cookies，加密存储",
+    )
     save_path_template: str = "/data/torrents/{site}/{name}"
     max_size: int | None = Field(default=None, description="辅种体积上限（字节）")
     min_interval_minutes: int = Field(default=60, ge=15, description="FR-2.2 下限 15")
@@ -46,8 +53,13 @@ class SiteUpdate(BaseModel):
     name: str | None = None
     domain: str | None = None
     rss_url: str | None = None  # 留空字符串表示不修改
-    apikey: str | None = Field(default=None, max_length=256, description="留空字符串 = 不修改")
-    adapter: str | None = None
+    apikey: str | None = Field(
+        default=None, max_length=256, description="留空字符串 = 不修改"
+    )
+    cookies: str | None = Field(
+        default=None, max_length=4096,
+        description="NexusPHP 站点 session cookies，留空字符串 = 不修改",
+    )
     save_path_template: str | None = None
     max_size: int | None = None
     min_interval_minutes: int | None = Field(default=None, ge=15)
@@ -60,7 +72,7 @@ class SiteUpdate(BaseModel):
     rss_time_pattern: str | None = None
     grab_short_window: bool | None = None
     enabled: bool | None = None
-    adapter: Literal["mteam"] | None = None  # 改名时也允许提供
+    adapter: Literal["mteam", "hhanclub", "hdsky", "ourbits"] | None = None
 
 
 class SiteOut(BaseModel):
@@ -71,6 +83,7 @@ class SiteOut(BaseModel):
     enabled: bool
     rss_url_masked: str
     has_apikey: bool  # 是否配置了 API key（不暴露 key 内容）
+    has_cookies: bool  # 是否配置了 session cookies
     default_free_duration: int
     min_buffer: int
     buffer_ratio: float
@@ -147,6 +160,10 @@ async def create_site(payload: SiteCreate) -> SiteOut:
             site.apikey_enc = cipher.encrypt(
                 payload.apikey, owner_type="site", owner_id=payload.name
             )
+        if payload.cookies:
+            site.cookies_enc = cipher.encrypt(
+                payload.cookies, owner_type="site", owner_id=payload.name
+            )
         session.add(site)
         await session.flush()
 
@@ -154,7 +171,7 @@ async def create_site(payload: SiteCreate) -> SiteOut:
         # 站点就永远不会被拉取（FR-2.2）
         # m-team 等 API 站点即使没有 rss_url（走 apikey）也要建 Feed 占位，
         # 调度层不关心站点用 RSS 还是 API（FR-1.5 适配层收拢差异）
-        if payload.rss_url or payload.apikey:
+        if payload.rss_url or payload.apikey or payload.cookies:
             session.add(
                 Feed(
                     site_id=site.id,
@@ -171,7 +188,6 @@ async def update_site(payload: SiteUpdate) -> SiteOut:
     """更新站点配置（id 在 body）。rss_url 留空字符串 = 不修改。"""
     site_id = payload.id
     cipher = build_cipher(get_settings())
-    settings = get_settings()
     async with session_scope() as session:
         site = (await session.execute(select(Site).where(Site.id == site_id))).scalar_one_or_none()
         if site is None:
@@ -197,6 +213,11 @@ async def update_site(payload: SiteUpdate) -> SiteOut:
         if payload.apikey:
             site.apikey_enc = cipher.encrypt(
                 payload.apikey, owner_type="site", owner_id=site.name
+            )
+        # cookies：同上，空字符串 = 不修改
+        if payload.cookies:
+            site.cookies_enc = cipher.encrypt(
+                payload.cookies, owner_type="site", owner_id=site.name
             )
         await session.flush()
         return _to_out(site, None)
@@ -238,14 +259,23 @@ async def test_site(site_id: int) -> dict[str, Any]:
     from app.core.config import get_settings
     from app.core.crypto import build_cipher
     apikey = None
+    cookies = None
+    cipher = build_cipher(get_settings())
     if site.apikey_enc:
         try:
-            apikey = build_cipher(get_settings()).try_decrypt(
+            apikey = cipher.try_decrypt(
                 site.apikey_enc, owner_type="site", owner_id=site.name
             )
         except Exception:
             apikey = None
-    adapter = adapter_cls(profile, apikey=apikey, clock_offset=offset)
+    if site.cookies_enc:
+        try:
+            cookies = cipher.try_decrypt(
+                site.cookies_enc, owner_type="site", owner_id=site.name
+            )
+        except Exception:
+            cookies = None
+    adapter = adapter_cls(profile, cookies=cookies, apikey=apikey, clock_offset=offset)
     try:
         health = await adapter.ping()
         # 字符串路径：mteam 也保留"剩余 X" 文案兜底，便于搜索结果页场景
@@ -307,6 +337,7 @@ def _to_out(site: Site, raw: str | None) -> SiteOut:
         enabled=site.enabled,
         rss_url_masked=mask_secret(raw or (site.rss_url_enc or ""), keep=8),
         has_apikey=bool(site.apikey_enc),
+        has_cookies=bool(site.cookies_enc),
         default_free_duration=site.default_free_duration,
         min_buffer=site.min_buffer,
         buffer_ratio=site.buffer_ratio,

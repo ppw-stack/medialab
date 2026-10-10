@@ -27,15 +27,15 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 import time
+import xml.etree.ElementTree as ET
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlencode
 
 import httpx
-import xml.etree.ElementTree as ET
 
+from app.adapters.sites._bencode import infohash_from_torrent
 from app.adapters.sites.base import (
     FeedItem,
     SiteAdapter,
@@ -409,16 +409,29 @@ class MteamAdapter(SiteAdapter):
             desc = fields.get("description", "")[:20000]
             cat_node = node.find("category")
             enc_node = node.find("enclosure")
+            enc_len = (
+                int(enc_node.get("length") or 0)
+                if enc_node is not None and enc_node.get("length")
+                else 0
+            )
+            enc_url = (
+                enc_node.get("url")
+                if enc_node is not None and enc_node.get("url")
+                else link
+            )
+            cat_text = (
+                cat_node.text if cat_node is not None and cat_node.text else None
+            )
             items.append(
                 FeedItem(
                     title=fields.get("title", ""),
                     link=link,
                     info_hash=None,
-                    size=int(enc_node.get("length") or 0) if enc_node is not None and enc_node.get("length") else 0,
-                    category=cat_node.text if cat_node is not None and cat_node.text else None,
+                    size=enc_len,
+                    category=cat_text,
                     description=desc,
                     published_at=None,
-                    torrent_url=enc_node.get("url") if enc_node is not None and enc_node.get("url") else link,
+                    torrent_url=enc_url,
                 )
             )
         return items[:_MAX_ITEMS_PER_PULL]
@@ -475,10 +488,10 @@ class MteamAdapter(SiteAdapter):
             )
         import re
         m = re.search(
-            r"(?:剩余|剩|left|remaining)\s*"
+            r"(?:剩余|剩餘|剩|left|remaining)\s*"
             r"(?:(?P<d>\d+)\s*(?:天|日|d|days?)\s*)?"
-            r"(?:(?P<h>\d+)\s*(?:小时|时|h|hours?)\s*)?"
-            r"(?:(?P<m>\d+)\s*(?:分|m|min)\s*)?",
+            r"(?:(?P<h>\d+)\s*(?:小时|小時|時|时|h|hours?)\s*)?"
+            r"(?:(?P<m>\d+)\s*(?:分|分鐘|m|min)\s*)?",
             text, re.IGNORECASE,
         )
         if m:
@@ -515,7 +528,10 @@ class MteamAdapter(SiteAdapter):
             try:
                 resp = await self._client.post(
                     f"{self._api_base()}{path}",
-                    headers={**self._auth_headers(), "Content-Type": "application/x-www-form-urlencoded"},
+                    headers={
+                        **self._auth_headers(),
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
                     content=f"id={item_id}",
                     timeout=self._timeout,
                 )
@@ -586,7 +602,10 @@ class MteamAdapter(SiteAdapter):
         try:
             resp = await self._client.post(
                 f"{self._api_base()}{path}",
-                headers={**self._auth_headers(), "Content-Type": "application/x-www-form-urlencoded"},
+                headers={
+                    **self._auth_headers(),
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
                 content=body,
                 timeout=self._timeout,
             )
@@ -630,62 +649,7 @@ class MteamAdapter(SiteAdapter):
     @staticmethod
     def _infohash_from_torrent(torrent_bytes: bytes) -> str | None:
         """从 torrent 文件解析 infohash（info dict 的 bencoded SHA1）。"""
-        try:
-            info = MteamAdapter._bdecode_info(torrent_bytes)
-        except (ValueError, IndexError):
-            return None
-        encoded = MteamAdapter._bencode(info)
-        return hashlib.sha1(encoded).hexdigest()
-
-    @staticmethod
-    def _bdecode_info(data: bytes) -> dict[bytes, Any]:
-        """解析 torrent 的 info dict。"""
-        def _decode(idx: int) -> tuple[Any, int]:
-            c = data[idx:idx + 1]
-            if c == b'd':
-                idx += 1
-                d: dict[bytes, Any] = {}
-                while data[idx:idx + 1] != b'e':
-                    k, idx = _decode(idx)
-                    v, idx = _decode(idx)
-                    d[k] = v
-                return d, idx + 1
-            if c == b'l':
-                idx += 1
-                lst: list[Any] = []
-                while data[idx:idx + 1] != b'e':
-                    v, idx = _decode(idx)
-                    lst.append(v)
-                return lst, idx + 1
-            if c == b'i':
-                idx += 1
-                end = data.index(b'e', idx)
-                return int(data[idx:end]), end + 1
-            if c in b'0123456789':
-                end = data.index(b':', idx)
-                n = int(data[idx:end])
-                return data[end + 1:end + 1 + n], end + 1 + n
-            raise ValueError(f"bad bencode char {c!r} at {idx}")
-
-        root, _ = _decode(0)
-        if not isinstance(root, dict) or b'info' not in root:
-            raise ValueError("missing info dict")
-        return root[b'info']
-
-    @staticmethod
-    def _bencode(obj: Any) -> bytes:
-        if isinstance(obj, int):
-            return b'i' + str(obj).encode() + b'e'
-        if isinstance(obj, bytes):
-            return str(len(obj)).encode() + b':' + obj
-        if isinstance(obj, str):
-            return MteamAdapter._bencode(obj.encode())
-        if isinstance(obj, dict):
-            items = sorted(obj.items(), key=lambda x: x[0])
-            return b'd' + b''.join(MteamAdapter._bencode(k) + MteamAdapter._bencode(v) for k, v in items) + b'e'
-        if isinstance(obj, list):
-            return b'l' + b''.join(MteamAdapter._bencode(v) for v in obj) + b'e'
-        raise ValueError(f"bad bencode type {type(obj)}")
+        return infohash_from_torrent(torrent_bytes)
 
     async def verify_status(self, info_hash: str) -> TorrentBrief:
         """m-team search API 不暴露删除/违规状态 → UNKNOWN。"""

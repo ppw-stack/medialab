@@ -150,9 +150,20 @@ class AdapterFactory:
                 owner_type="site",
                 owner_id=row.name,
             )
+        # NexusPHP 等站点 session cookies（加密解密后注入）
+        # 调用方显式传入的 cookies 优先于 DB 值（覆盖场景）
+        db_cookies = None
+        if row.cookies_enc:
+            db_cookies = decrypt_field(
+                self._cipher,
+                row.cookies_enc,
+                owner_type="site",
+                owner_id=row.name,
+            )
+        resolved_cookies = cookies or db_cookies
         adapter = adapter_cls(
             profile_from_site(row),
-            cookies=cookies,
+            cookies=resolved_cookies,
             apikey=apikey,
             clock_offset=clock_offset_for(row),
         )
