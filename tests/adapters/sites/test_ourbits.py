@@ -109,8 +109,8 @@ async def test_get_torrent_detail_ok(adapter: OurbitsAdapter) -> None:
     resp.text = "<html>detail</html>"
     adapter._client.get = AsyncMock(return_value=resp)
     detail = await adapter.get_torrent_detail("10001")
-    assert detail["id"] == "10001"
-    assert "_html" in detail
+    assert detail.item_id == "10001"
+    assert detail.raw_html is not None
 
 
 # ---- parse_torrents_html ----

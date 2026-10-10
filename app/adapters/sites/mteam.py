@@ -37,6 +37,7 @@ from app.adapters.sites.base import (
     SiteAdapter,
     SiteHealth,
     TorrentBrief,
+    TorrentDetail,
 )
 from app.core.logging import get_logger
 
@@ -367,13 +368,13 @@ class MteamAdapter(SiteAdapter):
         return TorrentBrief.EXISTS
 
     # ------------------------------------------------------------ 5. get_torrent_detail
-    async def get_torrent_detail(self, item_id: str) -> dict[str, object]:
+    async def get_torrent_detail(self, item_id: str) -> TorrentDetail:
         """5. 种子详情：调 ``/api/torrent/detail``。
 
-        返回完整种子数据（含 descr/mediainfo/status）。
+        返回统一 TorrentDetail（含 title/size/download_url/free_payload）。
         """
         if not self._apikey or not self._api_base():
-            return {"id": item_id, "_error": "缺少 apikey"}
+            return TorrentDetail(item_id=item_id, error="缺少 apikey")
         path = "/api/torrent/detail"
         try:
             resp = await self._client.post(
@@ -386,22 +387,29 @@ class MteamAdapter(SiteAdapter):
                 timeout=self._timeout,
             )
         except httpx.HTTPError as exc:
-            return {"id": item_id, "_error": f"detail 网络错误：{exc}"}
+            return TorrentDetail(item_id=item_id, error=f"detail 网络错误：{exc}")
         if resp.status_code in (401, 403):
-            return {"id": item_id, "_error": "鉴权失败"}
+            return TorrentDetail(item_id=item_id, error="鉴权失败")
         if resp.status_code >= 400:
-            return {"id": item_id, "_error": f"HTTP {resp.status_code}"}
+            return TorrentDetail(item_id=item_id, error=f"HTTP {resp.status_code}")
         try:
             data = resp.json()
         except (TypeError, ValueError):
-            return {"id": item_id, "_error": "响应非 JSON"}
+            return TorrentDetail(item_id=item_id, error="响应非 JSON")
         if str(data.get("code")) != "0":
-            return {"id": item_id, "_error": data.get("message", "detail 失败")}
+            return TorrentDetail(
+                item_id=item_id, error=data.get("message", "detail 失败")
+            )
         d = data.get("data") or {}
-        if isinstance(d, dict):
-            d["id"] = d.get("id") or item_id
-            return d
-        return {"id": item_id, "data": d}
+        if not isinstance(d, dict):
+            return TorrentDetail(item_id=item_id, error="响应 data 非 dict")
+        status = d.get("status") or {}
+        return TorrentDetail(
+            item_id=str(d.get("id") or item_id),
+            title=d.get("name"),
+            size=int(d.get("size") or 0),
+            free_payload={"status": status} if status else None,
+        )
 
     async def close(self) -> None:
         await self._client.aclose()

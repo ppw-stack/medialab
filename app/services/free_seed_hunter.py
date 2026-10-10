@@ -372,9 +372,8 @@ class FreeSeedHunter:
             item_id = url.rsplit("/", 1)[-1]
             try:
                 detail = await self._factory.site(site).get_torrent_detail(item_id)
-                real = detail.get("download_url")
-                if real:
-                    url = real
+                if detail.download_url:
+                    url = detail.download_url
             except Exception as exc:
                 logger.debug("取真实下载 URL 失败 %s：%s", item_id, exc)
         logger.info("添加种子 downloader=%s reason=free_seed", dl.name)

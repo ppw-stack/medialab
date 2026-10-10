@@ -158,11 +158,14 @@ async def test_check_status_no_apikey() -> None:
 async def test_get_torrent_detail_ok(adapter: MteamAdapter) -> None:
     resp = MagicMock()
     resp.status_code = 200
-    resp.json = MagicMock(return_value={"code": "0", "data": {"id": "1", "name": "X"}})
+    resp.json = MagicMock(return_value={"code": "0", "data": {"id": "1", "name": "X", "size": 100, "status": {"discount": "FREE"}}})
     adapter._client.post = AsyncMock(return_value=resp)
     detail = await adapter.get_torrent_detail("1")
-    assert detail["id"] == "1"
-    assert detail["name"] == "X"
+    assert detail.item_id == "1"
+    assert detail.title == "X"
+    assert detail.size == 100
+    assert detail.error is None
+    assert detail.free_payload == {"status": {"discount": "FREE"}}
 
 
 async def test_get_torrent_detail_error(adapter: MteamAdapter) -> None:
@@ -170,7 +173,13 @@ async def test_get_torrent_detail_error(adapter: MteamAdapter) -> None:
     resp.status_code = 403
     adapter._client.post = AsyncMock(return_value=resp)
     detail = await adapter.get_torrent_detail("1")
-    assert "_error" in detail
+    assert detail.error is not None
+
+
+async def test_get_torrent_detail_no_apikey() -> None:
+    a = MteamAdapter(PROFILE)
+    detail = await a.get_torrent_detail("1")
+    assert detail.error == "缺少 apikey"
 
 
 # ---- _parse_iso_dt ----

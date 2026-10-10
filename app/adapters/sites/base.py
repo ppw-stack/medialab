@@ -54,12 +54,28 @@ class FeedItem:
     free_payload: dict[str, object] | None = None
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class SiteProfile:
     """站点配置。"""
 
     name: str
     domain: str
+
+
+@dataclass(frozen=True, slots=True)
+class TorrentDetail:
+    """种子详情（get_torrent_detail 返回值）。
+
+    所有站点统一返回此结构，业务层不需要猜 dict 键。
+    """
+
+    item_id: str
+    title: str | None = None
+    size: int = 0
+    download_url: str | None = None
+    free_payload: dict[str, object] | None = None
+    raw_html: str | None = None
+    error: str | None = None
 
 
 class SiteAdapter(ABC):
@@ -126,8 +142,8 @@ class SiteAdapter(ABC):
         """
 
     @abstractmethod
-    async def get_torrent_detail(self, item_id: str) -> dict[str, object]:
-        """5. 种子详情查询。返回原始 dict（含 download_url / status 等）。"""
+    async def get_torrent_detail(self, item_id: str) -> TorrentDetail:
+        """5. 种子详情查询。返回统一结构（含 download_url / free_payload / raw_html）。"""
 
     async def close(self) -> None:
         """释放 HTTP 连接池。子类按需覆盖。"""

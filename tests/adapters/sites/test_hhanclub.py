@@ -137,8 +137,8 @@ async def test_get_torrent_detail_ok(adapter: HhanclubAdapter) -> None:
     resp.text = "<html>detail page</html>"
     adapter._client.get = AsyncMock(return_value=resp)
     detail = await adapter.get_torrent_detail("100001")
-    assert detail["id"] == "100001"
-    assert "_html" in detail
+    assert detail.item_id == "100001"
+    assert detail.raw_html is not None
 
 
 async def test_get_torrent_detail_error(adapter: HhanclubAdapter) -> None:
@@ -146,7 +146,7 @@ async def test_get_torrent_detail_error(adapter: HhanclubAdapter) -> None:
     resp.status_code = 500
     adapter._client.get = AsyncMock(return_value=resp)
     detail = await adapter.get_torrent_detail("100001")
-    assert "_error" in detail
+    assert detail.error is not None
 
 
 # ---- parse_torrents_html（静态方法）----

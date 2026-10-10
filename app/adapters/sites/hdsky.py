@@ -25,6 +25,7 @@ from app.adapters.sites.base import (
     SiteHealth,
     SiteProfile,
     TorrentBrief,
+    TorrentDetail,
 )
 from app.core.logging import get_logger
 
@@ -238,20 +239,20 @@ class HdskyAdapter(SiteAdapter):
         return TorrentBrief.UNKNOWN
 
     # ------------------------------------------------------------ 5. get_torrent_detail
-    async def get_torrent_detail(self, item_id: str) -> dict[str, object]:
-        """5. 种子详情：GET /details.php?id=X。返回 HTML 文本前 20k。"""
+    async def get_torrent_detail(self, item_id: str) -> TorrentDetail:
+        """5. 种子详情：GET /details.php?id=X。返回 HTML。"""
         if not self._cookies:
-            return {"id": item_id, "_error": "缺少 cookies"}
+            return TorrentDetail(item_id=item_id, error="缺少 cookies")
         try:
             resp = await self._client.get(
                 self._detail_url(item_id),
                 timeout=self._timeout,
             )
         except httpx.HTTPError as exc:
-            return {"id": item_id, "_error": f"detail 网络错误：{exc}"}
+            return TorrentDetail(item_id=item_id, error=f"detail 网络错误：{exc}")
         if resp.status_code >= 400:
-            return {"id": item_id, "_error": f"HTTP {resp.status_code}"}
-        return {"id": item_id, "_html": resp.text[:20000]}
+            return TorrentDetail(item_id=item_id, error=f"HTTP {resp.status_code}")
+        return TorrentDetail(item_id=item_id, raw_html=resp.text[:20000])
 
     async def close(self) -> None:
         await self._client.aclose()
