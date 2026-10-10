@@ -11,8 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.downloaders.base import DownloaderError
 from app.api.auth import require_session
-from app.core.crypto import build_cipher
 from app.core.config import get_settings
+from app.core.crypto import build_cipher
 from app.db.models import DownloaderInstance
 from app.db.session import session_scope
 from app.services.factory import get_factory

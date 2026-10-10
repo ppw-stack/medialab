@@ -184,8 +184,12 @@ class FeedFetcher:
         )
 
     async def _fetch_once(self, adapter: SiteAdapter, url: str) -> list[FeedItem]:
-        """单次拉取。适配层内部处理 HTTP 细节与状态码。"""
-        items = await adapter.fetch_feed(url)
+        """单次拉取。返回任务列表（RSS 拉取路径已废弃）。"""
+        _ = url  # RSS 路径不再使用
+        try:
+            items = await adapter.search_torrents({})
+        except Exception as exc:
+            raise httpx.HTTPError(f"search_torrents 失败：{exc}") from exc
         if items is None:
             raise httpx.HTTPError("适配器返回 None")
         return items

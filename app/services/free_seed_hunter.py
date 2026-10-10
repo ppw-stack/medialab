@@ -25,6 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.downloaders.base import AddTorrentPayload
+from app.adapters.sites._bencode import infohash_from_torrent
 from app.adapters.sites.base import FeedItem
 from app.core.logging import get_logger
 from app.core.metrics import free_seed_outcomes
@@ -48,6 +49,7 @@ from app.services.factory import AdapterFactory
 from app.services.feed_fetcher import FeedFetcher, PullStatus
 from app.services.matcher import extract_info_hash
 from app.services.task_queue import TaskKind, TaskQueueService, make_idem_key
+from app.services.window_parser import WindowParser
 from app.services.window_service import (
     DeadlineCalculator,
     SiteWindowService,
@@ -199,9 +201,7 @@ class FreeSeedHunter:
             return
 
         try:
-            window = await self._factory.site(site).parse_window(
-                self._feed_item_to_raw(item)
-            )
+            window = WindowParser.parse(item)
         except Exception as exc:
             logger.debug("站点 %s 解析失败：%s", site.name, exc)
             window = FreeWindow()
@@ -371,7 +371,7 @@ class FreeSeedHunter:
         if isinstance(url, str) and url.startswith("api://gen/"):
             item_id = url.rsplit("/", 1)[-1]
             try:
-                detail = await self._factory.site(site).torrent_detail(item_id)
+                detail = await self._factory.site(site).get_torrent_detail(item_id)
                 real = detail.get("download_url")
                 if real:
                     url = real
@@ -527,7 +527,7 @@ class FreeSeedHunter:
         return tail or None
 
     async def _resolve_infohash(self, site: Site, item: FeedItem) -> str | None:
-        """info_hash 缺失时，让站点适配器惰性下载 torrent 解析（m-team 等）。"""
+        """info_hash 缺失时，让站点适配器下载 torrent 解析（m-team 等）。"""
         item_id = self._item_id(item)
         if not item_id:
             return None
@@ -536,29 +536,11 @@ class FreeSeedHunter:
         except Exception:
             return None
         try:
-            return await adapter.fetch_infohash(item_id)
+            torrent_bytes = await adapter.download_torrent(item_id)
         except Exception as exc:
-            logger.debug("站点 %s 获取 %s 的 infohash 失败：%s", site.name, item_id, exc)
+            logger.debug("站点 %s 下载 %s 失败：%s", site.name, item_id, exc)
             return None
-
-    @staticmethod
-    def _feed_item_to_raw(item: FeedItem) -> str | dict[str, object]:
-        """把 FeedItem 适配为 SiteAdapter.parse_window 的入参。
-
-        多数站点 RSS 在 description 里嵌 JSON，这里用 description 优先、
-        title + link 兜底，最大化命中不同站点的窗口提取策略。
-        """
-        # m-team 等 API 站点：适配层已把 status 塞进 free_payload，优先用它
-        if item.free_payload:
-            return item.free_payload
-        if item.description and item.description.strip().startswith("{"):
-            return item.description
-        return {
-            "title": item.title,
-            "link": item.link,
-            "torrent_url": item.torrent_url or item.link,
-            "info_hash": item.info_hash or "",
-        }
+        return infohash_from_torrent(torrent_bytes)
 
 
 def win_policy(site: Site) -> WindowPolicy:

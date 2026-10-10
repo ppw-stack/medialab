@@ -18,7 +18,6 @@ from app.adapters.sites import resolve as resolve_site_adapter
 from app.adapters.sites.base import SiteAdapter, SiteProfile
 from app.core.crypto import CredentialCipher
 from app.core.logging import get_logger
-from app.core.timeutils import ClockOffset
 from app.db.models import DownloaderInstance, Site
 
 logger = get_logger(__name__)
@@ -51,11 +50,6 @@ def profile_from_site(site: Site) -> SiteProfile:
         domain=site.domain,
         features=frozenset({SiteFeature.RSS, SiteFeature.CLOCK_API, SiteFeature.TIMESTAMP_FIELD}),
     )
-
-
-def clock_offset_for(site: Site) -> ClockOffset:
-    """站点时钟偏差（当前固定为 zero，不再可配置）。"""
-    return ClockOffset.zero()
 
 
 class AdapterFactory:
@@ -148,7 +142,6 @@ class AdapterFactory:
             profile_from_site(row),
             cookies=resolved_cookies,
             apikey=apikey,
-            clock_offset=clock_offset_for(row),
         )
         self._sites[row.id] = adapter
         return adapter

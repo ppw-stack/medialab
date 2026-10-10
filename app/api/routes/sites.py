@@ -13,7 +13,6 @@ from app.adapters.sites.base import SiteProfile
 from app.api.auth import require_session
 from app.core.config import get_settings
 from app.core.crypto import build_cipher, mask_secret
-from app.core.timeutils import ClockOffset
 from app.db.models import Feed, Site
 from app.db.session import session_scope
 
@@ -202,15 +201,23 @@ async def test_site(site_id: int) -> dict[str, Any]:
             )
         except Exception:
             cookies = None
-    adapter = adapter_cls(profile, cookies=cookies, apikey=apikey, clock_offset=ClockOffset.zero())
+    adapter = adapter_cls(profile, cookies=cookies, apikey=apikey)
     try:
-        health = await adapter.ping()
-        probe = await adapter.parse_window("剩余 2 天 6 小时")
+        health = await adapter.check_reachability()
+        # 业务层 WindowParser.parse() 自检：用一段"剩余 2 天 6 小时"文案
+        from app.adapters.sites.base import FeedItem
+        from app.services.window_parser import WindowParser
+
+        probe_item = FeedItem(
+            title="[self-test] 剩余 2 天 6 小时",
+            link="",
+            description="剩余 2 天 6 小时",
+        )
+        probe = WindowParser.parse(probe_item)
         return {
             "reachable": health.reachable,
             "logged_in": health.logged_in,
             "detail": health.detail,
-            "capabilities": sorted(str(f) for f in adapter.capabilities()),
             "self_test": {
                 "free_type": probe.free_type,
                 "free_end_at": probe.free_end_at,
