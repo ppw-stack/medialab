@@ -247,6 +247,7 @@ class FreeSeedHunter:
             free_source=window.free_source,
             free_confidence=window.confidence,
             free_payload=free_payload,
+            torrent_url=item.torrent_url,
             status=status,
             reject_reason=reject_reason,
             seen_at=utcnow(),
@@ -385,13 +386,34 @@ class FreeSeedHunter:
     async def _download_torrent(
         self, site: Site, cand: FreeCandidate
     ) -> bytes | None:
-        """下载 torrent 字节，捕获所有异常返回 None。"""
-        item_id = cand.item_id
-        if not item_id:
-            return None
+        """下载 torrent 字节，捕获所有异常返回 None。
+
+        优先用 cand.torrent_url（pull 阶段已存的签名 URL，NexusPHP 含 passkey/sign）；
+        fallback 用 adapter.download_torrent(item_id)（mteam 走 genDlToken 路径）。
+        """
         try:
             adapter = self._factory.site(site)
         except Exception:
+            return None
+
+        # 路径 1：cand.torrent_url（NexusPHP 已签名的完整 URL）
+        if cand.torrent_url:
+            try:
+                resp = await adapter._client.get(cand.torrent_url, timeout=adapter._timeout)
+            except Exception as exc:
+                logger.debug("站点 %s 下载 %s 失败：%s", site.name, cand.item_id, exc)
+                return None
+            if resp.status_code >= 400:
+                logger.debug("站点 %s 下载 HTTP %d", site.name, resp.status_code)
+                return None
+            content = resp.content
+            if content.startswith(b"d"):
+                return content
+            return None
+
+        # 路径 2：fallback 到 adapter.download_torrent（mteam 走 genDlToken）
+        item_id = cand.item_id
+        if not item_id:
             return None
         try:
             return await adapter.download_torrent(item_id)

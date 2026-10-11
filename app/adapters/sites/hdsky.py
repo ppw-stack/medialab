@@ -59,6 +59,13 @@ _PROMO_FONT_CLASSES: frozenset[str] = frozenset(
 #: 详情页锚点 href 中的 id 提取
 _DETAILS_ID_RE = re.compile(r"details\.php\?id=(\d+)", re.IGNORECASE)
 
+#: 详情页 form action 里的签名 download URL（兼容 ``&amp;`` HTML 实体）
+#: ``download.php?id=123&t=1791689096&sign=6a47635b3134c1b3275984768eb3b2a6``
+_SIGNED_DL_RE = re.compile(
+    r"download\.php\?id=(\d+)(?:&amp;|&)t=(\d+)(?:&amp;|&)sign=([a-f0-9]+)",
+    re.IGNORECASE,
+)
+
 #: 绝对时刻（title 属性）：``2026-10-11 12:41:28``
 _ABS_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 
@@ -158,6 +165,9 @@ class HdskyAdapter(SiteAdapter):
         返回的 FeedItem.free_payload 含：
         - ``free_classes``: 标准 free/twoupfree/halfdown/thirtypercent 等
         - ``remaining_abs``: 限时结束绝对时刻（仅限时条目有）
+
+        返回的 FeedItem.torrent_url 字段（可选）已携带 ``t=...&sign=...``
+        签名参数，可直接 GET 下载 .torrent（绕过 `/download.php?id=X` 的 404）。
         """
         url = (
             f"{self._base_url()}/torrents.php"
@@ -171,7 +181,41 @@ class HdskyAdapter(SiteAdapter):
         if resp.status_code >= 400:
             logger.warning("HDSky 拉取 HTTP %d", resp.status_code)
             return []
-        return HdskyAdapter._parse_spstate7_html(resp.text, limit=page_size)
+        items = HdskyAdapter._parse_spstate7_html(resp.text, limit=page_size)
+        # 批量抓详情页提取 t&sign，HDSky 的 /download.php?id=X 直链 404，
+        # 需用 details.php 中的 form action（含 t&sign）才能下载。
+        await self._fill_download_signs(items)
+        return items
+
+    async def _fill_download_signs(self, items: list[FeedItem]) -> None:
+        """批量抓 details 页提取 ``t=...&sign=...`` 完整 download URL。
+
+        FeedItem 是 frozen dataclass，用 ``dataclasses.replace`` 重建实例并替换原位。
+        """
+        if not items:
+            return
+        for idx, item in enumerate(items):
+            if item.torrent_url or not item.item_id:
+                continue
+            try:
+                resp = await self._client.get(self._detail_url(item.item_id))
+            except httpx.HTTPError as exc:
+                logger.debug("HDSky 详情页拉取失败 %s: %s", item.item_id, exc)
+                continue
+            if resp.status_code >= 400:
+                continue
+            m = _SIGNED_DL_RE.search(resp.text)
+            if m:
+                item_id, ts, sign = m.group(1), m.group(2), m.group(3)
+                from dataclasses import replace
+
+                items[idx] = replace(
+                    item,
+                    torrent_url=(
+                        f"{self._base_url()}/download.php"
+                        f"?id={item_id}&t={ts}&sign={sign}"
+                    ),
+                )
 
     @staticmethod
     def _parse_spstate7_html(html: str, *, limit: int = 100) -> list[FeedItem]:
@@ -242,7 +286,7 @@ class HdskyAdapter(SiteAdapter):
                     category=None,
                     description="",
                     published_at=None,
-                    torrent_url=f"download.php?id={item_id}",
+                    torrent_url=None,  # 由 _fill_download_signs 后填（含 sign）
                     free_payload=free_payload,
                 )
             )

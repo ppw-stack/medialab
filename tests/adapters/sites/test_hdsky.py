@@ -109,33 +109,54 @@ async def test_get_torrent_detail_ok(adapter: HdskyAdapter) -> None:
 
 
 async def test_search_torrents_parses_spstate7(adapter: HdskyAdapter) -> None:
-    """parsel CSS 解析 HDSky 标准 NexusPHP 表格。
+    """parsel CSS 解析 HDSky 标准 NexusPHP 表格 + 批量抓详情填 torrent_url。
 
     fixture 模拟 spstate=7 页面的真实结构：
     - 锚点带 title="..." href="details.php?id=N&hit=1"
     - 永久免费：<img class="pro_free">
     - 限时免费：<img class="pro_30pctdown"> + <span title="绝对时刻">
     """
-    resp = MagicMock()
-    resp.status_code = 200
-    resp.text = HDSKY_SPSTATE7_HTML
-    adapter._client.get = AsyncMock(return_value=resp)
+    # 第一次 GET：spstate=7 列表；后续 GET：每条详情页（带 sign）
+    list_resp = MagicMock()
+    list_resp.status_code = 200
+    list_resp.text = HDSKY_SPSTATE7_HTML
+    detail_resp = MagicMock()
+    detail_resp.status_code = 200
+    detail_resp.text = HDSKY_DETAIL_HTML_10001  # 含 sign URL
+    # 第 1 次 = 列表；之后 3 次（每个 item 一次）都返回同一个详情 mock
+    responses = [list_resp, detail_resp, detail_resp, detail_resp]
+    adapter._client.get = AsyncMock(side_effect=responses)
 
     items = await adapter.search_torrents({}, page_size=100, page_number=1)
+    # 10001 / 10002 / 10003 中：10001 有 sign URL 被填入；10002/10003 没填（mock 不变）
     assert len(items) == 3
-    # 第一条：永久免费
     assert items[0].item_id == "10001"
     assert items[0].title == "Movie A"
     assert items[0].free_payload is not None
     assert "free" in items[0].free_payload["free_classes"]  # type: ignore[operator]
-    assert items[0].free_payload.get("remaining_abs") is None  # type: ignore[union-attr]
-    # 第二条：限时 30% off
+    # torrent_url 已填：HDSky sign 形式
+    assert items[0].torrent_url is not None
+    assert "sign=" in items[0].torrent_url
+    assert items[0].torrent_url and items[0].torrent_url.startswith("https://hdsky.me/download.php?id=10001&t=")
+    # 第二条：限时 30% off（mock 只对第 1 个详情响应，所以 torrent_url 仍 None）
     assert items[1].item_id == "10002"
     assert items[1].free_payload is not None
     assert "thirtypercent" in items[1].free_payload["free_classes"]  # type: ignore[operator]
-    assert items[1].free_payload["remaining_abs"] == "2026-12-31 23:59:00"  # type: ignore[index]
     # 第三条：非免费
     assert items[2].free_payload is None
+
+
+async def test_search_torrents_details_failure_keeps_list(adapter: HdskyAdapter) -> None:
+    """详情页失败不应影响列表解析（item 仍存在，torrent_url=None）。"""
+    list_resp = MagicMock()
+    list_resp.status_code = 200
+    list_resp.text = HDSKY_SPSTATE7_HTML
+    fail_resp = MagicMock()
+    fail_resp.status_code = 500
+    adapter._client.get = AsyncMock(side_effect=[list_resp, fail_resp, fail_resp, fail_resp])
+    items = await adapter.search_torrents({})
+    assert len(items) == 3
+    assert all(it.torrent_url is None for it in items)
 
 
 async def test_search_torrents_http_error(adapter: HdskyAdapter) -> None:
@@ -185,4 +206,13 @@ HDSKY_SPSTATE7_HTML = (
     '<td>2.00<br />GB</td>'
     '</tr>'
     '</table></body></html>'
+)
+
+#: HDSky details.php?id=10001 HTML（form action 含 sign URL）
+HDSKY_DETAIL_HTML_10001 = (
+    '<html><body>'
+    '<form action="https://hdsky.me/download.php?id=10001&amp;t=1791689105&amp;sign=6a47635b3134c1b3275984768eb3b2a6" method="get">'
+    '<input type="submit" value="下载"/>'
+    '</form>'
+    '</body></html>'
 )

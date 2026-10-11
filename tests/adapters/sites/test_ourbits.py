@@ -100,19 +100,26 @@ async def test_get_torrent_detail_ok(adapter: OurbitsAdapter) -> None:
 
 
 async def test_search_torrents_parses_spstate7(adapter: OurbitsAdapter) -> None:
-    """parsel CSS 解析 Ourbits 标准 NexusPHP 表格（与 hdsky 同源）。"""
-    resp = MagicMock()
-    resp.status_code = 200
-    resp.text = OURBITS_SPSTATE7_HTML
-    adapter._client.get = AsyncMock(return_value=resp)
+    """parsel CSS 解析 Ourbits 标准 NexusPHP 表格 + 批量抓详情填 torrent_url。"""
+    list_resp = MagicMock()
+    list_resp.status_code = 200
+    list_resp.text = OURBITS_SPSTATE7_HTML
+    detail_resp = MagicMock()
+    detail_resp.status_code = 200
+    detail_resp.text = OURBITS_DETAIL_HTML_10001
+    adapter._client.get = AsyncMock(side_effect=[list_resp, detail_resp, detail_resp, detail_resp])
 
     items = await adapter.search_torrents({}, page_size=100, page_number=1)
     assert len(items) == 3
-    # 第一条：永久免费
+    # 第一条：永久免费 + torrent_url 已填
     assert items[0].item_id == "10001"
     assert items[0].title == "Movie A"
     assert items[0].free_payload is not None
     assert "free" in items[0].free_payload["free_classes"]  # type: ignore[operator]
+    # torrent_url 已填：Ourbits passkey 形式
+    assert items[0].torrent_url is not None
+    assert "passkey=" in items[0].torrent_url
+    assert items[0].torrent_url and "id=10001" in items[0].torrent_url
     # 第二条：限时 30% off
     assert items[1].item_id == "10002"
     assert items[1].free_payload is not None
@@ -164,4 +171,11 @@ OURBITS_SPSTATE7_HTML = (
     '<td>2.00<br />GB</td>'
     '</tr>'
     '</table></body></html>'
+)
+
+#: Ourbits details.php?id=10001 HTML（anchor href 含 passkey）
+OURBITS_DETAIL_HTML_10001 = (
+    '<html><body>'
+    '<a href="/download.php?id=10001&passkey=74f6bd64e80ba32094b6f71485727f9a&https=1">下载</a>'
+    '</body></html>'
 )

@@ -476,6 +476,9 @@ class FreeCandidate(Base):
     free_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     #: 原始免费标记（m-team status dict / NexusPHP free_classes + remaining_*）
     free_payload: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    #: 已签名 download URL（NexusPHP 含 passkey/sign；mteam 走 genDlToken 不需要）
+    #: 入库时由 adapter 在 pull 阶段填好，推送时直接 GET 即可，绕过裸 /download.php?id=X 的 404。
+    torrent_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     #: pending / pushed / skipped / failed
     status: Mapped[str] = mapped_column(String(32), default="pending")
     reject_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)

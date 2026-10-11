@@ -47,6 +47,13 @@ _MAX_ITEMS_PER_PULL = 500
 #: 详情页锚点 href 中的 id 提取
 _DETAILS_ID_RE = re.compile(r"details\.php\?id=(\d+)", re.IGNORECASE)
 
+#: 详情页 anchor href 里的 passkey download URL（hhanclub 无 https= 参数）
+#: ``https://hhanclub.net/download.php?id=203626&passkey=9b42c1c53f661c86a250814b5e51149f``
+_SIGNED_DL_RE = re.compile(
+    r"download\.php\?id=(\d+)&passkey=([a-f0-9]+)",
+    re.IGNORECASE,
+)
+
 #: 绝对时刻（title 属性）：``2026-10-11 12:41:28``
 _ABS_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 
@@ -170,7 +177,39 @@ class HhanclubAdapter(SiteAdapter):
         if resp.status_code >= 400:
             logger.warning("HHanClub 拉取 HTTP %d", resp.status_code)
             return []
-        return HhanclubAdapter._parse_spstate2_html(resp.text, limit=page_size)
+        items = HhanclubAdapter._parse_spstate2_html(resp.text, limit=page_size)
+        await self._fill_download_signs(items)
+        return items
+
+    async def _fill_download_signs(self, items: list[FeedItem]) -> None:
+        """批量抓 details 页提取 ``passkey=...`` 完整 download URL。
+
+        FeedItem 是 frozen dataclass，用 ``dataclasses.replace`` 重建实例并替换原位。
+        """
+        if not items:
+            return
+        from dataclasses import replace
+
+        for idx, item in enumerate(items):
+            if item.torrent_url or not item.item_id:
+                continue
+            try:
+                resp = await self._client.get(self._detail_url(item.item_id))
+            except httpx.HTTPError as exc:
+                logger.debug("HHanClub 详情页拉取失败 %s: %s", item.item_id, exc)
+                continue
+            if resp.status_code >= 400:
+                continue
+            m = _SIGNED_DL_RE.search(resp.text)
+            if m:
+                item_id, passkey = m.group(1), m.group(2)
+                items[idx] = replace(
+                    item,
+                    torrent_url=(
+                        f"{self._base_url()}/download.php"
+                        f"?id={item_id}&passkey={passkey}"
+                    ),
+                )
 
     @staticmethod
     def _parse_spstate2_html(html: str, *, limit: int = 100) -> list[FeedItem]:
@@ -248,7 +287,7 @@ class HhanclubAdapter(SiteAdapter):
                     category=None,
                     description="",
                     published_at=None,
-                    torrent_url=f"download.php?id={item_id}",
+                    torrent_url=None,  # 由 _fill_download_signs 后填（含 passkey）
                     free_payload=free_payload,
                 )
             )

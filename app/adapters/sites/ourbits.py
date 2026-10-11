@@ -57,6 +57,13 @@ _PROMO_FONT_CLASSES: frozenset[str] = frozenset(
 #: 详情页锚点 href 中的 id 提取
 _DETAILS_ID_RE = re.compile(r"details\.php\?id=(\d+)", re.IGNORECASE)
 
+#: 详情页 anchor href 里的 passkey download URL
+#: ``/download.php?id=357094&passkey=74f6bd64e80ba32094b6f71485727f9a&https=1``
+_SIGNED_DL_RE = re.compile(
+    r"download\.php\?id=(\d+)&passkey=([a-f0-9]+)(?:&https=(\d))?",
+    re.IGNORECASE,
+)
+
 #: 绝对时刻（title 属性）：``2026-10-11 12:41:28``
 _ABS_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 
@@ -148,7 +155,11 @@ class OurbitsAdapter(SiteAdapter):
         page_size: int = 100,
         page_number: int = 1,
     ) -> list[FeedItem]:
-        """2. 抓取免费种子列表：GET /torrents.php?spstate=7，parsel CSS 解析。"""
+        """2. 抓取免费种子列表：GET /torrents.php?spstate=7，parsel CSS 解析。
+
+        返回的 FeedItem.torrent_url 字段已携带完整 passkey URL（通过
+        details 页 anchor href 提取），可直接 GET 下载。
+        """
         url = (
             f"{self._base_url()}/torrents.php"
             f"?spstate=7&page={max(0, page_number - 1)}"
@@ -161,7 +172,39 @@ class OurbitsAdapter(SiteAdapter):
         if resp.status_code >= 400:
             logger.warning("OurBits 拉取 HTTP %d", resp.status_code)
             return []
-        return OurbitsAdapter._parse_spstate7_html(resp.text, limit=page_size)
+        items = OurbitsAdapter._parse_spstate7_html(resp.text, limit=page_size)
+        await self._fill_download_signs(items)
+        return items
+
+    async def _fill_download_signs(self, items: list[FeedItem]) -> None:
+        """批量抓 details 页提取 ``passkey=...`` 完整 download URL。
+
+        FeedItem 是 frozen dataclass，用 ``dataclasses.replace`` 重建实例并替换原位。
+        """
+        if not items:
+            return
+        from dataclasses import replace
+
+        for idx, item in enumerate(items):
+            if item.torrent_url or not item.item_id:
+                continue
+            try:
+                resp = await self._client.get(self._detail_url(item.item_id))
+            except httpx.HTTPError as exc:
+                logger.debug("OurBits 详情页拉取失败 %s: %s", item.item_id, exc)
+                continue
+            if resp.status_code >= 400:
+                continue
+            m = _SIGNED_DL_RE.search(resp.text)
+            if m:
+                item_id, passkey, https_flag = m.group(1), m.group(2), m.group(3) or "1"
+                items[idx] = replace(
+                    item,
+                    torrent_url=(
+                        f"{self._base_url()}/download.php"
+                        f"?id={item_id}&passkey={passkey}&https={https_flag}"
+                    ),
+                )
 
     @staticmethod
     def _parse_spstate7_html(html: str, *, limit: int = 100) -> list[FeedItem]:
@@ -223,7 +266,7 @@ class OurbitsAdapter(SiteAdapter):
                     category=None,
                     description="",
                     published_at=None,
-                    torrent_url=f"download.php?id={item_id}",
+                    torrent_url=None,  # 由 _fill_download_signs 后填（含 passkey）
                     free_payload=free_payload,
                 )
             )

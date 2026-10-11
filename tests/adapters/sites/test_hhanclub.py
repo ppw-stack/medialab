@@ -138,22 +138,28 @@ async def test_get_torrent_detail_error(adapter: HhanclubAdapter) -> None:
 
 
 async def test_search_torrents_parses_spstate2(adapter: HhanclubAdapter) -> None:
-    """BS4 解析 HHan Tailwind 自定义主题的 spstate=2 页面（永久免费）。
+    """BS4 解析 HHan Tailwind 自定义主题的 spstate=2 页面（永久免费）+ torrent_url 提取。
 
     HHan 用 Tailwind class + 嵌套 div 而非标准 NexusPHP 表格。
     spstate=7 是 JS 动态加载，HTML 不含 torrent 链接；用 spstate=2 SSR。
     """
-    resp = MagicMock()
-    resp.status_code = 200
-    resp.text = HHAN_SPSTATE2_HTML
-    adapter._client.get = AsyncMock(return_value=resp)
+    list_resp = MagicMock()
+    list_resp.status_code = 200
+    list_resp.text = HHAN_SPSTATE2_HTML
+    detail_resp = MagicMock()
+    detail_resp.status_code = 200
+    detail_resp.text = HHAN_DETAIL_HTML_100001
+    adapter._client.get = AsyncMock(side_effect=[list_resp, detail_resp, detail_resp, detail_resp])
 
     items = await adapter.search_torrents({}, page_size=100, page_number=1)
     assert len(items) == 3
-    # 第一条：限时免费（Tailwind 主题，<span title="绝对时刻">）
+    # 第一条：限时免费 + torrent_url 已填
     assert items[0].item_id == "100001"
     assert items[0].free_payload is not None
     assert items[0].free_payload["remaining_abs"] == "2026-12-31 23:59:00"  # type: ignore[index]
+    assert items[0].torrent_url is not None
+    assert "passkey=" in items[0].torrent_url
+    assert items[0].torrent_url and "id=100001" in items[0].torrent_url
     # 第二条：永久免费（class="free"）
     assert items[1].item_id == "100002"
     assert items[1].free_payload is not None
@@ -250,5 +256,12 @@ HHAN_WITH_USER_LINK_HTML = (
     'class="torrent-info-text-name" title="Movie A">Movie A</a>'
     '<div class="torrent-info-text-size">4.95 GB</div>'
     '</div>'
+    '</body></html>'
+)
+
+#: HHanClub details.php?id=100001 HTML（anchor href 含 passkey）
+HHAN_DETAIL_HTML_100001 = (
+    '<html><body>'
+    '<a href="https://hhanclub.net/download.php?id=100001&passkey=9b42c1c53f661c86a250814b5e51149f">下载</a>'
     '</body></html>'
 )
