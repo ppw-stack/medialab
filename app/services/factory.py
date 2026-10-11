@@ -105,7 +105,7 @@ class AdapterFactory:
                     verify_tls=row.verify_tls,
                 )
             case "deluge" | "aria2":
-                # M3 起按 FR-1 补齐
+                # M2 仅实现 qBittorrent + Transmission；其余按 FR-1.3 后续实现
                 raise NotImplementedError(
                     f"下载器类型 {row.type} 自 M3 起实现（FR-1）"
                 )

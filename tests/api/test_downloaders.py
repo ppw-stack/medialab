@@ -103,6 +103,20 @@ async def test_create_unknown_type(dl_app) -> None:
             assert r.status_code == 400
 
 
+async def test_create_transmission(dl_app) -> None:
+    """transmission 已解锁 → 创建返回 201。"""
+    transport = ASGITransport(app=dl_app)
+    async with dl_app.router.lifespan_context(dl_app):
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.post(
+                "/api/v1/downloaders",
+                headers=_bearer(c),
+                json={"name": "tr", "type": "transmission", "url": "http://tr"},
+            )
+            assert r.status_code == 201
+            assert r.json()["type"] == "transmission"
+
+
 async def test_create_unimplemented_type(dl_app) -> None:
     """deluge/aria2：声明但未实现 → 501。"""
     transport = ASGITransport(app=dl_app)
@@ -111,7 +125,7 @@ async def test_create_unimplemented_type(dl_app) -> None:
             r = await c.post(
                 "/api/v1/downloaders",
                 headers=_bearer(c),
-                json={"name": "tr", "type": "deluge", "url": "http://tr"},
+                json={"name": "dg", "type": "deluge", "url": "http://dg"},
             )
             assert r.status_code == 501
 
