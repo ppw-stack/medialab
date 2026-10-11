@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, watch } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, watch, h } from 'vue'
 import { api } from '../api'
 import { message, Modal } from 'ant-design-vue'
 
@@ -246,34 +246,106 @@ async function onResume(t: Torrent) {
   } catch (e) { message.error(e instanceof Error ? e.message : '恢复失败') }
 }
 
-async function onRemove(t: Torrent, deleteData: boolean) {
-  const placeholder = deleteData ? 'data' : 'rm'
-  Modal.confirm({
-    title: deleteData ? '危险操作：删除任务 + 磁盘数据' : '删除任务',
-    okText: '继续',
-    cancelText: '取消',
-    okButtonProps: { danger: true },
-    content: () =>
-      h('div', [
-        h('p', deleteData ? '将删除任务 + 磁盘数据（不可恢复）' : '仅从下载器移除任务，保留磁盘文件。'),
-        h('p', `任务名: ${t.name.slice(0, 40)}`),
-        h('p', { style: 'margin-top: 8px; color: #ff4d4f' }, `请输入 "${placeholder}" 确认：`),
-      ]),
-    onOk: () => {
-      const userInput = window.prompt(`请输入 "${placeholder}" 确认删除:`)
-      if (userInput !== placeholder) {
-        message.error('输入不匹配，已取消')
-        return Promise.reject()
-      }
-      return api.post(
-        `/torrents/${t.id}/remove?delete_data=${deleteData}&force=true`,
-        {}
-      ).then(() => {
+// ------------------------------------------------------------ 删除统一确认
+interface RemoveConfirmOpts {
+  title: string
+  summary: string
+  /** 是否允许"删+磁盘数据"分支（FR-5.2.3 下载器原生任务禁用） */
+  allowDeleteData: boolean
+  onConfirm: (deleteData: boolean) => Promise<void>
+}
+
+function confirmRemove(opts: RemoveConfirmOpts): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let chosen: 'rm' | 'data' | null = null
+    const placeholder = 'rm'
+    const placeholderData = 'data'
+    Modal.confirm({
+      title: opts.title,
+      okText: '继续',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      content: () =>
+        h('div', [
+          h('p', opts.summary),
+          h('p', { style: 'margin-top: 4px; color: #888' },
+            opts.allowDeleteData
+              ? '请选择删除方式（每种方式都需输入占位符确认）：'
+              : '下载器原生任务仅支持删任务记录，磁盘数据由下载器自身管理。'),
+          h('div', { style: 'margin-top: 12px; display: flex; gap: 8px' },
+            [
+              h(
+                'button',
+                {
+                  class: 'ant-btn',
+                  onClick: () => { chosen = 'rm' },
+                },
+                `仅删任务（占位符 "${placeholder}"）`
+              ),
+              opts.allowDeleteData
+                ? h(
+                    'button',
+                    {
+                      class: 'ant-btn ant-btn-dangerous',
+                      onClick: () => { chosen = 'data' },
+                    },
+                    `删任务 + 磁盘数据（占位符 "${placeholderData}"，不可恢复）`
+                  )
+                : h(
+                    'button',
+                    {
+                      class: 'ant-btn ant-btn-dangerous',
+                      disabled: true,
+                      title: '下载器原生任务不支持删除数据（FR-5.2.3）',
+                    },
+                    `删任务 + 磁盘数据（不支持）`
+                  ),
+            ]
+          ),
+          h('p', { style: 'margin-top: 8px; color: #888' },
+            '点击上方按钮选择模式后，再点下方"继续"完成确认。'),
+        ]),
+      onOk: async () => {
+        if (!chosen) {
+          message.warning('请先在上方选择删除方式')
+          return Promise.reject()
+        }
+        const expected = chosen === 'data' ? placeholderData : placeholder
+        const userInput = window.prompt(`请输入 "${expected}" 确认删除:`)
+        if (userInput !== expected) {
+          message.error('输入不匹配，已取消')
+          return Promise.reject()
+        }
+        try {
+          await opts.onConfirm(chosen === 'data')
+          resolve()
+        } catch {
+          // 失败由调用方 toast
+        }
+      },
+      onCancel: () => resolve(),
+    })
+  })
+}
+
+async function onRemove(t: Torrent) {
+  const summary = `任务名: ${t.name.slice(0, 40)}`
+  await confirmRemove({
+    title: '删除任务',
+    summary,
+    allowDeleteData: true,
+    onConfirm: async (deleteData) => {
+      try {
+        await api.post(
+          `/torrents/${t.id}/remove?delete_data=${deleteData}&force=true`,
+          {}
+        )
         message.success('已删除')
         load()
-      }).catch((e) => {
+      } catch (e) {
         message.error(e instanceof Error ? e.message : '删除失败')
-      })
+        throw e
+      }
     },
   })
 }
@@ -295,35 +367,30 @@ async function onBatchPause(paused: boolean) {
   } catch (e) { message.error(e instanceof Error ? e.message : '操作失败') }
 }
 
-async function onBatchRemove(deleteData: boolean) {
+async function onBatchRemove() {
   if (selectedRowKeys.value.length === 0) {
     message.warning('请先选择任务')
     return
   }
-  const placeholder = deleteData ? 'data' : 'rm'
-  Modal.confirm({
-    title: deleteData ? '批量删除 + 数据（危险）' : '批量删除',
-    content: `将影响 ${selectedRowKeys.value.length} 个任务${deleteData ? ' + 磁盘数据' : ''}。请输入 "${placeholder}" 确认`,
-    okText: '确认',
-    cancelText: '取消',
-    okButtonProps: { danger: true },
-    onOk: () => {
-      const userInput = window.prompt(`请输入 "${placeholder}" 确认批量删除:`)
-      if (userInput !== placeholder) {
-        message.error('输入不匹配，已取消')
-        return Promise.reject()
-      }
+  const count = selectedRowKeys.value.length
+  await confirmRemove({
+    title: `批量删除 ${count} 个任务`,
+    summary: `将影响 ${count} 个任务`,
+    allowDeleteData: true,
+    onConfirm: async (deleteData) => {
       const items = data.value.items.filter(t => selectedRowKeys.value.includes(t.id))
       const hashes = items.map(t => t.info_hash)
-      return api.post<BatchOpResult>('/torrents/batch/remove', {
-        hashes, delete_data: deleteData, force: true,
-      }).then(r => {
+      try {
+        const r = await api.post<BatchOpResult>('/torrents/batch/remove', {
+          hashes, delete_data: deleteData, force: true,
+        })
         message.success(`批量删除：${r.succeeded}/${r.requested}（失败 ${r.failed}）`)
         selectedRowKeys.value = []
         load()
-      }).catch(e => {
+      } catch (e) {
         message.error(e instanceof Error ? e.message : '操作失败')
-      })
+        throw e
+      }
     },
   })
 }
@@ -357,25 +424,39 @@ async function loadDownloaderTorrents() {
 watch(selectedDlId, () => { selectedDlKeys.value = []; loadDownloaderTorrents() })
 watch(dlFilterState, loadDownloaderTorrents)
 
-async function onDownloaderOp(op: 'pause' | 'resume' | 'remove', deleteData = false) {
+async function onDownloaderOp(op: 'pause' | 'resume' | 'remove') {
   if (!selectedDlId.value || selectedDlKeys.value.length === 0) {
     message.warning('请先选择任务')
     return
   }
-  if (op === 'remove' && deleteData) {
-    message.error('下载器原生任务不支持删除数据（FR-5.2.3）')
+  if (op === 'remove') {
+    await confirmRemove({
+      title: '删除下载器原生任务',
+      summary: `将影响 ${selectedDlKeys.value.length} 个任务`,
+      allowDeleteData: false,
+      onConfirm: async () => {
+        const payload = { hashes: selectedDlKeys.value, delete_data: false }
+        try {
+          const r = await api.post<BatchOpResult>(
+            `/downloaders/${selectedDlId.value}/torrents/remove`, payload
+          )
+          message.success(`批量删除：${r.succeeded}/${r.requested}`)
+          selectedDlKeys.value = []
+          loadDownloaderTorrents()
+        } catch (e) {
+          message.error(e instanceof Error ? e.message : '操作失败')
+          throw e
+        }
+      },
+    })
     return
   }
   try {
-    const endpoint = op === 'pause' ? 'pause' : op === 'resume' ? 'pause' : 'remove'
-    const payload: Record<string, unknown> = { hashes: selectedDlKeys.value }
-    if (op === 'pause') payload.paused = true
-    if (op === 'resume') payload.paused = false
-    if (op === 'remove') payload.delete_data = false
+    const payload: Record<string, unknown> = { hashes: selectedDlKeys.value, paused: op === 'pause' }
     const r = await api.post<BatchOpResult>(
-      `/downloaders/${selectedDlId.value}/torrents/${endpoint}`, payload
+      `/downloaders/${selectedDlId.value}/torrents/pause`, payload
     )
-    message.success(`批量${op}：${r.succeeded}/${r.requested}`)
+    message.success(`批量${op === 'pause' ? '暂停' : '恢复'}：${r.succeeded}/${r.requested}`)
     selectedDlKeys.value = []
     loadDownloaderTorrents()
   } catch (e) {
@@ -410,7 +491,6 @@ const downloaderColumns = [
   { title: '路径', key: 'path', width: 200 },
 ]
 
-import { h } from 'vue'
 </script>
 
 <template>
@@ -489,8 +569,7 @@ import { h } from 'vue'
             <a-tag color="blue">已选 {{ selectedRowKeys.length }} 项</a-tag>
             <a-button size="small" @click="onBatchPause(true)">批量暂停</a-button>
             <a-button size="small" @click="onBatchPause(false)">批量恢复</a-button>
-            <a-button size="small" danger @click="onBatchRemove(false)">批量删除</a-button>
-            <a-button size="small" danger @click="onBatchRemove(true)">批量删除+数据</a-button>
+            <a-button size="small" danger @click="onBatchRemove()">批量删除</a-button>
             <a-button size="small" @click="selectedRowKeys = []">清空选择</a-button>
           </a-space>
 
@@ -552,10 +631,7 @@ import { h } from 'vue'
                 <a-space size="small">
                   <a-button v-if="record.status !== 'paused'" size="small" @click="onPause(record)">暂停</a-button>
                   <a-button v-else size="small" @click="onResume(record)">恢复</a-button>
-                  <a-button size="small" @click="onRemove(record, false)">删除</a-button>
-                  <a-popconfirm title="危险：删除任务 + 磁盘数据" @confirm="onRemove(record, true)">
-                    <a-button size="small" danger>删+数据</a-button>
-                  </a-popconfirm>
+                  <a-button size="small" danger @click="onRemove(record)">删除</a-button>
                 </a-space>
               </template>
             </template>
