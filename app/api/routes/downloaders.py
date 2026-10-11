@@ -9,7 +9,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.adapters.downloaders.base import DownloaderError
+from app.adapters.downloaders.base import (
+    DownloaderError,
+    TorrentFilter,
+    TorrentState,
+)
 from app.api.auth import require_session
 from app.core.config import get_settings
 from app.core.crypto import build_cipher
@@ -232,3 +236,142 @@ async def test_downloader(downloader_id: int) -> dict[str, Any]:
         }
     except DownloaderError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+# ================================================================ 下载器原生任务
+class DownloaderTorrentOut(BaseModel):
+    """下载器原生任务视图（来自下载器 adapter.list_torrents）。"""
+
+    hash: str
+    name: str
+    state: str
+    progress: float
+    size: int
+    downloaded: int
+    uploaded: int
+    dlspeed: int
+    upspeed: int
+    ratio: float
+    save_path: str | None = None
+    category: str | None = None
+    tags: list[str] = []
+
+
+class DownloaderBatchOpRequest(BaseModel):
+    hashes: list[str] = Field(..., min_length=1)
+    delete_data: bool = False
+    paused: bool = True
+
+
+class DownloaderBatchOpResult(BaseModel):
+    requested: int
+    succeeded: int
+    failed: int
+    errors: list[str] = []
+
+
+def _to_downloader_torrent_out(t: Any) -> DownloaderTorrentOut:
+    return DownloaderTorrentOut(
+        hash=t.hash,
+        name=t.name,
+        state=t.state.name if isinstance(t.state, TorrentState) else str(t.state),
+        progress=t.progress,
+        size=t.size,
+        downloaded=t.downloaded,
+        uploaded=t.uploaded,
+        dlspeed=t.dlspeed,
+        upspeed=t.upspeed,
+        ratio=t.ratio,
+        save_path=t.save_path,
+        category=t.category,
+        tags=list(t.tags),
+    )
+
+
+async def _resolve_downloader(downloader_id: int) -> tuple[DownloaderInstance, Any]:
+    async with session_scope() as session:
+        row = (
+            await session.execute(
+                select(DownloaderInstance).where(DownloaderInstance.id == downloader_id)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(status_code=404, detail="下载器不存在")
+        if not row.enabled:
+            raise HTTPException(status_code=400, detail="下载器已禁用")
+    adapter = get_factory().downloader(row)
+    return row, adapter
+
+
+@router.get("/{downloader_id}/torrents", summary="列出下载器原生任务")
+async def list_downloader_torrents(
+    downloader_id: int,
+    state: str | None = None,
+    category: str | None = None,
+) -> dict[str, Any]:
+    """调 downloader.adapter.list_torrents() 返回原生任务视图。
+
+    过滤：state（downloading/uploading/paused/error 等）/ category。
+    """
+    _, adapter = await _resolve_downloader(downloader_id)
+
+    states: frozenset[TorrentState] = frozenset()
+    if state:
+        try:
+            states = frozenset({TorrentState(state)})
+        except ValueError:
+            states = frozenset()
+
+    tags: frozenset[str] = frozenset()
+    try:
+        items = await adapter.list_torrents(
+            TorrentFilter(states=states, category=category, tags=tags)
+        )
+    except DownloaderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return {
+        "total": len(items),
+        "items": [_to_downloader_torrent_out(t) for t in items],
+    }
+
+
+@router.post("/{downloader_id}/torrents/pause", summary="暂停/恢复下载器原生任务")
+async def pause_downloader_torrents(
+    downloader_id: int, payload: DownloaderBatchOpRequest
+) -> DownloaderBatchOpResult:
+    if len(payload.hashes) > 200:
+        raise HTTPException(status_code=400, detail="批量操作上限 200")
+    _, adapter = await _resolve_downloader(downloader_id)
+    try:
+        ok = await adapter.set_pause(payload.hashes, payload.paused)
+    except DownloaderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return DownloaderBatchOpResult(
+        requested=len(payload.hashes),
+        succeeded=len(payload.hashes) if ok else 0,
+        failed=0 if ok else len(payload.hashes),
+    )
+
+
+@router.post("/{downloader_id}/torrents/remove", summary="删除下载器原生任务")
+async def remove_downloader_torrents(
+    downloader_id: int, payload: DownloaderBatchOpRequest
+) -> DownloaderBatchOpResult:
+    if len(payload.hashes) > 200:
+        raise HTTPException(status_code=400, detail="批量操作上限 200")
+    if payload.delete_data:
+        raise HTTPException(
+            status_code=400,
+            detail="下载器原生任务删除数据需前端二次确认后传 force=true（FR-5.2.3）",
+        )
+    _, adapter = await _resolve_downloader(downloader_id)
+    try:
+        ok = await adapter.remove(payload.hashes, delete_data=False)
+    except DownloaderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return DownloaderBatchOpResult(
+        requested=len(payload.hashes),
+        succeeded=len(payload.hashes) if ok else 0,
+        failed=0 if ok else len(payload.hashes),
+    )

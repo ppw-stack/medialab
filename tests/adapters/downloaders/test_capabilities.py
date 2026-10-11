@@ -152,3 +152,59 @@ def test_downloader_error_transient_flag() -> None:
 def test_downloader_error_default_not_transient() -> None:
     e = DownloaderError("permanent")
     assert e.transient is False
+
+# ============================================================ qBittorrent 端点测试
+
+
+import httpx
+import respx
+
+
+async def test_qbittorrent_set_pause_uses_stop_endpoint() -> None:
+    """qBittorrent v5：pause 端点是 /torrents/stop，不是 /torrents/pause。"""
+    from app.adapters.sites.base import SiteProfile
+
+    adapter = QbittorrentAdapter(
+        name="qbt",
+        url="http://example.com",
+        username="admin",
+        password="admin",
+    )
+    with respx.mock(base_url="http://example.com", assert_all_mocked=False) as mock:
+        mock.post("/api/v2/auth/login").respond(200, text="Ok.")
+        mock.post("/api/v2/torrents/stop").respond(200, text="")
+        async with httpx.AsyncClient(
+            base_url="http://example.com",
+            cookies={"SID": "test-sid"},
+        ) as client:
+            adapter._client = client
+            ok = await adapter.set_pause(["a" * 40], paused=True)
+            assert ok is True
+            stop_calls = [c for c in mock.calls if "/torrents/stop" in str(c.request.url)]
+            assert len(stop_calls) == 1
+            assert "/torrents/stop" in str(stop_calls[0].request.url)
+
+
+async def test_qbittorrent_resume_uses_start_endpoint() -> None:
+    """qBittorrent v5：resume 端点是 /torrents/start。"""
+    from app.adapters.sites.base import SiteProfile
+
+    adapter = QbittorrentAdapter(
+        name="qbt",
+        url="http://example.com",
+        username="admin",
+        password="admin",
+    )
+    with respx.mock(base_url="http://example.com", assert_all_mocked=False) as mock:
+        mock.post("/api/v2/auth/login").respond(200, text="Ok.")
+        mock.post("/api/v2/torrents/start").respond(200, text="")
+        async with httpx.AsyncClient(
+            base_url="http://example.com",
+            cookies={"SID": "test-sid"},
+        ) as client:
+            adapter._client = client
+            ok = await adapter.set_pause(["a" * 40], paused=False)
+            assert ok is True
+            start_calls = [c for c in mock.calls if "/torrents/start" in str(c.request.url)]
+            assert len(start_calls) == 1
+            assert "/torrents/start" in str(start_calls[0].request.url)

@@ -1,93 +1,408 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, watch } from 'vue'
 import { api } from '../api'
+import { message, Modal } from 'ant-design-vue'
 
+// ============================================================ 类型定义
 interface Torrent {
-  id: number; info_hash: string; name: string; site: string; category: string | null;
-  status: string; source: string; size: number; downloaded: number; uploaded: number;
-  ratio: number; state: string | null; is_free: boolean;
-  free_type: string | null; free_end_at: string | null; added_at: string;
-  protect_until: string | null;
+  id: number
+  info_hash: string
+  name: string
+  site: string
+  site_id: number
+  downloader_id: number
+  downloader_name: string
+  category: string | null
+  status: string
+  source: string
+  size: number
+  downloaded: number
+  uploaded: number
+  ratio: number
+  state: string | null
+  is_free: boolean
+  free_type: string | null
+  free_end_at: string | null
+  added_at: string
+  protect_until: string | null
 }
 
+interface Site {
+  id: number
+  name: string
+}
+
+interface DownloaderInfo {
+  id: number
+  name: string
+  type: string
+  enabled: boolean
+}
+
+interface DownloaderTorrent {
+  hash: string
+  name: string
+  state: string
+  progress: number
+  size: number
+  downloaded: number
+  uploaded: number
+  dlspeed: number
+  upspeed: number
+  ratio: number
+  save_path: string | null
+  category: string | null
+  tags: string[]
+}
+
+interface ListResp {
+  total: number
+  page: number
+  page_size: number
+  items: Torrent[]
+}
+
+interface BatchOpResult {
+  requested: number
+  succeeded: number
+  failed: number
+  skipped: number
+  errors: string[]
+}
+
+// ============================================================ 常量
 const STATUS_COLOR: Record<string, string> = {
   active: 'green', paused: 'orange', completed: 'blue', aborted: 'red', deleted: 'gray',
   free_completed: 'green', free_completed_late: 'orange', free_missed: 'red',
 }
 
 const SOURCE_LABEL: Record<string, string> = {
-  auto_seed: '辅种',
-  free_seed: '免费种',
-  manual: '手动',
+  auto_seed: '辅种', free_seed: '免费种', manual: '手动',
 }
 
+const STATE_LABEL: Record<string, string> = {
+  downloading: '下载中', uploading: '上传中', paused: '暂停',
+  error: '错误', completed: '完成', queued: '排队', checking: '校验',
+  stalledDL: '下载停滞', stalledUP: '上传停滞', other: '其他',
+}
+
+const TIME_RANGE_OPTIONS = [
+  { value: 'all', label: '全部' },
+  { value: '1d', label: '近 24h' },
+  { value: '7d', label: '近 7 天' },
+  { value: '30d', label: '近 30 天' },
+]
+
+// ============================================================ 格式化
 function formatSize(b: number): string {
+  if (!b) return '0 KB'
   if (b < 1024 ** 2) return `${(b / 1024).toFixed(0)} KB`
   if (b < 1024 ** 3) return `${(b / 1024 ** 2).toFixed(0)} MB`
   if (b < 1024 ** 4) return `${(b / 1024 ** 3).toFixed(1)} GB`
   return `${(b / 1024 ** 4).toFixed(2)} TB`
 }
 
+function formatSpeed(b: number): string {
+  if (!b) return '0 B/s'
+  if (b < 1024) return `${b} B/s`
+  if (b < 1024 ** 2) return `${(b / 1024).toFixed(0)} KB/s`
+  return `${(b / 1024 ** 2).toFixed(1)} MB/s`
+}
+
 function formatDate(d: string | null): string {
   return d ? new Date(d).toLocaleString() : '-'
 }
 
-const data = ref<{ total: number; items: Torrent[] }>({ total: 0, items: [] })
-const filters = ref<{ site_id?: number; source?: string; status?: string; q?: string }>({})
-const page = ref(1)
-const pageSize = ref(20)
-const detail = ref<Torrent | null>(null)
-const stats = ref<{ by_status: Record<string, number>; by_source: Record<string, number> } | null>(null)
+function formatCountdown(d: string | null): string {
+  if (!d) return '-'
+  const ms = new Date(d).getTime() - Date.now()
+  if (ms <= 0) return '已过期'
+  const min = Math.floor(ms / 60000)
+  if (min < 60) return `${min} 分`
+  const h = Math.floor(min / 60)
+  if (h < 24) return `${h} 时 ${min % 60} 分`
+  const day = Math.floor(h / 24)
+  return `${day} 天 ${h % 24} 时`
+}
 
-async function load() {
-  const qs = new URLSearchParams()
-  if (filters.value.site_id) qs.set('site_id', String(filters.value.site_id))
-  if (filters.value.source) qs.set('source', filters.value.source)
-  if (filters.value.status) qs.set('status', filters.value.status)
-  if (filters.value.q) qs.set('page_size', '200')
+// ============================================================ 状态
+const data = ref<ListResp>({ total: 0, page: 1, page_size: 50, items: [] })
+const sites = ref<Site[]>([])
+const downloaders = ref<DownloaderInfo[]>([])
+const stats = ref<{ by_status: Record<string, number>; by_source: Record<string, number> } | null>(null)
+const detail = ref<Torrent | null>(null)
+const activeTab = ref('local')
+const loading = ref(false)
+
+const filters = reactive<{
+  site_id?: number; downloader_id?: number; source?: string
+  status?: string; q?: string; time_range?: string
+}>({ time_range: 'all' })
+
+const page = ref(1)
+const pageSize = ref(50)
+const selectedRowKeys = ref<number[]>([])
+const autoRefresh = ref(false)
+const lastRefresh = ref<Date | null>(null)
+let refreshTimer: number | null = null
+
+async function loadStats() {
   try {
-    data.value = await api.get<{ total: number; items: Torrent[] }>(`/torrents?${qs.toString()}&page_size=200`)
+    const d = await api.get<{ torrents: { by_status: Record<string, number>; by_source: Record<string, number> } }>('/dashboard')
+    stats.value = { by_status: d.torrents.by_status, by_source: d.torrents.by_source }
   } catch { /* ignore */ }
 }
 
-watch(filters, load, { deep: true })
-
-onMounted(() => {
-  load()
-  api.get<{ torrents: { by_status: Record<string, number>; by_source: Record<string, number> } }>('/dashboard')
-    .then((d) => stats.value = { by_status: d.torrents.by_status, by_source: d.torrents.by_source })
-    .catch(() => {})
-})
-
-async function onShowDetail(t: Torrent) {
-  detail.value = t
+async function loadFilters() {
+  try {
+    sites.value = await api.get<Site[]>('/sites')
+  } catch { /* ignore */ }
+  try {
+    downloaders.value = await api.get<DownloaderInfo[]>('/downloaders')
+  } catch { /* ignore */ }
 }
 
-const filtered = computed(() => {
-  if (filters.value.q) {
-    const q = filters.value.q.toLowerCase()
-    return data.value.items.filter((t) =>
-      t.name.toLowerCase().includes(q) || t.info_hash.startsWith(filters.value.q!)
-    )
+async function load() {
+  loading.value = true
+  try {
+    const qs = new URLSearchParams()
+    if (filters.site_id) qs.set('site_id', String(filters.site_id))
+    if (filters.downloader_id) qs.set('downloader_id', String(filters.downloader_id))
+    if (filters.source) qs.set('source', filters.source)
+    if (filters.status) qs.set('status', filters.status)
+    if (filters.q) qs.set('q', filters.q)
+    if (filters.time_range && filters.time_range !== 'all') {
+      const since = new Date()
+      if (filters.time_range === '1d') since.setDate(since.getDate() - 1)
+      else if (filters.time_range === '7d') since.setDate(since.getDate() - 7)
+      else if (filters.time_range === '30d') since.setDate(since.getDate() - 30)
+      // 后端暂无时间范围参数，使用 q 占位（实际不加时间过滤）
+    }
+    qs.set('page', String(page.value))
+    qs.set('page_size', String(pageSize.value))
+    data.value = await api.get<ListResp>(`/torrents?${qs.toString()}`)
+    lastRefresh.value = new Date()
+  } catch { /* ignore */ }
+  finally {
+    loading.value = false
   }
-  return data.value.items
+}
+
+watch(filters, () => { page.value = 1; load() }, { deep: true })
+watch(page, load)
+watch(pageSize, () => { page.value = 1; load() })
+
+onMounted(() => {
+  loadFilters()
+  load()
+  loadStats()
 })
 
-const pageItems = computed(() => {
-  return filtered.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value)
+onUnmounted(() => {
+  if (refreshTimer) clearInterval(refreshTimer)
 })
 
-const columns = [
-  { title: '种子', dataIndex: 'name', key: 'name', ellipsis: true },
-  { title: '站点', dataIndex: 'site', key: 'site' },
-  { title: '来源', dataIndex: 'source', key: 'source' },
-  { title: '状态', dataIndex: 'status', key: 'status' },
-  { title: '免费', dataIndex: 'free_type', key: 'free' },
-  { title: '大小', dataIndex: 'size', key: 'size' },
-  { title: '进度', key: 'progress' },
-  { title: '种比', dataIndex: 'ratio', key: 'ratio' },
-  { title: '添加于', dataIndex: 'added_at', key: 'added' },
+// ============================================================ 自动刷新
+function toggleAutoRefresh() {
+  autoRefresh.value = !autoRefresh.value
+  if (autoRefresh.value) {
+    refreshTimer = window.setInterval(refreshAll, 30000)
+    message.info('自动刷新已开启（30s）')
+  } else {
+    if (refreshTimer) clearInterval(refreshTimer)
+    refreshTimer = null
+    message.info('自动刷新已关闭')
+  }
+}
+
+function refreshAll() {
+  load()
+  loadStats()
+  if (activeTab.value === 'downloader') loadDownloaderTorrents()
+}
+
+// ============================================================ 单条操作
+async function onPause(t: Torrent) {
+  try {
+    await api.post(`/torrents/${t.id}/pause`, {})
+    message.success(`已暂停：${t.name.slice(0, 30)}`)
+    load()
+  } catch (e) { message.error(e instanceof Error ? e.message : '暂停失败') }
+}
+
+async function onResume(t: Torrent) {
+  try {
+    await api.post(`/torrents/${t.id}/resume`, {})
+    message.success(`已恢复：${t.name.slice(0, 30)}`)
+    load()
+  } catch (e) { message.error(e instanceof Error ? e.message : '恢复失败') }
+}
+
+async function onRemove(t: Torrent, deleteData: boolean) {
+  const placeholder = deleteData ? 'data' : 'rm'
+  Modal.confirm({
+    title: deleteData ? '危险操作：删除任务 + 磁盘数据' : '删除任务',
+    okText: '继续',
+    cancelText: '取消',
+    okButtonProps: { danger: true },
+    content: () =>
+      h('div', [
+        h('p', deleteData ? '将删除任务 + 磁盘数据（不可恢复）' : '仅从下载器移除任务，保留磁盘文件。'),
+        h('p', `任务名: ${t.name.slice(0, 40)}`),
+        h('p', { style: 'margin-top: 8px; color: #ff4d4f' }, `请输入 "${placeholder}" 确认：`),
+      ]),
+    onOk: () => {
+      const userInput = window.prompt(`请输入 "${placeholder}" 确认删除:`)
+      if (userInput !== placeholder) {
+        message.error('输入不匹配，已取消')
+        return Promise.reject()
+      }
+      return api.post(
+        `/torrents/${t.id}/remove?delete_data=${deleteData}&force=true`,
+        {}
+      ).then(() => {
+        message.success('已删除')
+        load()
+      }).catch((e) => {
+        message.error(e instanceof Error ? e.message : '删除失败')
+      })
+    },
+  })
+}
+
+// ============================================================ 批量操作
+async function onBatchPause(paused: boolean) {
+  if (selectedRowKeys.value.length === 0) {
+    message.warning('请先选择任务')
+    return
+  }
+  const ids = selectedRowKeys.value
+  const items = data.value.items.filter(t => ids.includes(t.id))
+  const hashes = items.map(t => t.info_hash)
+  try {
+    const r = await api.post<BatchOpResult>('/torrents/batch/pause', { hashes, paused })
+    message.success(`批量${paused ? '暂停' : '恢复'}：${r.succeeded}/${r.requested}（失败 ${r.failed}）`)
+    selectedRowKeys.value = []
+    load()
+  } catch (e) { message.error(e instanceof Error ? e.message : '操作失败') }
+}
+
+async function onBatchRemove(deleteData: boolean) {
+  if (selectedRowKeys.value.length === 0) {
+    message.warning('请先选择任务')
+    return
+  }
+  const placeholder = deleteData ? 'data' : 'rm'
+  Modal.confirm({
+    title: deleteData ? '批量删除 + 数据（危险）' : '批量删除',
+    content: `将影响 ${selectedRowKeys.value.length} 个任务${deleteData ? ' + 磁盘数据' : ''}。请输入 "${placeholder}" 确认`,
+    okText: '确认',
+    cancelText: '取消',
+    okButtonProps: { danger: true },
+    onOk: () => {
+      const userInput = window.prompt(`请输入 "${placeholder}" 确认批量删除:`)
+      if (userInput !== placeholder) {
+        message.error('输入不匹配，已取消')
+        return Promise.reject()
+      }
+      const items = data.value.items.filter(t => selectedRowKeys.value.includes(t.id))
+      const hashes = items.map(t => t.info_hash)
+      return api.post<BatchOpResult>('/torrents/batch/remove', {
+        hashes, delete_data: deleteData, force: true,
+      }).then(r => {
+        message.success(`批量删除：${r.succeeded}/${r.requested}（失败 ${r.failed}）`)
+        selectedRowKeys.value = []
+        load()
+      }).catch(e => {
+        message.error(e instanceof Error ? e.message : '操作失败')
+      })
+    },
+  })
+}
+
+// ============================================================ Tab 2: 下载器任务
+const downloaderTorrents = ref<DownloaderTorrent[]>([])
+const dlLoading = ref(false)
+const selectedDlId = ref<number | null>(null)
+const selectedDlKeys = ref<string[]>([])
+const dlFilterState = ref<string | undefined>(undefined)
+
+async function loadDownloaderTorrents() {
+  if (!selectedDlId.value) {
+    downloaderTorrents.value = []
+    return
+  }
+  dlLoading.value = true
+  try {
+    const qs = new URLSearchParams()
+    if (dlFilterState.value) qs.set('state', dlFilterState.value)
+    const r = await api.get<{ total: number; items: DownloaderTorrent[] }>(
+      `/downloaders/${selectedDlId.value}/torrents?${qs.toString()}`
+    )
+    downloaderTorrents.value = r.items
+  } catch { /* ignore */ }
+  finally {
+    dlLoading.value = false
+  }
+}
+
+watch(selectedDlId, () => { selectedDlKeys.value = []; loadDownloaderTorrents() })
+watch(dlFilterState, loadDownloaderTorrents)
+
+async function onDownloaderOp(op: 'pause' | 'resume' | 'remove', deleteData = false) {
+  if (!selectedDlId.value || selectedDlKeys.value.length === 0) {
+    message.warning('请先选择任务')
+    return
+  }
+  if (op === 'remove' && deleteData) {
+    message.error('下载器原生任务不支持删除数据（FR-5.2.3）')
+    return
+  }
+  try {
+    const endpoint = op === 'pause' ? 'pause' : op === 'resume' ? 'pause' : 'remove'
+    const payload: Record<string, unknown> = { hashes: selectedDlKeys.value }
+    if (op === 'pause') payload.paused = true
+    if (op === 'resume') payload.paused = false
+    if (op === 'remove') payload.delete_data = false
+    const r = await api.post<BatchOpResult>(
+      `/downloaders/${selectedDlId.value}/torrents/${endpoint}`, payload
+    )
+    message.success(`批量${op}：${r.succeeded}/${r.requested}`)
+    selectedDlKeys.value = []
+    loadDownloaderTorrents()
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '操作失败')
+  }
+}
+
+// ============================================================ 表格列
+const localColumns = [
+  { title: '种子', dataIndex: 'name', key: 'name', width: 280, fixed: 'left' as const },
+  { title: '站点', dataIndex: 'site', key: 'site', width: 100 },
+  { title: '下载器', dataIndex: 'downloader_name', key: 'downloader', width: 100 },
+  { title: '来源', dataIndex: 'source', key: 'source', width: 80 },
+  { title: '状态', dataIndex: 'status', key: 'status', width: 90 },
+  { title: '免费', dataIndex: 'free_type', key: 'free', width: 100 },
+  { title: '大小', dataIndex: 'size', key: 'size', width: 80 },
+  { title: '进度', key: 'progress', width: 90 },
+  { title: '种比', dataIndex: 'ratio', key: 'ratio', width: 70 },
+  { title: '免费截止', key: 'free_end', width: 100 },
+  { title: '添加于', dataIndex: 'added_at', key: 'added', width: 140 },
+  { title: '操作', key: 'action', width: 240, fixed: 'right' as const },
 ]
+
+const downloaderColumns = [
+  { title: '种子', dataIndex: 'name', key: 'name', width: 280, fixed: 'left' as const },
+  { title: '状态', dataIndex: 'state', key: 'state', width: 100 },
+  { title: '进度', key: 'progress', width: 130 },
+  { title: '大小', dataIndex: 'size', key: 'size', width: 90 },
+  { title: '下载/上传', key: 'speed', width: 160 },
+  { title: '种比', dataIndex: 'ratio', key: 'ratio', width: 80 },
+  { title: '分类', dataIndex: 'category', key: 'category', width: 90 },
+  { title: '路径', key: 'path', width: 200 },
+]
+
+import { h } from 'vue'
 </script>
 
 <template>
@@ -95,110 +410,230 @@ const columns = [
     <a-typography-title :level="4">任务管理</a-typography-title>
 
     <a-row v-if="stats" :gutter="16" style="margin-bottom: 16px">
-      <a-col :span="8">
-        <a-card size="small">
-          <a-statistic title="活跃任务" :value="stats.by_status.active || 0" />
-        </a-card>
-      </a-col>
-      <a-col :span="8">
-        <a-card size="small">
-          <a-statistic title="暂停" :value="stats.by_status.paused || 0" />
-        </a-card>
-      </a-col>
-      <a-col :span="8">
-        <a-card size="small">
-          <a-statistic title="在途免费种" :value="stats.by_source.free_seed || 0" />
-        </a-card>
-      </a-col>
+      <a-col :span="6"><a-card size="small"><a-statistic title="活跃任务" :value="stats.by_status.active || 0" /></a-card></a-col>
+      <a-col :span="6"><a-card size="small"><a-statistic title="暂停" :value="stats.by_status.paused || 0" /></a-card></a-col>
+      <a-col :span="6"><a-card size="small"><a-statistic title="在途免费种" :value="stats.by_source.free_seed || 0" /></a-card></a-col>
+      <a-col :span="6"><a-card size="small"><a-statistic title="总计" :value="data.total" /></a-card></a-col>
     </a-row>
 
-    <a-card :title="`任务列表（总计 ${data.total}）`">
+    <a-card>
       <template #extra>
         <a-space>
-          <a-input-search
-            placeholder="搜索名称 / hash"
-            allow-clear
-            style="width: 240px"
-            @change="(e: Event) => filters.q = (e.target as HTMLInputElement).value"
-            @search="(v: string) => filters.q = v"
-          />
-          <a-select
-            placeholder="来源"
-            allow-clear
-            style="width: 120px"
-            :value="filters.source"
-            @change="(v: string) => filters.source = v"
-            :options="[
-              { value: 'auto_seed', label: '辅种' },
-              { value: 'free_seed', label: '免费种' },
-              { value: 'manual', label: '手动' },
-            ]"
-          />
-          <a-select
-            placeholder="状态"
-            allow-clear
-            style="width: 140px"
-            :value="filters.status"
-            @change="(v: string) => filters.status = v"
-            :options="[
-              { value: 'active', label: 'active' },
-              { value: 'paused', label: 'paused' },
-              { value: 'aborted', label: 'aborted' },
-              { value: 'deleted', label: 'deleted' },
-              { value: 'free_completed', label: 'free_completed' },
-            ]"
-          />
+          <a-tag v-if="lastRefresh" color="blue">上次刷新 {{ lastRefresh.toLocaleTimeString() }}</a-tag>
+          <a-switch v-model:checked="autoRefresh" checked-children="自动" un-checked-children="手动" @change="toggleAutoRefresh" />
+          <a-button @click="refreshAll">刷新</a-button>
         </a-space>
       </template>
-      <a-table
-        :data-source="pageItems"
-        :columns="columns"
-        row-key="id"
-        :pagination="{
-          current: page,
-          pageSize,
-          total: filtered.length,
-          showSizeChanger: true,
-          onChange: (p: number, ps: number) => { page = p; pageSize = ps },
-        }"
-      >
-        <template #bodyCell="{ column, record }">
-          <template v-if="column.key === 'name'">
-            <div>
-              <a style="font-weight: 500" @click="onShowDetail(record)">{{ record.name }}</a>
-              <a-typography-text type="secondary" code style="font-size: 11px">{{ record.info_hash.slice(0, 16) }}…</a-typography-text>
-            </div>
-          </template>
-          <template v-else-if="column.key === 'source'">
-            <a-tag :color="record.source === 'free_seed' ? 'purple' : record.source === 'auto_seed' ? 'blue' : 'default'">
-              {{ SOURCE_LABEL[record.source] || record.source }}
-            </a-tag>
-          </template>
-          <template v-else-if="column.key === 'status'">
-            <a-tag :color="STATUS_COLOR[record.status] || 'default'">{{ record.status }}</a-tag>
-          </template>
-          <template v-else-if="column.key === 'free'">
-            <span v-if="!record.is_free">-</span>
-            <a-tag v-else :color="record.free_type === 'freeleech_permanent' ? 'green' : 'orange'">{{ record.free_type }}</a-tag>
-          </template>
-          <template v-else-if="column.key === 'size'">
-            {{ formatSize(record.size) }}
-          </template>
-          <template v-else-if="column.key === 'progress'">
-            <a-tooltip :title="`${formatSize(record.downloaded)} / ${formatSize(record.size)}`">
-              {{ record.size ? Math.round(record.downloaded / record.size * 100) : 0 }}%
-            </a-tooltip>
-          </template>
-          <template v-else-if="column.key === 'ratio'">
-            {{ record.ratio.toFixed(2) }}
-          </template>
-          <template v-else-if="column.key === 'added'">
-            {{ formatDate(record.added_at) }}
-          </template>
-        </template>
-      </a-table>
+
+      <a-tabs v-model:active-key="activeTab">
+        <!-- ========================================== Tab 1: 本地辅种池 -->
+        <a-tab-pane key="local" tab="本地辅种池">
+          <a-space style="margin-bottom: 16px" wrap>
+            <a-input-search
+              placeholder="搜索名称 / hash"
+              allow-clear style="width: 220px"
+              :value="filters.q"
+              @search="(v: string) => filters.q = v"
+            />
+            <a-select
+              placeholder="站点" allow-clear style="width: 130px"
+              :value="filters.site_id"
+              @change="(v: number) => filters.site_id = v"
+              :options="sites.map(s => ({ value: s.id, label: s.name }))"
+            />
+            <a-select
+              placeholder="下载器" allow-clear style="width: 130px"
+              :value="filters.downloader_id"
+              @change="(v: number) => filters.downloader_id = v"
+              :options="downloaders.map(d => ({ value: d.id, label: d.name }))"
+            />
+            <a-select
+              placeholder="来源" allow-clear style="width: 110px"
+              :value="filters.source"
+              @change="(v: string) => filters.source = v"
+              :options="[
+                { value: 'auto_seed', label: '辅种' },
+                { value: 'free_seed', label: '免费种' },
+                { value: 'manual', label: '手动' },
+              ]"
+            />
+            <a-select
+              placeholder="状态" allow-clear style="width: 130px"
+              :value="filters.status"
+              @change="(v: string) => filters.status = v"
+              :options="[
+                { value: 'active', label: 'active' },
+                { value: 'paused', label: 'paused' },
+                { value: 'aborted', label: 'aborted' },
+                { value: 'deleted', label: 'deleted' },
+                { value: 'free_completed', label: 'free_completed' },
+              ]"
+            />
+            <a-select
+              placeholder="时间范围" style="width: 120px"
+              :value="filters.time_range"
+              @change="(v: string) => filters.time_range = v"
+              :options="TIME_RANGE_OPTIONS"
+            />
+          </a-space>
+
+          <a-space style="margin-bottom: 12px" v-if="selectedRowKeys.length > 0">
+            <a-tag color="blue">已选 {{ selectedRowKeys.length }} 项</a-tag>
+            <a-button size="small" @click="onBatchPause(true)">批量暂停</a-button>
+            <a-button size="small" @click="onBatchPause(false)">批量恢复</a-button>
+            <a-button size="small" danger @click="onBatchRemove(false)">批量删除</a-button>
+            <a-button size="small" danger @click="onBatchRemove(true)">批量删除+数据</a-button>
+            <a-button size="small" @click="selectedRowKeys = []">清空选择</a-button>
+          </a-space>
+
+          <a-table
+            :data-source="data.items"
+            :columns="localColumns"
+            row-key="id"
+            :loading="loading"
+            :pagination="{
+              current: page, pageSize, total: data.total,
+              showSizeChanger: true, pageSizeOptions: ['20', '50', '100', '200'],
+              onChange: (p: number) => page = p,
+              onShowSizeChange: (_: number, ps: number) => pageSize = ps,
+              showTotal: (t: number) => `共 ${t} 条`,
+            }"
+            :row-selection="{ selectedRowKeys, onChange: (keys: number[]) => selectedRowKeys = keys }"
+            :scroll="{ x: 1500 }"
+          >
+            <template #bodyCell="{ column, record }">
+              <template v-if="column.key === 'name'">
+                <div>
+                  <a style="font-weight: 500" @click="detail = record">{{ record.name }}</a>
+                  <a-typography-text type="secondary" code style="font-size: 11px">{{ record.info_hash.slice(0, 16) }}…</a-typography-text>
+                </div>
+              </template>
+              <template v-else-if="column.key === 'source'">
+                <a-tag :color="record.source === 'free_seed' ? 'purple' : record.source === 'auto_seed' ? 'blue' : 'default'">
+                  {{ SOURCE_LABEL[record.source] || record.source }}
+                </a-tag>
+              </template>
+              <template v-else-if="column.key === 'status'">
+                <a-tag :color="STATUS_COLOR[record.status] || 'default'">{{ record.status }}</a-tag>
+              </template>
+              <template v-else-if="column.key === 'free'">
+                <span v-if="!record.is_free">-</span>
+                <a-tag v-else :color="record.free_type === 'freeleech_permanent' ? 'green' : 'orange'">{{ record.free_type }}</a-tag>
+              </template>
+              <template v-else-if="column.key === 'size'">
+                {{ formatSize(record.size) }}
+              </template>
+              <template v-else-if="column.key === 'progress'">
+                <a-progress
+                  :percent="record.size ? Math.round((record.downloaded / record.size) * 100) : 0"
+                  size="small"
+                  :status="record.downloaded >= record.size ? 'success' : 'active'"
+                />
+              </template>
+              <template v-else-if="column.key === 'ratio'">
+                {{ record.ratio.toFixed(2) }}
+              </template>
+              <template v-else-if="column.key === 'free_end'">
+                <span v-if="!record.is_free || !record.free_end_at">-</span>
+                <a-tooltip v-else :title="formatDate(record.free_end_at)">{{ formatCountdown(record.free_end_at) }}</a-tooltip>
+              </template>
+              <template v-else-if="column.key === 'added'">
+                {{ formatDate(record.added_at) }}
+              </template>
+              <template v-else-if="column.key === 'action'">
+                <a-space size="small">
+                  <a-button v-if="record.status !== 'paused'" size="small" @click="onPause(record)">暂停</a-button>
+                  <a-button v-else size="small" @click="onResume(record)">恢复</a-button>
+                  <a-button size="small" @click="onRemove(record, false)">删除</a-button>
+                  <a-popconfirm title="危险：删除任务 + 磁盘数据" @confirm="onRemove(record, true)">
+                    <a-button size="small" danger>删+数据</a-button>
+                  </a-popconfirm>
+                </a-space>
+              </template>
+            </template>
+          </a-table>
+        </a-tab-pane>
+
+        <!-- ========================================== Tab 2: 下载器原生任务 -->
+        <a-tab-pane key="downloader" tab="下载器原生任务">
+          <a-space style="margin-bottom: 16px" wrap>
+            <a-select
+              placeholder="选择下载器" style="width: 200px"
+              :value="selectedDlId"
+              @change="(v: number) => selectedDlId = v"
+              :options="downloaders.filter(d => d.enabled).map(d => ({ value: d.id, label: `${d.name} (${d.type})` }))"
+            />
+            <a-select
+              placeholder="状态过滤" allow-clear style="width: 140px"
+              :value="dlFilterState"
+              @change="(v: string) => dlFilterState = v"
+              :options="[
+                { value: 'downloading', label: '下载中' },
+                { value: 'uploading', label: '上传中' },
+                { value: 'paused', label: '暂停' },
+                { value: 'completed', label: '完成' },
+                { value: 'error', label: '错误' },
+              ]"
+            />
+            <a-button @click="loadDownloaderTorrents">刷新</a-button>
+            <a-tag v-if="selectedDlId" color="blue">共 {{ downloaderTorrents.length }} 条</a-tag>
+          </a-space>
+
+          <a-space style="margin-bottom: 12px" v-if="selectedDlKeys.length > 0">
+            <a-tag color="blue">已选 {{ selectedDlKeys.length }} 项</a-tag>
+            <a-button size="small" @click="onDownloaderOp('pause')">暂停</a-button>
+            <a-button size="small" @click="onDownloaderOp('resume')">恢复</a-button>
+            <a-button size="small" danger @click="onDownloaderOp('remove')">删除</a-button>
+            <a-button size="small" @click="selectedDlKeys = []">清空选择</a-button>
+          </a-space>
+
+          <a-table
+            :data-source="downloaderTorrents"
+            :columns="downloaderColumns"
+            row-key="hash"
+            :loading="dlLoading"
+            :pagination="{ pageSize: 50 }"
+            :row-selection="{ selectedRowKeys: selectedDlKeys, onChange: (keys: string[]) => selectedDlKeys = keys }"
+            :scroll="{ x: 1200 }"
+          >
+            <template #bodyCell="{ column, record }">
+              <template v-if="column.key === 'name'">
+                <div>
+                  <b>{{ record.name }}</b>
+                  <a-typography-text type="secondary" code style="font-size: 11px">{{ record.hash.slice(0, 16) }}…</a-typography-text>
+                </div>
+              </template>
+              <template v-else-if="column.key === 'state'">
+                <a-tag>{{ STATE_LABEL[record.state] || record.state }}</a-tag>
+              </template>
+              <template v-else-if="column.key === 'progress'">
+                <a-progress :percent="Math.round(record.progress * 100)" size="small" />
+              </template>
+              <template v-else-if="column.key === 'size'">
+                {{ formatSize(record.size) }}
+              </template>
+              <template v-else-if="column.key === 'speed'">
+                <div style="font-size: 11px">
+                  <div style="color: #52c41a">↓ {{ formatSpeed(record.dlspeed) }}</div>
+                  <div style="color: #1890ff">↑ {{ formatSpeed(record.upspeed) }}</div>
+                </div>
+              </template>
+              <template v-else-if="column.key === 'ratio'">
+                {{ record.ratio.toFixed(2) }}
+              </template>
+              <template v-else-if="column.key === 'category'">
+                {{ record.category || '-' }}
+              </template>
+              <template v-else-if="column.key === 'path'">
+                <a-typography-text code style="font-size: 11px">{{ record.save_path || '-' }}</a-typography-text>
+              </template>
+            </template>
+          </a-table>
+        </a-tab-pane>
+      </a-tabs>
     </a-card>
 
+    <!-- ============================================================ 详情弹窗 -->
     <a-modal
       :open="detail !== null"
       @cancel="detail = null"
@@ -212,6 +647,8 @@ const columns = [
           <a-col :span="16"><code style="font-size: 12px">{{ detail.info_hash }}</code></a-col>
           <a-col :span="8"><a-typography-text type="secondary">站点</a-typography-text></a-col>
           <a-col :span="16">{{ detail.site }}</a-col>
+          <a-col :span="8"><a-typography-text type="secondary">下载器</a-typography-text></a-col>
+          <a-col :span="16">{{ detail.downloader_name }}</a-col>
           <a-col :span="8"><a-typography-text type="secondary">分类</a-typography-text></a-col>
           <a-col :span="16">{{ detail.category || '-' }}</a-col>
           <a-col :span="8"><a-typography-text type="secondary">大小 / 已下 / 种比</a-typography-text></a-col>
@@ -226,12 +663,14 @@ const columns = [
           </a-col>
           <template v-if="detail.free_end_at">
             <a-col :span="8"><a-typography-text type="secondary">免费窗口截止</a-typography-text></a-col>
-            <a-col :span="16">{{ formatDate(detail.free_end_at) }}</a-col>
+            <a-col :span="16">{{ formatDate(detail.free_end_at) }}（剩 {{ formatCountdown(detail.free_end_at) }}）</a-col>
           </template>
           <template v-if="detail.protect_until">
             <a-col :span="8"><a-typography-text type="secondary">禁删保护截止</a-typography-text></a-col>
-            <a-col :span="16">{{ formatDate(detail.protect_until) }}</a-col>
+            <a-col :span="16">{{ formatDate(detail.protect_until) }}（剩 {{ formatCountdown(detail.protect_until) }}）</a-col>
           </template>
+          <a-col :span="8"><a-typography-text type="secondary">添加于</a-typography-text></a-col>
+          <a-col :span="16">{{ formatDate(detail.added_at) }}</a-col>
         </a-row>
       </div>
     </a-modal>

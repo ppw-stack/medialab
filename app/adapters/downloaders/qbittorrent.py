@@ -161,6 +161,17 @@ class QbittorrentAdapter(DownloaderAdapter):
             return None
         return datetime.fromtimestamp(value, UTC).replace(tzinfo=None)
 
+    @staticmethod
+    def _matches(info: "TorrentInfo", filt: "TorrentFilter") -> bool:
+        """按 TorrentFilter 过滤：states/category/tags 三个维度。"""
+        if filt.states and info.state not in filt.states:
+            return False
+        if filt.category and info.category != filt.category:
+            return False
+        if filt.tags and not filt.tags.issubset(info.tags):
+            return False
+        return True
+
     # ------------------------------------------------------------ 接口
     async def ping(self) -> bool:
         try:
@@ -202,7 +213,7 @@ class QbittorrentAdapter(DownloaderAdapter):
                 completed_at=row.get("completion_on"),
                 eta=row.get("eta"),
             )
-            if filt is not None and not _matches(info, filt):
+            if filt is not None and not self._matches(info, filt):
                 continue
             out.append(info)
         return out
@@ -241,7 +252,8 @@ class QbittorrentAdapter(DownloaderAdapter):
     async def set_pause(self, hashes: Sequence[str], paused: bool) -> bool:
         if not hashes:
             return True
-        action = "pause" if paused else "resume"
+        # qBittorrent v5 端点（v5.0+）：pause=/torrents/stop, resume=/torrents/start
+        action = "stop" if paused else "start"
         await self._post_retry(
             f"/api/v2/torrents/{action}", data={"hashes": "|".join(hashes)}
         )
