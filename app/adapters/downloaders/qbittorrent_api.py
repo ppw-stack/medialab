@@ -569,10 +569,13 @@ class Qb5ApiClient:
         )
 
     async def add_peers(self, hash_: str, peers: list[str]) -> None:
-        """POST /api/v2/torrents/addPeers — 添加 peer（peers 格式 "host:port" 列表）。"""
+        """POST /api/v2/torrents/addPeers — 添加 peer（peers 格式 "host:port" 列表）。
+
+        注：qBittorrent 实际参数名是 ``hashes``（文档写作 ``hash``）。
+        """
         await self._post(
             "/api/v2/torrents/addPeers",
-            data={"hash": hash_, "peers": "\n".join(peers)},
+            data={"hashes": hash_, "peers": "\n".join(peers)},
         )
 
     # ============================================================ 限速 (4)
