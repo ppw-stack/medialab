@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from app.api.auth import require_session
+from app.core.timeutils import utcnow
 from app.db.models import FreeCandidate, Site
 from app.db.session import session_scope
 from app.services.factory import get_factory
@@ -92,7 +93,7 @@ def _to_card(c: FreeCandidate, site_name: str) -> CandidateCard:
     """构造候选卡片。"""
     remaining: float | None = None
     if c.free_end_at is not None:
-        remaining = (c.free_end_at - datetime.now()).total_seconds()
+        remaining = (c.free_end_at - utcnow()).total_seconds()
     return CandidateCard(
         id=c.id,
         site_id=c.site_id,

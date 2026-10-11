@@ -47,7 +47,9 @@ class DownloaderIn(BaseModel):
 
 class DownloaderUpdate(BaseModel):
     id: int
-    name: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
+    name: str | None = Field(
+        default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$"
+    )
     url: str | None = Field(default=None, min_length=1, max_length=512)
     username: str | None = Field(default=None, max_length=128)
     password: str | None = Field(default=None, max_length=512)
@@ -172,6 +174,7 @@ async def update_downloader(payload: DownloaderUpdate) -> DownloaderOut:
         ).scalar_one_or_none()
         if row is None:
             raise HTTPException(status_code=404, detail="下载器不存在")
+        old_name = row.name
         if payload.name and payload.name != row.name:
             if (
                 await session.execute(
@@ -192,6 +195,14 @@ async def update_downloader(payload: DownloaderUpdate) -> DownloaderOut:
             row.password_enc = cipher.encrypt(
                 payload.password, owner_type="downloader", owner_id=row.name
             )
+        elif old_name != row.name and row.password_enc:
+            # 改名时用新名重加密既有密码，否则 AAD 失配无法解密
+            rekeyed = cipher.rekey(
+                row.password_enc,
+                owner_type="downloader", old_id=old_name, new_id=row.name,
+            )
+            if rekeyed:
+                row.password_enc = rekeyed
         if payload.is_default:
             await _apply_default(session, row.id)
         return _to_out(row)

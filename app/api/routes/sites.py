@@ -97,7 +97,10 @@ async def delete_site(payload: SiteDeleteIn) -> dict[str, int]:
         if torrent_count or candidate_count:
             raise HTTPException(
                 status_code=409,
-                detail=f"站点下还有 {torrent_count} 条任务、{candidate_count} 个 free 候选，请先清理",
+                detail=(
+                    f"站点下还有 {torrent_count} 条任务、"
+                    f"{candidate_count} 个 free 候选，请先清理"
+                ),
             )
         await session.execute(delete(Feed).where(Feed.site_id == payload.id))
         await session.delete(site)
@@ -161,21 +164,33 @@ async def update_site(payload: SiteUpdate) -> SiteOut:
         if site is None:
             raise HTTPException(status_code=404, detail="站点不存在")
 
-        updates = payload.model_dump(exclude={"id", "rss_url", "apikey", "cookies"}, exclude_unset=True)
+        old_name = site.name
+        name_changed = bool(payload.name) and payload.name != old_name
+
+        updates = payload.model_dump(
+            exclude={"id", "rss_url", "apikey", "cookies"}, exclude_unset=True
+        )
         for key, value in updates.items():
             setattr(site, key, value)
-        if payload.rss_url:
-            site.rss_url_enc = cipher.encrypt(
-                payload.rss_url, owner_type="site", owner_id=site.name
-            )
-        if payload.apikey:
-            site.apikey_enc = cipher.encrypt(
-                payload.apikey, owner_type="site", owner_id=site.name
-            )
-        if payload.cookies:
-            site.cookies_enc = cipher.encrypt(
-                payload.cookies, owner_type="site", owner_id=site.name
-            )
+
+        # 凭据 AAD 绑定 owner_id=name：提供新值则用新值加密；改名时必须
+        # 用新名重加密既有密文，否则后续解密 AAD 失配（凭据永久不可用）。
+        for enc_attr, new_val in (
+            ("rss_url_enc", payload.rss_url),
+            ("apikey_enc", payload.apikey),
+            ("cookies_enc", payload.cookies),
+        ):
+            if new_val:
+                setattr(site, enc_attr, cipher.encrypt(
+                    new_val, owner_type="site", owner_id=site.name
+                ))
+            elif name_changed and getattr(site, enc_attr):
+                rekeyed = cipher.rekey(
+                    getattr(site, enc_attr),
+                    owner_type="site", old_id=old_name, new_id=site.name,
+                )
+                if rekeyed:
+                    setattr(site, enc_attr, rekeyed)
         return _to_out(site, payload.rss_url)
 
 

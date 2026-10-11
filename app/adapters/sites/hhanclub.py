@@ -436,12 +436,8 @@ def _find_torrent_container(anchor: object) -> object | None:
     return None
 
 
-class _BreakerTripped(RuntimeError):
-    """hhanclub 站点熔断（FR-2.2：429/403 立即熔断）。"""
-
-
 class _TorrentDownloadError(RuntimeError):
     """下载 torrent 失败。"""
 
 
-__all__ = ["HhanclubAdapter", "_BreakerTripped", "_TorrentDownloadError"]
+__all__ = ["HhanclubAdapter", "_TorrentDownloadError"]

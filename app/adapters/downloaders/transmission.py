@@ -50,6 +50,14 @@ _FIELDS_ALL: tuple[str, ...] = (
     "secondsSeeding",
     "files",
     "fileStats",
+    # 与 qBittorrent 视图对齐（FR-1.1 统一契约）。
+    "labels",                # TR 用「labels」承载原自定义标签
+    "uploadRatio",           # 上传/下载比
+    "eta",                   # 预计剩余秒数；完成时 TR 返 0
+    "addedDate",             # 入队 unix 秒
+    "doneDate",              # 完成 unix 秒；未完成返 0
+    "peersConnected",        # qB 字段 num_connections 对应值
+    "isFinished",            # 用于 completed_at 兜底
 )
 
 
@@ -219,6 +227,15 @@ class TransmissionAdapter(DownloaderAdapter):
             TorrentState.UPLOADING,
         ):
             state = TorrentState.ERROR  # FR-3.4 兜底
+        # TR 没有「category」字段；把第一个 label 当 category（FR-1.1 统一视图
+        # 在下载器控制台改标签即可表达分组），其余当 tags。
+        labels = list(row.get("labels") or [])
+        tags = frozenset(labels)
+        category = labels[0] if labels else None
+        done_date = int(row.get("doneDate") or 0)
+        completed_at = done_date if done_date and row.get("isFinished") else None
+        eta_raw = row.get("eta")
+        eta = int(eta_raw) if isinstance(eta_raw, (int, float)) and eta_raw else None
         return TorrentInfo(
             hash=row.get("hashString", ""),
             name=row.get("name", ""),
@@ -228,9 +245,16 @@ class TransmissionAdapter(DownloaderAdapter):
             downloaded=int(row.get("downloadedEver") or 0),
             uploaded=int(row.get("uploadedEver") or 0),
             save_path=row.get("downloadDir") or None,
+            category=category,
+            tags=tags,
             dlspeed=rate_dl,
             upspeed=int(row.get("rateUpload") or 0),
-            num_seeds=0,
+            num_seeds=0,  # ponytail: TR RPC 无 seed 数聚合，UI 显示「-」
+            num_connections=int(row.get("peersConnected") or 0),
+            ratio=float(row.get("uploadRatio") or 0),
+            added_at=int(row.get("addedDate") or 0) or None,
+            completed_at=completed_at,
+            eta=eta,
         )
 
     @staticmethod
@@ -270,6 +294,17 @@ class TransmissionAdapter(DownloaderAdapter):
         arguments: dict[str, Any] = {"paused": payload.paused}
         if payload.save_path:
             arguments["download-dir"] = payload.save_path
+        # TR 无 category 字段，把 payload.category 与 tags 合并到 labels（第一个
+        # 为 category，保持 _row_to_info 反向解析一致）。
+        labels: list[str] = []
+        if payload.category:
+            labels.append(payload.category)
+        if payload.tags:
+            for t in payload.tags:
+                if t and t not in labels:
+                    labels.append(t)
+        if labels:
+            arguments["labels"] = labels
         if payload.torrent_bytes is not None:
             arguments["metainfo"] = base64.b64encode(
                 payload.torrent_bytes

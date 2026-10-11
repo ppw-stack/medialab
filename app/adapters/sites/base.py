@@ -78,6 +78,14 @@ class TorrentDetail:
     error: str | None = None
 
 
+class BreakerTripped(RuntimeError):
+    """站点熔断（FR-2.2：429/403 立即熔断 1 小时）。
+
+    统一异常类：适配层抛出，由 :mod:`app.services.feed_fetcher` 捕获后
+    写入 ``feeds.breaker_until``。各 adapter 不再自定义同名类。
+    """
+
+
 class SiteAdapter(ABC):
     """站点统一接口（FR-1.5）。
 

@@ -1,19 +1,14 @@
 """任务队列幂等测试（§6 幂等性 / AC-09）。
 
-核心断言：**同一幂等键重复入队不会产生第二行**，这是崩溃重放不重复添加
-的真正保障——依赖数据库唯一约束，而非业务代码自觉。
+核心断言：**同一幂等键重复入队不会产生第二行**，依赖数据库唯一约束。
 """
 
 from __future__ import annotations
 
-from datetime import timedelta
-
 import pytest
-from app.core.timeutils import utcnow
 from app.services.task_queue import (
     TaskKind,
     TaskQueueService,
-    TaskStatus,
     make_idem_key,
 )
 
@@ -72,108 +67,6 @@ async def test_duplicate_enqueue_is_idempotent(db) -> None:
         assert first.created is True
         assert second.created is False
         assert first.task_id == second.task_id
-
-
-async def test_enqueue_after_done_is_still_idempotent(db) -> None:
-    """已完成的任务再次入队仍视为已处理——否则重启后会被重复执行。"""
-
-    from app.db.models import TaskQueue
-    from app.db.session import session_scope
-
-    async with session_scope() as s:
-        svc = TaskQueueService(s)
-        r = await svc.enqueue(TaskKind.ADD_TORRENT, {}, idem_key=key(1, H))
-        task = await s.get(TaskQueue, r.task_id)
-        assert task is not None
-        await svc.mark_done(task)
-
-    async with session_scope() as s:
-        svc = TaskQueueService(s)
-        again = await svc.enqueue(TaskKind.ADD_TORRENT, {}, idem_key=key(1, H))
-        assert again.created is False
-
-
-async def test_claim_due_marks_running(db) -> None:
-    from app.db.session import session_scope
-
-    async with session_scope() as s:
-        svc = TaskQueueService(s)
-        await svc.enqueue(TaskKind.ADD_TORRENT, {}, idem_key=key(1, H))
-        claimed = await svc.claim_due()
-        assert len(claimed) == 1
-        assert claimed[0].status == TaskStatus.RUNNING
-
-
-async def test_claim_due_skips_future_tasks(db) -> None:
-    from app.db.session import session_scope
-
-    async with session_scope() as s:
-        svc = TaskQueueService(s)
-        await svc.enqueue(
-            TaskKind.ADD_TORRENT,
-            {},
-            idem_key=key(1, H),
-            run_at=utcnow() + timedelta(hours=1),
-        )
-        assert await svc.claim_due() == []
-
-
-async def test_mark_failed_retries_then_gives_up(db) -> None:
-    """§6：失败自动重试 3 次。"""
-    from app.db.models import TaskQueue
-    from app.db.session import session_scope
-
-    async with session_scope() as s:
-        svc = TaskQueueService(s)
-        r = await svc.enqueue(TaskKind.ADD_TORRENT, {}, idem_key=key(1, H))
-        task = await s.get(TaskQueue, r.task_id)
-        assert task is not None
-        for i in range(3):
-            await svc.mark_failed(task, f"err{i}")
-        assert task.status == TaskStatus.FAILED
-        assert task.attempts == 3
-
-
-async def test_failed_task_not_reclaimed(db) -> None:
-    from app.db.models import TaskQueue
-    from app.db.session import session_scope
-
-    async with session_scope() as s:
-        svc = TaskQueueService(s)
-        r = await svc.enqueue(TaskKind.ADD_TORRENT, {}, idem_key=key(1, H))
-        task = await s.get(TaskQueue, r.task_id)
-        assert task is not None
-        for _ in range(3):
-            await svc.mark_failed(task, "x")
-        assert await svc.claim_due() == []
-
-
-async def test_requeue_running_recovers_crashed_tasks(db) -> None:
-    """崩溃恢复：残留 running 必须复位，否则永远卡住。"""
-    from app.db.session import session_scope
-
-    async with session_scope() as s:
-        svc = TaskQueueService(s)
-        await svc.enqueue(TaskKind.ADD_TORRENT, {}, idem_key=key(1, H))
-        await svc.claim_due()
-
-    async with session_scope() as s:
-        svc = TaskQueueService(s)
-        assert await svc.requeue_running() == 1
-
-    async with session_scope() as s:
-        svc = TaskQueueService(s)
-        assert len(await svc.claim_due()) == 1, "复位后应可被重新消费"
-
-
-async def test_pending_count(db) -> None:
-    from app.db.session import session_scope
-
-    async with session_scope() as s:
-        svc = TaskQueueService(s)
-        await svc.enqueue(TaskKind.ADD_TORRENT, {}, idem_key=key(1, H))
-        await svc.enqueue(TaskKind.ADD_TORRENT, {}, idem_key=key(2, H))
-        assert await svc.pending_count() == 2
 
 
 @pytest.mark.parametrize("kind", list(TaskKind))

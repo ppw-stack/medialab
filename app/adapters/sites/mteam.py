@@ -33,6 +33,7 @@ from urllib.parse import urlencode
 import httpx
 
 from app.adapters.sites.base import (
+    BreakerTripped,
     FeedItem,
     SiteAdapter,
     SiteHealth,
@@ -223,7 +224,7 @@ class MteamAdapter(SiteAdapter):
             logger.warning("m-team %s 搜索失败：%s", self.name, exc)
             return []
         if resp.status_code in (403, 429):
-            raise _BreakerTripped(f"m-team {self.name} 返回 {resp.status_code}，需熔断")
+            raise BreakerTripped(f"m-team {self.name} 返回 {resp.status_code}，需熔断")
         if resp.status_code >= 400:
             logger.warning("m-team %s 搜索返回 %s", self.name, resp.status_code)
             return []
@@ -418,12 +419,8 @@ class MteamAdapter(SiteAdapter):
         await self._client.aclose()
 
 
-class _BreakerTripped(RuntimeError):
-    """m-team 站点熔断（FR-2.2：429/403 立即熔断）。"""
-
-
 class _TorrentDownloadError(RuntimeError):
     """下载 torrent 失败（genDlToken 失败 / HTTP 错误 / 非 bencoded）。"""
 
 
-__all__ = ["MteamAdapter", "_BreakerTripped", "_TorrentDownloadError"]
+__all__ = ["MteamAdapter", "_TorrentDownloadError"]

@@ -413,12 +413,8 @@ class HdskyAdapter(SiteAdapter):
         await self._client.aclose()
 
 
-class _BreakerTripped(RuntimeError):
-    """hdsky 站点熔断（FR-2.2：429/403 立即熔断）。"""
-
-
 class _TorrentDownloadError(RuntimeError):
     """下载 torrent 失败。"""
 
 
-__all__ = ["HdskyAdapter", "_BreakerTripped", "_TorrentDownloadError"]
+__all__ = ["HdskyAdapter", "_TorrentDownloadError"]

@@ -26,11 +26,12 @@ from dataclasses import dataclass, field
 
 from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.downloaders.base import AddTorrentPayload, DownloaderError
 from app.adapters.sites._bencode import infohash_from_torrent
-from app.adapters.sites.base import FeedItem
+from app.adapters.sites.base import FeedItem, SiteAdapter
 from app.core.logging import get_logger
 from app.core.timeutils import utcnow
 from app.core.windows import FreeWindow
@@ -345,7 +346,8 @@ class FreeSeedHunter:
                     error=f"add_torrent 失败：{exc}",
                 )
 
-            # 4. 落库 Torrent（source=FREE_SEED）
+            # 4. 落库 Torrent（source=FREE_SEED）；info_hash 已存在则复用
+            #    （add_torrent 已成功，防 flush 撞 UNIQUE(info_hash) 留孤儿下载）
             now = utcnow()
             torrent = Torrent(
                 info_hash=info_hash,
@@ -361,14 +363,23 @@ class FreeSeedHunter:
                 free_type=cand.free_type,
                 free_end_at=cand.free_end_at,
                 free_source=cand.free_source,
-                free_confidence=cand.free_confidence or 1.0,
+                free_confidence=cand.free_confidence if cand.free_confidence is not None else 1.0,
             )
-            session.add(torrent)
-            await session.flush()
+            try:
+                async with session.begin_nested():
+                    session.add(torrent)
+                    await session.flush()
+                torrent_id = torrent.id
+            except IntegrityError:
+                torrent_id = (
+                    await session.execute(
+                        select(Torrent.id).where(Torrent.info_hash == info_hash)
+                    )
+                ).scalar_one()
 
             # 5. 更新 candidate 状态
             cand.info_hash = info_hash
-            cand.torrent_id = torrent.id
+            cand.torrent_id = torrent_id
             cand.status = CandidateStatus.PUSHED
             cand.pushed_at = now
 

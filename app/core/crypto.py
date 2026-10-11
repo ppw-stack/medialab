@@ -97,6 +97,19 @@ class CredentialCipher:
         except DecryptionError:
             return None
 
+    def rekey(
+        self, token: str, *, owner_type: str, old_id: int | str, new_id: int | str
+    ) -> str | None:
+        """改名专用：用旧 owner 解密、新 owner 重加密。
+
+        返回新密文；旧密文解不开（密钥错 / AAD 已失配）返回 ``None``——
+        此时调用方保留原密文，由用户重新输入凭据修复。
+        """
+        plain = self.try_decrypt(token, owner_type=owner_type, owner_id=old_id)
+        if plain is None:
+            return None
+        return self.encrypt(plain, owner_type=owner_type, owner_id=new_id)
+
 
 def build_cipher(settings: Any) -> CredentialCipher:
     """从配置对象构造加密器。

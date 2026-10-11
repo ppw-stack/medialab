@@ -9,8 +9,8 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from app.adapters.sites.base import SiteProfile, TorrentBrief
-from app.adapters.sites.mteam import MteamAdapter, _BreakerTripped, _TorrentDownloadError
+from app.adapters.sites.base import BreakerTripped, SiteProfile, TorrentBrief
+from app.adapters.sites.mteam import MteamAdapter, _TorrentDownloadError
 
 # ---- fixtures ----
 
@@ -87,7 +87,7 @@ async def test_search_429_trips_breaker(adapter: MteamAdapter) -> None:
     resp = MagicMock()
     resp.status_code = 429
     adapter._client.post = AsyncMock(return_value=resp)
-    with pytest.raises(_BreakerTripped):
+    with pytest.raises(BreakerTripped):
         await adapter.search_torrents({})
 
 

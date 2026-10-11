@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.sites.base import FeedItem
@@ -115,8 +116,14 @@ class SeedEngine:
         ``force=True`` 用于**手动触发**（FR-6.1）：跳过 FR-2.2 的频率下限。
         该下限是针对自动拉取的账号保护（R2），用户显式操作不应被限制，
         但仍会完整记录审计。
+
+        事务模型（P2-1 修复）：任何**网络 IO**（fetcher.fetch、adapter.add_torrent）
+        都不在 session_scope 内；DB 读与 DB 写各自用短事务隔离。长 session 跨
+        网络会拉长锁持有窗口、阻塞 scheduler 等其它任务，并使下载器慢响应放大
+        DB 排队延迟。
         """
         started = time.monotonic()
+        # 1) 短事务：site/feed 元数据 + 频率检查（纯 DB 读）
         async with session_scope() as session:
             site = (
                 await session.execute(select(Site).where(Site.id == site_id))
@@ -137,155 +144,132 @@ class SeedEngine:
                 return RoundStats(site=site.name, status="no_feed")
 
             if not force:
-                fetcher = FeedFetcher(site.name)
-                allowed, why = fetcher.should_pull(
+                allowed, why = FeedFetcher(site.name).should_pull(
                     feed, interval_minutes=site.min_interval_minutes
                 )
                 if not allowed:
                     logger.debug("站点 %s 本轮跳过：%s", site.name, why)
-                    return RoundStats(site=site.name, status=PullStatus.INTERVAL_NOT_MET)
+                    return RoundStats(
+                        site=site.name, status=PullStatus.INTERVAL_NOT_MET
+                    )
 
-            fetcher = FeedFetcher(site.name)
-            stats = await self._pull_and_add(session, site, feed, fetcher)
+        # 2) 网络拉取（无 session）。fetcher 自身带断路器/重试。
+        fetcher = FeedFetcher(site.name)
+        adapter = self._factory.site(site)
+        url = self._factory.site_rss_url(site) or ""
+        result = await fetcher.fetch(adapter, url)
+
+        stats = RoundStats(site=site.name)
+        stats.status = str(result.status)
+
+        # 3) 短事务：写 feed state（含熔断 breaker_until）
+        async with session_scope() as session:
+            feed_row = (
+                await session.execute(
+                    select(Feed).where(Feed.id == feed.id)
+                )
+            ).scalar_one()
+            if not result.ok:
+                await self._update_feed_state(
+                    session, feed_row, result.status,
+                    0, result.duration_ms, result.error,
+                )
+            else:
+                feed_row.last_pulled_at = utcnow()
+                feed_row.last_status = str(result.status)
+                feed_row.last_item_count = len(result.items)
+                feed_row.last_duration_ms = result.duration_ms
+                await session.flush()
+
+        if not result.ok:
+            feed_pulls.labels(site=site.name, result=stats.status).inc()
+            stats.duration_ms = int((time.monotonic() - started) * 1000)
+            return stats
+
+        # 4) 判定 + 投递（网络）。match_many 在短 session 内执行（只读），然后
+        # 退出 session；add_torrent 在无 session 状态下逐条进行。
+        items = list(result.items)[:MAX_ADD_PER_ROUND]
+        stats.pulled = len(items)
+
+        async with session_scope() as session:
+            policy = SiteMatchPolicy(site_id=site.id, site_name=site.name)
+            matcher = Matcher(session, policy)
+            results = await matcher.match_many(items)
+
+        # 5) 写每条 skip 决策（matcher 状态外移，必须另开会话）
+        skip_entries: list[tuple[FeedItem, str]] = []
+        accept_entries: list[tuple[FeedItem, MatchResult]] = []
+        for item, res in zip(items, results, strict=True):
+            if res.outcome is MatchOutcome.SKIP:
+                stats.note_skip(res.reason)
+                skip_entries.append((item, res.reason))
+            else:
+                stats.accepted += 1
+                accept_entries.append((item, res))
+
+        if skip_entries:
+            async with session_scope() as session:
+                feed_row = (
+                    await session.execute(
+                        select(Feed).where(Feed.id == feed.id)
+                    )
+                ).scalar_one()
+                for item, reason in skip_entries:
+                    await self._record_skip(session, feed_row, item, reason)
+
+        # 6) 逐条 dispatch：网络在无 session 下执行；DB 写各自短 session。
+        for item, res in accept_entries:
+            ok = await self._dispatch(site, item, res)
+            if ok:
+                stats.added += 1
+            else:
+                stats.failed += 1
 
         feed_pulls.labels(site=site.name, result=stats.status).inc()
         stats.duration_ms = int((time.monotonic() - started) * 1000)
         return stats
 
-    async def _pull_and_add(
-        self,
-        session: AsyncSession,
-        site: Site,
-        feed: Feed,
-        fetcher: FeedFetcher,
-    ) -> RoundStats:
-        """拉取 → 判定 → 投递。"""
-        stats = RoundStats(site=site.name)
-        adapter = self._factory.site(site)
-        # 站点可能没有 RSS URL（m-team 等 API 站点有 apikey 就走 API）。
-        # URL 是给 adapter 的提示，adapter 自行决定是否使用（FR-1.5）。
-        url = self._factory.site_rss_url(site) or ""
-
-        result = await fetcher.fetch(adapter, url)
-        stats.status = str(result.status)
-        if not result.ok:
-            await self._update_feed_state(
-                session, feed, result.status, 0, result.duration_ms, result.error
-            )
-            return stats
-
-        feed.last_pulled_at = utcnow()
-        feed.last_status = str(result.status)
-        feed.last_item_count = len(result.items)
-        feed.last_duration_ms = result.duration_ms
-
-        items = list(result.items)
-        stats.pulled = len(items)
-        await self._add_items(session, site, feed, items, stats)
-        return stats
-
-    async def _add_items(
-        self,
-        session: AsyncSession,
-        site: Site,
-        feed: Feed,
-        items: list[FeedItem],
-        stats: RoundStats,
-    ) -> None:
-        """对整批条目执行判定与投递。"""
-        policy = SiteMatchPolicy(
-            site_id=site.id,
-            site_name=site.name,
-        )
-        matcher = Matcher(session, policy)
-        results = await matcher.match_many(items[:MAX_ADD_PER_ROUND])
-
-        queue = TaskQueueService(session)
-        cooldown = CooldownService(session)
-
-        for item, res in zip(items[:MAX_ADD_PER_ROUND], results, strict=True):
-            if res.outcome is MatchOutcome.SKIP:
-                stats.note_skip(res.reason)
-                await self._record_skip(session, feed, item, res.reason)
-                continue
-
-            stats.accepted += 1
-            await self._dispatch(
-                session, queue, cooldown, site, item, res, stats
-            )
-
     async def _dispatch(
         self,
-        session: AsyncSession,
-        queue: TaskQueueService,
-        cooldown: CooldownService,
         site: Site,
         item: FeedItem,
         res: MatchResult,
-        stats: RoundStats,
-    ) -> None:
-        """投递一条辅种任务。幂等键保证重放不重复。"""
-        assert res.save_path is not None
-        payload: dict[str, object] = {
-            "site_id": site.id,
-            "site_name": site.name,
-            "info_hash": res.info_hash,
-            "name": item.title,
-            "url": item.torrent_url or item.link,
-            "save_path": str(res.save_path.path),
-            "category": "cross-seed",
-            "size": item.size,
-        }
-        enqueued = await queue.enqueue(
-            TaskKind.ADD_TORRENT,
-            payload,
-            idem_key=make_idem_key(
-                TaskKind.ADD_TORRENT, site_id=site.id, info_hash=res.info_hash
-            ),
-        )
-        if not enqueued.created:
-            # 队列中已有等价任务（重启重放，AC-09）
-            stats.note_skip("duplicate")
-            await self._record_skip(session, None, item, "duplicate")
-            return
+    ) -> bool:
+        """投递一条辅种任务。返回 True=成功。
 
-        ok, fail_reason = await self._execute_add(session, site, item, res)
-        if ok:
-            stats.added += 1
-        else:
-            stats.failed += 1
-            await cooldown.record(site.id, res.info_hash, fail_reason)
-
-    async def _execute_add(
-        self,
-        session: AsyncSession,
-        site: Site,
-        item: FeedItem,
-        res: MatchResult,
-    ) -> tuple[bool, str]:
-        """真正向下载器添加任务，并落库。返回 (ok, fail_reason)。
-
-        fail_reason 为空串表示成功；配置类错误返回 ``manual_skip``（不入
-        冷却，条件修复后立即可重试），下载器添加异常返回 ``dead_torrent``。
-
-        FR-2.4：辅种任务统一用独立分类与标签，与手动任务物理隔离。
+        网络（add_torrent）无 session；DB 写在短 session 内（enqueue +
+        Torrent/AddHistory；失败则 cooldown.record）。
         """
         assert res.save_path is not None
         url = item.torrent_url or item.link
         if not url:
             logger.warning("条目无下载链接，跳过：%s", item.title)
-            return False, CooldownReason.MANUAL_SKIP
+            await self._record_cooldown(site.id, res.info_hash, CooldownReason.MANUAL_SKIP)
+            return False
 
-        downloader_row = await self._resolve_default_downloader(session)
-        if downloader_row is None:
-            logger.warning("未配置可用下载器，无法辅种：%s", site.name)
-            return False, CooldownReason.MANUAL_SKIP
+        # 先在短 session 内取默认下载器（必须 join 才能取到字段）
+        async with session_scope() as session:
+            downloader_row = await self._resolve_default_downloader(session)
+            if downloader_row is None:
+                logger.warning("未配置可用下载器，无法辅种：%s", site.name)
+                return False
+            tags = frozenset({"auto", f"site:{site.name}"})
+            payload: dict[str, object] = {
+                "site_id": site.id,
+                "site_name": site.name,
+                "info_hash": res.info_hash,
+                "name": item.title,
+                "url": url,
+                "save_path": str(res.save_path.path),
+                "category": "cross-seed",
+                "size": item.size,
+                "downloader_name": downloader_row.name,
+            }
 
+        # 网络调用：构造 adapter 并 add_torrent（不在任何 session 内）
         from app.adapters.downloaders.base import AddTorrentPayload
 
         adapter = self._factory.downloader(downloader_row)
-        tags = frozenset({"auto", f"site:{site.name}"})
-
         logger.info(
             "添加种子 downloader=%s reason=cross_seed", downloader_row.name,
         )
@@ -301,46 +285,73 @@ class SeedEngine:
             )
         except Exception as exc:
             logger.warning("辅种添加失败 %s：%s", item.title, exc)
-            return False, CooldownReason.DEAD_TORRENT
-
-        torrent = Torrent(
-            info_hash=res.info_hash,
-            name=item.title[:1024],
-            site_id=site.id,
-            downloader_id=downloader_row.id,
-            category="cross-seed",
-            tags=",".join(sorted(tags)),
-            save_path=str(res.save_path.path),
-            size=item.size,
-            source=Source.AUTO_SEED,
-            status=TorrentStatus.ACTIVE,
-            protect_until=utcnow() + timedelta(hours=PROTECT_HOURS),
-        )
-        session.add(torrent)
-        await session.flush()
-
-        session.add(
-            AddHistory(
-                site_id=site.id,
-                info_hash=res.info_hash,
-                torrent_id=torrent.id,
-                name=item.title[:1024],
-                source=Source.AUTO_SEED,
-                outcome="added",
+            await self._record_cooldown(
+                site.id, res.info_hash, CooldownReason.DEAD_TORRENT
             )
-        )
+            return False
+
+        # 短事务：enqueue 幂等凭证 + Torrent + AddHistory（savepoint 处理重投）
+        async with session_scope() as session:
+            queue = TaskQueueService(session)
+            await queue.enqueue(
+                TaskKind.ADD_TORRENT,
+                payload,
+                idem_key=make_idem_key(
+                    TaskKind.ADD_TORRENT, site_id=site.id, info_hash=res.info_hash
+                ),
+            )
+            torrent = Torrent(
+                info_hash=res.info_hash,
+                name=item.title[:1024],
+                site_id=site.id,
+                downloader_id=downloader_row.id,
+                category="cross-seed",
+                tags=",".join(sorted(tags)),
+                save_path=str(res.save_path.path),
+                size=item.size,
+                source=Source.AUTO_SEED,
+                status=TorrentStatus.ACTIVE,
+                protect_until=utcnow() + timedelta(hours=PROTECT_HOURS),
+            )
+            try:
+                async with session.begin_nested():
+                    # savepoint：同轮内多个相同 info_hash 条目或并发写入时，
+                    # flush 撞 UNIQUE(info_hash) 不炸整轮（重投风暴根因）。
+                    # add_torrent 已成功，DB 有无记录都不改"已投递"事实；下轮
+                    # matcher 经 Torrent/AddHistory 去重。
+                    session.add(torrent)
+                    await session.flush()
+                    session.add(
+                        AddHistory(
+                            site_id=site.id,
+                            info_hash=res.info_hash,
+                            torrent_id=torrent.id,
+                            name=item.title[:1024],
+                            source=Source.AUTO_SEED,
+                            outcome="added",
+                        )
+                    )
+            except IntegrityError:
+                logger.info(
+                    "辅种 %s 已存在（info_hash=%s），幂等跳过落库",
+                    item.title, res.info_hash,
+                )
         cross_seed_added.labels(site=site.name, downloader=downloader_row.name).inc()
-        return True, ""
+        return True
+
+    async def _record_cooldown(self, site_id: int, info_hash: str, reason: str) -> None:
+        """失败落冷却：独立短事务，便于从无 session 上下文调用。"""
+        async with session_scope() as session:
+            cooldown = CooldownService(session)
+            await cooldown.record(site_id, info_hash, reason)
 
     async def _record_skip(
         self,
         session: AsyncSession,
-        feed: Feed | None,
+        feed: Feed,
         item: FeedItem,
         reason: str,
     ) -> None:
-        if feed is None:
-            return
         from app.services.matcher import MatchResult, record_decision
 
         await record_decision(

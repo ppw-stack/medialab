@@ -384,12 +384,8 @@ class OurbitsAdapter(SiteAdapter):
         await self._client.aclose()
 
 
-class _BreakerTripped(RuntimeError):
-    """ourbits 站点熔断（FR-2.2：429/403 立即熔断）。"""
-
-
 class _TorrentDownloadError(RuntimeError):
     """下载 torrent 失败。"""
 
 
-__all__ = ["OurbitsAdapter", "_BreakerTripped", "_TorrentDownloadError"]
+__all__ = ["OurbitsAdapter", "_TorrentDownloadError"]

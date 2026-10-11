@@ -59,6 +59,24 @@ def test_try_decrypt_returns_none_on_failure(test_key: str) -> None:
     assert c.try_decrypt("garbage", owner_type="site", owner_id="s") is None
 
 
+def test_rekey_changes_owner_and_preserves_plaintext(test_key: str) -> None:
+    """改名重加密：旧 owner 解 → 新 owner 加，明文不变，旧 owner 不再可解。"""
+    c = CredentialCipher(test_key)
+    token = c.encrypt("secret", owner_type="site", owner_id="old-name")
+    rekeyed = c.rekey(token, owner_type="site", old_id="old-name", new_id="new-name")
+    assert rekeyed is not None
+    assert c.decrypt(rekeyed, owner_type="site", owner_id="new-name") == "secret"
+    with pytest.raises(DecryptionError):
+        c.decrypt(rekeyed, owner_type="site", owner_id="old-name")
+
+
+def test_rekey_returns_none_when_old_owner_mismatch(test_key: str) -> None:
+    """旧 owner 解不开（AAD 已失配）时返回 None，调用方保留原密文。"""
+    c = CredentialCipher(test_key)
+    token = c.encrypt("secret", owner_type="site", owner_id="real")
+    assert c.rekey(token, owner_type="site", old_id="wrong", new_id="new") is None
+
+
 def test_invalid_key_length_rejected() -> None:
     with pytest.raises(ValueError, match="32"):
         CredentialCipher(base64.urlsafe_b64encode(b"short").decode())

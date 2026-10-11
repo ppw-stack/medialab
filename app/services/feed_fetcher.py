@@ -23,7 +23,7 @@ from enum import StrEnum
 
 import httpx
 
-from app.adapters.sites.base import FeedItem, SiteAdapter
+from app.adapters.sites.base import BreakerTripped, FeedItem, SiteAdapter
 from app.core.logging import get_logger
 from app.core.timeutils import utcnow
 from app.db.models import Feed
@@ -49,10 +49,6 @@ class PullStatus(StrEnum):
     INTERVAL_NOT_MET = "interval_not_met"
     HTTP_ERROR = "http_error"
     PARSE_ERROR = "parse_error"
-
-
-class BreakerTripped(RuntimeError):
-    """触发熔断（429/403）。调用方应记入 feeds.breaker_until。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +184,8 @@ class FeedFetcher:
         _ = url  # RSS 路径不再使用
         try:
             items = await adapter.search_torrents({})
+        except BreakerTripped:
+            raise  # 熔断信号透传，由 fetch() 捕获并写 breaker_until
         except Exception as exc:
             raise httpx.HTTPError(f"search_torrents 失败：{exc}") from exc
         if items is None:
