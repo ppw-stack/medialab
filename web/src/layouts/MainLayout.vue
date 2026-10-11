@@ -4,13 +4,12 @@ import { useRouter, useRoute } from 'vue-router'
 import {
   DashboardOutlined,
   CloudServerOutlined,
+  ApiOutlined,
   DownloadOutlined,
   GiftOutlined,
-  DeleteOutlined,
   SettingOutlined,
   LogoutOutlined,
   UserOutlined,
-  ApiOutlined,
 } from '@ant-design/icons-vue'
 import { useAuthStore } from '../stores/auth'
 
@@ -25,7 +24,6 @@ const menuItems = [
   { key: '/downloaders', icon: ApiOutlined, label: '下载器' },
   { key: '/torrents', icon: DownloadOutlined, label: '任务' },
   { key: '/free-seed', icon: GiftOutlined, label: '免费种' },
-  { key: '/cleanup', icon: DeleteOutlined, label: '清理' },
   { key: '/settings', icon: SettingOutlined, label: '设置' },
 ]
 
