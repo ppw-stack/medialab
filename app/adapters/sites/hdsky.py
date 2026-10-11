@@ -2,15 +2,21 @@
 
 hdsky.me 是 NexusPHP v1.5 Beta 5 架构的 PT 站点，基于 cookie 鉴权（无 x-api-key JSON API）。
 
-使用标准 NexusPHP 表格布局（``<table class="torrents">`` + ``<tr>`` 行），
-免费标记在 ``<img class="pro_free">`` 或 ``<font class="free">`` 中。
-
 契约方法（5 个）：
 1. check_reachability: GET /index.php，检查登录态
-2. search_torrents: 无搜索 API，返回 []
+2. search_torrents: GET /torrents.php?spstate=7，parsel CSS 解析（所有免费状态）
 3. download_torrent: GET /download.php?id=X
 4. check_status: GET /details.php?id=X，看 HTTP 200/404
 5. get_torrent_detail: GET /details.php?id=X
+
+免费标记格式：
+- ``<img class="pro_free">`` / ``<img class="pro_30pctdown">`` 等
+- ``<span title="绝对时刻">剩余时间文案</span>``
+
+spstate 含义（NexusPHP 标准）：
+- 7 = 所有免费状态（永久 + 限时 + 折扣）
+- 2 = 永久免费
+- 3 = 2X 上传免费
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ from __future__ import annotations
 import re
 
 import httpx
+from parsel import Selector
 
 from app.adapters.sites.base import (
     FeedItem,
@@ -34,57 +41,7 @@ logger = get_logger(__name__)
 #: 单次拉取上限（防止恶意站返回巨大响应撑爆内存）
 _MAX_ITEMS_PER_PULL = 500
 
-#: 种子标题锚点（HDSky 真实结构，嵌套表格）：
-#: ``<a title="Full Title" href="details.php?id=10001&hit=1">``
-_ANCHOR_RE = re.compile(
-    r'<a\b([^>]*href="details\.php\?id=(\d+)&hit=1"[^>]*)>',
-    re.IGNORECASE,
-)
-
-#: 从锚点属性段提取 title
-_ANCHOR_TITLE_RE = re.compile(r'title="([^"]+)"', re.IGNORECASE)
-
-#: 任意 download.php?id=NNN 引用（提取下载 ID）
-_ANY_DOWNLOAD_RE = re.compile(
-    r'download\.php\?id=(\d+)',
-    re.IGNORECASE,
-)
-
-#: 从 ``<img class="pro_free">`` 提取促销 class
-_PRO_IMG_RE = re.compile(
-    r'<img[^>]*class=["\'](pro_\w+)["\']',
-    re.IGNORECASE,
-)
-
-#: 从 ``<font class="free">`` 提取促销 class
-_FREE_FONT_RE = re.compile(
-    r'<font[^>]*class=["\']([^"\']+)["\'][^>]*>',
-    re.IGNORECASE,
-)
-
-#: HDSky 优惠剩余时间（可见 span，绝对时刻在 title 属性）
-_PROMO_TIME_RE = re.compile(
-    r'优惠剩余时间：<b><span title="([^"]+)"',
-    re.IGNORECASE,
-)
-
-#: 文件大小提取（HDSky 用 ``30.76<br />GB`` 分隔数字与单位）
-_SIZE_RE = re.compile(
-    r'([\d.]+)\s*(?:<br\s*/?>\s*)?(TB|GB|MB|KB|TiB|GiB|MiB|KiB)',
-    re.IGNORECASE,
-)
-
-#: 登录态检测
-_LOGGED_IN_RE = re.compile(r'(userdetails\.php|logout\.php|takelogout\.php)', re.IGNORECASE)
-_LOGIN_REDIRECT_RE = re.compile(r'login\.php', re.IGNORECASE)
-
-#: 大小单位转换
-_SIZE_FACTORS = {
-    "tb": 1024**4, "gb": 1024**3, "mb": 1024**2, "kb": 1024,
-    "tib": 1024**4, "gib": 1024**3, "mib": 1024**2, "kib": 1024,
-}
-
-#: ``<img class="pro_XXX">`` → 标准免费 class 映射（仅用于 free_payload 填充）
+#: ``<img class="pro_XXX">`` → 标准免费 class 映射（供 free_payload 填充）
 _PRO_IMG_MAP: dict[str, str] = {
     "pro_free": "free",
     "pro_free2up": "twoupfree",
@@ -93,6 +50,21 @@ _PRO_IMG_MAP: dict[str, str] = {
     "pro_50pctdown2up": "twouphalfdown",
     "pro_30pctdown": "thirtypercent",
 }
+
+#: CSS class 白名单（用于 free font class 过滤，排除 new/gray 等 UI 徽章）
+_PROMO_FONT_CLASSES: frozenset[str] = frozenset(
+    {"free", "twoupfree", "twoup", "halfdown", "twouphalfdown", "thirtypercent"}
+)
+
+#: 详情页锚点 href 中的 id 提取
+_DETAILS_ID_RE = re.compile(r"details\.php\?id=(\d+)", re.IGNORECASE)
+
+#: 绝对时刻（title 属性）：``2026-10-11 12:41:28``
+_ABS_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+
+#: 登录态检测
+_LOGGED_IN_RE = re.compile(r"(userdetails\.php|logout\.php|takelogout\.php)", re.IGNORECASE)
+_LOGIN_REDIRECT_RE = re.compile(r"login\.php", re.IGNORECASE)
 
 
 class HdskyAdapter(SiteAdapter):
@@ -149,18 +121,6 @@ class HdskyAdapter(SiteAdapter):
     def _download_url(self, item_id: str) -> str:
         return f"{self._base_url()}/download.php?id={item_id}"
 
-    @staticmethod
-    def _parse_size_str(text: str) -> int:
-        m = re.match(r"([\d.]+)\s*(\w+)", text.strip())
-        if not m:
-            return 0
-        try:
-            num = float(m.group(1))
-        except ValueError:
-            return 0
-        factor = _SIZE_FACTORS.get(m.group(2).lower(), 1)
-        return int(num * factor)
-
     # ------------------------------------------------------------ 1. check_reachability
     async def check_reachability(self) -> SiteHealth:
         """1. 校验域名可达与登录态：GET /index.php。"""
@@ -190,15 +150,110 @@ class HdskyAdapter(SiteAdapter):
         page_size: int = 100,
         page_number: int = 1,
     ) -> list[FeedItem]:
-        """2. 种子搜索：NexusPHP 无搜索 API，返回空列表。"""
-        return []
+        """2. 抓取免费种子列表：GET /torrents.php?spstate=7，parsel CSS 解析。
+
+        HDSky 使用标准 NexusPHP 嵌套表格，spstate=7 聚合所有免费状态
+        （永久 + 限时 + 折扣）。
+
+        返回的 FeedItem.free_payload 含：
+        - ``free_classes``: 标准 free/twoupfree/halfdown/thirtypercent 等
+        - ``remaining_abs``: 限时结束绝对时刻（仅限时条目有）
+        """
+        url = (
+            f"{self._base_url()}/torrents.php"
+            f"?spstate=7&page={max(0, page_number - 1)}"
+        )
+        try:
+            resp = await self._client.get(url, timeout=self._timeout)
+        except httpx.HTTPError as exc:
+            logger.warning("HDSky 拉取失败：%s", exc)
+            return []
+        if resp.status_code >= 400:
+            logger.warning("HDSky 拉取 HTTP %d", resp.status_code)
+            return []
+        return HdskyAdapter._parse_spstate7_html(resp.text, limit=page_size)
+
+    @staticmethod
+    def _parse_spstate7_html(html: str, *, limit: int = 100) -> list[FeedItem]:
+        """parsel CSS 解析 HDSky spstate=7 页面。
+
+        每个 torrent 跨多个嵌套 ``<tr>``，所以**整页一次性 parse**（不切片）。
+        对每个 ``a[href*="details.php?id="][title]`` 锚点，向上溯最近 ``<tr>`` 找促销信号。
+        """
+        sel = Selector(text=html)
+        items: list[FeedItem] = []
+        seen: set[str] = set()
+
+        for a in sel.css('a[href*="details.php?id="][title]'):
+            href = a.attrib.get("href", "")
+            m = _DETAILS_ID_RE.search(href)
+            if not m:
+                continue
+            item_id = m.group(1)
+            if item_id in seen:
+                continue
+            seen.add(item_id)
+            title = a.attrib.get("title", "").strip()
+
+            # 向上溯最近 <tr>（HDSky torrent 行通常在 <tr> 内）
+            tr = a.xpath("./ancestor::tr[1]").get("")
+            if not tr:
+                continue
+
+            tr_sel = Selector(text=tr)
+
+            # 免费标记：img class="pro_XXX" → 标准 class
+            pro_imgs = tr_sel.css('img[class*="pro_"]::attr(class)').getall()
+            mapped_pro = []
+            for cls in pro_imgs:
+                # cls 形如 "pro_free"，可能有多个 class，取首个匹配
+                for c in cls.split():
+                    if c.startswith("pro_"):
+                        mapped_pro.append(_PRO_IMG_MAP.get(c, c))
+                        break
+
+            # 限时/2X 标记：<font class="free|twoupfree|...">
+            font_classes = tr_sel.css("font::attr(class)").getall()
+            mapped_font = [c for c in font_classes if c in _PROMO_FONT_CLASSES]
+
+            free_classes = mapped_pro + mapped_font
+
+            # 限时绝对时刻：<span title="2026-10-11 12:41:28">
+            remaining_abs = None
+            for ts in tr_sel.css("span[title]::attr(title)").getall():
+                if _ABS_DATETIME_RE.match(ts):
+                    remaining_abs = ts
+                    break
+
+            free_payload: dict[str, object] | None = None
+            if free_classes or remaining_abs:
+                free_payload = {
+                    "free_classes": free_classes,
+                    "remaining_abs": remaining_abs,
+                }
+
+            items.append(
+                FeedItem(
+                    title=title,
+                    link=f"details.php?id={item_id}",
+                    item_id=item_id,
+                    info_hash=None,
+                    size=0,
+                    category=None,
+                    description="",
+                    published_at=None,
+                    torrent_url=f"download.php?id={item_id}",
+                    free_payload=free_payload,
+                )
+            )
+            if len(items) >= limit:
+                break
+
+        return items[:limit]
 
     # ------------------------------------------------------------ 3. download_torrent
     async def download_torrent(self, item_id: str) -> bytes:
-        """3. 下载 .torrent：GET /download.php?id=X。
-
-        HDSky 使用签名表单，签名为 path 中的 t/sign 参数。这里直接走 GET 即可。
-        """
+        """3. 下载 .torrent：GET /download.php?id=X。"""
         if not self._cookies:
             raise _TorrentDownloadError("缺少 cookies")
         try:
@@ -219,6 +274,7 @@ class HdskyAdapter(SiteAdapter):
     async def check_status(self, item_id: str) -> TorrentBrief:
         """4. 种子状态检查：GET /details.php?id=X。
 
+        NexusPHP 不暴露删除/违规标记 → 仅基于 HTTP 状态判断：
         - 200 → EXISTS
         - 404 → DELETED
         - 其他 → UNKNOWN
@@ -256,74 +312,6 @@ class HdskyAdapter(SiteAdapter):
 
     async def close(self) -> None:
         await self._client.aclose()
-
-    # ------------------------------------------------------------ HTML 解析（仅作 free_payload 填充）
-    @staticmethod
-    def parse_torrents_html(html: str, *, limit: int = 100) -> list[FeedItem]:
-        """公开：供 feed_fetcher 工具调用。解析 HDSky 真实 torrents.php HTML。
-
-        HDSky 使用嵌套表格，单个种子跨多个 ``<tr>``（无法按行切分）。
-        解析策略：以标题锚点为界，把列表切成一串"种子窗口"，每个窗口内提取：
-        - 标题（title 属性）
-        - ``<img class="pro_free">``
-        - 优惠剩余时间（``优惠剩余时间：<b><span title="绝对时刻">``）
-        - 签名下载表单
-        - 大小
-        """
-        items: list[FeedItem] = []
-        anchors = list(_ANCHOR_RE.finditer(html))
-        for i, m in enumerate(anchors):
-            attrs = m.group(1)
-            torrent_id = m.group(2)
-            title_m = _ANCHOR_TITLE_RE.search(attrs)
-            title = title_m.group(1).strip() if title_m else f"torrent-{torrent_id}"
-
-            start = m.start()
-            end = anchors[i + 1].start() if i + 1 < len(anchors) else len(html)
-            window = html[start:end]
-
-            dl_m = _ANY_DOWNLOAD_RE.search(window)
-            dl_id = dl_m.group(1) if dl_m else torrent_id
-
-            size_m = _SIZE_RE.search(window)
-            size = 0
-            if size_m:
-                size = HdskyAdapter._parse_size_str(
-                    f"{size_m.group(1)} {size_m.group(2)}"
-                )
-
-            pro_classes = [mm.group(1) for mm in _PRO_IMG_RE.finditer(window)]
-            mapped_pro = [_PRO_IMG_MAP.get(c.lower(), c) for c in pro_classes]
-            font_classes = [mm.group(1) for mm in _FREE_FONT_RE.finditer(window)]
-            free_classes = mapped_pro + font_classes
-
-            time_m = _PROMO_TIME_RE.search(window)
-            remaining_abs = time_m.group(1) if time_m else None
-
-            free_payload: dict[str, object] | None = None
-            if free_classes or remaining_abs:
-                free_payload = {
-                    "free_classes": free_classes,
-                    "remaining_abs": remaining_abs,
-                }
-
-            items.append(
-                FeedItem(
-                    title=title,
-                    link=f"details.php?id={torrent_id}",
-                    item_id=torrent_id,
-                    info_hash=None,
-                    size=size,
-                    category=None,
-                    description="",
-                    published_at=None,
-                    torrent_url=f"download.php?id={dl_id}",
-                    free_payload=free_payload,
-                )
-            )
-            if len(items) >= limit:
-                break
-        return items[:limit]
 
 
 class _BreakerTripped(RuntimeError):

@@ -156,6 +156,30 @@ def test_nexushp_halfdown_neutral() -> None:
     assert win.free_type == FreeType.NEUTRAL
 
 
+def test_nexushp_thirtypercent_with_abs_keeps_neutral() -> None:
+    """R10 契约：NEUTRAL 类型不能有 free_end_at（即使 payload 给了 remaining_abs）。
+
+    修复前 bug：thirtypercent + remaining_abs 会返回 FreeWindow(NEUTRAL, end_at)，
+    触发 R10 ValueError。中性下载没有时间窗口，应忽略 end_at。
+    """
+    win = _parse_payload({
+        "free_classes": ["thirtypercent"],
+        "remaining_abs": "2026-12-31 23:59:00",
+    })
+    assert win.free_type == FreeType.NEUTRAL
+    assert win.free_end_at is None  # R10 强制
+
+
+def test_nexushp_twoupfree_with_abs_keeps_twou_timed() -> None:
+    """R10 契约：TWOU_TIMED 类型也不能有 free_end_at（2X 永久有效）。"""
+    win = _parse_payload({
+        "free_classes": ["twoupfree"],
+        "remaining_abs": "2026-12-31 23:59:00",
+    })
+    assert win.free_type == FreeType.TWOU_TIMED
+    assert win.free_end_at is None  # R10 强制
+
+
 def test_nexushp_remaining_abs_overrides_to_timed() -> None:
     win = _parse_payload({
         "free_classes": ["free"],

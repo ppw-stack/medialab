@@ -16,23 +16,6 @@ PROFILE = SiteProfile(name="hdsky", domain="hdsky.me")
 COOKIES = "c_secure_uid=MTAzMjE4; c_secure_pass=abc123"
 MINIMAL_TORRENT = b"d4:infod6:lengthi100e4:name8:test.txtee"
 
-#: HDSky 标准 NexusPHP 表格 HTML 片段
-HDSKY_HTML = (
-    '<table class="torrents">'
-    '<tr>'
-    '<td><a target="_blank" title="Movie A" href="details.php?id=10001&hit=1">Movie A</a></td>'
-    '<td><img class="pro_free" src="free.png"/></td>'
-    '<td>优惠剩余时间：<b><span title="2026-12-31 23:59:00">3天2小时</span></b></td>'
-    '<td><a href="download.php?id=10001&passkey=abc">DL</a></td>'
-    '<td class="rowfollow">4.95<br />GB</td>'
-    '</tr>'
-    '<tr>'
-    '<td><a target="_blank" title="Movie B" href="details.php?id=10002&hit=1">Movie B</a></td>'
-    '<td class="rowfollow">1.00<br />GB</td>'
-    '</tr>'
-    '</table>'
-)
-
 
 @pytest.fixture
 def adapter() -> HdskyAdapter:
@@ -122,20 +105,84 @@ async def test_get_torrent_detail_ok(adapter: HdskyAdapter) -> None:
     assert detail.raw_html is not None
 
 
-# ---- parse_torrents_html ----
+# ---- 2. search_torrents (parsel 解析 spstate=7) ----
 
 
-def test_parse_torrents_html_extracts_items() -> None:
-    items = HdskyAdapter.parse_torrents_html(HDSKY_HTML, limit=100)
-    assert len(items) == 2
-    assert items[0].title == "Movie A"
+async def test_search_torrents_parses_spstate7(adapter: HdskyAdapter) -> None:
+    """parsel CSS 解析 HDSky 标准 NexusPHP 表格。
+
+    fixture 模拟 spstate=7 页面的真实结构：
+    - 锚点带 title="..." href="details.php?id=N&hit=1"
+    - 永久免费：<img class="pro_free">
+    - 限时免费：<img class="pro_30pctdown"> + <span title="绝对时刻">
+    """
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.text = HDSKY_SPSTATE7_HTML
+    adapter._client.get = AsyncMock(return_value=resp)
+
+    items = await adapter.search_torrents({}, page_size=100, page_number=1)
+    assert len(items) == 3
+    # 第一条：永久免费
     assert items[0].item_id == "10001"
-    assert items[0].size > 4 * 1024**3
+    assert items[0].title == "Movie A"
     assert items[0].free_payload is not None
     assert "free" in items[0].free_payload["free_classes"]  # type: ignore[operator]
-    assert items[0].free_payload["remaining_abs"] == "2026-12-31 23:59:00"  # type: ignore[index]
-    assert items[1].free_payload is None
+    assert items[0].free_payload.get("remaining_abs") is None  # type: ignore[union-attr]
+    # 第二条：限时 30% off
+    assert items[1].item_id == "10002"
+    assert items[1].free_payload is not None
+    assert "thirtypercent" in items[1].free_payload["free_classes"]  # type: ignore[operator]
+    assert items[1].free_payload["remaining_abs"] == "2026-12-31 23:59:00"  # type: ignore[index]
+    # 第三条：非免费
+    assert items[2].free_payload is None
 
 
-def test_parse_torrents_html_empty() -> None:
-    assert HdskyAdapter.parse_torrents_html("<html></html>") == []
+async def test_search_torrents_http_error(adapter: HdskyAdapter) -> None:
+    """HTTP 5xx / 4xx 返回空列表（不抛错）。"""
+    resp = MagicMock()
+    resp.status_code = 500
+    adapter._client.get = AsyncMock(return_value=resp)
+
+    items = await adapter.search_torrents({})
+    assert items == []
+
+
+# ---- 静态解析单元测试（_parse_spstate7_html）----
+
+
+def test_parse_spstate7_html_extracts_items() -> None:
+    items = HdskyAdapter._parse_spstate7_html(HDSKY_SPSTATE7_HTML, limit=100)
+    assert len(items) == 3
+    assert items[0].item_id == "10001"
+    assert "free" in items[0].free_payload["free_classes"]  # type: ignore[operator]
+
+
+def test_parse_spstate7_html_empty() -> None:
+    assert HdskyAdapter._parse_spstate7_html("<html></html>") == []
+
+
+# ---- fixture: HDSky spstate=7 真实结构片段 ----
+
+HDSKY_SPSTATE7_HTML = (
+    '<html><body><table class="torrents">'
+    # 永久免费
+    '<tr>'
+    '<td><a target="_blank" title="Movie A" href="details.php?id=10001&amp;hit=1">Movie A</a></td>'
+    '<td><img class="pro_free" src="free.png"/></td>'
+    '<td>4.95<br />GB</td>'
+    '</tr>'
+    # 限时 30% off
+    '<tr>'
+    '<td><a target="_blank" title="Movie B" href="details.php?id=10002&amp;hit=1">Movie B</a></td>'
+    '<td><img class="pro_30pctdown" src="30.png" alt="30%"/></td>'
+    '<td>优惠剩余时间：<b><span title="2026-12-31 23:59:00">3天2小时</span></b></td>'
+    '<td>1.00<br />GB</td>'
+    '</tr>'
+    # 非免费
+    '<tr>'
+    '<td><a target="_blank" title="Movie C" href="details.php?id=10003&amp;hit=1">Movie C</a></td>'
+    '<td>2.00<br />GB</td>'
+    '</tr>'
+    '</table></body></html>'
+)

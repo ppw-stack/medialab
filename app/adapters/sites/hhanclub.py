@@ -4,13 +4,18 @@ hhanclub.net 是 NexusPHP v1.8.6 架构的 PT 站点，基于 cookie 鉴权（�
 
 契约方法（5 个）：
 1. check_reachability: GET /index.php，检查登录态
-2. search_torrents: 无搜索 API，返回 []
+2. search_torrents: GET /torrents.php?spstate=7，BeautifulSoup 解析（Tailwind 自定义主题）
 3. download_torrent: GET /download.php?id=X
 4. check_status: GET /details.php?id=X，看 HTTP 200/404
 5. get_torrent_detail: GET /details.php?id=X
 
-NexusPHP 免费标记 HTML 解析仍保留（_parse_torrents_html/_classify_from_html），
-但只产生 free_payload，由业务层 WindowParser 解析。
+HHan 使用 Tailwind 自定义主题，与标准 NexusPHP 表格布局不同，DOM 结构散乱
+（嵌套 div / 自定义 class），因此用 BS4 容错遍历而非 parsel CSS。
+
+免费标记格式（实测）：
+- 限免/2X：``<span title="绝对时刻">X时Y分钟</span>`` 在 `[剩余时间：...]` 块内
+- 永久免费：标题前的绿色图标 / ``class="free"``（保留兼容性）
+- 折扣：``<font class="halfdown">30%</font>`` 等
 
 cookie 模式：用户手动从浏览器获取 session cookies（c_secure_uid / c_secure_pass 等），
 加密存储在 sites.cookies_enc，由 AdapterFactory.site 解密注入。
@@ -22,6 +27,7 @@ from __future__ import annotations
 import re
 
 import httpx
+from bs4 import BeautifulSoup
 
 from app.adapters.sites.base import (
     FeedItem,
@@ -38,58 +44,25 @@ logger = get_logger(__name__)
 #: 单次拉取上限（防止恶意站返回巨大响应撑爆内存）
 _MAX_ITEMS_PER_PULL = 500
 
-#: HHan 主题种子卡片分隔符（每个种子卡片以 torrent-table-for-spider 开头）
-_CARD_SPLIT_RE = re.compile(r'torrent-table-for-spider', re.IGNORECASE)
+#: 详情页锚点 href 中的 id 提取
+_DETAILS_ID_RE = re.compile(r"details\.php\?id=(\d+)", re.IGNORECASE)
 
-#: 从种子名链接提取 ID + 标题（兼容单/双引号）
-_NAME_RE = re.compile(
-    r"details\.php\?id=(\d+)[^>]*?torrent-info-text-name[\"'][^>]*>([^<]+)",
-    re.IGNORECASE,
-)
+#: 绝对时刻（title 属性）：``2026-10-11 12:41:28``
+_ABS_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 
-#: 从下载链接提取 ID + passkey
-_DOWNLOAD_RE = re.compile(
-    r'download\.php\?id=(\d+)&passkey=([a-f0-9]+)',
-    re.IGNORECASE,
-)
-
-#: 从大小单元格提取文件大小
-_SIZE_RE = re.compile(
-    r'torrent-info-text-size[^>]*>\s*([\d.]+\s*\w+)\s*<',
-    re.IGNORECASE,
-)
-
-#: HHan 主题免费标记提取
-_PROMO_TAG_RE = re.compile(
-    r'promotion-tag\s+promotion-tag-(\w+)',
-    re.IGNORECASE,
-)
-
-#: HHan 主题剩余时间绝对时刻提取
-_REMAINING_TIME_RE = re.compile(
-    r'剩余时间：<span title="([^"]+)"',
-    re.IGNORECASE,
-)
-
-#: "剩余 X天Y小时" 文案正则（兼容简体/繁体/英文）
-_REMAINING_RE = re.compile(
-    r"(?:剩余|剩餘|剩|left|remaining)\s*"
-    r"(?:(?P<d>\d+)\s*(?:天|日|d|days?)\s*)?"
-    r"(?:(?P<h>\d+)\s*(?:小时|小時|時|时|h|hours?)\s*)?"
-    r"(?:(?P<m>\d+)\s*(?:分|分鐘|m|min)\s*)?",
-    re.IGNORECASE,
-)
+#: "剩余时间"文案包裹（Tailwind 自定义）：``剩余时间：<span title="...">X时Y分钟</span>``
+_REMAINING_BLOCK_RE = re.compile(r"剩余时间[:：]\s*<span\s+title=\"([^\"]+)\"", re.IGNORECASE)
 
 #: 登录态检测：登录后页面含 userdetails.php 或 logout.php 链接
-_LOGGED_IN_RE = re.compile(r'(userdetails\.php|logout\.php|takelogout\.php)', re.IGNORECASE)
+_LOGGED_IN_RE = re.compile(r"(userdetails\.php|logout\.php|takelogout\.php)", re.IGNORECASE)
 
 #: 登录页重定向检测
-_LOGIN_REDIRECT_RE = re.compile(r'login\.php', re.IGNORECASE)
+_LOGIN_REDIRECT_RE = re.compile(r"login\.php", re.IGNORECASE)
 
-#: 大小单位转换
-_SIZE_FACTORS = {
-    "tb": 1024**4, "gb": 1024**3, "mb": 1024**2, "kb": 1024,
-}
+#: CSS class 白名单（用于 free/twoupfree/halfdown 等促销 class 识别）
+_PROMO_CLASSES: frozenset[str] = frozenset(
+    {"free", "twoupfree", "twoup", "halfdown", "twouphalfdown", "thirtypercent"}
+)
 
 
 class HhanclubAdapter(SiteAdapter):
@@ -146,19 +119,6 @@ class HhanclubAdapter(SiteAdapter):
     def _download_url(self, item_id: str) -> str:
         return f"{self._base_url()}/download.php?id={item_id}"
 
-    @staticmethod
-    def _parse_size_str(text: str) -> int:
-        """大小字符串 → 字节数（如 "56.64 GB" → 60763234091）。"""
-        m = re.match(r"([\d.]+)\s*(\w+)", text.strip())
-        if not m:
-            return 0
-        try:
-            num = float(m.group(1))
-        except ValueError:
-            return 0
-        factor = _SIZE_FACTORS.get(m.group(2).lower(), 1)
-        return int(num * factor)
-
     # ------------------------------------------------------------ 1. check_reachability
     async def check_reachability(self) -> SiteHealth:
         """1. 校验域名可达与登录态：GET /index.php。"""
@@ -188,11 +148,114 @@ class HhanclubAdapter(SiteAdapter):
         page_size: int = 100,
         page_number: int = 1,
     ) -> list[FeedItem]:
-        """2. 种子搜索：NexusPHP 无搜索 API，返回空列表。
+        """2. 抓取免费种子列表：GET /torrents.php?spstate=2，BS4 解析。
 
-        站点种子发现走 RSS 拉取（不在 adapter 契约中，由 feed_fetcher 工具接管）。
+        HHan 自定义主题的 spstate=7（所有免费）是 JS 动态加载，HTML 不含
+        torrent 链接。spstate=2（永久免费）反而是 SSR 全量返回，所以用
+        spstate=2 抓取。
+
+        注：当前只覆盖"永久免费"窗口；限时活动（HHan 自定义等 → 一）
+        因 JS 渲染暂不可见，需要 site 升级为 API 抓取或 headless 浏览器
+        才能识别（不引入反爬对抗，AGENTS.md）。
         """
-        return []
+        url = (
+            f"{self._base_url()}/torrents.php"
+            f"?spstate=2&page={max(0, page_number - 1)}"
+        )
+        try:
+            resp = await self._client.get(url, timeout=self._timeout)
+        except httpx.HTTPError as exc:
+            logger.warning("HHanClub 拉取失败：%s", exc)
+            return []
+        if resp.status_code >= 400:
+            logger.warning("HHanClub 拉取 HTTP %d", resp.status_code)
+            return []
+        return HhanclubAdapter._parse_spstate2_html(resp.text, limit=page_size)
+
+    @staticmethod
+    def _parse_spstate2_html(html: str, *, limit: int = 100) -> list[FeedItem]:
+        """BS4 解析 HHanClub spstate=2 页面（永久免费 SSR）。
+
+        HHan 使用 Tailwind 自定义主题：
+        - 锚点 ``href="https://hhanclub.net/details.php?id=N"`` 含完整域名
+        - 限时块 ``<span title="2026-10-11 12:41:28">X时Y分钟</span>`` 紧邻
+          "剩余时间" 文案
+        - 永久免费条目无剩余时间文案，但有 ``class="free"`` 的图标 span
+
+        过滤：排除 ``userdetails.php?id=N``（用户名导航），只保留 torrent。
+        """
+        soup = BeautifulSoup(html, "lxml")
+        items: list[FeedItem] = []
+        seen: set[str] = set()
+
+        # 找所有指向 details.php?id=N 的锚点（排除 userdetails.php）
+        for a in soup.find_all("a", href=_DETAILS_ID_RE):
+            href = a.get("href", "")
+            # 排除 userdetails 链接
+            if "userdetails.php" in href:
+                continue
+            m = _DETAILS_ID_RE.search(href)
+            if not m:
+                continue
+            item_id = m.group(1)
+            if item_id in seen:
+                continue
+            seen.add(item_id)
+
+            # 标题：title 属性优先，其次文本
+            title = (a.get("title") or a.get_text(strip=True) or "").strip()
+
+            # 向上找 torrent 容器：通常最近的 <tr> 或包含"剩余时间"的块
+            container = _find_torrent_container(a)
+
+            # 限时绝对时刻：<span title="YYYY-MM-DD HH:MM:SS">
+            remaining_abs = None
+            if container is not None:
+                for span in container.find_all("span"):
+                    t = span.get("title", "")
+                    if _ABS_DATETIME_RE.match(t):
+                        remaining_abs = t
+                        break
+
+            # 免费 class 标记：img class="pro_XXX" 或 font class="free/halfdown/..."
+            free_classes: list[str] = []
+            if container is not None:
+                for tag in container.find_all(class_=True):
+                    classes = tag.get("class", [])
+                    for cls in classes:
+                        if cls in _PROMO_CLASSES:
+                            free_classes.append(cls)
+                        elif cls.startswith("pro_"):
+                            # 兼容 hdsky/ourbits 风格
+                            mapped = cls[4:]
+                            if mapped in _PROMO_CLASSES:
+                                free_classes.append(mapped)
+
+            free_payload: dict[str, object] | None = None
+            if free_classes or remaining_abs:
+                free_payload = {
+                    "free_classes": free_classes,
+                    "remaining_abs": remaining_abs,
+                }
+
+            items.append(
+                FeedItem(
+                    title=title,
+                    link=f"details.php?id={item_id}",
+                    item_id=item_id,
+                    info_hash=None,
+                    size=0,
+                    category=None,
+                    description="",
+                    published_at=None,
+                    torrent_url=f"download.php?id={item_id}",
+                    free_payload=free_payload,
+                )
+            )
+            if len(items) >= limit:
+                break
+
+        return items[:limit]
 
     # ------------------------------------------------------------ 3. download_torrent
     async def download_torrent(self, item_id: str) -> bytes:
@@ -215,13 +278,7 @@ class HhanclubAdapter(SiteAdapter):
 
     # ------------------------------------------------------------ 4. check_status
     async def check_status(self, item_id: str) -> TorrentBrief:
-        """4. 种子状态检查：GET /details.php?id=X。
-
-        NexusPHP 不暴露删除/违规标记 → 仅基于 HTTP 状态判断：
-        - 200 → EXISTS
-        - 404 → DELETED
-        - 其他 → UNKNOWN
-        """
+        """4. 种子状态检查：GET /details.php?id=X。"""
         if not self._cookies:
             return TorrentBrief.UNKNOWN
         try:
@@ -256,72 +313,27 @@ class HhanclubAdapter(SiteAdapter):
     async def close(self) -> None:
         await self._client.aclose()
 
-    # ------------------------------------------------------------ HTML 解析（仅作 free_payload 填充）
-    @staticmethod
-    def parse_torrents_html(html: str, *, limit: int = 100) -> list[FeedItem]:
-        """公开：供 feed_fetcher 工具调用。解析 HHan 主题 torrents.php HTML。
 
-        提取站内 ID、标题、大小、免费标记 class、剩余时间文案，组装为 FeedItem。
-        免费窗口解析不在此完成（由业务层 WindowParser 接管）。
-        """
-        items: list[FeedItem] = []
-        cards = _CARD_SPLIT_RE.split(html)
-        for card in cards[1:]:
-            name_m = _NAME_RE.search(card)
-            if not name_m:
-                continue
-            torrent_id = name_m.group(1)
-            title = name_m.group(2).strip()
-
-            dl_m = _DOWNLOAD_RE.search(card)
-            dl_id = dl_m.group(1) if dl_m else torrent_id
-
-            size_m = _SIZE_RE.search(card)
-            size = 0
-            if size_m:
-                size = HhanclubAdapter._parse_size_str(size_m.group(1))
-
-            promo_classes = [m.group(1) for m in _PROMO_TAG_RE.finditer(card)]
-            font_classes = [
-                m.group(1)
-                for m in re.finditer(
-                    r'<font[^>]*class=["\']([^"\']+)["\'][^>]*>',
-                    card, re.IGNORECASE,
-                )
-            ]
-            free_classes = promo_classes + font_classes
-
-            time_m = _REMAINING_TIME_RE.search(card)
-            remaining_abs = time_m.group(1) if time_m else None
-
-            remaining_m = _REMAINING_RE.search(card)
-            remaining_text = remaining_m.group(0) if remaining_m else None
-
-            free_payload: dict[str, object] | None = None
-            if free_classes or remaining_abs or remaining_text:
-                free_payload = {
-                    "free_classes": free_classes,
-                    "remaining_text": remaining_text,
-                    "remaining_abs": remaining_abs,
-                }
-
-            items.append(
-                FeedItem(
-                    title=title,
-                    link=f"details.php?id={torrent_id}",
-                    item_id=torrent_id,
-                    info_hash=None,
-                    size=size,
-                    category=None,
-                    description="",
-                    published_at=None,
-                    torrent_url=f"download.php?id={dl_id}",
-                    free_payload=free_payload,
-                )
-            )
-            if len(items) >= limit:
-                break
-        return items[:limit]
+def _find_torrent_container(anchor: object) -> object | None:
+    """向上查找 torrent 容器（最近的 <tr> 或最近的 <div>）。"""
+    # 优先：最近 <tr>（标准 NexusPHP 表格行）
+    tr = anchor.find_parent("tr")  # type: ignore[attr-defined]
+    if tr is not None:
+        return tr
+    # 兜底：最近的 <div>（HHan Tailwind 自定义主题，每个 torrent 卡片是一个 div）
+    # 限制深度 8 层，避免把整个 body 当作 container
+    parent = anchor.parent  # type: ignore[attr-defined]
+    seen: set[int] = set()
+    depth = 0
+    max_depth = 8
+    while parent is not None and id(parent) not in seen and depth < max_depth:
+        seen.add(id(parent))
+        depth += 1
+        # 找到块级容器（div 或 article 或 section）
+        if getattr(parent, "name", None) in {"div", "article", "section"}:
+            return parent
+        parent = parent.parent  # type: ignore[attr-defined]
+    return None
 
 
 class _BreakerTripped(RuntimeError):

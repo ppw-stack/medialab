@@ -4,12 +4,17 @@ ourbits.club 是基于 NexusPHP（xiaomlove fork, 1.10.x）的 PT 站点，cooki
 
 契约方法（5 个）：
 1. check_reachability: GET /index.php，检查登录态
-2. search_torrents: 无搜索 API，返回 []
+2. search_torrents: GET /torrents.php?spstate=7，parsel CSS 解析
 3. download_torrent: GET /download.php?id=X
 4. check_status: GET /details.php?id=X，看 HTTP 200/404
 5. get_torrent_detail: GET /details.php?id=X
 
 ourbits 在 Cloudflare 后，需 cf_clearance cookie。
+
+免费标记格式：
+- ``<img class="pro_free">`` / ``<img class="pro_30pctdown">`` 等
+- ``<font class="free">``（白名单过滤）
+- ``<span title="绝对时刻">剩余时间文案</span>``
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ from __future__ import annotations
 import re
 
 import httpx
+from parsel import Selector
 
 from app.adapters.sites.base import (
     FeedItem,
@@ -33,63 +39,7 @@ logger = get_logger(__name__)
 #: 单次拉取上限（防止恶意站返回巨大响应撑爆内存）
 _MAX_ITEMS_PER_PULL = 500
 
-#: 种子标题锚点（标准 NexusPHP 表格行，href 中 & 被转义为 &amp;）：
-#: ``<a title="Full Title"  href="details.php?id=10001&amp;hit=1">``
-_ANCHOR_RE = re.compile(
-    r'<a\b([^>]*href="details\.php\?id=(\d+)&(?:amp;)?hit=1"[^>]*)>',
-    re.IGNORECASE,
-)
-
-#: 从锚点属性段提取 title
-_ANCHOR_TITLE_RE = re.compile(r'title="([^"]+)"', re.IGNORECASE)
-
-#: 任意 download.php?id=NNN 引用（提取下载 ID）
-_ANY_DOWNLOAD_RE = re.compile(
-    r'download\.php\?id=(\d+)',
-    re.IGNORECASE,
-)
-
-#: 从 ``<img class="pro_free">`` 提取促销 class
-_PRO_IMG_RE = re.compile(
-    r'<img[^>]*class=["\'](pro_\w+)["\']',
-    re.IGNORECASE,
-)
-
-#: 真正的促销 ``<font class="free">`` 白名单（排除 new/gray 等 UI 徽章 class）
-_PROMO_FONT_CLASSES: frozenset[str] = frozenset(
-    {"free", "twoupfree", "twoup", "halfdown", "twouphalfdown", "thirtypercent"}
-)
-
-#: 从 ``<font class="free">`` 提取促销 class
-_FREE_FONT_RE = re.compile(
-    r'<font[^>]*class=["\']([^"\']+)["\'][^>]*>',
-    re.IGNORECASE,
-)
-
-#: 可见剩余时间（绝对时刻在 title 属性）：
-#: ``剩余时间：<b><span title="2026-10-10 23:07:39">8时28分</span></b>``
-_PROMO_TIME_RE = re.compile(
-    r'剩余时间：<b><span title="([^"]+)"',
-    re.IGNORECASE,
-)
-
-#: 文件大小提取（兼容 ``30.76<br />GB`` 与 ``30.76 GB``）
-_SIZE_RE = re.compile(
-    r'([\d.]+)\s*(?:<br\s*/?>\s*)?(TB|GB|MB|KB|TiB|GiB|MiB|KiB)',
-    re.IGNORECASE,
-)
-
-#: 登录态检测
-_LOGGED_IN_RE = re.compile(r'(userdetails\.php|logout\.php|takelogout\.php)', re.IGNORECASE)
-_LOGIN_REDIRECT_RE = re.compile(r'login\.php', re.IGNORECASE)
-
-#: 大小单位转换
-_SIZE_FACTORS = {
-    "tb": 1024**4, "gb": 1024**3, "mb": 1024**2, "kb": 1024,
-    "tib": 1024**4, "gib": 1024**3, "mib": 1024**2, "kib": 1024,
-}
-
-#: ``<img class="pro_XXX">`` → 标准免费 class 映射
+#: ``<img class="pro_XXX">`` → 标准免费 class 映射（供 free_payload 填充）
 _PRO_IMG_MAP: dict[str, str] = {
     "pro_free": "free",
     "pro_free2up": "twoupfree",
@@ -98,6 +48,21 @@ _PRO_IMG_MAP: dict[str, str] = {
     "pro_50pctdown2up": "twouphalfdown",
     "pro_30pctdown": "thirtypercent",
 }
+
+#: 真正的促销 ``<font class="free">`` 白名单（排除 new/gray 等 UI 徽章 class）
+_PROMO_FONT_CLASSES: frozenset[str] = frozenset(
+    {"free", "twoupfree", "twoup", "halfdown", "twouphalfdown", "thirtypercent"}
+)
+
+#: 详情页锚点 href 中的 id 提取
+_DETAILS_ID_RE = re.compile(r"details\.php\?id=(\d+)", re.IGNORECASE)
+
+#: 绝对时刻（title 属性）：``2026-10-11 12:41:28``
+_ABS_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+
+#: 登录态检测
+_LOGGED_IN_RE = re.compile(r"(userdetails\.php|logout\.php|takelogout\.php)", re.IGNORECASE)
+_LOGIN_REDIRECT_RE = re.compile(r"login\.php", re.IGNORECASE)
 
 
 class OurbitsAdapter(SiteAdapter):
@@ -154,18 +119,6 @@ class OurbitsAdapter(SiteAdapter):
     def _download_url(self, item_id: str) -> str:
         return f"{self._base_url()}/download.php?id={item_id}"
 
-    @staticmethod
-    def _parse_size_str(text: str) -> int:
-        m = re.match(r"([\d.]+)\s*(\w+)", text.strip())
-        if not m:
-            return 0
-        try:
-            num = float(m.group(1))
-        except ValueError:
-            return 0
-        factor = _SIZE_FACTORS.get(m.group(2).lower(), 1)
-        return int(num * factor)
-
     # ------------------------------------------------------------ 1. check_reachability
     async def check_reachability(self) -> SiteHealth:
         """1. 校验域名可达与登录态：GET /index.php。"""
@@ -195,8 +148,89 @@ class OurbitsAdapter(SiteAdapter):
         page_size: int = 100,
         page_number: int = 1,
     ) -> list[FeedItem]:
-        """2. 种子搜索：NexusPHP 无搜索 API，返回空列表。"""
-        return []
+        """2. 抓取免费种子列表：GET /torrents.php?spstate=7，parsel CSS 解析。"""
+        url = (
+            f"{self._base_url()}/torrents.php"
+            f"?spstate=7&page={max(0, page_number - 1)}"
+        )
+        try:
+            resp = await self._client.get(url, timeout=self._timeout)
+        except httpx.HTTPError as exc:
+            logger.warning("OurBits 拉取失败：%s", exc)
+            return []
+        if resp.status_code >= 400:
+            logger.warning("OurBits 拉取 HTTP %d", resp.status_code)
+            return []
+        return OurbitsAdapter._parse_spstate7_html(resp.text, limit=page_size)
+
+    @staticmethod
+    def _parse_spstate7_html(html: str, *, limit: int = 100) -> list[FeedItem]:
+        """parsel CSS 解析 Ourbits spstate=7 页面（与 hdsky 同源，结构一致）。"""
+        sel = Selector(text=html)
+        items: list[FeedItem] = []
+        seen: set[str] = set()
+
+        for a in sel.css('a[href*="details.php?id="][title]'):
+            href = a.attrib.get("href", "")
+            m = _DETAILS_ID_RE.search(href)
+            if not m:
+                continue
+            item_id = m.group(1)
+            if item_id in seen:
+                continue
+            seen.add(item_id)
+            title = a.attrib.get("title", "").strip()
+
+            tr = a.xpath("./ancestor::tr[1]").get("")
+            if not tr:
+                continue
+
+            tr_sel = Selector(text=tr)
+
+            pro_imgs = tr_sel.css('img[class*="pro_"]::attr(class)').getall()
+            mapped_pro = []
+            for cls in pro_imgs:
+                for c in cls.split():
+                    if c.startswith("pro_"):
+                        mapped_pro.append(_PRO_IMG_MAP.get(c, c))
+                        break
+
+            font_classes = tr_sel.css("font::attr(class)").getall()
+            mapped_font = [c for c in font_classes if c in _PROMO_FONT_CLASSES]
+
+            free_classes = mapped_pro + mapped_font
+
+            remaining_abs = None
+            for ts in tr_sel.css("span[title]::attr(title)").getall():
+                if _ABS_DATETIME_RE.match(ts):
+                    remaining_abs = ts
+                    break
+
+            free_payload: dict[str, object] | None = None
+            if free_classes or remaining_abs:
+                free_payload = {
+                    "free_classes": free_classes,
+                    "remaining_abs": remaining_abs,
+                }
+
+            items.append(
+                FeedItem(
+                    title=title,
+                    link=f"details.php?id={item_id}",
+                    item_id=item_id,
+                    info_hash=None,
+                    size=0,
+                    category=None,
+                    description="",
+                    published_at=None,
+                    torrent_url=f"download.php?id={item_id}",
+                    free_payload=free_payload,
+                )
+            )
+            if len(items) >= limit:
+                break
+
+        return items[:limit]
 
     # ------------------------------------------------------------ 3. download_torrent
     async def download_torrent(self, item_id: str) -> bytes:
@@ -219,12 +253,7 @@ class OurbitsAdapter(SiteAdapter):
 
     # ------------------------------------------------------------ 4. check_status
     async def check_status(self, item_id: str) -> TorrentBrief:
-        """4. 种子状态检查：GET /details.php?id=X。
-
-        - 200 → EXISTS
-        - 404 → DELETED
-        - 其他 → UNKNOWN
-        """
+        """4. 种子状态检查：GET /details.php?id=X。"""
         if not self._cookies:
             return TorrentBrief.UNKNOWN
         try:
@@ -258,69 +287,6 @@ class OurbitsAdapter(SiteAdapter):
 
     async def close(self) -> None:
         await self._client.aclose()
-
-    # ------------------------------------------------------------ HTML 解析（仅作 free_payload 填充）
-    @staticmethod
-    def parse_torrents_html(html: str, *, limit: int = 100) -> list[FeedItem]:
-        """公开：供 feed_fetcher 工具调用。解析 Ourbits 真实 torrents.php HTML。
-
-        Ourbits 使用标准 NexusPHP 表格，按锚点切分。
-        """
-        items: list[FeedItem] = []
-        anchors = list(_ANCHOR_RE.finditer(html))
-        for i, m in enumerate(anchors):
-            attrs = m.group(1)
-            torrent_id = m.group(2)
-            title_m = _ANCHOR_TITLE_RE.search(attrs)
-            title = title_m.group(1).strip() if title_m else f"torrent-{torrent_id}"
-
-            start = m.start()
-            end = anchors[i + 1].start() if i + 1 < len(anchors) else len(html)
-            window = html[start:end]
-
-            dl_m = _ANY_DOWNLOAD_RE.search(window)
-            dl_id = dl_m.group(1) if dl_m else torrent_id
-
-            size_m = _SIZE_RE.search(window)
-            size = 0
-            if size_m:
-                size = OurbitsAdapter._parse_size_str(
-                    f"{size_m.group(1)} {size_m.group(2)}"
-                )
-
-            pro_classes = [mm.group(1) for mm in _PRO_IMG_RE.finditer(window)]
-            mapped_pro = [_PRO_IMG_MAP.get(c.lower(), c) for c in pro_classes]
-            font_classes = [mm.group(1) for mm in _FREE_FONT_RE.finditer(window)]
-            font_classes = [c for c in font_classes if c in _PROMO_FONT_CLASSES]
-            free_classes = mapped_pro + font_classes
-
-            time_m = _PROMO_TIME_RE.search(window)
-            remaining_abs = time_m.group(1) if time_m else None
-
-            free_payload: dict[str, object] | None = None
-            if free_classes or remaining_abs:
-                free_payload = {
-                    "free_classes": free_classes,
-                    "remaining_abs": remaining_abs,
-                }
-
-            items.append(
-                FeedItem(
-                    title=title,
-                    link=f"details.php?id={torrent_id}",
-                    item_id=torrent_id,
-                    info_hash=None,
-                    size=size,
-                    category=None,
-                    description="",
-                    published_at=None,
-                    torrent_url=f"download.php?id={dl_id}",
-                    free_payload=free_payload,
-                )
-            )
-            if len(items) >= limit:
-                break
-        return items[:limit]
 
 
 class _BreakerTripped(RuntimeError):

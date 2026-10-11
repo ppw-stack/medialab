@@ -1,6 +1,6 @@
 """OurbitsAdapter 契约测试。
 
-覆盖 5 个契约方法 + parse_torrents_html 静态方法。
+覆盖 5 个契约方法 + search_torrents (parsel 解析 spstate=7) 静态方法。
 所有 HTTP 调用 mock，不依赖网络。
 """
 
@@ -15,23 +15,6 @@ from app.adapters.sites.ourbits import OurbitsAdapter, _TorrentDownloadError
 PROFILE = SiteProfile(name="ourbits", domain="ourbits.club")
 COOKIES = "c_secure_uid=xxx; c_secure_pass=abc123; cf_clearance=xyz"
 MINIMAL_TORRENT = b"d4:infod6:lengthi100e4:name8:test.txtee"
-
-#: Ourbits 标准 NexusPHP 表格 HTML 片段（&amp; 转义）
-OURBITS_HTML = (
-    '<table class="torrents">'
-    '<tr>'
-    '<td><a target="_blank" title="Movie A" href="details.php?id=10001&amp;hit=1">Movie A</a></td>'
-    '<td><img class="pro_free" src="free.png"/></td>'
-    '<td>剩余时间：<b><span title="2026-12-31 23:59:00">3天2小时</span></b></td>'
-    '<td><a href="download.php?id=10001&passkey=abc">DL</a></td>'
-    '<td>4.95<br />GB</td>'
-    '</tr>'
-    '<tr>'
-    '<td><a target="_blank" title="Movie B" href="details.php?id=10002&amp;hit=1">Movie B</a></td>'
-    '<td>1.00 GB</td>'
-    '</tr>'
-    '</table>'
-)
 
 
 @pytest.fixture
@@ -113,20 +96,72 @@ async def test_get_torrent_detail_ok(adapter: OurbitsAdapter) -> None:
     assert detail.raw_html is not None
 
 
-# ---- parse_torrents_html ----
+# ---- 2. search_torrents (parsel 解析 spstate=7) ----
 
 
-def test_parse_torrents_html_extracts_items() -> None:
-    items = OurbitsAdapter.parse_torrents_html(OURBITS_HTML, limit=100)
-    assert len(items) == 2
-    assert items[0].title == "Movie A"
+async def test_search_torrents_parses_spstate7(adapter: OurbitsAdapter) -> None:
+    """parsel CSS 解析 Ourbits 标准 NexusPHP 表格（与 hdsky 同源）。"""
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.text = OURBITS_SPSTATE7_HTML
+    adapter._client.get = AsyncMock(return_value=resp)
+
+    items = await adapter.search_torrents({}, page_size=100, page_number=1)
+    assert len(items) == 3
+    # 第一条：永久免费
     assert items[0].item_id == "10001"
-    assert items[0].size > 4 * 1024**3
+    assert items[0].title == "Movie A"
     assert items[0].free_payload is not None
     assert "free" in items[0].free_payload["free_classes"]  # type: ignore[operator]
-    assert items[0].free_payload["remaining_abs"] == "2026-12-31 23:59:00"  # type: ignore[index]
-    assert items[1].free_payload is None
+    # 第二条：限时 30% off
+    assert items[1].item_id == "10002"
+    assert items[1].free_payload is not None
+    assert "thirtypercent" in items[1].free_payload["free_classes"]  # type: ignore[operator]
+    assert items[1].free_payload["remaining_abs"] == "2026-12-31 23:59:00"  # type: ignore[index]
+    # 第三条：非免费
+    assert items[2].free_payload is None
 
 
-def test_parse_torrents_html_empty() -> None:
-    assert OurbitsAdapter.parse_torrents_html("<html></html>") == []
+async def test_search_torrents_http_error(adapter: OurbitsAdapter) -> None:
+    resp = MagicMock()
+    resp.status_code = 500
+    adapter._client.get = AsyncMock(return_value=resp)
+    items = await adapter.search_torrents({})
+    assert items == []
+
+
+# ---- 静态解析单元测试 ----
+
+
+def test_parse_spstate7_html_extracts_items() -> None:
+    items = OurbitsAdapter._parse_spstate7_html(OURBITS_SPSTATE7_HTML, limit=100)
+    assert len(items) == 3
+    assert items[0].item_id == "10001"
+    assert "free" in items[0].free_payload["free_classes"]  # type: ignore[operator]
+
+
+def test_parse_spstate7_html_empty() -> None:
+    assert OurbitsAdapter._parse_spstate7_html("<html></html>") == []
+
+
+# ---- fixture: Ourbits spstate=7 真实结构片段 ----
+
+OURBITS_SPSTATE7_HTML = (
+    '<html><body><table class="torrents">'
+    '<tr>'
+    '<td><a target="_blank" title="Movie A" href="details.php?id=10001&amp;hit=1">Movie A</a></td>'
+    '<td><img class="pro_free" src="free.png"/></td>'
+    '<td>4.95<br />GB</td>'
+    '</tr>'
+    '<tr>'
+    '<td><a target="_blank" title="Movie B" href="details.php?id=10002&amp;hit=1">Movie B</a></td>'
+    '<td><img class="pro_30pctdown" src="30.png" alt="30%"/></td>'
+    '<td>剩余时间：<b><span title="2026-12-31 23:59:00">3天2小时</span></b></td>'
+    '<td>1.00<br />GB</td>'
+    '</tr>'
+    '<tr>'
+    '<td><a target="_blank" title="Movie C" href="details.php?id=10003&amp;hit=1">Movie C</a></td>'
+    '<td>2.00<br />GB</td>'
+    '</tr>'
+    '</table></body></html>'
+)

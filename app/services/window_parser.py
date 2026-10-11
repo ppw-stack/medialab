@@ -271,6 +271,13 @@ def _parse_nexushp_html(item: FeedItem) -> FreeWindow | None:
     if end_at is None and remaining_delta is not None:
         end_at = utcnow() + remaining_delta
 
+    # R10 契约：NEUTRAL / TWOU_TIMED 必须 free_end_at=None（中性/2X 无时间窗口）。
+    # 若 user 同时给了 remaining_abs，按 free_type 优先：
+    # - NEUTRAL：忽略 end_at（中性下载不限时）
+    # - TWOU_TIMED：忽略 end_at（2X 永久有效）
+    if free_type in (FreeType.NEUTRAL, FreeType.TWOU_TIMED):
+        end_at = None
+
     if end_at is not None and free_type in (
         FreeType.PERMANENT,
         FreeType.TIMED,

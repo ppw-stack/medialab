@@ -1,6 +1,6 @@
 """HhanclubAdapter 契约测试。
 
-覆盖 5 个契约方法 + parse_torrents_html 静态方法。
+覆盖 5 个契约方法 + search_torrents (BS4 解析 spstate=7) 静态方法。
 所有 HTTP 调用 mock，不依赖网络。
 """
 
@@ -15,21 +15,6 @@ from app.adapters.sites.hhanclub import HhanclubAdapter, _TorrentDownloadError
 PROFILE = SiteProfile(name="hhanclub", domain="hhanclub.net")
 COOKIES = "c_secure_uid=MTU3NTk%3D; c_secure_pass=abc123"
 MINIMAL_TORRENT = b"d4:infod6:lengthi100e4:name8:test.txtee"
-
-#: HHan 主题 HTML 片段（含 promotion-tag-free + 剩余时间 + 大小）
-HHAN_HTML = (
-    '<div class="torrent-table-for-spider">'
-    '<a href="details.php?id=100001&hit=1" class="torrent-info-text-name">Movie A</a>'
-    '<div class="torrent-info-text torrent-info-text-size">4.95 GB</div>'
-    '<a href="download.php?id=100001&passkey=abc">DL</a>'
-    '<span class="promotion-tag promotion-tag-free">免费</span>'
-    '剩余时间：<span title="2026-12-31 23:59:00">3天2小时</span>'
-    '</div>'
-    '<div class="torrent-table-for-spider">'
-    '<a href="details.php?id=100002&hit=1" class="torrent-info-text-name">Movie B</a>'
-    '<div class="torrent-info-text torrent-info-text-size">1.00 GB</div>'
-    '</div>'
-)
 
 
 @pytest.fixture
@@ -149,25 +134,121 @@ async def test_get_torrent_detail_error(adapter: HhanclubAdapter) -> None:
     assert detail.error is not None
 
 
-# ---- parse_torrents_html（静态方法）----
+# ---- 2. search_torrents (BS4 解析 spstate=2) ----
 
 
-def test_parse_torrents_html_extracts_items() -> None:
-    items = HhanclubAdapter.parse_torrents_html(HHAN_HTML, limit=100)
-    assert len(items) == 2
-    assert items[0].title == "Movie A"
+async def test_search_torrents_parses_spstate2(adapter: HhanclubAdapter) -> None:
+    """BS4 解析 HHan Tailwind 自定义主题的 spstate=2 页面（永久免费）。
+
+    HHan 用 Tailwind class + 嵌套 div 而非标准 NexusPHP 表格。
+    spstate=7 是 JS 动态加载，HTML 不含 torrent 链接；用 spstate=2 SSR。
+    """
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.text = HHAN_SPSTATE2_HTML
+    adapter._client.get = AsyncMock(return_value=resp)
+
+    items = await adapter.search_torrents({}, page_size=100, page_number=1)
+    assert len(items) == 3
+    # 第一条：限时免费（Tailwind 主题，<span title="绝对时刻">）
     assert items[0].item_id == "100001"
-    assert items[0].size > 4 * 1024**3  # ~5 GB
     assert items[0].free_payload is not None
-    assert "free" in items[0].free_payload["free_classes"]  # type: ignore[operator]
     assert items[0].free_payload["remaining_abs"] == "2026-12-31 23:59:00"  # type: ignore[index]
-    assert items[1].free_payload is None  # 第二条无免费标记
+    # 第二条：永久免费（class="free"）
+    assert items[1].item_id == "100002"
+    assert items[1].free_payload is not None
+    assert "free" in items[1].free_payload["free_classes"]  # type: ignore[operator]
+    # 第三条：非免费
+    assert items[2].free_payload is None
 
 
-def test_parse_torrents_html_limit() -> None:
-    items = HhanclubAdapter.parse_torrents_html(HHAN_HTML, limit=1)
+async def test_search_torrents_excludes_userdetails(adapter: HhanclubAdapter) -> None:
+    """过滤掉 userdetails.php?id=N（用户名导航链接，不当作 torrent）。"""
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.text = HHAN_WITH_USER_LINK_HTML
+    adapter._client.get = AsyncMock(return_value=resp)
+    items = await adapter.search_torrents({})
+    # 应该只返回 torrent 100001，userdetails 15759 被过滤
+    assert len(items) == 1
+    assert items[0].item_id == "100001"
+
+
+async def test_search_torrents_http_error(adapter: HhanclubAdapter) -> None:
+    resp = MagicMock()
+    resp.status_code = 500
+    adapter._client.get = AsyncMock(return_value=resp)
+    items = await adapter.search_torrents({})
+    assert items == []
+
+
+async def test_search_returns_empty_on_redirect(adapter: HhanclubAdapter) -> None:
+    """未登录触发 login.php 重定向 → search_torrents 内部 raise → 返回空。"""
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.text = '<html><a href="login.php">login</a></html>'
+    adapter._client.get = AsyncMock(return_value=resp)
+    items = await adapter.search_torrents({})
+    assert isinstance(items, list)
+
+
+# ---- 静态解析单元测试 ----
+
+
+def test_parse_spstate2_html_extracts_items() -> None:
+    items = HhanclubAdapter._parse_spstate2_html(HHAN_SPSTATE2_HTML, limit=100)
+    assert len(items) == 3
+    assert items[0].item_id == "100001"
+    assert items[0].free_payload["remaining_abs"] == "2026-12-31 23:59:00"  # type: ignore[index]
+
+
+def test_parse_spstate2_html_limit() -> None:
+    items = HhanclubAdapter._parse_spstate2_html(HHAN_SPSTATE2_HTML, limit=1)
     assert len(items) == 1
 
 
-def test_parse_torrents_html_empty() -> None:
-    assert HhanclubAdapter.parse_torrents_html("<html></html>") == []
+def test_parse_spstate2_html_empty() -> None:
+    assert HhanclubAdapter._parse_spstate2_html("<html></html>") == []
+
+
+# ---- fixture: HHan Tailwind 自定义主题 spstate=2 真实结构片段 ----
+
+HHAN_SPSTATE2_HTML = (
+    '<html><body>'
+    # 限时免费：嵌套 div + span title="绝对时刻"
+    '<div class="torrent-info-card">'
+    '<a href="https://hhanclub.net/details.php?id=100001&amp;hit=1" '
+    'class="torrent-info-text-name" title="Movie A">Movie A</a>'
+    '<div class="torrent-info-promo">'
+    '剩余时间：<span title="2026-12-31 23:59:00">3天2小时</span>'
+    '</div>'
+    '<div class="torrent-info-text-size">4.95 GB</div>'
+    '</div>'
+    # 永久免费：class="free"
+    '<div class="torrent-info-card">'
+    '<a href="https://hhanclub.net/details.php?id=100002&amp;hit=1" '
+    'class="torrent-info-text-name" title="Movie B">Movie B</a>'
+    '<span class="free">免费</span>'
+    '<div class="torrent-info-text-size">1.00 GB</div>'
+    '</div>'
+    # 非免费
+    '<div class="torrent-info-card">'
+    '<a href="https://hhanclub.net/details.php?id=100003&amp;hit=1" '
+    'class="torrent-info-text-name" title="Movie C">Movie C</a>'
+    '<div class="torrent-info-text-size">2.00 GB</div>'
+    '</div>'
+    '</body></html>'
+)
+
+HHAN_WITH_USER_LINK_HTML = (
+    '<html><body>'
+    # 用户导航链接（应被过滤）
+    '<a href="https://hhanclub.net/userdetails.php?id=15759">ppwHhc</a>'
+    # 真实 torrent
+    '<div class="torrent-info-card">'
+    '<a href="https://hhanclub.net/details.php?id=100001&amp;hit=1" '
+    'class="torrent-info-text-name" title="Movie A">Movie A</a>'
+    '<div class="torrent-info-text-size">4.95 GB</div>'
+    '</div>'
+    '</body></html>'
+)
