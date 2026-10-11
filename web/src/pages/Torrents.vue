@@ -80,6 +80,14 @@ const SOURCE_LABEL: Record<string, string> = {
   auto_seed: '辅种', free_seed: '免费种', manual: '手动',
 }
 
+const FREE_TYPE_LABELS: Record<string, string> = {
+  freeleech_permanent: '永久免费',
+  freeleech_timed: '限时免费',
+  twoup_timed: '限时 2X',
+  neutral_leech: '中性种',
+  unknown: '未知',
+}
+
 const STATE_LABEL: Record<string, string> = {
   downloading: '下载中', uploading: '上传中', paused: '暂停',
   error: '错误', completed: '完成', queued: '排队', checking: '校验',
@@ -382,7 +390,7 @@ const localColumns = [
   { title: '下载器', dataIndex: 'downloader_name', key: 'downloader', width: 100 },
   { title: '来源', dataIndex: 'source', key: 'source', width: 80 },
   { title: '状态', dataIndex: 'status', key: 'status', width: 90 },
-  { title: '免费', dataIndex: 'free_type', key: 'free', width: 100 },
+  { title: '免费', dataIndex: 'free_type', key: 'free', width: 110 },
   { title: '大小', dataIndex: 'size', key: 'size', width: 80 },
   { title: '进度', key: 'progress', width: 90 },
   { title: '种比', dataIndex: 'ratio', key: 'ratio', width: 70 },
@@ -518,7 +526,7 @@ import { h } from 'vue'
               </template>
               <template v-else-if="column.key === 'free'">
                 <span v-if="!record.is_free">-</span>
-                <a-tag v-else :color="record.free_type === 'freeleech_permanent' ? 'green' : 'orange'">{{ record.free_type }}</a-tag>
+                <a-tag v-else :color="record.free_type === 'freeleech_permanent' ? 'green' : 'orange'">{{ FREE_TYPE_LABELS[record.free_type] || record.free_type }}</a-tag>
               </template>
               <template v-else-if="column.key === 'size'">
                 {{ formatSize(record.size) }}
