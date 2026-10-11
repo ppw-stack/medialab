@@ -14,6 +14,7 @@ from app.adapters.downloaders.base import (
 )
 from app.adapters.downloaders.locks import locks
 from app.adapters.downloaders.qbittorrent import QbittorrentAdapter
+from app.adapters.downloaders.transmission import TransmissionAdapter
 
 __all__ = [
     "AddTorrentPayload",
@@ -25,5 +26,6 @@ __all__ = [
     "TorrentHandle",
     "TorrentInfo",
     "TorrentState",
+    "TransmissionAdapter",
     "locks",
 ]

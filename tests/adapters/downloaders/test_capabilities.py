@@ -162,8 +162,6 @@ import respx
 
 async def test_qbittorrent_set_pause_uses_stop_endpoint() -> None:
     """qBittorrent v5：pause 端点是 /torrents/stop，不是 /torrents/pause。"""
-    from app.adapters.sites.base import SiteProfile
-
     adapter = QbittorrentAdapter(
         name="qbt",
         url="http://example.com",
@@ -177,7 +175,7 @@ async def test_qbittorrent_set_pause_uses_stop_endpoint() -> None:
             base_url="http://example.com",
             cookies={"SID": "test-sid"},
         ) as client:
-            adapter._client = client
+            adapter._qb._client = client
             ok = await adapter.set_pause(["a" * 40], paused=True)
             assert ok is True
             stop_calls = [c for c in mock.calls if "/torrents/stop" in str(c.request.url)]
@@ -187,8 +185,6 @@ async def test_qbittorrent_set_pause_uses_stop_endpoint() -> None:
 
 async def test_qbittorrent_resume_uses_start_endpoint() -> None:
     """qBittorrent v5：resume 端点是 /torrents/start。"""
-    from app.adapters.sites.base import SiteProfile
-
     adapter = QbittorrentAdapter(
         name="qbt",
         url="http://example.com",
@@ -202,7 +198,7 @@ async def test_qbittorrent_resume_uses_start_endpoint() -> None:
             base_url="http://example.com",
             cookies={"SID": "test-sid"},
         ) as client:
-            adapter._client = client
+            adapter._qb._client = client
             ok = await adapter.set_pause(["a" * 40], paused=False)
             assert ok is True
             start_calls = [c for c in mock.calls if "/torrents/start" in str(c.request.url)]

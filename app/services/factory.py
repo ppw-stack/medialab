@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from app.adapters.downloaders.base import DownloaderAdapter
 from app.adapters.downloaders.qbittorrent import QbittorrentAdapter
+from app.adapters.downloaders.transmission import TransmissionAdapter
 from app.adapters.sites import resolve as resolve_site_adapter
 from app.adapters.sites.base import SiteAdapter, SiteProfile
 from app.core.crypto import CredentialCipher
@@ -95,8 +96,16 @@ class AdapterFactory:
                     password or "",
                     verify_tls=row.verify_tls,
                 )
-            case "transmission" | "deluge" | "aria2":
-                # M2 仅实现 qBittorrent；其余按 FR-1.3 声明能力后降级
+            case "transmission":
+                return TransmissionAdapter(
+                    row.name,
+                    row.url,
+                    row.username or "",
+                    password or "",
+                    verify_tls=row.verify_tls,
+                )
+            case "deluge" | "aria2":
+                # M3 起按 FR-1 补齐
                 raise NotImplementedError(
                     f"下载器类型 {row.type} 自 M3 起实现（FR-1）"
                 )

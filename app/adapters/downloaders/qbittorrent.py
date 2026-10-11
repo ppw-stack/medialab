@@ -1,16 +1,13 @@
 """qBittorrent 适配器（附录 A）。
 
-WebUI API v2，见 https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-(qBittorrent-4.1)
+基于 :class:`Qb5ApiClient`（WebUI API v2）实现 :class:`DownloaderAdapter` 契约。
+qBittorrent 5.x：pause=/torrents/stop, resume=/torrents/start（v4 端点 /pause /resume 已废弃）。
 """
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Sequence
-from datetime import UTC, datetime
 from typing import Any
-
-import httpx
 
 from app.adapters.downloaders.base import (
     AddTorrentPayload,
@@ -22,11 +19,12 @@ from app.adapters.downloaders.base import (
     TorrentInfo,
     TorrentState,
 )
+from app.adapters.downloaders.qbittorrent_api import Qb5ApiClient, Qb5ApiError
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-#: 客户端 → 状态映射。未知状态归 UNKNOWN，由 FR-3.4 兜底行按红线中止。
+#: qBittorrent 原生 state → TorrentState。未知状态归 UNKNOWN，由 FR-3.4 兜底行按红线中止。
 _STATE_MAP: dict[str, TorrentState] = {
     "error": TorrentState.ERROR,
     "missingFiles": TorrentState.MISSING_FILES,
@@ -67,135 +65,52 @@ class QbittorrentAdapter(DownloaderAdapter):
         verify_tls: bool = True,
     ) -> None:
         self.name = name
-        self._base = url.rstrip("/")
-        self._username = username
-        self._password = password
-        self._timeout = timeout
-        self._client = httpx.AsyncClient(
-            base_url=self._base,
+        self._qb = Qb5ApiClient(
+            url,
+            username=username,
+            password=password,
             timeout=timeout,
-            verify=verify_tls,
-            follow_redirects=True,
-            headers={"Referer": self._base, "User-Agent": "SeedHelper/0.1"},
+            verify_tls=verify_tls,
         )
-        self._authed = False
-        self._auth_lock = asyncio.Lock()
 
     # ------------------------------------------------------------ 内部
-    async def _ensure_auth(self) -> None:
-        """登录取 Cookie（附录 A）。401/403 自动重登一次。"""
-        if self._authed:
-            return
-        async with self._auth_lock:
-            if self._authed:  # double-check：其他协程可能已登录
-                return
-            try:
-                resp = await self._client.post(
-                    "/api/v2/auth/login",
-                    data={"username": self._username, "password": self._password},
-                )
-                # qBittorrent 5.x 登录成功返回 200 或 204（No Content）；
-                # 失败时返回 200 但 body 含 "Fails"/"Ok."。
-                if resp.status_code not in (200, 204) or "Fails" in resp.text:
-                    raise DownloaderError("qBittorrent 登录失败", transient=False)
-                self._authed = True
-            except httpx.HTTPError as exc:
-                raise DownloaderError(f"qBittorrent 网络错误：{exc}", transient=True) from exc
-
-    async def _post_retry(self, path: str, **kw: Any) -> httpx.Response:
-        await self._ensure_auth()
-        try:
-            resp = await self._client.post(path, **kw)
-        except httpx.HTTPError as exc:
-            raise DownloaderError(f"qBittorrent 网络错误：{exc}", transient=True) from exc
-        if resp.status_code in {401, 403}:
-            self._authed = False
-            await self._ensure_auth()
-            try:
-                resp = await self._client.post(path, **kw)
-            except httpx.HTTPError as exc:
-                raise DownloaderError(
-                    f"qBittorrent 重试失败：{exc}", transient=True
-                ) from exc
-        if resp.status_code >= 500:
-            raise DownloaderError(
-                f"qBittorrent 服务端错误 {resp.status_code}", transient=True
-            )
-        if resp.status_code >= 400:
-            raise DownloaderError(
-                f"qBittorrent 请求失败 {resp.status_code}：{resp.text[:200]}",
-                transient=False,
-            )
-        return resp
-
-    async def _get_retry(self, path: str, **kw: Any) -> httpx.Response:
-        await self._ensure_auth()
-        try:
-            resp = await self._client.get(path, **kw)
-        except httpx.HTTPError as exc:
-            raise DownloaderError(f"qBittorrent 网络错误：{exc}", transient=True) from exc
-        if resp.status_code in {401, 403}:
-            self._authed = False
-            await self._ensure_auth()
-            try:
-                resp = await self._client.get(path, **kw)
-            except httpx.HTTPError as exc:
-                raise DownloaderError(
-                    f"qBittorrent 重试失败：{exc}", transient=True
-                ) from exc
-        if resp.status_code >= 500:
-            raise DownloaderError(
-                f"qBittorrent 服务端错误 {resp.status_code}", transient=True
-            )
-        if resp.status_code >= 400:
-            raise DownloaderError(
-                f"qBittorrent 请求失败 {resp.status_code}：{resp.text[:200]}",
-                transient=False,
-            )
-        return resp
-
     @staticmethod
-    def _ts(value: int | None) -> datetime | None:
-        """qBittorrent 的 Unix 秒 → naive UTC。"""
-        if not value or value < 0:
-            return None
-        return datetime.fromtimestamp(value, UTC).replace(tzinfo=None)
-
-    @staticmethod
-    def _matches(info: "TorrentInfo", filt: "TorrentFilter") -> bool:
+    def _matches(info: TorrentInfo, filt: TorrentFilter) -> bool:
         """按 TorrentFilter 过滤：states/category/tags 三个维度。"""
         if filt.states and info.state not in filt.states:
             return False
         if filt.category and info.category != filt.category:
             return False
-        if filt.tags and not filt.tags.issubset(info.tags):
-            return False
-        return True
+        return not (filt.tags and not filt.tags.issubset(info.tags))
 
     # ------------------------------------------------------------ 接口
     async def ping(self) -> bool:
         try:
-            resp = await self._get_retry("/api/v2/app/version")
-            return bool(resp.text.strip())
-        except DownloaderError as exc:
+            version = await self._qb.get_app_version()
+            return bool(version)
+        except Qb5ApiError as exc:
             logger.warning("qBittorrent %s 连通性检测失败：%s", self.name, exc)
             return False
 
-    async def list_torrents(self, filt: TorrentFilter | None = None) -> list[TorrentInfo]:
-        resp = await self._get_retry("/api/v2/torrents/info")
+    async def list_torrents(
+        self, filt: TorrentFilter | None = None
+    ) -> list[TorrentInfo]:
         try:
-            rows: list[dict[str, Any]] = resp.json()
-        except ValueError as exc:
-            raise DownloaderError(f"qBittorrent 响应非 JSON：{exc}", transient=False) from exc
+            rows: list[dict[str, Any]] = await self._qb.list_torrents()
+        except Qb5ApiError as exc:
+            raise DownloaderError(str(exc), transient=exc.transient) from exc
+
         out: list[TorrentInfo] = []
         for row in rows:
-            state = _STATE_MAP.get(row.get("state", ""), TorrentState.UNKNOWN)
+            state = _STATE_MAP.get(str(row.get("state", "")), TorrentState.UNKNOWN)
             tags = frozenset(
-                t.strip() for t in (row.get("tags") or "").split(",") if t.strip()
+                t.strip()
+                for t in (row.get("tags") or "").split(",")
+                if t.strip()
             )
             info = TorrentInfo(
-                hash=row.get("hash", ""),
-                name=row.get("name", ""),
+                hash=str(row.get("hash", "")),
+                name=str(row.get("name", "")),
                 state=state,
                 progress=float(row.get("progress") or 0),
                 size=int(row.get("size") or 0),
@@ -220,60 +135,70 @@ class QbittorrentAdapter(DownloaderAdapter):
 
     async def add_torrent(self, payload: AddTorrentPayload) -> TorrentHandle:
         """附录 A：``urls`` / ``savepath`` / ``category`` / ``tags`` / ``skip_checking``。"""
-        data: dict[str, str] = {
-            "savepath": payload.save_path or "",
-            "skip_checking": "true" if payload.skip_checking else "false",
+        kwargs: dict[str, Any] = {
+            "savepath": payload.save_path,
+            "category": payload.category,
+            "skip_checking": payload.skip_checking,
+            "paused": payload.paused,
         }
-        if payload.paused:
-            data["paused"] = "true"
         if payload.tags:
-            data["tags"] = ",".join(sorted(payload.tags))
-        files: dict[str, Any] = {}
-        if payload.torrent_bytes is not None:
-            files = {"torrents": (f"{payload.name}.torrent", payload.torrent_bytes)}
-        elif payload.urls:
-            data["urls"] = "\n".join(payload.urls)
-        else:
-            raise DownloaderError("添加任务缺少 urls 或 torrent_bytes")
-        resp = await self._post_retry("/api/v2/torrents/add", data=data, files=files or None)
+            kwargs["tags"] = sorted(payload.tags)
+        try:
+            if payload.torrent_bytes is not None:
+                mimetype = "application/x-bittorrent"
+                files = [(f"{payload.name}.torrent", payload.torrent_bytes, mimetype)]
+                await self._qb.add_torrent(torrents=files, **kwargs)
+            elif payload.urls:
+                await self._qb.add_torrent(urls=list(payload.urls), **kwargs)
+            else:
+                raise DownloaderError("添加任务缺少 urls 或 torrent_bytes")
+        except Qb5ApiError as exc:
+            raise DownloaderError(str(exc), transient=exc.transient) from exc
         # qBittorrent 不返回 hash；调用方需按 idem_key 或随后 list 查询
-        return TorrentHandle(info_hash="", downloader=self.name, raw=resp.text)
+        return TorrentHandle(info_hash="", downloader=self.name, raw=None)
 
     async def remove(self, hashes: Sequence[str], *, delete_data: bool) -> bool:
         """附录 A：``deleteFiles`` 独立控制数据删除。"""
         if not hashes:
             return True
-        await self._post_retry(
-            "/api/v2/torrents/delete",
-            data={"hashes": "|".join(hashes), "deleteFiles": "true" if delete_data else "false"},
-        )
+        try:
+            await self._qb.delete_torrents(list(hashes), delete_files=delete_data)
+        except Qb5ApiError as exc:
+            raise DownloaderError(str(exc), transient=exc.transient) from exc
         return True
 
     async def set_pause(self, hashes: Sequence[str], paused: bool) -> bool:
         if not hashes:
             return True
-        # qBittorrent v5 端点（v5.0+）：pause=/torrents/stop, resume=/torrents/start
-        action = "stop" if paused else "start"
-        await self._post_retry(
-            f"/api/v2/torrents/{action}", data={"hashes": "|".join(hashes)}
-        )
+        # qBittorrent v5：pause=/torrents/stop, resume=/torrents/start
+        try:
+            if paused:
+                await self._qb.pause_torrents(list(hashes))
+            else:
+                await self._qb.resume_torrents(list(hashes))
+        except Qb5ApiError as exc:
+            raise DownloaderError(str(exc), transient=exc.transient) from exc
         return True
 
     async def get_files(self, info_hash: str) -> list[TorrentFile]:
         """FR-5.2.5a 的数据来源。删除目标只能来自此返回值。"""
         try:
-            resp = await self._get_retry("/api/v2/torrents/files", params={"hash": info_hash})
-        except DownloaderError:
+            rows: list[dict[str, Any]] = await self._qb.get_torrent_files(info_hash)
+        except Qb5ApiError:
             return []
-        try:
-            data = resp.json()
-        except ValueError:
-            return []
-        return [
-            TorrentFile(path=row.get("name", ""), size=int(row.get("size") or 0))
-            for row in data
-            if row.get("name")
-        ]
+        out: list[TorrentFile] = []
+        for row in rows:
+            name = row.get("name")
+            if not name:
+                continue
+            out.append(
+                TorrentFile(
+                    path=str(name),
+                    size=int(row.get("size") or 0),
+                    priority=int(row.get("priority") or 0),
+                )
+            )
+        return out
 
     async def close(self) -> None:
-        await self._client.aclose()
+        await self._qb.close()

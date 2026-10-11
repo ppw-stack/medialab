@@ -28,7 +28,7 @@ router = APIRouter(
 )
 
 #: 已实现的下载器类型（M1+M2 范围）。其他类型后续按 FR-1 补齐。
-SUPPORTED_TYPES: tuple[str, ...] = ("qbittorrent",)
+SUPPORTED_TYPES: tuple[str, ...] = ("qbittorrent", "transmission")
 ALL_TYPES: tuple[str, ...] = ("qbittorrent", "transmission", "deluge", "aria2")
 
 
