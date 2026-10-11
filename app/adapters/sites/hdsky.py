@@ -297,19 +297,44 @@ class HdskyAdapter(SiteAdapter):
 
     # ------------------------------------------------------------ 3. download_torrent
     async def download_torrent(self, item_id: str) -> bytes:
-        """3. 下载 .torrent：GET /download.php?id=X。"""
+        """3. 下载 .torrent。
+
+        流程（与 pull 阶段 `_fill_download_signs` 一致）：
+        1. GET /details.php?id=X 提取 form action 中的 ``t=...&sign=...`` 完整 URL
+        2. GET 该完整 URL 拿 bencoded bytes
+
+        注：裸 ``/download.php?id=X`` 在 HDSky 永远 404，必须带签名参数。
+        """
         if not self._cookies:
             raise _TorrentDownloadError("缺少 cookies")
+        # 抓详情页提取签名 URL
         try:
             resp = await self._client.get(
-                self._download_url(item_id),
+                self._detail_url(item_id),
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise _TorrentDownloadError(f"详情页拉取失败：{exc}") from exc
+        if resp.status_code >= 400:
+            raise _TorrentDownloadError(f"详情页 HTTP {resp.status_code}")
+        m = _SIGNED_DL_RE.search(resp.text)
+        if not m:
+            raise _TorrentDownloadError(f"未找到签名 download URL（id={item_id}）")
+        signed_url = (
+            f"{self._base_url()}/download.php"
+            f"?id={m.group(1)}&t={m.group(2)}&sign={m.group(3)}"
+        )
+        # GET 完整签名 URL
+        try:
+            dl_resp = await self._client.get(
+                signed_url,
                 timeout=self._timeout,
             )
         except httpx.HTTPError as exc:
             raise _TorrentDownloadError(f"下载失败：{exc}") from exc
-        if resp.status_code >= 400:
-            raise _TorrentDownloadError(f"HTTP {resp.status_code}")
-        content = resp.content
+        if dl_resp.status_code >= 400:
+            raise _TorrentDownloadError(f"HTTP {dl_resp.status_code}")
+        content = dl_resp.content
         if not content.startswith(b"d"):
             raise _TorrentDownloadError("响应不是 bencoded torrent")
         return content
@@ -321,7 +346,10 @@ class HdskyAdapter(SiteAdapter):
         NexusPHP 不暴露删除/违规标记 → 仅基于 HTTP 状态判断：
         - 200 → EXISTS
         - 404 → DELETED
+        - 302/401/403 → UNKNOWN（cookie 过期重定向到 login.php，避免误判 EXISTS）
         - 其他 → UNKNOWN
+
+        注：用 follow_redirects=False 才能识别 302 重定向（默认会跟到 login.php 的 200 误判为 EXISTS）。
         """
         if not self._cookies:
             return TorrentBrief.UNKNOWN
@@ -329,18 +357,25 @@ class HdskyAdapter(SiteAdapter):
             resp = await self._client.get(
                 self._detail_url(item_id),
                 timeout=self._timeout,
+                follow_redirects=False,
             )
         except httpx.HTTPError:
             return TorrentBrief.UNKNOWN
         if resp.status_code == 404:
             return TorrentBrief.DELETED
+        if resp.status_code == 302:
+            # 重定向到 login.php（cookie 过期）
+            return TorrentBrief.UNKNOWN
         if resp.status_code == 200:
             return TorrentBrief.EXISTS
         return TorrentBrief.UNKNOWN
 
     # ------------------------------------------------------------ 5. get_torrent_detail
     async def get_torrent_detail(self, item_id: str) -> TorrentDetail:
-        """5. 种子详情：GET /details.php?id=X。返回 HTML。"""
+        """5. 种子详情：GET /details.php?id=X。
+
+        解析：title（h1/title 锚点）+ size（保留在 raw_html 中）+ download_url（form action 中的 sign URL）。
+        """
         if not self._cookies:
             return TorrentDetail(item_id=item_id, error="缺少 cookies")
         try:
@@ -352,7 +387,27 @@ class HdskyAdapter(SiteAdapter):
             return TorrentDetail(item_id=item_id, error=f"detail 网络错误：{exc}")
         if resp.status_code >= 400:
             return TorrentDetail(item_id=item_id, error=f"HTTP {resp.status_code}")
-        return TorrentDetail(item_id=item_id, raw_html=resp.text[:20000])
+
+        html = resp.text[:20000]
+        # 解析 title：h1 或 title 属性
+        from parsel import Selector as _Sel
+
+        sel = _Sel(text=html)
+        title_text = sel.css("h1::text").get() or sel.css('a[title]::attr(title)').get()
+        # 解析 download URL（form action 中的 sign）
+        m = _SIGNED_DL_RE.search(html)
+        download_url = None
+        if m:
+            download_url = (
+                f"{self._base_url()}/download.php"
+                f"?id={m.group(1)}&t={m.group(2)}&sign={m.group(3)}"
+            )
+        return TorrentDetail(
+            item_id=item_id,
+            title=title_text,
+            download_url=download_url,
+            raw_html=html,
+        )
 
     async def close(self) -> None:
         await self._client.aclose()

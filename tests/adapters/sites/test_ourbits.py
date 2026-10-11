@@ -52,10 +52,17 @@ async def test_search_returns_empty(adapter: OurbitsAdapter) -> None:
 
 
 async def test_download_torrent_returns_bytes(adapter: OurbitsAdapter) -> None:
-    resp = MagicMock()
-    resp.status_code = 200
-    resp.content = MINIMAL_TORRENT
-    adapter._client.get = AsyncMock(return_value=resp)
+    """走详情页提取 passkey → 下载完整 URL。
+
+    两次 GET：details.php?id=10001 → download.php?id=...&passkey=...
+    """
+    detail_resp = MagicMock()
+    detail_resp.status_code = 200
+    detail_resp.text = OURBITS_DETAIL_HTML_10001
+    download_resp = MagicMock()
+    download_resp.status_code = 200
+    download_resp.content = MINIMAL_TORRENT
+    adapter._client.get = AsyncMock(side_effect=[detail_resp, download_resp])
     content = await adapter.download_torrent("10001")
     assert content == MINIMAL_TORRENT
 
@@ -83,17 +90,28 @@ async def test_check_status_deleted(adapter: OurbitsAdapter) -> None:
     assert await adapter.check_status("10001") == TorrentBrief.DELETED
 
 
+async def test_check_status_redirect_to_login(adapter: OurbitsAdapter) -> None:
+    resp = MagicMock()
+    resp.status_code = 302
+    resp.headers = {"Location": "https://ourbits.club/login.php"}
+    adapter._client.get = AsyncMock(return_value=resp)
+    assert await adapter.check_status("10001") == TorrentBrief.UNKNOWN
+
+
 # ---- 5. get_torrent_detail ----
 
 
 async def test_get_torrent_detail_ok(adapter: OurbitsAdapter) -> None:
     resp = MagicMock()
     resp.status_code = 200
-    resp.text = "<html>detail</html>"
+    resp.text = "<h1>Test Movie</h1>" + OURBITS_DETAIL_HTML_10001
     adapter._client.get = AsyncMock(return_value=resp)
     detail = await adapter.get_torrent_detail("10001")
     assert detail.item_id == "10001"
     assert detail.raw_html is not None
+    assert detail.title == "Test Movie"
+    assert detail.download_url is not None
+    assert "passkey=" in detail.download_url
 
 
 # ---- 2. search_torrents (parsel 解析 spstate=7) ----

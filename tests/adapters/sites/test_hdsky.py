@@ -52,10 +52,17 @@ async def test_search_returns_empty(adapter: HdskyAdapter) -> None:
 
 
 async def test_download_torrent_returns_bytes(adapter: HdskyAdapter) -> None:
-    resp = MagicMock()
-    resp.status_code = 200
-    resp.content = MINIMAL_TORRENT
-    adapter._client.get = AsyncMock(return_value=resp)
+    """走详情页提取 sign → 下载完整 URL。
+
+    两次 GET：details.php?id=10001 → download.php?id=10001&t=...&sign=...
+    """
+    detail_resp = MagicMock()
+    detail_resp.status_code = 200
+    detail_resp.text = HDSKY_DETAIL_HTML_10001
+    download_resp = MagicMock()
+    download_resp.status_code = 200
+    download_resp.content = MINIMAL_TORRENT
+    adapter._client.get = AsyncMock(side_effect=[detail_resp, download_resp])
     content = await adapter.download_torrent("10001")
     assert content == MINIMAL_TORRENT
 
@@ -67,10 +74,24 @@ async def test_download_torrent_no_cookies() -> None:
 
 
 async def test_download_torrent_non_bencode(adapter: HdskyAdapter) -> None:
-    resp = MagicMock()
-    resp.status_code = 200
-    resp.content = b"not torrent"
-    adapter._client.get = AsyncMock(return_value=resp)
+    """详情页正常但下载响应不是 bencoded → 抛错。"""
+    detail_resp = MagicMock()
+    detail_resp.status_code = 200
+    detail_resp.text = HDSKY_DETAIL_HTML_10001
+    bad_resp = MagicMock()
+    bad_resp.status_code = 200
+    bad_resp.content = b"not torrent"
+    adapter._client.get = AsyncMock(side_effect=[detail_resp, bad_resp])
+    with pytest.raises(_TorrentDownloadError):
+        await adapter.download_torrent("10001")
+
+
+async def test_download_torrent_no_sign_url(adapter: HdskyAdapter) -> None:
+    """详情页不含 sign → 抛错。"""
+    detail_resp = MagicMock()
+    detail_resp.status_code = 200
+    detail_resp.text = "<html>no sign</html>"
+    adapter._client.get = AsyncMock(return_value=detail_resp)
     with pytest.raises(_TorrentDownloadError):
         await adapter.download_torrent("10001")
 
@@ -92,17 +113,30 @@ async def test_check_status_deleted(adapter: HdskyAdapter) -> None:
     assert await adapter.check_status("10001") == TorrentBrief.DELETED
 
 
+async def test_check_status_redirect_to_login(adapter: HdskyAdapter) -> None:
+    """cookie 过期 → 302 重定向到 login.php → UNKNOWN（不是 EXISTS）。"""
+    resp = MagicMock()
+    resp.status_code = 302
+    resp.headers = {"Location": "https://hdsky.me/login.php?returnto=..."}
+    adapter._client.get = AsyncMock(return_value=resp)
+    assert await adapter.check_status("10001") == TorrentBrief.UNKNOWN
+
+
 # ---- 5. get_torrent_detail ----
 
 
 async def test_get_torrent_detail_ok(adapter: HdskyAdapter) -> None:
     resp = MagicMock()
     resp.status_code = 200
-    resp.text = "<html>detail</html>"
+    resp.text = "<h1>Test Movie</h1>" + HDSKY_DETAIL_HTML_10001
     adapter._client.get = AsyncMock(return_value=resp)
     detail = await adapter.get_torrent_detail("10001")
     assert detail.item_id == "10001"
     assert detail.raw_html is not None
+    assert detail.title == "Test Movie"
+    # download_url 从 sign form action 解析
+    assert detail.download_url is not None
+    assert "sign=" in detail.download_url
 
 
 # ---- 2. search_torrents (parsel 解析 spstate=7) ----

@@ -67,11 +67,17 @@ async def test_search_returns_empty(adapter: HhanclubAdapter) -> None:
 
 
 async def test_download_torrent_returns_bytes(adapter: HhanclubAdapter) -> None:
-    resp = MagicMock()
-    resp.status_code = 200
-    resp.content = MINIMAL_TORRENT
-    adapter._client.get = AsyncMock(return_value=resp)
+    """走详情页提取 passkey → 下载完整 URL。
 
+    两次 GET：details.php?id=100001 → download.php?id=...&passkey=...
+    """
+    detail_resp = MagicMock()
+    detail_resp.status_code = 200
+    detail_resp.text = HHAN_DETAIL_HTML_100001
+    download_resp = MagicMock()
+    download_resp.status_code = 200
+    download_resp.content = MINIMAL_TORRENT
+    adapter._client.get = AsyncMock(side_effect=[detail_resp, download_resp])
     content = await adapter.download_torrent("100001")
     assert content == MINIMAL_TORRENT
 
@@ -83,10 +89,13 @@ async def test_download_torrent_no_cookies() -> None:
 
 
 async def test_download_torrent_non_bencode(adapter: HhanclubAdapter) -> None:
-    resp = MagicMock()
-    resp.status_code = 200
-    resp.content = b"<html>error</html>"
-    adapter._client.get = AsyncMock(return_value=resp)
+    detail_resp = MagicMock()
+    detail_resp.status_code = 200
+    detail_resp.text = HHAN_DETAIL_HTML_100001
+    bad_resp = MagicMock()
+    bad_resp.status_code = 200
+    bad_resp.content = b"<html>error</html>"
+    adapter._client.get = AsyncMock(side_effect=[detail_resp, bad_resp])
     with pytest.raises(_TorrentDownloadError):
         await adapter.download_torrent("100001")
 
@@ -108,6 +117,14 @@ async def test_check_status_deleted(adapter: HhanclubAdapter) -> None:
     assert await adapter.check_status("100001") == TorrentBrief.DELETED
 
 
+async def test_check_status_redirect_to_login(adapter: HhanclubAdapter) -> None:
+    resp = MagicMock()
+    resp.status_code = 302
+    resp.headers = {"Location": "https://hhanclub.net/login.php"}
+    adapter._client.get = AsyncMock(return_value=resp)
+    assert await adapter.check_status("100001") == TorrentBrief.UNKNOWN
+
+
 async def test_check_status_no_cookies() -> None:
     a = HhanclubAdapter(PROFILE)
     assert await a.check_status("1") == TorrentBrief.UNKNOWN
@@ -119,11 +136,14 @@ async def test_check_status_no_cookies() -> None:
 async def test_get_torrent_detail_ok(adapter: HhanclubAdapter) -> None:
     resp = MagicMock()
     resp.status_code = 200
-    resp.text = "<html>detail page</html>"
+    resp.text = "<html><h1>Test Movie</h1></html>" + HHAN_DETAIL_HTML_100001
     adapter._client.get = AsyncMock(return_value=resp)
     detail = await adapter.get_torrent_detail("100001")
     assert detail.item_id == "100001"
     assert detail.raw_html is not None
+    assert detail.title == "Test Movie"
+    assert detail.download_url is not None
+    assert "passkey=" in detail.download_url
 
 
 async def test_get_torrent_detail_error(adapter: HhanclubAdapter) -> None:

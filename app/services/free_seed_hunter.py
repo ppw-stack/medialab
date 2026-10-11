@@ -388,8 +388,11 @@ class FreeSeedHunter:
     ) -> bytes | None:
         """下载 torrent 字节，捕获所有异常返回 None。
 
-        优先用 cand.torrent_url（pull 阶段已存的签名 URL，NexusPHP 含 passkey/sign）；
-        fallback 用 adapter.download_torrent(item_id)（mteam 走 genDlToken 路径）。
+        三层 fallback：
+        1. cand.torrent_url（pull 阶段存的签名 URL，可能因 sign 过期失效）
+        2. adapter.download_torrent(item_id)（NexusPHP 会重新抓详情拿新 sign；
+           mteam 走 genDlToken）
+        3. 仍失败 → None
         """
         try:
             adapter = self._factory.site(site)
@@ -398,20 +401,14 @@ class FreeSeedHunter:
 
         # 路径 1：cand.torrent_url（NexusPHP 已签名的完整 URL）
         if cand.torrent_url:
-            try:
-                resp = await adapter._client.get(cand.torrent_url, timeout=adapter._timeout)
-            except Exception as exc:
-                logger.debug("站点 %s 下载 %s 失败：%s", site.name, cand.item_id, exc)
-                return None
-            if resp.status_code >= 400:
-                logger.debug("站点 %s 下载 HTTP %d", site.name, resp.status_code)
-                return None
-            content = resp.content
-            if content.startswith(b"d"):
+            content = await self._try_download_url(
+                adapter, cand.torrent_url, site.name, cand.item_id
+            )
+            if content is not None:
                 return content
-            return None
+            # sign/passkey 过期或权限失效 → 回退到路径 2（adapter 内部会重新抓详情）
 
-        # 路径 2：fallback 到 adapter.download_torrent（mteam 走 genDlToken）
+        # 路径 2：adapter.download_torrent（NexusPHP 重新抓详情拿新 sign；mteam 走 genDlToken）
         item_id = cand.item_id
         if not item_id:
             return None
@@ -420,6 +417,27 @@ class FreeSeedHunter:
         except Exception as exc:
             logger.debug("站点 %s 下载 %s 失败：%s", site.name, item_id, exc)
             return None
+
+    async def _try_download_url(
+        self,
+        adapter: SiteAdapter,
+        url: str,
+        site_name: str,
+        item_id: str | None,
+    ) -> bytes | None:
+        """尝试 GET 已签 URL，返回 bencoded bytes 或 None。"""
+        try:
+            resp = await adapter._client.get(url, timeout=adapter._timeout)
+        except Exception as exc:
+            logger.debug("站点 %s 下载 %s 失败：%s", site_name, item_id, exc)
+            return None
+        if resp.status_code >= 400:
+            logger.debug("站点 %s 下载 HTTP %d", site_name, resp.status_code)
+            return None
+        content = resp.content
+        if content.startswith(b"d"):
+            return content
+        return None
 
     async def _resolve_default_downloader(
         self, session: AsyncSession
