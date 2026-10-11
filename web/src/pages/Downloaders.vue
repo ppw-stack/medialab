@@ -129,6 +129,7 @@ function closeModal() {
 }
 
 async function onTest(record?: Downloader) {
+  if (testing.value) return
   const target = record ?? editing.value
   if (!target) return
   testing.value = true
@@ -222,7 +223,7 @@ const columns = [
           <template v-else-if="column.key === 'action'">
             <a-space>
               <a-button size="small" @click="onEdit(record)">编辑</a-button>
-              <a-button size="small" :disabled="!isImplemented(record.type)" @click="onTest(record)">测连</a-button>
+              <a-button size="small" :loading="testing" :disabled="!isImplemented(record.type)" @click="onTest(record)">测连</a-button>
               <a-popconfirm title="确认删除？" @confirm="onDelete(record.id)">
                 <a-button size="small" danger>删除</a-button>
               </a-popconfirm>
@@ -298,7 +299,7 @@ const columns = [
       <a-card v-if="editing" size="small" style="margin-top: 16px; background: #1f1f1f">
         <a-space direction="vertical" style="width: 100%">
           <a-space>
-            <a-button :loading="testing" @click="onTest">测连（实际适配器 ping）</a-button>
+            <a-button :loading="testing" @click="onTest()">测连（实际适配器 ping）</a-button>
             <a-tag v-if="testResult" :color="testResult.reachable ? 'green' : 'red'">
               {{ testResult.reachable ? '✓ 已连通' : `✗ ${testResult.detail}` }}
             </a-tag>
