@@ -17,12 +17,10 @@ def test_all_expected_tables_registered() -> None:
         "downloader_instances",
         "feeds",
         "free_candidates",
-        "rules",
         "site_window_stats",
         "sites",
         "task_queue",
         "torrents",
-        "trash",
     }
     assert expected <= set(Base.metadata.tables)
 
@@ -74,12 +72,12 @@ def test_foreign_keys_declared(table: str) -> None:
     assert Base.metadata.tables[table].foreign_keys, f"{table} 缺少外键声明"
 
 
-@pytest.mark.parametrize("table", ["downloader_instances", "trash"])
+@pytest.mark.parametrize("table", ["downloader_instances"])
 def test_weak_reference_tables_use_plain_ints(table: str) -> None:
-    """这两张表故意**不**建外键。
+    """下载器表故意**不**建 torrent 外键。
 
-    理由：站点/下载器被删除后，回收站条目必须**保留**。若用外键 +
-    级联删除，历史会随主记录一起消失。因此它们存的是裸 id，
+    理由：下载器被删除后，历史 torrent 仍要**保留**。若用外键 +
+    级联删除，历史会随下载器一起消失。因此存的是裸 id，
     删除由业务层显式处理。
     """
     assert not Base.metadata.tables[table].foreign_keys

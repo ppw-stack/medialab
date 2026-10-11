@@ -41,9 +41,13 @@ COPY README.md ./
 COPY app ./app
 # --reinstall：强制重装 app，绕开 uv 缓存的旧 wheel
 # （uv sync 只哈希 pyproject.toml/uv.lock，不感知 app/ 源码变化）
+# build 期 AppSettings 需要 ENCRYPTION_KEY 才能 import 通过——用占位密钥。
+# runtime 会从 compose env 注入真实密钥。
 RUN --mount=type=cache,target=/root/.cache/uv \
+    ENCRYPTION_KEY=dBLrfJ3DsMCdTTdH9CtRvgyuXrf8Fhan5tfDvyOZxJQ \
     uv sync --no-dev --no-editable --reinstall \
-    && /opt/venv/bin/python -c "import app, app.main; print('import ok:', app.__version__)"
+    && ENCRYPTION_KEY=dBLrfJ3DsMCdTTdH9CtRvgyuXrf8Fhan5tfDvyOZxJQ \
+       /opt/venv/bin/python -c "import app, app.main; print('import ok:', app.__version__)"
 
 
 # ---- Runtime ----

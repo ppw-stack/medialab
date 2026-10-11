@@ -24,12 +24,7 @@ from app.core.logging import configure_logging, get_logger
 from app.core.metrics import render_metrics, state
 from app.db.session import dispose_db, init_db, writer
 from app.services.factory import AdapterFactory, init_factory
-from app.services.jobs import (
-    register_cleanup_jobs,
-    register_free_seed_jobs,
-    register_jobs,
-)
-from app.services.queue_worker import recover_on_start, replay_once
+from app.services.jobs import register_seed_jobs
 from app.services.scheduler import scheduler_center
 from app.services.seed_engine import SeedEngine
 
@@ -70,20 +65,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await migrate_adapter_values()
     state["db_healthy"].set(1 if await writer.healthcheck() else 0)
 
-    # 崩溃恢复：复位中断任务（§6 可靠性、AC-09）
-    await recover_on_start(factory)
-
     engine = SeedEngine(factory)
     if settings.scheduler_enabled:
         scheduler_center.start()
         from app.services.free_seed_hunter import FreeSeedHunter
-        from app.services.window_watcher import WindowWatcher
 
         hunter = FreeSeedHunter(factory)
-        watcher = WindowWatcher(factory)
-        register_jobs(engine, lambda: replay_once(factory))
-        register_free_seed_jobs(hunter, watcher)
-        register_cleanup_jobs(factory)
+        register_seed_jobs(engine, hunter)
 
     try:
         yield
@@ -131,7 +119,6 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 def _mount_routes(app: FastAPI) -> None:
     from app.api.auth import router as auth_router
     from app.api.routes import (
-        cleanup,
         cross_seed,
         dashboard,
         downloaders,
@@ -147,7 +134,6 @@ def _mount_routes(app: FastAPI) -> None:
         downloaders.router,
         cross_seed.router,
         free_seed.router,
-        cleanup.router,
     ):
         app.include_router(router, prefix="/api/v1")
     app.include_router(auth_router)  # 自身已含 /api/v1 前缀

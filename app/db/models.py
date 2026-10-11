@@ -119,44 +119,6 @@ class Decision:
     FAILED = "failed"
 
 
-class CleanupTrigger:
-    """清理触发源（FR-5.1）：用于规则匹配与统计。"""
-
-    AUTO_SEED = "auto_seed"
-    FREE_SEED = "free_seed"
-    MANUAL = "manual"
-    #: FR-4.1 异常自动处置（M3 已枚举）
-    CLIENT_ERROR = "client_error"
-    TORRENT_DELETED = "torrent_deleted"
-    TORRENT_ERROR = "torrent_error"
-    #: FR-5.3 空间压力触发的清理
-    SPACE_PRESSURE = "space_pressure"
-    #: FR-5.4 报告/汇总
-    REPORT = "report"
-
-
-class CleanupStatus:
-    """FR-5.1 / FR-5.2.4：清理任务状态机。"""
-
-    PENDING = "pending"            # 干跑完成，等待用户确认
-    CONFIRMED = "confirmed"        # 用户已二次确认，待执行
-    RUNNING = "running"            # 正在执行
-    DONE = "done"                  # 完成
-    FAILED = "failed"              # 执行失败
-    CANCELLED = "cancelled"        # 用户取消
-    SKIPPED = "skipped"            # 保护机制触发，跳过
-
-
-class CleanupAction:
-    """FR-5.2 全部动作类型。"""
-
-    DRY_RUN = "dry_run"
-    CONFIRM = "confirm"
-    TRASH = "trash"
-    PURGE = "purge"
-    RESTORE = "restore"
-
-
 #: 永久免费不参与超时中止（FR-3.0 / R10）
 NON_ABORTABLE_FREE_TYPES: Final = frozenset({FreeType.PERMANENT, FreeType.NEUTRAL})
 
@@ -344,121 +306,6 @@ class FeedItemRecord(Base):
     seen_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
-class Trash(Base):
-    """回收站（FR-5.2.3 / FR-3.5 中止数据隔离）。"""
-
-    __tablename__ = "trash"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    info_hash: Mapped[str] = mapped_column(String(64), index=True)
-    torrent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    site_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    name: Mapped[str | None] = mapped_column(String(1024), nullable=True)
-    size: Mapped[int] = mapped_column(BigInteger, default=0)
-    original_path: Mapped[str] = mapped_column(String(1024))
-    trash_path: Mapped[str] = mapped_column(String(1024))
-    trigger_source: Mapped[str] = mapped_column(String(32), default=TriggerSource.RULE)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
-    expire_at: Mapped[datetime] = mapped_column(DateTime)
-    restored: Mapped[bool] = mapped_column(Boolean, default=False)
-    purged: Mapped[bool] = mapped_column(Boolean, default=False)
-
-
-class CleanupPolicy(Base):
-    """清理策略（单行，FR-5.2 全局配置）。"""
-
-    __tablename__ = "cleanup_policy"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
-    #: FR-5.2.2 新规则首次启用强制干跑
-    dry_run_on_first_use: Mapped[bool] = mapped_column(Boolean, default=True)
-    #: FR-5.2.4 二次确认阈值（任务数）
-    batch_limit: Mapped[int] = mapped_column(Integer, default=20)
-    #: FR-5.2.4 二次确认阈值（释放空间 / 字节）
-    space_limit: Mapped[int] = mapped_column(BigInteger, default=200 * 1024**3)
-    #: FR-5.2.6 禁删保护期（小时）
-    protect_hours: Mapped[int] = mapped_column(Integer, default=12)
-    #: FR-5.2.3 回收站保留期（天）
-    trash_retention_days: Mapped[int] = mapped_column(Integer, default=7)
-    #: FR-5.3 磁盘低水位（字节）
-    low_water: Mapped[int] = mapped_column(BigInteger, default=50 * 1024**3)
-    #: FR-5.3 回升目标（字节）
-    high_water: Mapped[int] = mapped_column(BigInteger, default=100 * 1024**3)
-    #: 默认清理源（FR-5.1 维度 1）：默认不含手动任务
-    default_sources: Mapped[str] = mapped_column(String(64), default="auto_seed,free_seed")
-
-
-class CleanupRule(Base):
-    """FR-5.1 清理规则。
-
-    ``when`` 存 JSON DSL，按字段嵌套匹配；具体 DSL 见
-    :class:`~app.services.cleanup.RuleEngine`。新增字段需向后兼容——
-    引擎对未知字段应跳过而非报错。
-    """
-
-    __tablename__ = "cleanup_rules"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    name: Mapped[str] = mapped_column(String(128))
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    priority: Mapped[int] = mapped_column(Integer, default=100)
-    #: DSL 条件表达式，如 {"ratio_gte": 3.0, "seeding_days_gte": 30}
-    when: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
-    #: 已完成干跑（FR-5.2.2）
-    dry_run_done: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
-
-
-class CleanupConfirmation(Base):
-    """FR-5.2.4 二次确认队列。
-
-    单次清理涉及任务数 / 空间超阈值时，**不执行**，写一条记录供人工确认。
-    用户在面板点击"确认"才真正执行。
-    """
-
-    __tablename__ = "cleanup_confirmations"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
-    rule_id: Mapped[int | None] = mapped_column(
-        ForeignKey("cleanup_rules.id", ondelete="SET NULL"), nullable=True
-    )
-    rule_name: Mapped[str] = mapped_column(String(128))
-    trigger_source: Mapped[str] = mapped_column(String(32))
-    affected_count: Mapped[int] = mapped_column(Integer, default=0)
-    estimated_space: Mapped[int] = mapped_column(BigInteger, default=0)
-    #: 待删除任务的 infohash 列表（JSON）—— 确认时按此执行，避免重算
-    affected_hashes: Mapped[list[str]] = mapped_column(JSON, default=list)
-    #: FR-5.2.5c 下载根目录：执行时校验
-    download_root: Mapped[str] = mapped_column(String(512))
-    status: Mapped[str] = mapped_column(
-        String(16), default=CleanupStatus.PENDING
-    )
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-
-
-class CleanupLog(Base):
-    """清理动作审计日志（FR-5.4 报告 / 排障）。
-
-    与 :class:`Trash` 的区别：本表记录**所有**清理决策的结果（含白名单
-    拦截、保护期、二次确认路径失败的），便于追溯"为什么没删 / 为什么删了"。
-    """
-
-    __tablename__ = "cleanup_logs"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
-    rule_id: Mapped[int | None] = mapped_column(
-        ForeignKey("cleanup_rules.id", ondelete="SET NULL"), nullable=True
-    )
-    rule_name: Mapped[str] = mapped_column(String(128))
-    action: Mapped[str] = mapped_column(String(16))  # CleanupAction.*
-    trigger_source: Mapped[str] = mapped_column(String(32))
-    affected: Mapped[list[str]] = mapped_column(JSON, default=list)
-    freed_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
-    result: Mapped[str] = mapped_column(String(16))  # CleanupStatus.*
-    error: Mapped[str] = mapped_column(String(512), default="")
-
 
 class Feed(Base):
     """RSS 源（FR-2.2）。"""
@@ -531,20 +378,6 @@ class SiteWindowStat(Base):
         DateTime, default=_utcnow, onupdate=_utcnow
     )
 
-
-class Rule(Base):
-    """清理/告警规则（FR-5.1）。"""
-
-    __tablename__ = "rules"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    name: Mapped[str] = mapped_column(String(128))
-    kind: Mapped[str] = mapped_column(String(32), default="cleanup")
-    priority: Mapped[int] = mapped_column(Integer, default=100)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    dry_run_done: Mapped[bool] = mapped_column(Boolean, default=False)
-    when: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
 class TaskQueue(Base):
