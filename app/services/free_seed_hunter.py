@@ -329,15 +329,15 @@ class FreeSeedHunter:
                         tags=tags,
                     )
                 )
-            except DownloaderError:
+            except DownloaderError as exc:
                 cand.status = CandidateStatus.FAILED
-                cand.reject_reason = "add_torrent 失败"
+                cand.reject_reason = str(exc)[:64]
                 return PushResult(
-                    candidate_id=candidate_id, success=False, error="add_torrent 失败"
+                    candidate_id=candidate_id, success=False, error=str(exc)
                 )
             except Exception as exc:
                 cand.status = CandidateStatus.FAILED
-                cand.reject_reason = f"add_torrent 失败：{exc}"
+                cand.reject_reason = f"add_torrent 失败：{exc}"[:64]
                 return PushResult(
                     candidate_id=candidate_id,
                     success=False,
