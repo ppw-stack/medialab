@@ -8,6 +8,7 @@ import base64
 import pytest_asyncio
 from app.core.auth import (
     hash_password,
+    init_hmac_key,
     make_session,
     verify_password,
     verify_session,
@@ -29,6 +30,7 @@ def test_password_hash_and_verify() -> None:
 
 def test_make_and_verify_session() -> None:
     """Session token 签名 + 过期校验。"""
+    init_hmac_key("test-encryption-key-for-session-hmac")
     token = make_session()
     assert verify_session(token) is True
     # 篡改 → False

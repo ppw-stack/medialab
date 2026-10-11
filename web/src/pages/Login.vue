@@ -9,7 +9,14 @@ const loading = ref(false)
 const form = reactive({ username: '', password: '' })
 
 async function submitLogin() {
-  if (!form.username || !form.password) return
+  if (!form.username) {
+    message.warning('请输入用户名')
+    return
+  }
+  if (!form.password) {
+    message.warning('请输入密码')
+    return
+  }
   loading.value = true
   try {
     await auth.login(form.username, form.password)

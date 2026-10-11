@@ -15,9 +15,38 @@ _RESERVED: Final = frozenset(
     logging.LogRecord("", 0, "", 0, "", (), None).__dict__
 ) | {"asctime", "message", "taskName"}
 
+#: 任何 key 命中（大小写不敏感）都脱敏为占位符
+_SECRET_KEYS: Final = frozenset({
+    "password",
+    "token",
+    "cookie",
+    "cookies",
+    "cookies_enc",
+    "apikey",
+    "apikey_enc",
+    "authorization",
+    "secret",
+    "encryption_key",
+    "rss_url_enc",
+    "password_enc",
+    "session",
+})
+
+
+def _scrub(value: Any) -> Any:
+    """递归清洗 dict/list/tuple 中的敏感字段。"""
+    if isinstance(value, dict):
+        return {
+            k: ("***" if k.lower() in _SECRET_KEYS else _scrub(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_scrub(x) for x in value]
+    return value
+
 
 class JsonFormatter(logging.Formatter):
-    """把 extra 字段并入 JSON 输出。"""
+    """把 extra 字段并入 JSON 输出，并对敏感字段脱敏。"""
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
@@ -30,7 +59,7 @@ class JsonFormatter(logging.Formatter):
             payload["exc"] = self.formatException(record.exc_info)
         for key, value in record.__dict__.items():
             if key not in _RESERVED and not key.startswith("_"):
-                payload[key] = value
+                payload[key] = _scrub(value)
         return json.dumps(payload, ensure_ascii=False, default=str)
 
 

@@ -86,17 +86,21 @@ async function onDelete(id: number) {
 }
 
 async function onSave() {
-  if (creating.value) {
-    await api.post('/sites', formState)
-    message.success('已创建')
-  } else if (editing.value) {
-    await api.post('/sites/update', { id: editing.value.id, ...formState })
-    message.success('已更新')
+  try {
+    if (creating.value) {
+      await api.post('/sites', formState)
+      message.success('已创建')
+    } else if (editing.value) {
+      await api.post('/sites/update', { id: editing.value.id, ...formState })
+      message.success('已更新')
+    }
+    creating.value = false
+    editing.value = null
+    modalOpen.value = false
+    load()
+  } catch (exc) {
+    message.error(exc instanceof Error ? exc.message : '保存失败')
   }
-  creating.value = false
-  editing.value = null
-  modalOpen.value = false
-  load()
 }
 
 async function onTest() {
@@ -112,6 +116,8 @@ async function onTest() {
       detail: r.detail,
       cap: r.self_test,
     }
+  } catch (exc) {
+    message.error(exc instanceof Error ? exc.message : '测连失败')
   } finally {
     testing.value = false
   }

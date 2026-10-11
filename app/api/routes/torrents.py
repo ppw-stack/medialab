@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
@@ -41,14 +41,14 @@ class TorrentOut(BaseModel):
 
 @router.get("", summary="任务列表（多维筛选 + 服务端分页）")
 async def list_torrents(
-    site_id: int | None = None,
-    downloader_id: int | None = None,
-    source: str | None = None,
-    status: str | None = None,
-    q: str | None = None,
+    site_id: int | None = Query(default=None, ge=1),
+    downloader_id: int | None = Query(default=None, ge=1),
+    source: str | None = Query(default=None, max_length=16),
+    status: str | None = Query(default=None, max_length=24),
+    q: str | None = Query(default=None, max_length=128),
     include_deleted: bool = False,
-    page: int = 1,
-    page_size: int = 50,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, Any]:
     """任务列表。
 
@@ -372,7 +372,7 @@ async def _batch_remove(
         )
 
     now = utcnow()
-    by_dl: dict[int, list[str]] = []
+    by_dl: dict[int, list[str]] = {}
     protect_blocked: list[str] = []
     torrent_hashes: set[str] = set()
 

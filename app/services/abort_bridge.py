@@ -85,7 +85,10 @@ async def _execute_one_abort(
     """
     t = (
         await session.execute(
-            select(Torrent).where(Torrent.info_hash == info_hash)
+            select(Torrent).where(
+                Torrent.info_hash == info_hash,
+                Torrent.site_id == site_id,  # 防御：站点不匹配视为过期任务
+            )
         )
     ).scalar_one_or_none()
     if t is None:

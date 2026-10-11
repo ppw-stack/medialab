@@ -56,6 +56,8 @@ class AppSettings(BaseSettings):
     web_username: str = "admin"
     web_password: SecretStr | None = None
     web_token: SecretStr | None = None
+    # -- 前端静态资源路径（FR-6.1 SPA 托管）--
+    frontend_dist: Path = Path("/app/web/dist")
 
     # -- 凭据加密（FR-7.1）--
     encryption_key: SecretStr = Field(
@@ -91,6 +93,18 @@ class AppSettings(BaseSettings):
             CredentialCipher(raw)
         except ValueError as exc:
             raise ValueError(f"{exc}；生成命令：{KEY_HINT}") from exc
+        return v
+
+    @field_validator("web_username")
+    @classmethod
+    def _warn_default_admin(cls, v: str) -> str:
+        """安全提示：默认 admin 用户名需在生产环境修改；不阻塞启动，仅打日志。"""
+        import logging
+
+        if v == "admin":
+            logging.getLogger(__name__).warning(
+                "WEB_USERNAME 使用默认值 'admin'，建议在生产环境改为唯一值"
+            )
         return v
 
     @field_validator("log_level")

@@ -104,12 +104,15 @@ class MteamAdapter(SiteAdapter):
         domain = (self.profile.domain or "").strip()
         if not domain:
             return ""
+        # 先剥 scheme，避免 domain 含 https:// 时拼出双 scheme
+        domain = domain.removeprefix("https://").removeprefix("http://")
         host = domain if domain.startswith("api.") else f"api.{domain}"
-        host = host.replace("https://", "").replace("http://", "")
         return f"https://{host}"
 
     def _detail_url(self, item_id: str) -> str:
-        return f"https://{self.profile.domain}/detail/{item_id}"
+        domain = (self.profile.domain or "").strip()
+        domain = domain.removeprefix("https://").removeprefix("http://")
+        return f"https://{domain}/detail/{item_id}"
 
     def _auth_headers(self) -> dict[str, str]:
         h: dict[str, str] = {}

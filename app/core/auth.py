@@ -18,8 +18,11 @@ from typing import Final
 
 SESSION_COOKIE: Final = "seedhelper_session"
 SESSION_MAX_AGE: Final = 24 * 3600  # 24h
-#: 默认 HMAC 盐（启动时由 init_hmac_key 从 ENCRYPTION_KEY 派生覆盖）
-_hmac_key: bytes = b"seedhelper-v0.1-salt"
+#: OWASP 2023+ 推荐 PBKDF2-HMAC-SHA256 ≥ 600,000 次
+PBKDF2_ITERATIONS: Final = 600_000
+
+#: HMAC key 由 init_hmac_key() 派生；未派生时为 None → make/verify 直接抛错
+_hmac_key: bytes | None = None
 
 
 def init_hmac_key(encryption_key: str) -> None:
@@ -28,11 +31,21 @@ def init_hmac_key(encryption_key: str) -> None:
     _hmac_key = hashlib.sha256(encryption_key.encode() + b"session-hmac").digest()
 
 
+def _require_key() -> bytes:
+    if _hmac_key is None:
+        raise RuntimeError(
+            "HMAC key 未初始化：必须在 lifespan 中先调用 init_hmac_key()"
+        )
+    return _hmac_key
+
+
 def hash_password(password: str) -> str:
-    """PBKDF2-HMAC-SHA256：盐 + 迭代。"""
+    """PBKDF2-HMAC-SHA256：盐 + 迭代（OWASP 推荐 600k）。"""
     salt = os.urandom(16)
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 120_000)
-    return f"pbkdf2$120000${salt.hex()}${dk.hex()}"
+    dk = hashlib.pbkdf2_hmac(
+        "sha256", password.encode(), salt, PBKDF2_ITERATIONS
+    )
+    return f"pbkdf2${PBKDF2_ITERATIONS}${salt.hex()}${dk.hex()}"
 
 
 def verify_password(password: str, stored: str) -> bool:
@@ -40,7 +53,9 @@ def verify_password(password: str, stored: str) -> bool:
         algo, iters, salt_hex, dk_hex = stored.split("$")
         salt = bytes.fromhex(salt_hex)
         expected = bytes.fromhex(dk_hex)
-        got = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, int(iters))
+        got = hashlib.pbkdf2_hmac(
+            "sha256", password.encode(), salt, int(iters)
+        )
     except (ValueError, TypeError):
         return False
     if algo != "pbkdf2":
@@ -69,10 +84,14 @@ def verify_session(token: str) -> bool:
         return False
     if exp < time.time():
         return False
-    expected = _sign(nonce, exp)
+    try:
+        expected = _sign(nonce, exp)
+    except RuntimeError:
+        # HMAC 未初始化 = 服务端配置错误 → 拒绝所有 session
+        return False
     return hmac.compare_digest(sig, expected)
 
 
 def _sign(nonce: str, expires: int) -> str:
     msg = f"{nonce}:{expires}".encode()
-    return hmac.new(_hmac_key, msg, hashlib.sha256).hexdigest()
+    return hmac.new(_require_key(), msg, hashlib.sha256).hexdigest()

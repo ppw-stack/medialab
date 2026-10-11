@@ -153,5 +153,6 @@ def install_static(app, *, path: str = "/app/web/dist") -> None:
     logger.info("前端 SPA 静态托管已挂载（来源：%s）", path)
 
 
-#: ``auto_error=False`` 让 ``session`` 可能是 None，便于开发模式
-Depends_session = Depends(require_session)
+#: ``Depends(require_session)`` 直接在路由用 ``dependencies=[Depends(require_session)]`` 即可，
+#: 不再导出额外别名。
+_HMAC_AUTH_ALIAS = Depends(require_session)  # 保留向后引用占位

@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from app.adapters.sites import resolve as resolve_site_adapter
 from app.adapters.sites.base import SiteProfile
 from app.api.auth import require_session
 from app.core.config import get_settings
 from app.core.crypto import build_cipher, mask_secret
-from app.db.models import Feed, Site
+from app.core.logging import get_logger
+from app.db.models import Feed, FreeCandidate, Site, Torrent
 from app.db.session import session_scope
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/sites", dependencies=[Depends(require_session)], tags=["sites"])
 
@@ -42,6 +46,10 @@ class SiteUpdate(BaseModel):
     adapter: Literal["mteam", "hhanclub", "hdsky", "ourbits"] | None = None
 
 
+class SiteDeleteIn(BaseModel):
+    id: int = Field(..., ge=1)
+
+
 class SiteOut(BaseModel):
     id: int
     name: str
@@ -52,8 +60,8 @@ class SiteOut(BaseModel):
     has_apikey: bool
     has_cookies: bool
     min_interval_minutes: int
-    created_at: str
-    updated_at: str
+    created_at: datetime
+    updated_at: datetime
 
 
 @router.get("", summary="站点列表（凭据脱敏）")
@@ -64,19 +72,36 @@ async def list_sites() -> list[SiteOut]:
 
 
 @router.post("/delete", summary="删除站点")
-async def delete_site(payload: dict) -> dict[str, int]:
-    site_id = payload.get("id") if isinstance(payload, dict) else None
-    if site_id is None:
-        raise HTTPException(status_code=400, detail="id 必填")
+async def delete_site(payload: SiteDeleteIn) -> dict[str, int]:
     async with session_scope() as session:
         site = (
-            await session.execute(select(Site).where(Site.id == site_id))
+            await session.execute(select(Site).where(Site.id == payload.id))
         ).scalar_one_or_none()
         if site is None:
             raise HTTPException(status_code=404, detail="站点不存在")
-        await session.execute(delete(Feed).where(Feed.site_id == site_id))
+        # 检查引用：torrent / free_candidate 都依赖 site_id
+        torrent_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(Torrent)
+                .where(Torrent.site_id == payload.id)
+            )
+        ).scalar_one()
+        candidate_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(FreeCandidate)
+                .where(FreeCandidate.site_id == payload.id)
+            )
+        ).scalar_one()
+        if torrent_count or candidate_count:
+            raise HTTPException(
+                status_code=409,
+                detail=f"站点下还有 {torrent_count} 条任务、{candidate_count} 个 free 候选，请先清理",
+            )
+        await session.execute(delete(Feed).where(Feed.site_id == payload.id))
         await session.delete(site)
-    return {"id": site_id}
+    return {"id": payload.id}
 
 
 @router.post("", status_code=201, summary="新增站点")
@@ -192,14 +217,16 @@ async def test_site(site_id: int) -> dict[str, Any]:
             apikey = cipher.try_decrypt(
                 site.apikey_enc, owner_type="site", owner_id=site.name
             )
-        except Exception:
+        except Exception as exc:
+            logger.warning("站点 %s apikey 解密失败：%s", site.name, exc)
             apikey = None
     if site.cookies_enc:
         try:
             cookies = cipher.try_decrypt(
                 site.cookies_enc, owner_type="site", owner_id=site.name
             )
-        except Exception:
+        except Exception as exc:
+            logger.warning("站点 %s cookies 解密失败：%s", site.name, exc)
             cookies = None
     adapter = adapter_cls(profile, cookies=cookies, apikey=apikey)
     try:
@@ -240,6 +267,6 @@ def _to_out(site: Site, raw: str | None) -> SiteOut:
         has_apikey=bool(site.apikey_enc),
         has_cookies=bool(site.cookies_enc),
         min_interval_minutes=site.min_interval_minutes,
-        created_at=site.created_at.isoformat() if site.created_at else "",
-        updated_at=site.updated_at.isoformat() if site.updated_at else "",
+        created_at=site.created_at or datetime.min,
+        updated_at=site.updated_at or datetime.min,
     )

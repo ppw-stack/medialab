@@ -228,10 +228,10 @@ class HdskyAdapter(SiteAdapter):
         items: list[FeedItem] = []
         seen: set[str] = set()
 
-        for a in sel.css('a[href*="details.php?id="][title]'):
+        for a in sel.css('a[href^="details.php?id="][title]'):
             href = a.attrib.get("href", "")
             m = _DETAILS_ID_RE.search(href)
-            if not m:
+            if not m or "userdetails.php" in href:
                 continue
             item_id = m.group(1)
             if item_id in seen:

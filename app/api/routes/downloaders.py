@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.downloaders.base import (
@@ -17,7 +18,7 @@ from app.adapters.downloaders.base import (
 from app.api.auth import require_session
 from app.core.config import get_settings
 from app.core.crypto import build_cipher
-from app.db.models import DownloaderInstance
+from app.db.models import DownloaderInstance, Torrent
 from app.db.session import session_scope
 from app.services.factory import get_factory
 
@@ -67,8 +68,8 @@ class DownloaderOut(BaseModel):
     is_default: bool
     enabled: bool
     verify_tls: bool
-    created_at: str
-    updated_at: str
+    created_at: datetime
+    updated_at: datetime
 
 
 def _to_out(row: DownloaderInstance) -> DownloaderOut:
@@ -83,8 +84,8 @@ def _to_out(row: DownloaderInstance) -> DownloaderOut:
         is_default=row.is_default,
         enabled=row.enabled,
         verify_tls=row.verify_tls,
-        created_at=row.created_at.isoformat() if row.created_at else "",
-        updated_at=row.updated_at.isoformat() if row.updated_at else "",
+        created_at=row.created_at or datetime.min,
+        updated_at=row.updated_at or datetime.min,
     )
 
 
@@ -196,23 +197,39 @@ async def update_downloader(payload: DownloaderUpdate) -> DownloaderOut:
         return _to_out(row)
 
 
+class DownloaderDeleteIn(BaseModel):
+    id: int = Field(..., ge=1)
+
+
 @router.post("/delete", summary="删除下载器")
-async def delete_downloader(payload: dict) -> dict[str, int]:
-    downloader_id = payload.get("id") if isinstance(payload, dict) else None
-    if downloader_id is None:
-        raise HTTPException(status_code=400, detail="id 必填")
+async def delete_downloader(payload: DownloaderDeleteIn) -> dict[str, int]:
     async with session_scope() as session:
         row = (
             await session.execute(
                 select(DownloaderInstance).where(
-                    DownloaderInstance.id == downloader_id
+                    DownloaderInstance.id == payload.id
                 )
             )
         ).scalar_one_or_none()
         if row is None:
             raise HTTPException(status_code=404, detail="下载器不存在")
-        await session.delete(row)
-    return {"id": downloader_id}
+        # 检查引用：有任务绑定则拒绝物理删除
+        ref_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(Torrent)
+                .where(Torrent.downloader_id == payload.id)
+            )
+        ).scalar_one()
+        if ref_count:
+            raise HTTPException(
+                status_code=409,
+                detail=f"下载器下还有 {ref_count} 条任务，请先清理或迁移后再删除",
+            )
+        await session.execute(
+            delete(DownloaderInstance).where(DownloaderInstance.id == payload.id)
+        )
+    return {"id": payload.id}
 
 
 @router.post("/{downloader_id}/test", summary="测连（验证 URL + 凭据）")

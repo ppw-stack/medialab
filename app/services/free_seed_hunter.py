@@ -427,14 +427,10 @@ class FreeSeedHunter:
     ) -> bytes | None:
         """尝试 GET 已签 URL，返回 bencoded bytes 或 None。"""
         try:
-            resp = await adapter._client.get(url, timeout=adapter._timeout)
+            content = await adapter.download_torrent_url(url)
         except Exception as exc:
             logger.debug("站点 %s 下载 %s 失败：%s", site_name, item_id, exc)
             return None
-        if resp.status_code >= 400:
-            logger.debug("站点 %s 下载 HTTP %d", site_name, resp.status_code)
-            return None
-        content = resp.content
         if content.startswith(b"d"):
             return content
         return None

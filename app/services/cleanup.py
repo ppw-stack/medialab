@@ -618,6 +618,22 @@ class Cleaner:
         error: str = "",
     ) -> None:
         rule_name = getattr(rule, "name", "") if rule else ""
+        rule_id = getattr(rule, "id", None) if rule else None
+        # 落库：审计查询依赖此表，仅日志不够
+        from app.db.models import CleanupLog
+
+        self._session.add(
+            CleanupLog(
+                rule_id=rule_id if isinstance(rule_id, int) else None,
+                rule_name=rule_name,
+                action=action,
+                trigger_source=trigger,
+                affected=affected,
+                freed_bytes=freed,
+                result=result,
+                error=error[:512] if error else "",
+            )
+        )
         logger.info(
             "清理动作 action=%s trigger=%s rule=%s affected=%d freed=%d result=%s%s",
             action, trigger, rule_name, len(affected), freed, result,

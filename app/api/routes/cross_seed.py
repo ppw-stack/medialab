@@ -109,8 +109,13 @@ async def test_feed(site_id: int) -> FeedTestResult:
     factory: AdapterFactory = get_factory()
     try:
         url = factory.site_rss_url(site)
-    except Exception as exc:
+    except (ValueError, AttributeError, KeyError, TypeError) as exc:
+        # 已知：凭据缺失/格式错误/字段缺失
+        logger.warning("站点 %s 凭据解析失败：%s", site.name, exc)
         return FeedTestResult(ok=False, status="credential_error", error=str(exc))
+    except Exception as exc:
+        logger.exception("站点 %s RSS 测试内部异常", site.name)
+        return FeedTestResult(ok=False, status="internal_error", error="RSS URL 生成失败")
 
     adapter = factory.site(site)
     fetcher = FeedFetcher(site.name)
@@ -157,8 +162,7 @@ async def scheduler_status() -> dict[str, Any]:
     from app.services.scheduler import scheduler_center
 
     settings = get_settings()
-    cipher = build_cipher(settings)  # 确认密钥可用（FR-7.1）
-    _ = cipher
+    # 启动期已在 lifespan 中执行 cipher smoke test，这里不再重复构建
     return {
         "enabled": settings.scheduler_enabled,
         "jobs": scheduler_center.list_jobs(),

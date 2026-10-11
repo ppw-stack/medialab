@@ -92,13 +92,17 @@ async def update_policy(payload: CleanupPolicyIn) -> CleanupPolicyOut:
 # ---------------------------------------------------------------- 规则
 class RuleIn(BaseModel):
     id: int | None = None  # 更新/删除时携带
-    name: str
+    name: str = Field(min_length=1, max_length=128)
     when: dict[str, Any] = Field(
         default_factory=dict,
         description="DSL 条件：ratio_gte / seeding_days_gte / size_gte / status / category_eq 等",
     )
     enabled: bool = True
-    priority: int = 100
+    priority: int = Field(default=100, ge=0, le=10000)
+
+
+class RuleDeleteIn(BaseModel):
+    id: int = Field(..., ge=1)
 
 
 class RuleOut(BaseModel):
@@ -199,14 +203,11 @@ async def update_rule(payload: RuleIn) -> RuleOut:
 
 
 @router.post("/rules/delete", summary="删除规则")
-async def delete_rule(payload: dict) -> dict[str, bool]:
-    rule_id = payload.get("id") if isinstance(payload, dict) else None
-    if rule_id is None:
-        raise HTTPException(status_code=400, detail="id 必填")
+async def delete_rule(payload: RuleDeleteIn) -> dict[str, bool]:
     async with session_scope() as session:
         rule = (
             await session.execute(
-                select(CleanupRule).where(CleanupRule.id == rule_id)
+                select(CleanupRule).where(CleanupRule.id == payload.id)
             )
         ).scalar_one_or_none()
         if rule is None:

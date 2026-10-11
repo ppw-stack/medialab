@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
 from app import __version__
@@ -110,10 +111,20 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
+    # CORS：同源部署时无作用；分离部署（dev 前端 / 反代场景）显式允许 origin
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            f"http://{get_settings().web_host}:{get_settings().web_port}",
+        ],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PATCH", "DELETE"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+
     from app.api.auth import install_static
     _mount_routes(app)
-    import os as _os
-    install_static(app, path=_os.environ.get("FRONTEND_DIST", "/app/web/dist"))
+    install_static(app, path=str(get_settings().frontend_dist))
     return app
 
 

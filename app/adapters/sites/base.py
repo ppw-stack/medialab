@@ -134,6 +134,18 @@ class SiteAdapter(ABC):
         失败时抛出异常或返回 ``b""``。
         """
 
+    async def download_torrent_url(self, url: str) -> bytes:
+        """下载已签名的 .torrent URL（绕过裸 /download.php 的 404）。
+
+        默认实现走内部 ``_client``；子类可覆盖以注入站点特定的 headers
+        （referer / cookies）。失败时抛出异常。
+        """
+        import httpx
+
+        resp = await self._client.get(url, timeout=self._timeout)
+        resp.raise_for_status()
+        return resp.content
+
     @abstractmethod
     async def check_status(self, item_id: str) -> TorrentBrief:
         """4. 种子状态检查（按站内 ID）。

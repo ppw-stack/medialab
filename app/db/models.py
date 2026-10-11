@@ -421,7 +421,7 @@ class CleanupConfirmation(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     rule_id: Mapped[int | None] = mapped_column(
-        ForeignKey("cleanup_rules.id"), nullable=True
+        ForeignKey("cleanup_rules.id", ondelete="SET NULL"), nullable=True
     )
     rule_name: Mapped[str] = mapped_column(String(128))
     trigger_source: Mapped[str] = mapped_column(String(32))
@@ -435,6 +435,29 @@ class CleanupConfirmation(Base):
         String(16), default=CleanupStatus.PENDING
     )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class CleanupLog(Base):
+    """清理动作审计日志（FR-5.4 报告 / 排障）。
+
+    与 :class:`Trash` 的区别：本表记录**所有**清理决策的结果（含白名单
+    拦截、保护期、二次确认路径失败的），便于追溯"为什么没删 / 为什么删了"。
+    """
+
+    __tablename__ = "cleanup_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    rule_id: Mapped[int | None] = mapped_column(
+        ForeignKey("cleanup_rules.id", ondelete="SET NULL"), nullable=True
+    )
+    rule_name: Mapped[str] = mapped_column(String(128))
+    action: Mapped[str] = mapped_column(String(16))  # CleanupAction.*
+    trigger_source: Mapped[str] = mapped_column(String(32))
+    affected: Mapped[list[str]] = mapped_column(JSON, default=list)
+    freed_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    result: Mapped[str] = mapped_column(String(16))  # CleanupStatus.*
+    error: Mapped[str] = mapped_column(String(512), default="")
 
 
 class Feed(Base):

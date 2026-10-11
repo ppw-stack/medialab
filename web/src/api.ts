@@ -21,7 +21,8 @@ export async function apiFetch<T = unknown>(
   });
 
   if (resp.status === 401) {
-    window.location.href = "/login";
+    // 不要 full-reload：保留 SPA 路由栈，由登录页组件处理跳转。
+    // 全量 reload 会丢失登录前发出的 in-flight fetch 与滚动状态。
     throw new ApiError(401, "未登录");
   }
 

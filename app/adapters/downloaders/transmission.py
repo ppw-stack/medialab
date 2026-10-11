@@ -144,9 +144,13 @@ class TransmissionAdapter(DownloaderAdapter):
                 metainfo = base64.b64encode(payload.torrent_bytes).decode()
                 result = await self._tr.add_torrent(metainfo=metainfo, **kwargs)
             elif payload.urls:
-                result = await self._tr.add_torrent(
-                    filename=payload.urls[0], **kwargs
-                )
+                # Transmission 一次只接受一个 filename；多个 URL 顺序逐个加入
+                result = {}
+                for url in payload.urls:
+                    single = await self._tr.add_torrent(filename=url, **kwargs)
+                    if single:
+                        result = single
+                        break
             else:
                 raise DownloaderError("添加任务缺少 urls 或 torrent_bytes")
         except TrApiError as exc:
@@ -183,7 +187,7 @@ class TransmissionAdapter(DownloaderAdapter):
                 tags=tags,
                 dlspeed=int(row.get("rateDownload") or 0),
                 upspeed=int(row.get("rateUpload") or 0),
-                num_seeds=int(row.get("peersConnected") or 0),
+                num_seeds=int(row.get("peersSendingToUs") or 0),
                 num_connections=int(row.get("peersConnected") or 0),
                 ratio=float(row.get("uploadRatio") or 0),
                 added_at=row.get("addedDate"),

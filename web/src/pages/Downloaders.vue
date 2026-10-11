@@ -92,9 +92,13 @@ function onEdit(d: Downloader) {
 }
 
 async function onDelete(id: number) {
-  await api.post('/downloaders/delete', { id })
-  message.success('已删除')
-  load()
+  try {
+    await api.post('/downloaders/delete', { id })
+    message.success('已删除')
+    load()
+  } catch (exc) {
+    message.error(exc instanceof Error ? exc.message : '删除失败')
+  }
 }
 
 async function onSave() {

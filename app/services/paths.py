@@ -23,6 +23,9 @@ PLACEHOLDERS = frozenset({"site", "name", "category", "info_hash"})
 _ILLEGAL_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f]')
 #: 路径穿越片段
 _TRAVERSAL = re.compile(r"(^|[\\/])\.\.([\\/]|$)")
+#: Windows 盘符（前缀必须是单字母 + 冒号 + 分隔符），``:`` 在 Linux/macOS
+#: 文件名中合法，仅拒绝这种盘符形态而不是任意冒号。
+_WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
 #: 零宽 / 方向控制字符（钓鱼与显示混淆）。**不得**用裸 `-` 起始字符类，
 #: 否则会连同连字符一起删除（曾把 ``example-pt`` 变成 ``examplept``）。
 _INVISIBLE = re.compile("[\\u00ad\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u2064\\ufeff]")
@@ -68,7 +71,7 @@ def sanitize_segment(value: str, *, fallback: str = "unnamed") -> str:
         raise PathRenderError(f"非法路径段：{value!r}")
     if _TRAVERSAL.search(cleaned):
         raise PathRenderError(f"路径穿越尝试：{value!r}")
-    if cleaned.startswith(("/", "\\")) or ":" in cleaned:
+    if cleaned.startswith(("/", "\\")) or _WINDOWS_DRIVE.match(cleaned):
         raise PathRenderError(f"绝对路径或盘符：{value!r}")
     if len(cleaned) > MAX_SEGMENT:
         cleaned = cleaned[:MAX_SEGMENT].rstrip(". ") or fallback
