@@ -9,6 +9,7 @@ import {
   SettingOutlined,
   LogoutOutlined,
   UserOutlined,
+  DatabaseOutlined,
 } from '@ant-design/icons-vue'
 import { useAuthStore } from '../stores/auth'
 
@@ -22,6 +23,7 @@ const menuItems = [
   { key: '/sites', icon: CloudServerOutlined, label: '站点' },
   { key: '/downloaders', icon: ApiOutlined, label: '下载器' },
   { key: '/torrents', icon: DownloadOutlined, label: '任务' },
+  { key: '/torrent-index', icon: DatabaseOutlined, label: '拉取索引' },
   { key: '/settings', icon: SettingOutlined, label: '设置' },
 ]
 

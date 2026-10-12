@@ -16,6 +16,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'torrents', name: 'torrents', component: () => import('./pages/Torrents.vue') },
       { path: 'settings', name: 'settings', component: () => import('./pages/Settings.vue') },
       { path: 'downloaders', name: 'downloaders', component: () => import('./pages/Downloaders.vue') },
+      { path: 'torrent-index', name: 'torrent-index', component: () => import('./pages/TorrentIndex.vue') },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/' },
