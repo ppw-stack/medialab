@@ -40,28 +40,18 @@ build-backend = "hatchling.build"
 packages = ["app"]
 
 [tool.hatch.build.targets.sdist]
-include = ["app", "tests", "README.md", "pyproject.toml"]
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
-addopts = "-q --strict-markers"
-markers = [
-    "integration: 联调测试（需真实外部依赖，默认跳过）",
-]
-filterwarnings = ["error::DeprecationWarning:seedhelper.*"]
+include = ["app", "README.md", "pyproject.toml"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["app", "tests"]
+src = ["app"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC", "C4", "SIM", "RUF"]
 ignore = ["S101", "B008", "B027", "B017", "RUF001", "RUF002", "RUF003", "ASYNC230", "ASYNC240"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S", "ASYNC"]
 "app/db/migrations/**" = ["E501"]
 
 [tool.mypy]

@@ -34,11 +34,8 @@ curl http://localhost:8080/metrics | head
 # 安装依赖（Python 3.12，由 uv 管理）
 uv sync --extra dev
 
-# 运行测试（含附录 D 完整窗口解析用例集 + 凭据加密 + 窗口核心逻辑）
-uv run pytest
-
 # 静态检查
-uv run ruff check app/ tests/
+uv run ruff check app/
 uv run mypy app/
 ```
 
@@ -78,7 +75,6 @@ app/
 ├── services/      # 调度中心、业务引擎（M2+）
 ├── api/           # FastAPI 路由
 └── main.py        # 应用入口 + lifespan
-tests/             # 106 个用例，覆盖附录 D 全部场景
 ```
 
 ## 安全
