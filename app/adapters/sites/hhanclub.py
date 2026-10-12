@@ -37,6 +37,7 @@ from app.adapters.sites.base import (
     SiteProfile,
     TorrentBrief,
     TorrentDetail,
+    parse_abs_datetime,
     parse_size_text,
 )
 from app.core.logging import get_logger
@@ -264,7 +265,8 @@ class HhanclubAdapter(SiteAdapter):
 
             # ---------------- size / category / published_at: Tailwind 主题
             # <div class="torrent-info-text torrent-info-text-size">32.23 GB</div>
-            # added = 相对时间（"3天17时"），无 title 属性 → published_at 留 None
+            # <div class="torrent-info-text torrent-info-text-added"
+            #      ><span title="2026-10-09 00:54:32">3天18时</span></div>  (发布时间)
             size_bytes = 0
             category: str | None = None
             published_at = None
@@ -278,33 +280,40 @@ class HhanclubAdapter(SiteAdapter):
                         size_bytes = parse_size_text(text)
                     elif "torrent-info-text-cat" in div_classes and text:
                         category = text
-                    elif "torrent-info-text-added" in div_classes and text:
-                        # HHanClub 显示的是相对时间（"3天17时"），不是绝对时刻
-                        # 无 title 属性 — published_at 留 None（业务层不依赖）
-                        pass
+                    elif "torrent-info-text-added" in div_classes:
+                        # added 显示相对时间（"3天18时"），内层 span 带绝对时刻 title
+                        sp = div.find("span", attrs={"title": True})
+                        if sp is not None:
+                            published_at = parse_abs_datetime(
+                                str(sp.get("title") or "")
+                            )
 
-            # 限时绝对时刻：<span title="YYYY-MM-DD HH:MM:SS">
-            remaining_abs: str | None = None
-            if container is not None:
-                for span in container.find_all("span"):
-                    t: str = str(span.get("title") or "")
-                    if _ABS_DATETIME_RE.match(t):
-                        remaining_abs = t
-                        break
-
-            # 免费 class 标记：img class="pro_XXX" 或 font class="free/halfdown/..."
+            # ---------------- 免费标记：promotion-tag-*（HHan 主题）/ pro_* / free 等
             free_classes: list[str] = []
+            remaining_abs: str | None = None
             if container is not None:
                 for tag in container.find_all(class_=True):
                     classes: list[str] = list(tag.get("class") or [])
                     for cls in classes:
-                        if cls in _PROMO_CLASSES:
+                        if cls.startswith("promotion-tag-"):
+                            # promotion-tag-free / -2xfree / -50 / -30 → free/2xfree/50/30
+                            free_classes.append(cls[len("promotion-tag-"):])
+                        elif cls in _PROMO_CLASSES:
                             free_classes.append(cls)
                         elif cls.startswith("pro_"):
-                            # 兼容 hdsky/ourbits 风格
                             mapped = cls[4:]
                             if mapped in _PROMO_CLASSES:
                                 free_classes.append(mapped)
+
+                # 限时剩余时刻：<span title="YYYY-MM-DD HH:MM:SS">（排除发布时间 span）
+                for span in container.find_all("span", attrs={"title": True}):
+                    t: str = str(span.get("title") or "")
+                    if not _ABS_DATETIME_RE.match(t):
+                        continue
+                    if published_at is not None and parse_abs_datetime(t) == published_at:
+                        continue
+                    remaining_abs = t
+                    break
 
             free_payload: dict[str, object] | None = None
             if free_classes or remaining_abs:

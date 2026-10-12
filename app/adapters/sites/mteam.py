@@ -68,6 +68,8 @@ class MteamAdapter(SiteAdapter):
         timeout: float = 20.0,
     ) -> None:
         super().__init__(profile, cookies=cookies, apikey=apikey, timeout=timeout)
+        #: 分类 id → 中文名 缓存（首次 search_torrents 时从 categoryList 拉）
+        self._category_map: dict[str, str] | None = None
         referer_host = self.profile.domain or "m-team.io"
         if "rss." in referer_host:
             referer_host = referer_host.replace("rss.", "", 1)
@@ -122,6 +124,44 @@ class MteamAdapter(SiteAdapter):
         if self._cookies:
             h["Cookie"] = self._cookies
         return h
+
+    async def _load_category_map(self) -> dict[str, str]:
+        """拉取 m-team 分类列表（id → 中文名），缓存到实例。
+
+        搜索接口只返回分类数字 id（如 ``"419"``），此映射把 id 转成可读名称
+        （``nameChs``）。失败时返回空 dict，调用方回退到原始 id。
+        """
+        if self._category_map is not None:
+            return self._category_map
+        empty: dict[str, str] = {}
+        if not (self._apikey and self._api_base()):
+            self._category_map = empty
+            return empty
+        try:
+            resp = await self._client.post(
+                f"{self._api_base()}/api/torrent/categoryList",
+                headers={**self._auth_headers(), "Content-Type": "application/json"},
+                json={},
+                timeout=self._timeout,
+            )
+            payload = resp.json()
+        except (httpx.HTTPError, TypeError, ValueError) as exc:
+            logger.debug("m-team 分类列表拉取失败：%s", exc)
+            self._category_map = empty
+            return empty
+        data = payload.get("data") or {}
+        rows = data.get("list") if isinstance(data, dict) else None
+        mapping: dict[str, str] = {}
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                cid = str(row.get("id") or "")
+                name = row.get("nameChs") or row.get("nameEng") or ""
+                if cid and name:
+                    mapping[cid] = str(name)
+        self._category_map = mapping
+        return mapping
 
     @staticmethod
     def _api_sign(path: str, ts_ms: int, method: str = "POST") -> str:
@@ -240,6 +280,7 @@ class MteamAdapter(SiteAdapter):
             )
             return []
         data = (payload.get("data") or {}).get("data") or []
+        category_map = await self._load_category_map()
         items: list[FeedItem] = []
         for raw in data:
             if not isinstance(raw, dict):
@@ -248,14 +289,19 @@ class MteamAdapter(SiteAdapter):
             torrent_id = str(raw.get("id") or "")
             if not torrent_id:
                 continue
+            raw_cat = str(raw.get("category") or "")
             items.append(
                 FeedItem(
                     title=raw.get("name") or "",
                     link=self._detail_url(torrent_id),
                     item_id=torrent_id,
-                    info_hash=None,
+                    # m-team 搜索响应直接带 infoHash（小写 hex）
+                    info_hash=(str(raw["infoHash"]).lower() or None)
+                    if raw.get("infoHash")
+                    else None,
                     size=int(raw.get("size") or 0),
-                    category=str(raw.get("category") or ""),
+                    # 分类 id → 中文名（categoryList 映射；缺失则回退原始 id）
+                    category=category_map.get(raw_cat, raw_cat) or None,
                     description=raw.get("smallDescr") or "",
                     published_at=MteamAdapter._parse_iso_dt(raw.get("createdDate")),
                     torrent_url=f"api://gen/{torrent_id}",

@@ -144,6 +144,7 @@ function freeEndColor(end: string | null): string {
 
 const columns = [
   { title: '站点', key: 'site', width: 110 },
+  { title: '分类', key: 'category', width: 130, ellipsis: true },
   { title: '种子名', key: 'name', ellipsis: true },
   { title: '大小', key: 'size', width: 100 },
   { title: '免费类型', key: 'free_type', width: 110 },
@@ -212,12 +213,16 @@ const columns = [
           onChange: onPageChange,
         }"
         row-key="id"
-        :scroll="{ x: 1100 }"
+        :scroll="{ x: 1250 }"
         size="middle"
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'site'">
             <a-tag color="blue">{{ record.site_name }}</a-tag>
+          </template>
+          <template v-else-if="column.key === 'category'">
+            <a-typography-text v-if="record.category">{{ record.category }}</a-typography-text>
+            <a-typography-text v-else type="secondary">—</a-typography-text>
           </template>
           <template v-else-if="column.key === 'name'">
             <a-typography-text :ellipsis="true" style="max-width: 480px">

@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
+from bs4.element import Tag
+
 
 class TorrentBrief(StrEnum):
     """种子在站点的状态。"""
@@ -256,3 +258,42 @@ def parse_abs_datetime(text: str | None) -> datetime | None:
         return datetime(y, mo, d, h, mi, s)
     except ValueError:
         return None
+
+
+#: 发布时间单元格文本（纯相对时长）：``"5时14分"`` / ``"2天18时"`` / ``"1月0天"``
+_REL_TIME_RE = re.compile(r"^\d+[年月周天时分秒][\d年月周天时分秒]*$")
+
+#: 发布时间单元格文本（绝对日期）：``"2025-11-23"`` / ``"2025-11-23 12:39:58"``
+_ABS_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2}:\d{2})?$")
+
+
+def parse_publish_time(row: Tag) -> datetime | None:
+    """从 NexusPHP 列表 ``<tr>`` 提取发布时间。
+
+    发布时间单元格形如::
+
+        <td class="rowfollow nowrap"><span title="2026-10-12 14:51:34">5时14分</span></td>
+
+    **注意**：同一 ``<tr>`` 的描述栏还可能是"优惠剩余时间"
+    ``<span title="2026-10-15 14:51:34">2天18时</span>``——两者文本都是相对时长，
+    只按 ``span[title]`` 顺序取会误把优惠结束时刻当成发布时间。
+    这里用"文本为纯相对时长（如 ``5时14分``）的 ``<td>``"精确定位发布时间单元格。
+    """
+    for td in row.find_all("td"):
+        text = td.get_text(" ", strip=True)
+        norm = re.sub(r"\s+", "", text)
+        # 情况 A：相对时长（"5时14分" / "1月0天"）→ 从内层 span 的绝对 title 取值
+        if _REL_TIME_RE.match(norm) and len(norm) <= 10:
+            span = td.find("span", attrs={"title": True})
+            if span is not None:
+                parsed = parse_abs_datetime(str(span.get("title") or ""))
+                if parsed is not None:
+                    return parsed
+        # 情况 B：老条目直接显示绝对日期（"2025-11-23" / "2025-11-23 12:39:58"）
+        elif _ABS_DATE_RE.match(text):
+            parsed = parse_abs_datetime(
+                text if len(text) > 10 else f"{text} 00:00:00"
+            )
+            if parsed is not None:
+                return parsed
+    return None

@@ -26,6 +26,7 @@ from app.db.models import Site, TorrentIndex
 from app.db.session import session_scope
 from app.services.factory import AdapterFactory
 from app.services.scheduler import JobSpec, scheduler_center
+from app.services.window_parser import WindowParser
 
 logger = get_logger(__name__)
 
@@ -93,6 +94,7 @@ async def _pull_one_site(
     now = utcnow()
     for fi in feed_items:
         item_id = (fi.item_id or "").strip() or None
+        window = WindowParser.parse(fi)
         stmt = sqlite_insert(TorrentIndex).values(
             site_id=row.id,
             item_id=item_id,
@@ -101,10 +103,10 @@ async def _pull_one_site(
             size=fi.size,
             category=fi.category,
             description=fi.description or None,
-            free_type="unknown",  # 由 WindowParser 后续处理（可选 enrich 任务）
-            free_end_at=None,
-            free_source=None,
-            free_confidence=None,
+            free_type=window.free_type,
+            free_end_at=window.free_end_at,
+            free_source=window.free_source,
+            free_confidence=window.confidence,
             torrent_url=fi.torrent_url,
             free_payload=fi.free_payload or {},
             published_at=fi.published_at,
@@ -118,6 +120,10 @@ async def _pull_one_site(
                 "size": fi.size,
                 "category": fi.category,
                 "description": fi.description or None,
+                "free_type": window.free_type,
+                "free_end_at": window.free_end_at,
+                "free_source": window.free_source,
+                "free_confidence": window.confidence,
                 "torrent_url": fi.torrent_url,
                 "free_payload": fi.free_payload or {},
                 "published_at": fi.published_at,

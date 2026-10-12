@@ -35,6 +35,7 @@ from app.adapters.sites.base import (
     TorrentBrief,
     TorrentDetail,
     parse_abs_datetime,
+    parse_publish_time,
 )
 from app.core.logging import get_logger
 
@@ -278,10 +279,8 @@ class HdskyAdapter(SiteAdapter):
                 cat_title = str(cat_img.get("title") or cat_img.get("alt") or "")
                 category = cat_title.strip() or None
 
-            # ---------------- size / pub_at: 扫所有 td，匹配 <td>X.XX<br />UNIT</td>
-            # 与 <span title="YYYY-MM-DD HH:MM:SS">
+            # ---------------- size: 扫 td 匹配 <td>X.XX<br />UNIT</td>
             size_bytes = 0
-            published_at = None
             for td in tr.find_all("td"):
                 td_html: str = td.decode()
                 if size_bytes == 0:
@@ -301,12 +300,10 @@ class HdskyAdapter(SiteAdapter):
                                     "KB": 1024,
                                 }[m_sz.group(2).upper()]
                             )
-                if published_at is None:
-                    span = td.find("span", attrs={"title": True})
-                    if span is not None:
-                        t = str(span.get("title") or "")
-                        if _ABS_DATETIME_RE.match(t):
-                            published_at = parse_abs_datetime(t)
+
+            # ---------------- published_at: 发布时间单元格（短相对时长 td），
+            # 避免误取描述栏里的"优惠剩余时间"
+            published_at = parse_publish_time(tr)
 
             # ---------------- 免费标记：img class="pro_XXX" → 标准 class
             free_classes: list[str] = []
@@ -323,13 +320,16 @@ class HdskyAdapter(SiteAdapter):
                         free_classes.append(c)
                         break
 
-            # ---------------- 限时绝对时刻
+            # ---------------- 限时绝对时刻（排除发布时间单元格自身）
             remaining_abs: str | None = None
             for span in tr.find_all("span", attrs={"title": True}):
                 t = str(span.get("title") or "")
-                if _ABS_DATETIME_RE.match(t):
-                    remaining_abs = t
-                    break
+                if not _ABS_DATETIME_RE.match(t):
+                    continue
+                if published_at is not None and parse_abs_datetime(t) == published_at:
+                    continue
+                remaining_abs = t
+                break
             if remaining_abs is None:
                 for img in tr.find_all("img", attrs={"onmouseover": True}):
                     ov: str = str(img.get("onmouseover") or "")
