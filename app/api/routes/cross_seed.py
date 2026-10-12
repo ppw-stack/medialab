@@ -1,9 +1,11 @@
 """RSS 拉取作业 API 与 RSS 连通性测试。
 
 历史背景：本文件原名 ``cross_seed.py``（辅种作业 API），现在仅保留
-两个端点：
+三个端点：
 
 - ``GET /scheduler``：查询调度作业状态（自动从注册的 JobSpec 列表生成）
+- ``POST /scheduler/{job_name}/toggle``：启停单个作业
+- ``POST /scheduler/{job_name}/run``：手动触发作业（不等 cron）
 - ``GET /sites/{site_id}/feed-test``：测试站点 RSS 可达性，纯诊断
 
 辅种匹配（``pull`` / ``pull-all``）与 ``feeds`` 列表已删除——见 commit
@@ -11,6 +13,7 @@
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -23,6 +26,7 @@ from app.db.models import Site
 from app.db.session import session_scope
 from app.services.factory import AdapterFactory, get_factory
 from app.services.feed_fetcher import FeedFetcher
+from app.services.scheduler import RunResult, scheduler_center
 
 logger = get_logger(__name__)
 router = APIRouter(dependencies=[Depends(require_session)], tags=["rss"])
@@ -39,11 +43,20 @@ class FeedTestResult(BaseModel):
     error: str = ""
 
 
+class RunJobResult(BaseModel):
+    """手动触发作业响应（对齐 :class:`RunResult`）。"""
+
+    ok: bool
+    started_at: datetime
+    finished_at: datetime
+    duration_ms: int
+    error: str = ""
+
+
 @router.get("/scheduler", summary="调度作业状态")
 async def scheduler_status() -> dict[str, Any]:
     """返回调度中心当前注册的作业列表。"""
     from app.core.config import get_settings
-    from app.services.scheduler import scheduler_center
 
     settings = get_settings()
     return {
@@ -57,11 +70,33 @@ async def scheduler_status() -> dict[str, Any]:
 @router.post("/scheduler/{job_name}/toggle", summary="启停调度作业")
 async def toggle_job(job_name: str, enabled: bool) -> dict[str, Any]:
     """切换单个作业的启用状态。"""
-    from app.services.scheduler import scheduler_center
-
     if not scheduler_center.enable(job_name, enabled):
         raise HTTPException(status_code=404, detail=f"作业不存在：{job_name}")
     return {"job": job_name, "enabled": enabled}
+
+
+@router.post(
+    "/scheduler/{job_name}/run",
+    summary="手动触发作业",
+    response_model=RunJobResult,
+)
+async def run_job(job_name: str) -> RunJobResult:
+    """立即触发作业并 await 完成，返回结果。
+
+    与 cron 触发的区别：
+
+    - 跳过 cron 表达式，立即触发
+    - 复用 :meth:`SchedulerCenter.run_now` 的异常隔离 + inflight 计数
+    - 停机（``accepting_new_work=False``）时返回 ok=False + error
+    """
+    r: RunResult = await scheduler_center.run_now(job_name)
+    return RunJobResult(
+        ok=r.ok,
+        started_at=r.started_at,
+        finished_at=r.finished_at,
+        duration_ms=r.duration_ms,
+        error=r.error,
+    )
 
 
 @router.get("/sites/{site_id}/feed-test", summary="RSS 连通性测试")

@@ -178,3 +178,62 @@ def test_fetch_all_sites_registered() -> None:
     names = list(scheduler_center._specs.keys())
     assert names == ["fetch_all_sites"]
     assert scheduler_center._specs["fetch_all_sites"].cron == settings.fetch_all_sites_cron
+
+
+# ============================================================ run_now
+
+
+@pytest.mark.asyncio
+async def test_run_now_executes_registered_job() -> None:
+    """run_now 立即调用已注册作业并返回成功结果。"""
+    ran = 0
+
+    async def job() -> None:
+        nonlocal ran
+        ran += 1
+
+    center = SchedulerCenter()
+    center.register(JobSpec(name="j", func=job, cron="*/1 * * * *"))
+    r = await center.run_now("j")
+    assert r.ok is True
+    assert r.error == ""
+    assert r.duration_ms >= 0
+    assert ran == 1
+
+
+@pytest.mark.asyncio
+async def test_run_now_unknown_job_returns_error() -> None:
+    """未知作业名返回 ok=False + error，不抛异常。"""
+    center = SchedulerCenter()
+    r = await center.run_now("nope")
+    assert r.ok is False
+    assert "unknown job" in r.error
+
+
+@pytest.mark.asyncio
+async def test_run_now_refuses_when_not_accepting() -> None:
+    """停机时 run_now 必须拒绝。"""
+    async def job() -> None:
+        pass
+
+    center = SchedulerCenter()
+    center.register(JobSpec(name="j", func=job, cron="*/1 * * * *"))
+    center.accepting_new_work = False
+    r = await center.run_now("j")
+    assert r.ok is False
+    assert "not accepting" in r.error
+
+
+@pytest.mark.asyncio
+async def test_run_now_isolates_exceptions() -> None:
+    """作业抛异常时 run_now 返回 ok=False + error，调度器不崩。"""
+    async def boom() -> None:
+        raise RuntimeError("boom")
+
+    center = SchedulerCenter()
+    center.register(JobSpec(name="j", func=boom, cron="*/1 * * * *"))
+    r = await center.run_now("j")
+    assert r.ok is False
+    assert "boom" in r.error
+    # 调度器仍能查询
+    assert center.list_jobs()[0]["name"] == "j"

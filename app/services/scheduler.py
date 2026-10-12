@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from apscheduler.executors.asyncio import AsyncIOExecutor
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -37,6 +38,17 @@ class JobSpec:
     #: cron 表达式（5 字段：分 时 日 月 星期）；错峰通过分钟位表达
     cron: str
     enabled: bool = True
+
+
+@dataclass(slots=True)
+class RunResult:
+    """手动触发作业的执行结果。"""
+
+    ok: bool
+    started_at: datetime
+    finished_at: datetime
+    duration_ms: int
+    error: str = ""
 
 
 class SchedulerCenter:
@@ -169,6 +181,81 @@ class SchedulerCenter:
                     self._inflight.discard(task)
 
         return _run
+
+    # ------------------------------------------------------------ 手动触发
+    async def run_now(self, name: str) -> RunResult:
+        """手动触发作业，await 执行完成后返回结果。
+
+        与 cron 触发的区别：
+
+        - 绕过 :meth:`_wrap` 的 R8 异常吞没——手动触发的异常必须抛回调用方，
+          让用户知道失败（cron 触发走 _wrap 是为了保护调度器整体存活）
+        - 仍复用 inflight 计数 + ``accepting_new_work`` 闸门
+        - 不通过 APScheduler 调度（不写 job store），由 FastAPI 请求上下文驱动
+        """
+        spec = self._specs.get(name)
+        if spec is None:
+            return RunResult(
+                ok=False,
+                started_at=datetime.now(UTC),
+                finished_at=datetime.now(UTC),
+                duration_ms=0,
+                error=f"unknown job: {name}",
+            )
+        if not self.accepting_new_work:
+            return RunResult(
+                ok=False,
+                started_at=datetime.now(UTC),
+                finished_at=datetime.now(UTC),
+                duration_ms=0,
+                error="scheduler not accepting new work",
+            )
+        if name in self._running:
+            return RunResult(
+                ok=False,
+                started_at=datetime.now(UTC),
+                finished_at=datetime.now(UTC),
+                duration_ms=0,
+                error=f"job {name} is already running",
+            )
+        started = datetime.now(UTC)
+        self._running.add(name)
+        task = asyncio.current_task()
+        if task is not None:
+            self._inflight.add(task)
+        try:
+            await spec.func()
+        except asyncio.CancelledError:
+            finished = datetime.now(UTC)
+            logger.info("手动触发作业 %s 被取消", name)
+            return RunResult(
+                ok=False,
+                started_at=started,
+                finished_at=finished,
+                duration_ms=int((finished - started).total_seconds() * 1000),
+                error="cancelled",
+            )
+        except Exception as exc:
+            finished = datetime.now(UTC)
+            logger.exception("手动触发作业 %s 失败：%s", name, exc)
+            return RunResult(
+                ok=False,
+                started_at=started,
+                finished_at=finished,
+                duration_ms=int((finished - started).total_seconds() * 1000),
+                error=str(exc),
+            )
+        finally:
+            self._running.discard(name)
+            if task is not None:
+                self._inflight.discard(task)
+        finished = datetime.now(UTC)
+        return RunResult(
+            ok=True,
+            started_at=started,
+            finished_at=finished,
+            duration_ms=int((finished - started).total_seconds() * 1000),
+        )
 
 
 #: 全局调度中心
