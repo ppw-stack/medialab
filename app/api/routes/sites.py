@@ -30,7 +30,7 @@ class SiteCreate(BaseModel):
     rss_url: str | None = None
     apikey: str | None = Field(default=None, max_length=256)
     cookies: str | None = Field(default=None, max_length=4096)
-    min_interval_minutes: int = Field(default=60, ge=15)
+    min_interval_minutes: int = Field(default=60, ge=1)
     enabled: bool = True
 
 
@@ -41,7 +41,7 @@ class SiteUpdate(BaseModel):
     rss_url: str | None = None
     apikey: str | None = None
     cookies: str | None = None
-    min_interval_minutes: int | None = Field(default=None, ge=15)
+    min_interval_minutes: int | None = Field(default=None, ge=1)
     enabled: bool | None = None
     adapter: Literal["mteam", "hhanclub", "hdsky", "ourbits"] | None = None
 

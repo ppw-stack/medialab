@@ -18,7 +18,6 @@ import asyncio
 import random
 import time
 from dataclasses import dataclass
-from datetime import timedelta
 from enum import StrEnum
 
 import httpx
@@ -30,8 +29,6 @@ from app.db.models import Feed
 
 logger = get_logger(__name__)
 
-#: 频率下限（分钟，FR-2.2 强制）
-MIN_INTERVAL_MINUTES = 15
 #: 重试次数（FR-2.2）
 MAX_RETRIES = 3
 #: 熔断时长（秒，FR-2.2：429/403 熔断 1 小时）
@@ -77,11 +74,6 @@ class BreakerState:
         return cls(tripped=False, until=None)
 
 
-def enforce_interval(configured_minutes: int) -> int:
-    """夹住拉取间隔下限（FR-2.2）。"""
-    return max(int(configured_minutes), MIN_INTERVAL_MINUTES)
-
-
 class FeedFetcher:
     """RSS 拉取器。
 
@@ -100,17 +92,15 @@ class FeedFetcher:
         self._jitter = jitter
 
     def should_pull(self, feed: Feed, *, interval_minutes: int) -> tuple[bool, str]:
-        """是否可以拉取：熔断优先，其次频率下限。"""
+        """是否可以拉取：熔断优先。
+
+        频率下限 FR-2.2 已移除——每站拉取频率由 cron 周期 + ``interval_minutes``
+        （仅作记录提示）决定。仍保留熔断防 PT 站封号（429/403）。
+        """
         now = utcnow()
         if feed.breaker_until and feed.breaker_until > now:
             remain = int((feed.breaker_until - now).total_seconds())
             return False, f"熔断中，剩余 {remain}s"
-        if feed.last_pulled_at:
-            interval = enforce_interval(interval_minutes)
-            next_at = feed.last_pulled_at + timedelta(minutes=interval)
-            if now < next_at:
-                remain = int((next_at - now).total_seconds())
-                return False, f"未到间隔，剩余 {remain}s（间隔下限 {interval}min）"
         return True, ""
 
     def compute_backoff(self, attempt: int) -> float:
