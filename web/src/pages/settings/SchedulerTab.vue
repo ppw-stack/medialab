@@ -5,7 +5,7 @@ import { message } from 'ant-design-vue'
 
 interface Job {
   name: string;
-  interval_seconds: number;
+  cron: string;
   enabled: boolean;
   running: boolean;
 }
@@ -53,7 +53,7 @@ function jobLabel(name: string) {
 const columns = [
   { title: '作业', dataIndex: 'name', key: 'name' },
   { title: '说明', key: 'desc' },
-  { title: '间隔', dataIndex: 'interval_seconds', key: 'interval' },
+  { title: 'cron', dataIndex: 'cron', key: 'cron', width: 160 },
   { title: '运行中', dataIndex: 'running', key: 'running' },
   { title: '启用', dataIndex: 'enabled', key: 'enabled' },
 ]
@@ -83,8 +83,8 @@ const columns = [
         <template v-else-if="column.key === 'desc'">
           {{ jobLabel(record.name)?.desc || '-' }}
         </template>
-        <template v-else-if="column.key === 'interval'">
-          {{ record.interval_seconds >= 60 ? `${record.interval_seconds / 60}min` : `${record.interval_seconds}s` }}
+        <template v-else-if="column.key === 'cron'">
+          <code style="font-size: 12px">{{ record.cron }}</code>
         </template>
         <template v-else-if="column.key === 'running'">
           <a-tag v-if="record.running" color="processing">是</a-tag>

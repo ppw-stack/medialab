@@ -74,6 +74,10 @@ class AppSettings(BaseSettings):
 
     # -- 调度 --
     scheduler_enabled: bool = True
+    #: 辅种拉取 cron 表达式（5 字段：分 时 日 月 星期），默认每小时第 17 分
+    cross_seed_cron: str = "17 * * * *"
+    #: 免费种拉取 cron 表达式，默认每 10 分钟一次
+    free_seed_poll_cron: str = "*/10 * * * *"
 
     # -- 优雅停机（FR-8.2）--
     shutdown_grace_seconds: int = 60

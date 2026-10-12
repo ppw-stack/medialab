@@ -3,7 +3,8 @@
 用 APScheduler 的 AsyncIOScheduler 驱动全部周期性作业。设计要点：
 
 - **作业级异常隔离**（R8）：单任务失败不中断整轮。
-- **错峰调度**：不同频率的作业避免同一秒集中触发（§1.3 资源红线）。
+- **cron 周期**：作业周期由 cron 表达式配置（5 字段：分 时 日 月 星期）。
+- **错峰调度**：通过 cron 的"分钟"位错开不同作业（§1.3 资源红线）。
 - **优雅停机**（FR-8.2）：停机时停止新调度，等待在途作业。
 
 M1 只搭建骨架，业务作业自 M2 起通过 :meth:`SchedulerCenter.register` 注册。
@@ -14,11 +15,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
 from apscheduler.executors.asyncio import AsyncIOExecutor
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
 
 from app.core.logging import get_logger
 from app.core.metrics import stage_duration
@@ -34,9 +34,8 @@ class JobSpec:
 
     name: str
     func: JobFn
-    interval_seconds: int
-    #: 首次执行前的错峰偏移，避免同秒触发
-    offset_seconds: int = 0
+    #: cron 表达式（5 字段：分 时 日 月 星期）；错峰通过分钟位表达
+    cron: str
     enabled: bool = True
 
 
@@ -105,10 +104,9 @@ class SchedulerCenter:
         assert self._scheduler is not None
         self._scheduler.add_job(
             self._wrap(spec),
-            trigger=IntervalTrigger(seconds=spec.interval_seconds),
+            trigger=CronTrigger.from_crontab(spec.cron, timezone=self._tz),
             id=spec.name,
             name=spec.name,
-            next_run_time=_first_run(spec),
             replace_existing=True,
         )
 
@@ -129,7 +127,7 @@ class SchedulerCenter:
         return [
             {
                 "name": name,
-                "interval_seconds": spec.interval_seconds,
+                "cron": spec.cron,
                 "enabled": spec.enabled,
                 "running": name in self._running,
             }
@@ -166,13 +164,6 @@ class SchedulerCenter:
                     self._inflight.discard(task)
 
         return _run
-
-
-def _first_run(spec: JobSpec) -> datetime:
-    now = datetime.now(UTC).replace(tzinfo=None)
-    from datetime import timedelta
-
-    return now + timedelta(seconds=spec.offset_seconds % max(spec.interval_seconds, 1))
 
 
 #: 全局调度中心

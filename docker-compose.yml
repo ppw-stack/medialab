@@ -19,6 +19,9 @@ services:
       WEB_TOKEN: ${WEB_TOKEN}
       # FR-7.1：缺失则启动失败（AC-17），不要留空
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      # 调度 cron（cron 表达式：分 时 日 月 星期）
+      CROSS_SEED_CRON: ${CROSS_SEED_CRON:-17 * * * *}
+      FREE_SEED_POLL_CRON: ${FREE_SEED_POLL_CRON:-*/10 * * * *}
     env_file:
       - .env
     volumes:
