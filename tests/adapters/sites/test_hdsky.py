@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -139,18 +140,18 @@ async def test_get_torrent_detail_ok(adapter: HdskyAdapter) -> None:
     assert "sign=" in detail.download_url
 
 
-# ---- 2. search_torrents (parsel 解析 spstate=7) ----
+# ---- 2. search_torrents (parsel 解析 spstate=0) ----
 
 
 async def test_search_torrents_parses_spstate7(adapter: HdskyAdapter) -> None:
     """parsel CSS 解析 HDSky 标准 NexusPHP 表格 + 批量抓详情填 torrent_url。
 
-    fixture 模拟 spstate=7 页面的真实结构：
-    - 锚点带 title="..." href="details.php?id=N&hit=1"
-    - 永久免费：<img class="pro_free">
-    - 限时免费：<img class="pro_30pctdown"> + <span title="绝对时刻">
+    fixture 模拟 spstate=0 页面的真实结构（混排：永久 + 限时 + 折扣）：
+    - 永久免费：<img class="pro_free">，无剩余时间
+    - 限时免费：<img class="pro_free"> + <span title="绝对时刻">
+    - 永久折扣：<img class="pro_30pctdown">，无剩余时间
     """
-    # 第一次 GET：spstate=7 列表；后续 GET：每条详情页（带 sign）
+    # 第一次 GET：spstate=0 列表；后续 GET：每条详情页（带 sign）
     list_resp = MagicMock()
     list_resp.status_code = 200
     list_resp.text = HDSKY_SPSTATE7_HTML
@@ -162,22 +163,54 @@ async def test_search_torrents_parses_spstate7(adapter: HdskyAdapter) -> None:
     adapter._client.get = AsyncMock(side_effect=responses)
 
     items = await adapter.search_torrents({}, page_size=100, page_number=1)
-    # 10001 / 10002 / 10003 中：10001 有 sign URL 被填入；10002/10003 没填（mock 不变）
+    # 10001 / 10002 / 10003
     assert len(items) == 3
+    # 第一条：永久免费（pro_free，无 remaining_abs）
     assert items[0].item_id == "10001"
     assert items[0].title == "Movie A"
     assert items[0].free_payload is not None
     assert "free" in items[0].free_payload["free_classes"]  # type: ignore[operator]
+    assert items[0].free_payload["remaining_abs"] is None  # type: ignore[operator]
     # torrent_url 已填：HDSky sign 形式
     assert items[0].torrent_url is not None
     assert "sign=" in items[0].torrent_url
     assert items[0].torrent_url and items[0].torrent_url.startswith("https://hdsky.me/download.php?id=10001&t=")
-    # 第二条：限时 30% off（mock 只对第 1 个详情响应，所以 torrent_url 仍 None）
+    # 第二条：限时免费（pro_free + remaining_abs）
     assert items[1].item_id == "10002"
     assert items[1].free_payload is not None
-    assert "thirtypercent" in items[1].free_payload["free_classes"]  # type: ignore[operator]
-    # 第三条：非免费
-    assert items[2].free_payload is None
+    assert "free" in items[1].free_payload["free_classes"]  # type: ignore[operator]
+    assert items[1].free_payload["remaining_abs"] == "2026-12-31 23:59:00"  # type: ignore[operator]
+    # 第三条：30% off（pro_30pctdown → thirtypercent → NEUTRAL，无 remaining_abs）
+    assert items[2].item_id == "10003"
+    assert items[2].free_payload is not None
+    assert "thirtypercent" in items[2].free_payload["free_classes"]  # type: ignore[operator]
+    assert items[2].free_payload["remaining_abs"] is None  # type: ignore[operator]
+
+
+async def test_search_torrents_extracts_window_for_timed_free(adapter: Any) -> None:
+    """限时免费条目应能在 _parse_nexushp_html 中正确解析出 free_end_at。
+
+    模拟：RSS 列表返回 1 条限时免费（id=10002，含 pro_free + span title）。
+    window_parser._parse_nexushp_html() 解析后 free_end_at 应为正确 datetime。
+    """
+    from datetime import datetime as dt
+
+    list_resp = MagicMock()
+    list_resp.status_code = 200
+    list_resp.text = HDSKY_SPSTATE7_HTML  # 3 条列表
+    detail_resp = MagicMock()
+    detail_resp.status_code = 200
+    detail_resp.text = HDSKY_DETAIL_HTML_10001
+    adapter._client.get = AsyncMock(side_effect=[list_resp, detail_resp, detail_resp, detail_resp])
+
+    items = await adapter.search_torrents({}, page_size=100, page_number=1)
+    # 找限时条（item_id=10002）
+    timed = next(it for it in items if it.item_id == "10002")
+    from app.services.window_parser import _parse_nexushp_html
+    win = _parse_nexushp_html(timed)
+    assert win is not None, "限时免费应能解析窗口"
+    assert win.free_end_at == dt(2026, 12, 31, 23, 59, 00)
+    assert win.is_actionable is True
 
 
 async def test_search_torrents_details_failure_keeps_list(adapter: HdskyAdapter) -> None:
@@ -217,27 +250,68 @@ def test_parse_spstate7_html_empty() -> None:
     assert HdskyAdapter._parse_spstate7_html("<html></html>") == []
 
 
-# ---- fixture: HDSky spstate=7 真实结构片段 ----
+def test_parse_spstate7_html_skips_non_free() -> None:
+    """spstate=0 包含普通付费种子，没有 pro_free 不应进候选池。"""
+    html = (
+        '<html><body><table class="torrents">'
+        '<tr>'
+        '<td><a target="_blank" title="Free" href="details.php?id=20001&amp;hit=1">Free</a></td>'
+        '<td><img class="pro_free" src="free.png"/></td>'
+        '<td>1.00<br />GB</td>'
+        '</tr>'
+        '<tr>'
+        '<td><a target="_blank" title="Paid" href="details.php?id=20002&amp;hit=1">Paid</a></td>'
+        '<td>&nbsp;</td>'  # 无 pro_*
+        '<td>2.00<br />GB</td>'
+        '</tr>'
+        '<tr>'
+        '<td><a target="_blank" title="Timed" href="details.php?id=20003&amp;hit=1">Timed</a></td>'
+        '<td><img class="pro_free" src="free.png"/></td>'
+        '<td><span title="2026-12-31 23:59:00">1天</span></td>'
+        '</tr>'
+        '</table></body></html>'
+    )
+    items = HdskyAdapter._parse_spstate7_html(html, limit=100)
+    ids = [it.item_id for it in items]
+    assert ids == ["20001", "20003"]  # 20002（无免费标志）被跳过
+    assert items[1].free_payload is not None
+    assert items[1].free_payload["remaining_abs"] == "2026-12-31 23:59:00"  # type: ignore[index]
 
+
+# ---- fixture: HDSky spstate=0 真实结构片段（2026-10 抓取）----
+
+# 模拟 HDSky spstate=0 列表（实际是混排：永久 + 限时 + 30% 折扣）。
+# 真实页面 DOM 例子：
+#   <tr>
+#     <td><a target="_blank" title="..." href="details.php?id=625366&amp;hit=1">Stranger Things</a>
+#       <img class="pro_30pctdown" src="pic/trans.gif" alt="30%" title="30%" />
+#     </td>
+#     <td><img class="pro_free" src="free.png" /></td>
+#     <td>5.05 GB</td>
+#     <td>优惠剩余时间：<b><span title="2026-12-31 23:59:00">3天2小时</span></b></td>
+#   </tr>
 HDSKY_SPSTATE7_HTML = (
     '<html><body><table class="torrents">'
-    # 永久免费
+    # 永久免费（pro_free，无剩余时间）
     '<tr>'
     '<td><a target="_blank" title="Movie A" href="details.php?id=10001&amp;hit=1">Movie A</a></td>'
     '<td><img class="pro_free" src="free.png"/></td>'
     '<td>4.95<br />GB</td>'
+    '<td>&nbsp;</td>'
     '</tr>'
-    # 限时 30% off
+    # 限时免费（pro_free + span title 倒计时）
     '<tr>'
     '<td><a target="_blank" title="Movie B" href="details.php?id=10002&amp;hit=1">Movie B</a></td>'
-    '<td><img class="pro_30pctdown" src="30.png" alt="30%"/></td>'
-    '<td>优惠剩余时间：<b><span title="2026-12-31 23:59:00">3天2小时</span></b></td>'
+    '<td><img class="pro_free" src="free.png" title="免费"/></td>'
     '<td>1.00<br />GB</td>'
+    '<td>优惠剩余时间：<b><span title="2026-12-31 23:59:00">3天2小时</span></b></td>'
     '</tr>'
-    # 非免费
+    # 永久 30% 折扣（pro_30pctdown，无剩余时间）
     '<tr>'
     '<td><a target="_blank" title="Movie C" href="details.php?id=10003&amp;hit=1">Movie C</a></td>'
+    '<td><img class="pro_30pctdown" src="30.png" alt="30%"/></td>'
     '<td>2.00<br />GB</td>'
+    '<td>&nbsp;</td>'
     '</tr>'
     '</table></body></html>'
 )
@@ -245,7 +319,8 @@ HDSKY_SPSTATE7_HTML = (
 #: HDSky details.php?id=10001 HTML（form action 含 sign URL）
 HDSKY_DETAIL_HTML_10001 = (
     '<html><body>'
-    '<form action="https://hdsky.me/download.php?id=10001&amp;t=1791689105&amp;sign=6a47635b3134c1b3275984768eb3b2a6" method="get">'
+    '<form action="https://hdsky.me/download.php?id=10001'
+    '&amp;t=1791689105&amp;sign=6a47635b3134c1b3275984768eb3b2a6" method="get">'
     '<input type="submit" value="下载"/>'
     '</form>'
     '</body></html>'

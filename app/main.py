@@ -24,9 +24,8 @@ from app.core.logging import configure_logging, get_logger
 from app.core.metrics import render_metrics, state
 from app.db.session import dispose_db, init_db, writer
 from app.services.factory import AdapterFactory, init_factory
-from app.services.jobs import register_seed_jobs
+from app.services.jobs import register_jobs
 from app.services.scheduler import scheduler_center
-from app.services.seed_engine import SeedEngine
 
 logger = get_logger(__name__)
 
@@ -65,13 +64,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await migrate_adapter_values()
     state["db_healthy"].set(1 if await writer.healthcheck() else 0)
 
-    engine = SeedEngine(factory)
     if settings.scheduler_enabled:
         scheduler_center.start()
-        from app.services.free_seed_hunter import FreeSeedHunter
-
-        hunter = FreeSeedHunter(factory)
-        register_seed_jobs(engine, hunter)
+        register_jobs(factory)
 
     try:
         yield
@@ -122,7 +117,6 @@ def _mount_routes(app: FastAPI) -> None:
         cross_seed,
         dashboard,
         downloaders,
-        free_seed,
         sites,
         torrents,
     )
@@ -133,7 +127,6 @@ def _mount_routes(app: FastAPI) -> None:
         torrents.router,
         downloaders.router,
         cross_seed.router,
-        free_seed.router,
     ):
         app.include_router(router, prefix="/api/v1")
     app.include_router(auth_router)  # 自身已含 /api/v1 前缀

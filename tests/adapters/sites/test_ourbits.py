@@ -114,11 +114,17 @@ async def test_get_torrent_detail_ok(adapter: OurbitsAdapter) -> None:
     assert "passkey=" in detail.download_url
 
 
-# ---- 2. search_torrents (parsel 解析 spstate=7) ----
+# ---- 2. search_torrents (parsel 解析 spstate=0) ----
 
 
 async def test_search_torrents_parses_spstate7(adapter: OurbitsAdapter) -> None:
-    """parsel CSS 解析 Ourbits 标准 NexusPHP 表格 + 批量抓详情填 torrent_url。"""
+    """parsel CSS 解析 Ourbits 标准 NexusPHP 表格 + 批量抓详情填 torrent_url。
+
+    fixture 模拟 spstate=0 页面（永久 + 限时 + 折扣混排）：
+    - 永久免费：<img class="pro_free">，无剩余时间
+    - 限时免费：<img class="pro_free"> + <span title="绝对时刻">
+    - 永久折扣：<img class="pro_50pctdown">，无剩余时间
+    """
     list_resp = MagicMock()
     list_resp.status_code = 200
     list_resp.text = OURBITS_SPSTATE7_HTML
@@ -134,17 +140,21 @@ async def test_search_torrents_parses_spstate7(adapter: OurbitsAdapter) -> None:
     assert items[0].title == "Movie A"
     assert items[0].free_payload is not None
     assert "free" in items[0].free_payload["free_classes"]  # type: ignore[operator]
+    assert items[0].free_payload["remaining_abs"] is None  # type: ignore[operator]
     # torrent_url 已填：Ourbits passkey 形式
     assert items[0].torrent_url is not None
     assert "passkey=" in items[0].torrent_url
     assert items[0].torrent_url and "id=10001" in items[0].torrent_url
-    # 第二条：限时 30% off
+    # 第二条：限时免费（pro_free + remaining_abs）
     assert items[1].item_id == "10002"
     assert items[1].free_payload is not None
-    assert "thirtypercent" in items[1].free_payload["free_classes"]  # type: ignore[operator]
+    assert "free" in items[1].free_payload["free_classes"]  # type: ignore[operator]
     assert items[1].free_payload["remaining_abs"] == "2026-12-31 23:59:00"  # type: ignore[index]
-    # 第三条：非免费
-    assert items[2].free_payload is None
+    # 第三条：50% 折扣（pro_50pctdown → halfdown → NEUTRAL）
+    assert items[2].item_id == "10003"
+    assert items[2].free_payload is not None
+    assert "halfdown" in items[2].free_payload["free_classes"]  # type: ignore[operator]
+    assert items[2].free_payload["remaining_abs"] is None  # type: ignore[operator]
 
 
 async def test_search_torrents_http_error(adapter: OurbitsAdapter) -> None:
@@ -169,24 +179,64 @@ def test_parse_spstate7_html_empty() -> None:
     assert OurbitsAdapter._parse_spstate7_html("<html></html>") == []
 
 
-# ---- fixture: Ourbits spstate=7 真实结构片段 ----
+def test_parse_spstate7_html_skips_non_free() -> None:
+    """spstate=0 包含普通付费种子，没有 pro_free 不应进候选池。"""
+    html = (
+        '<html><body><table class="torrents">'
+        '<tr>'
+        '<td><a target="_blank" title="Free" href="details.php?id=30001&amp;hit=1">Free</a></td>'
+        '<td><img class="pro_free" src="free.png"/></td>'
+        '<td>1.00<br />GB</td>'
+        '</tr>'
+        '<tr>'
+        '<td><a target="_blank" title="Paid" href="details.php?id=30002&amp;hit=1">Paid</a></td>'
+        '<td>&nbsp;</td>'  # 无 pro_*
+        '<td>2.00<br />GB</td>'
+        '</tr>'
+        '<tr>'
+        '<td><a target="_blank" title="Timed" href="details.php?id=30003&amp;hit=1">Timed</a></td>'
+        '<td><img class="pro_free" src="free.png"/></td>'
+        '<td><span title="2026-12-31 23:59:00">1天</span></td>'
+        '</tr>'
+        '</table></body></html>'
+    )
+    items = OurbitsAdapter._parse_spstate7_html(html, limit=100)
+    ids = [it.item_id for it in items]
+    assert ids == ["30001", "30003"]  # 30002（无免费标志）被跳过
 
+
+# ---- fixture: Ourbits spstate=0 真实结构片段（2026-10 抓取）----
+
+# 模拟 Ourbits spstate=0 列表（混排：永久 + 限时 + 50% 折扣）。
+# 真实页面 DOM 例子（与 HDSky 同结构 NexusPHP 主题）：
+#   <tr>
+#     <td><a target="_blank" title="..." href="details.php?id=10002&amp;hit=1">Iron Man</a></td>
+#     <td><img class="pro_free" src="free.png" /></td>
+#     <td>5.05 GB</td>
+#     <td>剩余时间：<b><span title="2026-10-12 22:19:50">7时35分</span></b></td>
+#   </tr>
 OURBITS_SPSTATE7_HTML = (
     '<html><body><table class="torrents">'
+    # 永久免费
     '<tr>'
     '<td><a target="_blank" title="Movie A" href="details.php?id=10001&amp;hit=1">Movie A</a></td>'
     '<td><img class="pro_free" src="free.png"/></td>'
     '<td>4.95<br />GB</td>'
+    '<td>&nbsp;</td>'
     '</tr>'
+    # 限时免费
     '<tr>'
     '<td><a target="_blank" title="Movie B" href="details.php?id=10002&amp;hit=1">Movie B</a></td>'
-    '<td><img class="pro_30pctdown" src="30.png" alt="30%"/></td>'
-    '<td>剩余时间：<b><span title="2026-12-31 23:59:00">3天2小时</span></b></td>'
+    '<td><img class="pro_free" src="free.png" title="免费"/></td>'
     '<td>1.00<br />GB</td>'
+    '<td>剩余时间：<b><span title="2026-12-31 23:59:00">3天2小时</span></b></td>'
     '</tr>'
+    # 50% 折扣（永久）
     '<tr>'
     '<td><a target="_blank" title="Movie C" href="details.php?id=10003&amp;hit=1">Movie C</a></td>'
+    '<td><img class="pro_50pctdown" src="50.png" alt="50%"/></td>'
     '<td>2.00<br />GB</td>'
+    '<td>&nbsp;</td>'
     '</tr>'
     '</table></body></html>'
 )

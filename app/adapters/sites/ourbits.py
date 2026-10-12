@@ -155,14 +155,18 @@ class OurbitsAdapter(SiteAdapter):
         page_size: int = 100,
         page_number: int = 1,
     ) -> list[FeedItem]:
-        """2. 抓取免费种子列表：GET /torrents.php?spstate=7，parsel CSS 解析。
+        """2. 抓取免费种子列表：GET /torrents.php?spstate=0，parsel CSS 解析。
+
+        Ourbits 与 HDSky 同为标准 NexusPHP 主题，spstate=0 抓所有促销种子
+        （永久 + 限时 + 折扣）。**注意**：旧版本用 spstate=7（仅30%折扣页），
+        错误地把所有种子视为无 end_at 的 30% off——已修复为 spstate=0 抓全量。
 
         返回的 FeedItem.torrent_url 字段已携带完整 passkey URL（通过
         details 页 anchor href 提取），可直接 GET 下载。
         """
         url = (
             f"{self._base_url()}/torrents.php"
-            f"?spstate=7&page={max(0, page_number - 1)}"
+            f"?spstate=0&page={max(0, page_number - 1)}"
         )
         try:
             resp = await self._client.get(url, timeout=self._timeout)
@@ -255,6 +259,11 @@ class OurbitsAdapter(SiteAdapter):
                     "free_classes": free_classes,
                     "remaining_abs": remaining_abs,
                 }
+
+            # spstate=0 是全站列表，包含大量无免费标志的普通 torrent。
+            # 只入候选池带免费标记的条目（避免噪声）。
+            if free_payload is None:
+                continue
 
             items.append(
                 FeedItem(

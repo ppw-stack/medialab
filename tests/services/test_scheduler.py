@@ -157,3 +157,24 @@ def test_invalid_cron_raises_value_error() -> None:
 
     with pytest.raises((ValueError, Exception)):
         CronTrigger.from_crontab("not a cron")
+
+
+def test_fetch_all_sites_registered() -> None:
+    """fetch_all_sites 是唯一注册的 cron 作业。"""
+    from app.core.config import get_settings
+    from app.services.jobs import register_jobs
+
+    settings = get_settings()
+    # 重置调度中心避免污染其他测试
+    from app.services.scheduler import scheduler_center
+    scheduler_center._specs.clear()
+    scheduler_center._scheduler = None
+
+    # 用 mock 工厂
+    class _FakeFactory:
+        pass
+
+    register_jobs(_FakeFactory(), settings=settings)
+    names = list(scheduler_center._specs.keys())
+    assert names == ["fetch_all_sites"]
+    assert scheduler_center._specs["fetch_all_sites"].cron == settings.fetch_all_sites_cron

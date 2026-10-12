@@ -229,155 +229,49 @@ class Torrent(Base):
     zero_seed_rounds: Mapped[int] = mapped_column(Integer, default=0)
 
 
-class CooldownHash(Base):
-    """冷却黑名单（FR-2.3.1，按 reason 阶梯）。"""
+class TorrentIndex(Base):
+    """通用拉取索引：所有站点的 RSS feed 拉取结果。
 
-    __tablename__ = "cooldown_hash"
-    __table_args__ = (
-        UniqueConstraint("site_id", "info_hash", name="uq_cooldown_site_hash"),
-        Index("ix_cooldown_lookup", "site_id", "info_hash", "cooldown_until"),
-    )
+    单个调度任务 ``fetch_all_sites``（cron ``*/10 * * * *``）按站遍历
+    调用各 adapter 的 :meth:`SiteAdapter.search_torrents`，把返回的
+    :class:`FeedItem` 全部 upsert 写到这里（唯一约束 ``(site_id, item_id)``）。
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    site_id: Mapped[int] = mapped_column(ForeignKey("sites.id"))
-    info_hash: Mapped[str] = mapped_column(String(64))
-    reason: Mapped[str] = mapped_column(String(32))
-    fail_count: Mapped[int] = mapped_column(Integer, default=1)
-    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    last_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
-
-
-class AddHistory(Base):
-    """辅种添加历史（FR-2.3「站点去重」）。
-
-    **与 :class:`CooldownHash` 的职责边界**（FR-2.3.1）：
-
-    - 本表 = **幂等凭证**。"本站在此站添加过这个 hash" 是不可协商的事实，
-      永久保留，是非功能·幂等性的落地。
-    - ``cooldown_hash`` = **临时回避**。到期即失效，某些 ``reason``
-      （``user_removed`` / ``user_blacklisted``）甚至需要人工解除。
-
-    二者不得互相替代：``disk_full`` / ``duplicate`` 记入 history 但**不**冷却，
-    空间恢复或规则变化后必须能重新辅种。
+    历史背景：替代原 ``free_candidates``（手动推送候选池）+ ``Feed``
+    + ``FeedItemRecord``（RSS audit）。统一成一张"RSS 拉取快照"——
+    任何后续工作（外部工具、SQL 查询、辅种匹配、手动筛选）都从这里读。
     """
 
-    __tablename__ = "add_history"
+    __tablename__ = "torrent_index"
     __table_args__ = (
-        UniqueConstraint("site_id", "info_hash", name="uq_history_site_hash"),
-        Index("ix_history_torrent", "torrent_id"),
+        UniqueConstraint("site_id", "item_id", name="uq_torrent_index_site_item"),
+        Index("ix_torrent_index_last_seen", "last_seen_at"),
+        Index("ix_torrent_index_info_hash", "info_hash"),
+        Index("ix_torrent_index_site_free", "site_id", "free_type"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     site_id: Mapped[int] = mapped_column(ForeignKey("sites.id"))
-    info_hash: Mapped[str] = mapped_column(String(64))
-    torrent_id: Mapped[int | None] = mapped_column(
-        Integer, nullable=True, comment="可空：下载器添加失败时仅有记录"
-    )
-    name: Mapped[str | None] = mapped_column(String(1024), nullable=True)
-    source: Mapped[str] = mapped_column(String(16), default=Source.AUTO_SEED)
-    outcome: Mapped[str] = mapped_column(String(24), default="added")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
-
-
-class FeedItemRecord(Base):
-    """RSS 拉取到的原始条目（FR-2.2「拉取结果写入本地 SQLite」）。
-
-    与 :class:`AddHistory` 的区别：本表记录的是**看过但未添加**的条目，
-    用于排查"为什么这个种没被辅种"（FR-2.3 每一项过滤都要可追溯）。
-    """
-
-    __tablename__ = "feed_items"
-    __table_args__ = (
-        Index("ix_feed_items_feed_seen", "feed_id", "seen_at"),
-        Index("ix_feed_items_hash", "info_hash"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    feed_id: Mapped[int] = mapped_column(ForeignKey("feeds.id"))
-    info_hash: Mapped[str] = mapped_column(String(64))
-    title: Mapped[str] = mapped_column(String(1024))
-    link: Mapped[str] = mapped_column(String(1024))
-    size: Mapped[int] = mapped_column(BigInteger, default=0)
-    category: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    #: 过滤结果：``accepted`` 或具体 skip 原因（FR-2.3 七项）
-    decision: Mapped[str] = mapped_column(String(32), default="pending")
-    reject_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    torrent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    seen_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
-
-
-
-class Feed(Base):
-    """RSS 源（FR-2.2）。"""
-
-    __tablename__ = "feeds"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    site_id: Mapped[int] = mapped_column(ForeignKey("sites.id"))
-    kind: Mapped[str] = mapped_column(String(32), default="site_rss")
-    interval_minutes: Mapped[int] = mapped_column(Integer, default=60)
-    last_pulled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    last_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    last_item_count: Mapped[int] = mapped_column(Integer, default=0)
-    last_duration_ms: Mapped[int] = mapped_column(Integer, default=0)
-    breaker_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-
-
-class FreeCandidate(Base):
-    """免费种候选池（用户手动选择推送）。"""
-
-    __tablename__ = "free_candidates"
-    __table_args__ = (
-        UniqueConstraint("site_id", "item_id", name="uq_candidate_site_item"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    site_id: Mapped[int] = mapped_column(ForeignKey("sites.id"))
-    #: 站内 ID（m-team 数字 ID / NexusPHP details.php?id=X）。允许 None（id 缺失跳过）
+    #: 站内 ID（m-team 数字 ID / NexusPHP details.php?id=X）
     item_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
-    #: m-team search 不返回 hash，download_torrent 后回填
-    info_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    #: m-team 拉取时一般无 hash；NexusPHP 留空等 push 时回填
+    info_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     name: Mapped[str] = mapped_column(String(1024))
     size: Mapped[int] = mapped_column(BigInteger, default=0)
+    category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     free_type: Mapped[str] = mapped_column(String(32), default=FreeType.UNKNOWN)
-    free_end_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    free_end_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     free_source: Mapped[str | None] = mapped_column(String(24), nullable=True)
     free_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
-    #: 原始免费标记（m-team status dict / NexusPHP free_classes + remaining_*）
-    free_payload: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
-    #: 已签名 download URL（NexusPHP 含 passkey/sign；mteam 走 genDlToken 不需要）
-    #: 入库时由 adapter 在 pull 阶段填好，推送时直接 GET 即可，绕过裸 /download.php?id=X 的 404。
+    #: 已签名 download URL（NexusPHP 含 passkey/sign；mteam 走 genDlToken）
     torrent_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    #: pending / pushed / skipped / failed
-    status: Mapped[str] = mapped_column(String(32), default="pending")
-    reject_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    #: 推送成功后回填（torrents.id）
-    torrent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    seen_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
-    pushed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-
-
-class SiteWindowStat(Base):
-    """各站窗口时长历史分布，供自学习估算（FR-3.0 来源 5）。"""
-
-    __tablename__ = "site_window_stats"
-    __table_args__ = (
-        UniqueConstraint("site_id", "free_type", name="uq_site_stat_type"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    site_id: Mapped[int] = mapped_column(ForeignKey("sites.id"))
-    free_type: Mapped[str] = mapped_column(String(32))
-    sample_count: Mapped[int] = mapped_column(Integer, default=0)
-    duration_p50: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    duration_p75: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    completion_rate: Mapped[float] = mapped_column(Float, default=0.0)
-    avg_slack: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=_utcnow, onupdate=_utcnow
-    )
-
+    #: 原始 free payload（mteam status dict / NexusPHP free_classes + remaining_*）
+    free_payload: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    #: 首次入库时间（历史分析用）
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    #: 最近一次拉取时间（清理过期数据参考）
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
 
 
 class TaskQueue(Base):

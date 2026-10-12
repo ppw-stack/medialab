@@ -34,7 +34,7 @@ def _bearer() -> dict[str, str]:
 
 async def _make_env(app):
     """创建 Site + DownloaderInstance + Torrent，返回 (site_id, dl_id, torrent_id)。"""
-    from datetime import datetime, timedelta, UTC
+    from datetime import UTC, datetime, timedelta
 
     from app.db.models import DownloaderInstance, Site, Torrent, TorrentStatus
     from app.db.session import session_scope

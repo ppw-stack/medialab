@@ -6,7 +6,6 @@ import {
   CloudServerOutlined,
   ApiOutlined,
   DownloadOutlined,
-  GiftOutlined,
   SettingOutlined,
   LogoutOutlined,
   UserOutlined,
@@ -23,7 +22,6 @@ const menuItems = [
   { key: '/sites', icon: CloudServerOutlined, label: '站点' },
   { key: '/downloaders', icon: ApiOutlined, label: '下载器' },
   { key: '/torrents', icon: DownloadOutlined, label: '任务' },
-  { key: '/free-seed', icon: GiftOutlined, label: '免费种' },
   { key: '/settings', icon: SettingOutlined, label: '设置' },
 ]
 

@@ -148,7 +148,6 @@ class SiteAdapter(ABC):
         默认实现走内部 ``_client``；子类可覆盖以注入站点特定的 headers
         （referer / cookies）。失败时抛出异常。
         """
-        import httpx
 
         resp = await self._client.get(url, timeout=self._timeout)
         resp.raise_for_status()

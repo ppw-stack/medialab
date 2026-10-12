@@ -25,7 +25,6 @@ import httpx
 from app.adapters.sites.base import BreakerTripped, FeedItem, SiteAdapter
 from app.core.logging import get_logger
 from app.core.timeutils import utcnow
-from app.db.models import Feed
 
 logger = get_logger(__name__)
 
@@ -91,15 +90,14 @@ class FeedFetcher:
         self._timeout = timeout
         self._jitter = jitter
 
-    def should_pull(self, feed: Feed, *, interval_minutes: int) -> tuple[bool, str]:
-        """是否可以拉取：熔断优先。
+    def should_pull(self, breaker_until: object | None) -> tuple[bool, str]:
+        """是否应该拉取：当前仅保留熔断检查（FR-2.2 频率下限已移除）。
 
-        频率下限 FR-2.2 已移除——每站拉取频率由 cron 周期 + ``interval_minutes``
-        （仅作记录提示）决定。仍保留熔断防 PT 站封号（429/403）。
+        :param breaker_until: 该站点的熔断结束时刻（datetime 或 None）。
         """
         now = utcnow()
-        if feed.breaker_until and feed.breaker_until > now:
-            remain = int((feed.breaker_until - now).total_seconds())
+        if breaker_until and breaker_until > now:
+            remain = int((breaker_until - now).total_seconds())
             return False, f"熔断中，剩余 {remain}s"
         return True, ""
 

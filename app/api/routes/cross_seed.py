@@ -1,5 +1,14 @@
-"""辅种作业 API（FR-6.1：手动触发一次拉取 / RSS 连通性测试）。"""
+"""RSS 拉取作业 API 与 RSS 连通性测试。
 
+历史背景：本文件原名 ``cross_seed.py``（辅种作业 API），现在仅保留
+两个端点：
+
+- ``GET /scheduler``：查询调度作业状态（自动从注册的 JobSpec 列表生成）
+- ``GET /sites/{site_id}/feed-test``：测试站点 RSS 可达性，纯诊断
+
+辅种匹配（``pull`` / ``pull-all``）与 ``feeds`` 列表已删除——见 commit
+``refactor: 统一 RSS 拉取作业 + 删除辅种匹配 + 删除 free_candidates``。
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -9,21 +18,18 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from app.api.auth import require_session
-from app.core.config import get_settings
-from app.core.crypto import build_cipher
 from app.core.logging import get_logger
-from app.db.models import Feed, Site
+from app.db.models import Site
 from app.db.session import session_scope
 from app.services.factory import AdapterFactory, get_factory
 from app.services.feed_fetcher import FeedFetcher
-from app.services.seed_engine import RoundStats, SeedEngine
 
 logger = get_logger(__name__)
-router = APIRouter(dependencies=[Depends(require_session)], tags=["cross-seed"])
+router = APIRouter(dependencies=[Depends(require_session)], tags=["rss"])
 
 
 class FeedTestResult(BaseModel):
-    """RSS 连通性测试结果（FR-6.1 站点管理）。"""
+    """RSS 连通性测试结果。"""
 
     ok: bool
     status: str
@@ -33,71 +39,36 @@ class FeedTestResult(BaseModel):
     error: str = ""
 
 
-class RoundResult(BaseModel):
-    """一轮辅种的结果。"""
+@router.get("/scheduler", summary="调度作业状态")
+async def scheduler_status() -> dict[str, Any]:
+    """返回调度中心当前注册的作业列表。"""
+    from app.core.config import get_settings
+    from app.services.scheduler import scheduler_center
 
-    site: str
-    status: str
-    pulled: int = 0
-    accepted: int = 0
-    skipped: int = 0
-    added: int = 0
-    failed: int = 0
-    duration_ms: int = 0
-    skip_reasons: dict[str, int] = {}
-
-
-class RoundList(BaseModel):
-    rounds: list[RoundResult]
+    settings = get_settings()
+    return {
+        "enabled": settings.scheduler_enabled,
+        "jobs": scheduler_center.list_jobs(),
+        "inflight": scheduler_center.inflight_count(),
+        "accepting_new_work": scheduler_center.accepting_new_work,
+    }
 
 
-def _stats_out(stats: RoundStats) -> RoundResult:
-    return RoundResult(
-        site=stats.site,
-        status=stats.status,
-        pulled=stats.pulled,
-        accepted=stats.accepted,
-        skipped=stats.skipped,
-        added=stats.added,
-        failed=stats.failed,
-        duration_ms=stats.duration_ms,
-        skip_reasons=dict(stats.skip_reasons),
-    )
+@router.post("/scheduler/{job_name}/toggle", summary="启停调度作业")
+async def toggle_job(job_name: str, enabled: bool) -> dict[str, Any]:
+    """切换单个作业的启用状态。"""
+    from app.services.scheduler import scheduler_center
 
-
-@router.get("/feeds", summary="RSS 源状态（FR-2.2 拉取记录）")
-async def list_feeds() -> list[dict[str, Any]]:
-    async with session_scope() as session:
-        rows = (
-            (
-                await session.execute(
-                    select(Feed, Site.name)
-                    .join(Site, Site.id == Feed.site_id)
-                    .order_by(Site.name)
-                )
-            )
-            .all()
-        )
-    return [
-        {
-            "site": site_name,
-            "interval_minutes": feed.interval_minutes,
-            "last_pulled_at": feed.last_pulled_at,
-            "last_status": feed.last_status,
-            "last_item_count": feed.last_item_count,
-            "last_duration_ms": feed.last_duration_ms,
-            "breaker_until": feed.breaker_until,
-            "enabled": feed.enabled,
-        }
-        for feed, site_name in rows
-    ]
+    if not scheduler_center.enable(job_name, enabled):
+        raise HTTPException(status_code=404, detail=f"作业不存在：{job_name}")
+    return {"job": job_name, "enabled": enabled}
 
 
 @router.get("/sites/{site_id}/feed-test", summary="RSS 连通性测试")
 async def test_feed(site_id: int) -> FeedTestResult:
     """测试站点 RSS 可达性与解析结果。
 
-    **不落库、不触发辅种**——纯诊断，避免用户"测试"操作意外添加任务。
+    **不落库、不触发 cron**——纯诊断，避免用户"测试"操作意外添加任务。
     """
     async with session_scope() as session:
         site = (
@@ -110,10 +81,9 @@ async def test_feed(site_id: int) -> FeedTestResult:
     try:
         url = factory.site_rss_url(site)
     except (ValueError, AttributeError, KeyError, TypeError) as exc:
-        # 已知：凭据缺失/格式错误/字段缺失
         logger.warning("站点 %s 凭据解析失败：%s", site.name, exc)
         return FeedTestResult(ok=False, status="credential_error", error=str(exc))
-    except Exception as exc:
+    except Exception:
         logger.exception("站点 %s RSS 测试内部异常", site.name)
         return FeedTestResult(ok=False, status="internal_error", error="RSS URL 生成失败")
 
@@ -128,53 +98,3 @@ async def test_feed(site_id: int) -> FeedTestResult:
         sample_titles=[item.title for item in result.items[:5]],
         error=result.error,
     )
-
-
-@router.post("/sites/{site_id}/pull", summary="手动触发一次辅种拉取")
-async def pull_now(site_id: int) -> RoundResult:
-    """立即对指定站点跑一轮辅种，忽略频率下限（FR-6.1）。
-
-    用户主动操作不受 FR-2.2 的 15 分钟下限约束——该下限是针对**自动**
-    拉取的账号保护。手动触发是显式决策，但仍记录审计。
-    """
-    async with session_scope() as session:
-        site = (
-            await session.execute(select(Site).where(Site.id == site_id))
-        ).scalar_one_or_none()
-        if site is None:
-            raise HTTPException(status_code=404, detail="站点不存在")
-        if not site.enabled:
-            raise HTTPException(status_code=409, detail="站点已禁用")
-
-    engine = SeedEngine(get_factory())
-    stats = await engine.run_site(site_id, force=True)
-    return _stats_out(stats)
-
-
-@router.post("/pull-all", summary="手动触发全部站点")
-async def pull_all() -> RoundList:
-    engine = SeedEngine(get_factory())
-    return RoundList(rounds=[_stats_out(s) for s in await engine.run_all()])
-
-
-@router.get("/scheduler", summary="调度作业状态")
-async def scheduler_status() -> dict[str, Any]:
-    from app.services.scheduler import scheduler_center
-
-    settings = get_settings()
-    # 启动期已在 lifespan 中执行 cipher smoke test，这里不再重复构建
-    return {
-        "enabled": settings.scheduler_enabled,
-        "jobs": scheduler_center.list_jobs(),
-        "inflight": scheduler_center.inflight_count(),
-        "accepting_new_work": scheduler_center.accepting_new_work,
-    }
-
-
-@router.post("/scheduler/{job_name}/toggle", summary="启停调度作业")
-async def toggle_job(job_name: str, enabled: bool) -> dict[str, Any]:
-    from app.services.scheduler import scheduler_center
-
-    if not scheduler_center.enable(job_name, enabled):
-        raise HTTPException(status_code=404, detail=f"作业不存在：{job_name}")
-    return {"job": job_name, "enabled": enabled}

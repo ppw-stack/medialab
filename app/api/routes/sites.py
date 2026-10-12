@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 
 from app.adapters.sites import resolve as resolve_site_adapter
 from app.adapters.sites.base import SiteProfile
@@ -15,7 +15,7 @@ from app.api.auth import require_session
 from app.core.config import get_settings
 from app.core.crypto import build_cipher, mask_secret
 from app.core.logging import get_logger
-from app.db.models import Feed, FreeCandidate, Site, Torrent
+from app.db.models import Site, Torrent
 from app.db.session import session_scope
 
 logger = get_logger(__name__)
@@ -30,7 +30,6 @@ class SiteCreate(BaseModel):
     rss_url: str | None = None
     apikey: str | None = Field(default=None, max_length=256)
     cookies: str | None = Field(default=None, max_length=4096)
-    min_interval_minutes: int = Field(default=60, ge=1)
     enabled: bool = True
 
 
@@ -41,7 +40,6 @@ class SiteUpdate(BaseModel):
     rss_url: str | None = None
     apikey: str | None = None
     cookies: str | None = None
-    min_interval_minutes: int | None = Field(default=None, ge=1)
     enabled: bool | None = None
     adapter: Literal["mteam", "hhanclub", "hdsky", "ourbits"] | None = None
 
@@ -79,7 +77,7 @@ async def delete_site(payload: SiteDeleteIn) -> dict[str, int]:
         ).scalar_one_or_none()
         if site is None:
             raise HTTPException(status_code=404, detail="站点不存在")
-        # 检查引用：torrent / free_candidate 都依赖 site_id
+        # 检查引用：torrent 仍依赖 site_id（free_candidates 已删除）
         torrent_count = (
             await session.execute(
                 select(func.count())
@@ -87,22 +85,11 @@ async def delete_site(payload: SiteDeleteIn) -> dict[str, int]:
                 .where(Torrent.site_id == payload.id)
             )
         ).scalar_one()
-        candidate_count = (
-            await session.execute(
-                select(func.count())
-                .select_from(FreeCandidate)
-                .where(FreeCandidate.site_id == payload.id)
-            )
-        ).scalar_one()
-        if torrent_count or candidate_count:
+        if torrent_count:
             raise HTTPException(
                 status_code=409,
-                detail=(
-                    f"站点下还有 {torrent_count} 条任务、"
-                    f"{candidate_count} 个 free 候选，请先清理"
-                ),
+                detail=f"站点下还有 {torrent_count} 条任务，请先清理",
             )
-        await session.execute(delete(Feed).where(Feed.site_id == payload.id))
         await session.delete(site)
     return {"id": payload.id}
 
@@ -124,7 +111,6 @@ async def create_site(payload: SiteCreate) -> SiteOut:
             name=payload.name,
             domain=payload.domain or "",
             adapter=payload.adapter,
-            min_interval_minutes=payload.min_interval_minutes,
             enabled=payload.enabled,
         )
         if payload.rss_url:
@@ -141,16 +127,7 @@ async def create_site(payload: SiteCreate) -> SiteOut:
             )
         session.add(site)
         await session.flush()
-        # 每个 site 都创建 Feed 占位（调度需要 enabled 记录）
         # 凭据可后续通过 update_site 补齐
-        session.add(
-            Feed(
-                site_id=site.id,
-                kind="site_rss",
-                interval_minutes=payload.min_interval_minutes,
-                enabled=payload.enabled,
-            )
-        )
         return _to_out(site, payload.rss_url)
 
 

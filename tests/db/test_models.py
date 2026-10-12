@@ -13,14 +13,11 @@ from app.db.models import Base, DownloaderInstance, Site, Torrent
 def test_all_expected_tables_registered() -> None:
     """§8 要求的核心表必须齐备。"""
     expected = {
-        "cooldown_hash",
         "downloader_instances",
-        "feeds",
-        "free_candidates",
-        "site_window_stats",
         "sites",
-        "task_queue",
         "torrents",
+        "torrent_index",
+        "task_queue",
     }
     assert expected <= set(Base.metadata.tables)
 
@@ -33,7 +30,6 @@ def test_site_config_columns_exist() -> None:
         "rss_url_enc",
         "apikey_enc",
         "cookies_enc",
-        "min_interval_minutes",
         "enabled",
     ):
         assert name in cols, name
@@ -50,10 +46,10 @@ def test_required_indexes_present() -> None:
 
 
 def test_cooldown_unique_per_site_hash() -> None:
-    """FR-2.3.1：同站独立冷却，(site_id, info_hash) 必须唯一。"""
-    constraints = Base.metadata.tables["cooldown_hash"].constraints
+    """torrent_index 唯一约束：同站同 item_id 必须唯一。"""
+    constraints = Base.metadata.tables["torrent_index"].constraints
     assert any(
-        {c.name for c in con.columns} == {"site_id", "info_hash"} for con in constraints
+        {c.name for c in con.columns} == {"site_id", "item_id"} for con in constraints
     )
 
 
@@ -61,10 +57,7 @@ def test_cooldown_unique_per_site_hash() -> None:
     "table",
     [
         "torrents",
-        "cooldown_hash",
-        "feeds",
-        "free_candidates",
-        "site_window_stats",
+        "torrent_index",
     ],
 )
 def test_foreign_keys_declared(table: str) -> None:

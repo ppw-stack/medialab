@@ -14,7 +14,6 @@ const routes: RouteRecordRaw[] = [
       { path: '', name: 'dashboard', component: () => import('./pages/Dashboard.vue') },
       { path: 'sites', name: 'sites', component: () => import('./pages/Sites.vue') },
       { path: 'torrents', name: 'torrents', component: () => import('./pages/Torrents.vue') },
-      { path: 'free-seed', name: 'free-seed', component: () => import('./pages/FreeSeed.vue') },
       { path: 'settings', name: 'settings', component: () => import('./pages/Settings.vue') },
       { path: 'downloaders', name: 'downloaders', component: () => import('./pages/Downloaders.vue') },
     ],

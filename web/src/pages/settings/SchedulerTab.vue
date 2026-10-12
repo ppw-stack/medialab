@@ -18,8 +18,7 @@ interface SchedulerInfo {
 }
 
 const JOB_LABELS: Record<string, { name: string; desc: string }> = {
-  cross_seed:     { name: '辅种拉取',     desc: 'FR-2：每小时从各站点 RSS 拉取一次（受 FR-2.2 频率下限约束）' },
-  free_seed_poll: { name: '免费种拉取',   desc: 'FR-3：每 10 分钟捕获免费种候选 + 添加到下载器' },
+  fetch_all_sites: { name: 'RSS 拉取',    desc: '遍历所有启用站点拉取 RSS，写入 torrent_index 表' },
 }
 
 const data = ref<SchedulerInfo | null>(null)
