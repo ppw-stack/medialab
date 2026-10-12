@@ -225,7 +225,10 @@ const columns = [
             </a-typography-text>
           </template>
           <template v-else-if="column.key === 'size'">
-            {{ formatSize(record.size) }}
+            <template v-if="record.size > 0">
+              {{ formatSize(record.size) }}
+            </template>
+            <a-typography-text v-else type="secondary">—</a-typography-text>
           </template>
           <template v-else-if="column.key === 'free_type'">
             <a-tag :color="freeTypeLabel(record.free_type).color">
@@ -233,7 +236,13 @@ const columns = [
             </a-tag>
           </template>
           <template v-else-if="column.key === 'free_end_at'">
-            <a-tag v-if="record.free_type === 'freeleech_permanent'" color="green">
+            <a-typography-text
+              v-if="record.free_type === 'unknown'"
+              type="secondary"
+            >
+              —
+            </a-typography-text>
+            <a-tag v-else-if="record.free_type === 'freeleech_permanent'" color="green">
               永久
             </a-tag>
             <a-tag v-else :color="freeEndColor(record.free_end_at)">

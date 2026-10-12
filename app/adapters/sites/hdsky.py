@@ -21,10 +21,11 @@ spstate 含义（NexusPHP 标准）：
 
 from __future__ import annotations
 
+import contextlib
 import re
 
 import httpx
-from parsel import Selector
+from bs4 import BeautifulSoup
 
 from app.adapters.sites.base import (
     FeedItem,
@@ -33,6 +34,7 @@ from app.adapters.sites.base import (
     SiteProfile,
     TorrentBrief,
     TorrentDetail,
+    parse_abs_datetime,
 )
 from app.core.logging import get_logger
 
@@ -223,55 +225,127 @@ class HdskyAdapter(SiteAdapter):
 
     @staticmethod
     def _parse_spstate7_html(html: str, *, limit: int = 100) -> list[FeedItem]:
-        """parsel CSS 解析 HDSky spstate=7 页面。
+        """BS4 解析 HDSky spstate=0 页面（fetch_all_sites 拉全量入库）。
 
-        每个 torrent 跨多个嵌套 ``<tr>``，所以**整页一次性 parse**（不切片）。
-        对每个 ``a[href*="details.php?id="][title]`` 锚点，向上溯最近 ``<tr>`` 找促销信号。
+        HDSky 使用标准 NexusPHP 主题，``torrents.php?spstate=0`` 渲染
+        ``<table class="torrents">``，每个 torrent 占一个 ``<tr>`` 包含多 ``<td>``：
+
+        - td0 = 分类图标（``<img class="c_tvseries">``）
+        - td1 = 标题（``<a target="_blank" title="..." href="details.php?id=...">``）
+                + 促销标记（``<img class="pro_free">`` + onmouseover 内的剩余时间）
+        - td2..td4 = download / zip / bookmark 操作
+        - td5 = 评论数
+        - td6 = 发布时间（``<span title="2026-10-12 14:51:34">3时<br />41分</span>``）
+        - td7 = size（``<td>50.54<br />GB</td>``）
+        - td8 = seeders / leechers
+
+        解析流程：先定位 ``table.torrents`` 主表格，遍历每个 tr 找 details 锚点，
+        从同一 tr 的不同 td 提取全字段。
         """
-        sel = Selector(text=html)
+        soup = BeautifulSoup(html, "lxml")
+        # 定位主表格（NexusPHP 标准 class="torrents"）；无则 fallback 到全文档
+        table = soup.find("table", class_="torrents")
+        if table is None:
+            table = soup
+
         items: list[FeedItem] = []
         seen: set[str] = set()
 
-        for a in sel.css('a[href^="details.php?id="][title]'):
-            href = a.attrib.get("href", "")
+        for tr in table.find_all("tr"):
+            if len(items) >= limit:
+                break
+            # 找 details 锚点（带 title 属性）
+            a = tr.find("a", href=_DETAILS_ID_RE, attrs={"title": True})
+            if a is None:
+                continue
+            href: str = str(a.get("href") or "")
+            if "userdetails.php" in href:
+                continue
             m = _DETAILS_ID_RE.search(href)
-            if not m or "userdetails.php" in href:
+            if not m:
                 continue
             item_id = m.group(1)
             if item_id in seen:
                 continue
             seen.add(item_id)
-            title = a.attrib.get("title", "").strip()
+            title: str = str(a.get("title") or "").strip()
 
-            # 向上溯最近 <tr>（HDSky torrent 行通常在 <tr> 内）
-            tr = a.xpath("./ancestor::tr[1]").get("")
-            if not tr:
-                continue
+            # ---------------- category: <img class="c_xxx" title="...">
+            # 兼容 HDSky (`c_movies`) / Ourbits (`c2_movies`) 两种前缀
+            category: str | None = None
+            cat_img = tr.find("img", class_=re.compile(r"^c\d?_"))
+            if cat_img is not None:
+                cat_title = str(cat_img.get("title") or cat_img.get("alt") or "")
+                category = cat_title.strip() or None
 
-            tr_sel = Selector(text=tr)
+            # ---------------- size / pub_at: 扫所有 td，匹配 <td>X.XX<br />UNIT</td>
+            # 与 <span title="YYYY-MM-DD HH:MM:SS">
+            size_bytes = 0
+            published_at = None
+            for td in tr.find_all("td"):
+                td_html: str = td.decode()
+                if size_bytes == 0:
+                    m_sz = re.search(
+                        r"(\d+(?:\.\d+)?)\s*<br\s*/?>\s*(TB|GB|MB|KB)",
+                        td_html,
+                        re.IGNORECASE,
+                    )
+                    if m_sz is not None:
+                        with contextlib.suppress(KeyError, ValueError):
+                            size_bytes = int(
+                                float(m_sz.group(1))
+                                * {
+                                    "TB": 1024 ** 4,
+                                    "GB": 1024 ** 3,
+                                    "MB": 1024 ** 2,
+                                    "KB": 1024,
+                                }[m_sz.group(2).upper()]
+                            )
+                if published_at is None:
+                    span = td.find("span", attrs={"title": True})
+                    if span is not None:
+                        t = str(span.get("title") or "")
+                        if _ABS_DATETIME_RE.match(t):
+                            published_at = parse_abs_datetime(t)
 
-            # 免费标记：img class="pro_XXX" → 标准 class
-            pro_imgs = tr_sel.css('img[class*="pro_"]::attr(class)').getall()
-            mapped_pro = []
-            for cls in pro_imgs:
-                # cls 形如 "pro_free"，可能有多个 class，取首个匹配
-                for c in cls.split():
-                    if c.startswith("pro_"):
-                        mapped_pro.append(_PRO_IMG_MAP.get(c, c))
+            # ---------------- 免费标记：img class="pro_XXX" → 标准 class
+            free_classes: list[str] = []
+            for img in tr.find_all("img", class_=re.compile(r"^pro_")):
+                classes: list[str] = list(img.get("class") or [])
+                for c in classes:
+                    if c.startswith("pro_") and c in _PRO_IMG_MAP:
+                        free_classes.append(_PRO_IMG_MAP[c])
+                        break
+            # font class="free|twoupfree|..." 标记
+            for font in tr.find_all("font", class_=True):
+                for c in font.get("class") or []:
+                    if c in _PROMO_FONT_CLASSES:
+                        free_classes.append(c)
                         break
 
-            # 限时/2X 标记：<font class="free|twoupfree|...">
-            font_classes = tr_sel.css("font::attr(class)").getall()
-            mapped_font = [c for c in font_classes if c in _PROMO_FONT_CLASSES]
-
-            free_classes = mapped_pro + mapped_font
-
-            # 限时绝对时刻：<span title="2026-10-11 12:41:28">
-            remaining_abs = None
-            for ts in tr_sel.css("span[title]::attr(title)").getall():
-                if _ABS_DATETIME_RE.match(ts):
-                    remaining_abs = ts
+            # ---------------- 限时绝对时刻
+            remaining_abs: str | None = None
+            for span in tr.find_all("span", attrs={"title": True}):
+                t = str(span.get("title") or "")
+                if _ABS_DATETIME_RE.match(t):
+                    remaining_abs = t
                     break
+            if remaining_abs is None:
+                for img in tr.find_all("img", attrs={"onmouseover": True}):
+                    ov: str = str(img.get("onmouseover") or "")
+                    decoded = (
+                        ov.replace("&quot;", '"')
+                        .replace("&amp;", "&")
+                        .replace("&lt;", "<")
+                        .replace("&gt;", ">")
+                    )
+                    m2 = re.search(
+                        r"<span title=\"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\"",
+                        decoded,
+                    )
+                    if m2:
+                        remaining_abs = m2.group(1)
+                        break
 
             free_payload: dict[str, object] | None = None
             if free_classes or remaining_abs:
@@ -280,24 +354,20 @@ class HdskyAdapter(SiteAdapter):
                     "remaining_abs": remaining_abs,
                 }
 
-            # spstate=0 是全站列表：fetch_all_sites 必须拉全量入库，
-            # 不做"只入免费"过滤——是否免费留给 WindowParser enrich。
             items.append(
                 FeedItem(
                     title=title,
                     link=f"details.php?id={item_id}",
                     item_id=item_id,
                     info_hash=None,
-                    size=0,
-                    category=None,
+                    size=size_bytes,
+                    category=category,
                     description="",
-                    published_at=None,
+                    published_at=published_at,
                     torrent_url=None,  # 由 _fill_download_signs 后填（含 sign）
                     free_payload=free_payload,
                 )
             )
-            if len(items) >= limit:
-                break
 
         return items[:limit]
 

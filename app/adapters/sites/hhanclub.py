@@ -28,6 +28,7 @@ import re
 
 import httpx
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 
 from app.adapters.sites.base import (
     FeedItem,
@@ -36,6 +37,7 @@ from app.adapters.sites.base import (
     SiteProfile,
     TorrentBrief,
     TorrentDetail,
+    parse_size_text,
 )
 from app.core.logging import get_logger
 
@@ -229,7 +231,7 @@ class HhanclubAdapter(SiteAdapter):
 
         # 找所有指向 details.php?id=N 的锚点（排除 userdetails.php）
         for a in soup.find_all("a", href=_DETAILS_ID_RE):
-            href = a.get("href", "")
+            href: str = str(a.get("href") or "")
             # 排除 userdetails 链接
             if "userdetails.php" in href:
                 continue
@@ -242,16 +244,50 @@ class HhanclubAdapter(SiteAdapter):
             seen.add(item_id)
 
             # 标题：title 属性优先，其次文本
-            title = (a.get("title") or a.get_text(strip=True) or "").strip()
+            title: str = str(a.get("title") or a.get_text(strip=True) or "").strip()
 
-            # 向上找 torrent 容器：通常最近的 <tr> 或包含"剩余时间"的块
-            container = _find_torrent_container(a)
+            # 向上找 torrent 卡片容器：HHanClub 为 Tailwind 自定义主题，
+            # 标题锚点与 size/cat/pub 的 ``<div class="torrent-info">`` 不在同一分支，
+            # 最近公共祖先为 ``<div class="... torrent-table-sub-info">``。
+            # 因此以"最近的、包含 size 子 div 的祖先"为卡片容器。
+            container: Tag | None = None
+            for depth, ancestor in enumerate(a.parents):
+                if ancestor is None or depth > 8:
+                    break
+                if ancestor.find("div", class_="torrent-info-text-size") is not None:
+                    container = ancestor
+                    break
+            if container is None:
+                fallback = _find_torrent_container(a)
+                if isinstance(fallback, Tag):
+                    container = fallback
+
+            # ---------------- size / category / published_at: Tailwind 主题
+            # <div class="torrent-info-text torrent-info-text-size">32.23 GB</div>
+            # added = 相对时间（"3天17时"），无 title 属性 → published_at 留 None
+            size_bytes = 0
+            category: str | None = None
+            published_at = None
+            if container is not None:
+                for div in container.find_all(
+                    "div", class_=re.compile(r"torrent-info-text")
+                ):
+                    div_classes: list[str] = list(div.get("class") or [])
+                    text: str = div.get_text(strip=True)
+                    if "torrent-info-text-size" in div_classes:
+                        size_bytes = parse_size_text(text)
+                    elif "torrent-info-text-cat" in div_classes and text:
+                        category = text
+                    elif "torrent-info-text-added" in div_classes and text:
+                        # HHanClub 显示的是相对时间（"3天17时"），不是绝对时刻
+                        # 无 title 属性 — published_at 留 None（业务层不依赖）
+                        pass
 
             # 限时绝对时刻：<span title="YYYY-MM-DD HH:MM:SS">
-            remaining_abs = None
+            remaining_abs: str | None = None
             if container is not None:
                 for span in container.find_all("span"):
-                    t = span.get("title", "")
+                    t: str = str(span.get("title") or "")
                     if _ABS_DATETIME_RE.match(t):
                         remaining_abs = t
                         break
@@ -260,7 +296,7 @@ class HhanclubAdapter(SiteAdapter):
             free_classes: list[str] = []
             if container is not None:
                 for tag in container.find_all(class_=True):
-                    classes = tag.get("class", [])
+                    classes: list[str] = list(tag.get("class") or [])
                     for cls in classes:
                         if cls in _PROMO_CLASSES:
                             free_classes.append(cls)
@@ -283,10 +319,10 @@ class HhanclubAdapter(SiteAdapter):
                     link=f"details.php?id={item_id}",
                     item_id=item_id,
                     info_hash=None,
-                    size=0,
-                    category=None,
+                    size=size_bytes,
+                    category=category,
                     description="",
-                    published_at=None,
+                    published_at=published_at,
                     torrent_url=None,  # 由 _fill_download_signs 后填（含 passkey）
                     free_payload=free_payload,
                 )

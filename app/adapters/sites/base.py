@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
@@ -166,3 +167,92 @@ class SiteAdapter(ABC):
 
     async def close(self) -> None:
         """释放 HTTP 连接池。子类按需覆盖。"""
+
+
+# ---------------------------------------------------------------- 工具函数
+
+#: ``"50.54 GB"`` / ``"1191.58 MB"`` → ``int`` 字节
+_SIZE_RE = re.compile(
+    r"^\s*(\d+(?:\.\d+)?)\s*(TB|GB|MB|KB|B)\s*$",
+    re.IGNORECASE,
+)
+_SIZE_FACTORS = {
+    "B": 1,
+    "KB": 1024,
+    "MB": 1024 ** 2,
+    "GB": 1024 ** 3,
+    "TB": 1024 ** 4,
+}
+
+
+def parse_size_text(text: str | None) -> int:
+    """把 ``"50.54 GB"`` / ``"32.23 GB"`` / ``"1.89 MB"`` 解析为字节整数。
+
+    无法解析（含 ``None`` / 空串 / 单位异常）时返回 0。适配层 parser 用于
+    从 ``torrents.php`` 列表页 td / div 文本中提取 size。
+    """
+    if not text:
+        return 0
+    m = _SIZE_RE.match(text.strip())
+    if m is None:
+        return 0
+    value, unit = m.group(1), m.group(2).upper()
+    try:
+        return int(float(value) * _SIZE_FACTORS[unit])
+    except (KeyError, ValueError):
+        return 0
+
+
+def parse_size_from_br(text: str | None) -> int:
+    """把 ``"50.54<br />GB"`` 解析为字节整数（HTML 跨 tag 用）。
+
+    比 :func:`parse_size_text` 更宽松：匹配 ``<br />`` / ``<br>`` 之间的数字与单位。
+    """
+    if not text:
+        return 0
+    m = re.search(
+        r"(\d+(?:\.\d+)?)\s*<br\s*/?>\s*(TB|GB|MB|KB)",
+        text,
+        re.IGNORECASE,
+    )
+    if m is None:
+        return parse_size_text(text)
+    value, unit = m.group(1), m.group(2).upper()
+    try:
+        return int(float(value) * _SIZE_FACTORS[unit])
+    except (KeyError, ValueError):
+        return 0
+
+
+#: ``"2026-10-15 14:51:34"`` → :class:`datetime` (naive UTC)
+_ABS_DATETIME_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$")
+
+
+def bs4_attr(value: object) -> str:
+    """把 BS4 ``Tag.get()`` 返值（``str | list[str] | None``）归一为 ``str``。
+
+    BS4 属性值可能是 list（class 等）或 None，统一 cast 为字符串便于 regex 处理。
+    """
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return " ".join(str(v) for v in value)
+    return str(value)
+
+
+def parse_abs_datetime(text: str | None) -> datetime | None:
+    """把 ``"2026-10-15 14:51:34"`` 解析为 naive UTC datetime。
+
+    输入为站点本地时间（Asia/Shanghai），业务层 timestamp 用作历史排序。
+    无法解析（含 ``None`` / 空串 / 格式异常）时返回 ``None``。
+    """
+    if not text:
+        return None
+    m = _ABS_DATETIME_RE.match(text.strip())
+    if m is None:
+        return None
+    try:
+        y, mo, d, h, mi, s = (int(x) for x in m.groups())
+        return datetime(y, mo, d, h, mi, s)
+    except ValueError:
+        return None

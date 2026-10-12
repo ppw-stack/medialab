@@ -82,7 +82,10 @@ async def list_torrent_index(
         total = (await session.execute(count_stmt)).scalar_one() or 0
         rows = (
             await session.execute(
-                stmt.order_by(TorrentIndex.last_seen_at.desc())
+                stmt.order_by(
+                    TorrentIndex.last_seen_at.desc(),
+                    TorrentIndex.id.desc(),
+                )
                 .offset(offset)
                 .limit(limit)
             )

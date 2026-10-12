@@ -19,10 +19,11 @@ ourbits 在 Cloudflare 后，需 cf_clearance cookie。
 
 from __future__ import annotations
 
+import contextlib
 import re
 
 import httpx
-from parsel import Selector
+from bs4 import BeautifulSoup
 
 from app.adapters.sites.base import (
     FeedItem,
@@ -31,6 +32,7 @@ from app.adapters.sites.base import (
     SiteProfile,
     TorrentBrief,
     TorrentDetail,
+    parse_abs_datetime,
 )
 from app.core.logging import get_logger
 
@@ -215,46 +217,111 @@ class OurbitsAdapter(SiteAdapter):
 
     @staticmethod
     def _parse_spstate7_html(html: str, *, limit: int = 100) -> list[FeedItem]:
-        """parsel CSS 解析 Ourbits spstate=7 页面（与 hdsky 同源，结构一致）。"""
-        sel = Selector(text=html)
+        """BS4 解析 Ourbits spstate=0 页面（与 hdsky 同源 NexusPHP 主题）。
+
+        Ourbits 与 hdsky 共用标准 NexusPHP 表格主题：每个 torrent 占一个 ``<tr>``，
+        不同 ``<td>`` 依次放 category / title / download / pub / size / seeders。
+        """
+        soup = BeautifulSoup(html, "lxml")
+        table = soup.find("table", class_="torrents")
+        if table is None:
+            table = soup
+
         items: list[FeedItem] = []
         seen: set[str] = set()
 
-        for a in sel.css('a[href^="details.php?id="][title]'):
-            href = a.attrib.get("href", "")
+        for tr in table.find_all("tr"):
+            if len(items) >= limit:
+                break
+            a = tr.find("a", href=_DETAILS_ID_RE, attrs={"title": True})
+            if a is None:
+                continue
+            href: str = str(a.get("href") or "")
+            if "userdetails.php" in href:
+                continue
             m = _DETAILS_ID_RE.search(href)
-            if not m or "userdetails.php" in href:
+            if not m:
                 continue
             item_id = m.group(1)
             if item_id in seen:
                 continue
             seen.add(item_id)
-            title = a.attrib.get("title", "").strip()
+            title: str = str(a.get("title") or "").strip()
 
-            tr = a.xpath("./ancestor::tr[1]").get("")
-            if not tr:
-                continue
+            # ---------------- category
+            # 兼容 HDSky (`c_movies`) / Ourbits (`c2_movies`) 两种前缀
+            category: str | None = None
+            cat_img = tr.find("img", class_=re.compile(r"^c\d?_"))
+            if cat_img is not None:
+                cat_title = str(cat_img.get("title") or cat_img.get("alt") or "")
+                category = cat_title.strip() or None
 
-            tr_sel = Selector(text=tr)
+            # ---------------- size / pub_at：扫所有 td
+            size_bytes = 0
+            published_at = None
+            for td in tr.find_all("td"):
+                td_html: str = td.decode()
+                if size_bytes == 0:
+                    m_sz = re.search(
+                        r"(\d+(?:\.\d+)?)\s*<br\s*/?>\s*(TB|GB|MB|KB)",
+                        td_html,
+                        re.IGNORECASE,
+                    )
+                    if m_sz is not None:
+                        with contextlib.suppress(KeyError, ValueError):
+                            size_bytes = int(
+                                float(m_sz.group(1))
+                                * {
+                                    "TB": 1024 ** 4,
+                                    "GB": 1024 ** 3,
+                                    "MB": 1024 ** 2,
+                                    "KB": 1024,
+                                }[m_sz.group(2).upper()]
+                            )
+                if published_at is None:
+                    span = td.find("span", attrs={"title": True})
+                    if span is not None:
+                        t = str(span.get("title") or "")
+                        if _ABS_DATETIME_RE.match(t):
+                            published_at = parse_abs_datetime(t)
 
-            pro_imgs = tr_sel.css('img[class*="pro_"]::attr(class)').getall()
-            mapped_pro = []
-            for cls in pro_imgs:
-                for c in cls.split():
-                    if c.startswith("pro_"):
-                        mapped_pro.append(_PRO_IMG_MAP.get(c, c))
+            # ---------------- 免费标记
+            free_classes: list[str] = []
+            for img in tr.find_all("img", class_=re.compile(r"^pro_")):
+                classes: list[str] = list(img.get("class") or [])
+                for c in classes:
+                    if c.startswith("pro_") and c in _PRO_IMG_MAP:
+                        free_classes.append(_PRO_IMG_MAP[c])
+                        break
+            for font in tr.find_all("font", class_=True):
+                for c in font.get("class") or []:
+                    if c in _PROMO_FONT_CLASSES:
+                        free_classes.append(c)
                         break
 
-            font_classes = tr_sel.css("font::attr(class)").getall()
-            mapped_font = [c for c in font_classes if c in _PROMO_FONT_CLASSES]
-
-            free_classes = mapped_pro + mapped_font
-
-            remaining_abs = None
-            for ts in tr_sel.css("span[title]::attr(title)").getall():
-                if _ABS_DATETIME_RE.match(ts):
-                    remaining_abs = ts
+            # ---------------- 限时绝对时刻
+            remaining_abs: str | None = None
+            for span in tr.find_all("span", attrs={"title": True}):
+                t = str(span.get("title") or "")
+                if _ABS_DATETIME_RE.match(t):
+                    remaining_abs = t
                     break
+            if remaining_abs is None:
+                for img in tr.find_all("img", attrs={"onmouseover": True}):
+                    ov: str = str(img.get("onmouseover") or "")
+                    decoded = (
+                        ov.replace("&quot;", '"')
+                        .replace("&amp;", "&")
+                        .replace("&lt;", "<")
+                        .replace("&gt;", ">")
+                    )
+                    m2 = re.search(
+                        r"<span title=\"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\"",
+                        decoded,
+                    )
+                    if m2:
+                        remaining_abs = m2.group(1)
+                        break
 
             free_payload: dict[str, object] | None = None
             if free_classes or remaining_abs:
@@ -263,24 +330,20 @@ class OurbitsAdapter(SiteAdapter):
                     "remaining_abs": remaining_abs,
                 }
 
-            # spstate=0 是全站列表：fetch_all_sites 必须拉全量入库，
-            # 不做"只入免费"过滤——是否免费留给 WindowParser enrich。
             items.append(
                 FeedItem(
                     title=title,
                     link=f"details.php?id={item_id}",
                     item_id=item_id,
                     info_hash=None,
-                    size=0,
-                    category=None,
+                    size=size_bytes,
+                    category=category,
                     description="",
-                    published_at=None,
+                    published_at=published_at,
                     torrent_url=None,  # 由 _fill_download_signs 后填（含 passkey）
                     free_payload=free_payload,
                 )
             )
-            if len(items) >= limit:
-                break
 
         return items[:limit]
 
