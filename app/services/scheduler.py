@@ -42,7 +42,12 @@ class JobSpec:
 class SchedulerCenter:
     """调度中心门面。"""
 
-    def __init__(self, timezone: str = "UTC") -> None:
+    def __init__(self, timezone: str | None = None) -> None:
+        # 默认从 settings.timezone 取（与日志/保种/窗口计算一致），
+        # 单元测试可显式覆盖。
+        if timezone is None:
+            from app.core.config import get_settings
+            timezone = get_settings().timezone
         self._tz = timezone
         self._scheduler: AsyncIOScheduler | None = None
         self._specs: dict[str, JobSpec] = {}
