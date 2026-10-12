@@ -131,10 +131,13 @@ async def test_search_torrents_parses_spstate7(adapter: OurbitsAdapter) -> None:
     detail_resp = MagicMock()
     detail_resp.status_code = 200
     detail_resp.text = OURBITS_DETAIL_HTML_10001
-    adapter._client.get = AsyncMock(side_effect=[list_resp, detail_resp, detail_resp, detail_resp])
+    adapter._client.get = AsyncMock(
+        side_effect=[list_resp, detail_resp, detail_resp, detail_resp, detail_resp]
+    )
 
     items = await adapter.search_torrents({}, page_size=100, page_number=1)
-    assert len(items) == 3
+    # 全量拉取（含无促销标记的种子）—— fetch_all_sites 必须入库所有 spstate=0 项
+    assert len(items) == 4
     # 第一条：永久免费 + torrent_url 已填
     assert items[0].item_id == "10001"
     assert items[0].title == "Movie A"
@@ -155,6 +158,11 @@ async def test_search_torrents_parses_spstate7(adapter: OurbitsAdapter) -> None:
     assert items[2].free_payload is not None
     assert "halfdown" in items[2].free_payload["free_classes"]  # type: ignore[operator]
     assert items[2].free_payload["remaining_abs"] is None  # type: ignore[operator]
+    # 第四条：spstate=0 拉全量后必须保留（无任何促销标记）
+    assert items[3].item_id == "10004"
+    assert items[3].title == "Movie D"
+    assert items[3].free_payload is None
+    assert items[3].torrent_url is not None
 
 
 async def test_search_torrents_http_error(adapter: OurbitsAdapter) -> None:
@@ -170,7 +178,8 @@ async def test_search_torrents_http_error(adapter: OurbitsAdapter) -> None:
 
 def test_parse_spstate7_html_extracts_items() -> None:
     items = OurbitsAdapter._parse_spstate7_html(OURBITS_SPSTATE7_HTML, limit=100)
-    assert len(items) == 3
+    # 全量拉取：4 条（3 个有促销 + 1 个无）
+    assert len(items) == 4
     assert items[0].item_id == "10001"
     assert "free" in items[0].free_payload["free_classes"]  # type: ignore[operator]
 
@@ -179,8 +188,11 @@ def test_parse_spstate7_html_empty() -> None:
     assert OurbitsAdapter._parse_spstate7_html("<html></html>") == []
 
 
-def test_parse_spstate7_html_skips_non_free() -> None:
-    """spstate=0 包含普通付费种子，没有 pro_free 不应进候选池。"""
+def test_parse_spstate7_html_keeps_non_free() -> None:
+    """spstate=0 拉全量：含普通付费种子（无 pro_* 标记）也必须保留。
+
+    fetch_all_sites 不做免费过滤——是否免费留给 WindowParser enrich 阶段判断。
+    """
     html = (
         '<html><body><table class="torrents">'
         '<tr>'
@@ -202,7 +214,8 @@ def test_parse_spstate7_html_skips_non_free() -> None:
     )
     items = OurbitsAdapter._parse_spstate7_html(html, limit=100)
     ids = [it.item_id for it in items]
-    assert ids == ["30001", "30003"]  # 30002（无免费标志）被跳过
+    # 三条全保留：30002 虽无促销标记也入库
+    assert ids == ["30001", "30002", "30003"]
 
 
 # ---- fixture: Ourbits spstate=0 真实结构片段（2026-10 抓取）----
@@ -236,6 +249,13 @@ OURBITS_SPSTATE7_HTML = (
     '<td><a target="_blank" title="Movie C" href="details.php?id=10003&amp;hit=1">Movie C</a></td>'
     '<td><img class="pro_50pctdown" src="50.png" alt="50%"/></td>'
     '<td>2.00<br />GB</td>'
+    '<td>&nbsp;</td>'
+    '</tr>'
+    # 普通种子（spstate=0 拉全量，无任何促销标记）—— 必须保留
+    '<tr>'
+    '<td><a target="_blank" title="Movie D" href="details.php?id=10004&amp;hit=1">Movie D</a></td>'
+    '<td>&nbsp;</td>'
+    '<td>3.50<br />GB</td>'
     '<td>&nbsp;</td>'
     '</tr>'
     '</table></body></html>'

@@ -157,11 +157,14 @@ class HdskyAdapter(SiteAdapter):
         page_size: int = 100,
         page_number: int = 1,
     ) -> list[FeedItem]:
-        """2. 抓取免费种子列表：GET /torrents.php?spstate=0，parsel CSS 解析。
+        """2. 抓取种子列表：GET /torrents.php?spstate=0，parsel CSS 解析。
 
         HDSky 使用标准 NexusPHP 嵌套表格，spstate=0 聚合所有促销种子
         （永久 + 限时 + 折扣）。**注意**：旧版本用 spstate=7（仅30%折扣页），
         错误地把所有种子视为无 end_at 的 30% off——已修复为 spstate=0 抓全量。
+
+        fetch_all_sites 拉全量入库（含无促销标记的普通种子）—— 是否免费
+        留给 WindowParser enrich 阶段判断。
 
         返回的 FeedItem.free_payload 含：
         - ``free_classes``: 标准 free/twoupfree/halfdown/thirtypercent 等
@@ -277,11 +280,8 @@ class HdskyAdapter(SiteAdapter):
                     "remaining_abs": remaining_abs,
                 }
 
-            # spstate=0 是全站列表，包含大量无免费标志的普通 torrent。
-            # 只入候选池带免费标记的条目（避免噪声）。
-            if free_payload is None:
-                continue
-
+            # spstate=0 是全站列表：fetch_all_sites 必须拉全量入库，
+            # 不做"只入免费"过滤——是否免费留给 WindowParser enrich。
             items.append(
                 FeedItem(
                     title=title,

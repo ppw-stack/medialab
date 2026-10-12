@@ -158,13 +158,13 @@ async def test_search_torrents_parses_spstate7(adapter: HdskyAdapter) -> None:
     detail_resp = MagicMock()
     detail_resp.status_code = 200
     detail_resp.text = HDSKY_DETAIL_HTML_10001  # 含 sign URL
-    # 第 1 次 = 列表；之后 3 次（每个 item 一次）都返回同一个详情 mock
-    responses = [list_resp, detail_resp, detail_resp, detail_resp]
+    # 第 1 次 = 列表；之后 4 次（每个 item 一次）都返回同一个详情 mock
+    responses = [list_resp, detail_resp, detail_resp, detail_resp, detail_resp]
     adapter._client.get = AsyncMock(side_effect=responses)
 
     items = await adapter.search_torrents({}, page_size=100, page_number=1)
-    # 10001 / 10002 / 10003
-    assert len(items) == 3
+    # 10001 / 10002 / 10003 / 10004 — 全量拉取，无促销标记也保留
+    assert len(items) == 4
     # 第一条：永久免费（pro_free，无 remaining_abs）
     assert items[0].item_id == "10001"
     assert items[0].title == "Movie A"
@@ -179,12 +179,17 @@ async def test_search_torrents_parses_spstate7(adapter: HdskyAdapter) -> None:
     assert items[1].item_id == "10002"
     assert items[1].free_payload is not None
     assert "free" in items[1].free_payload["free_classes"]  # type: ignore[operator]
-    assert items[1].free_payload["remaining_abs"] == "2026-12-31 23:59:00"  # type: ignore[operator]
+    assert items[1].free_payload["remaining_abs"] == "2026-12-31 23:59:00"  # type: ignore[index]
     # 第三条：30% off（pro_30pctdown → thirtypercent → NEUTRAL，无 remaining_abs）
     assert items[2].item_id == "10003"
     assert items[2].free_payload is not None
     assert "thirtypercent" in items[2].free_payload["free_classes"]  # type: ignore[operator]
     assert items[2].free_payload["remaining_abs"] is None  # type: ignore[operator]
+    # 第四条：spstate=0 拉全量后必须保留（无任何促销标记）—fetch_all_sites 全量入库
+    assert items[3].item_id == "10004"
+    assert items[3].title == "Movie D"
+    assert items[3].free_payload is None  # 不构造空 dict
+    assert items[3].torrent_url is not None  # 仍走 sign URL 抓详情
 
 
 async def test_search_torrents_extracts_window_for_timed_free(adapter: Any) -> None:
@@ -197,11 +202,13 @@ async def test_search_torrents_extracts_window_for_timed_free(adapter: Any) -> N
 
     list_resp = MagicMock()
     list_resp.status_code = 200
-    list_resp.text = HDSKY_SPSTATE7_HTML  # 3 条列表
+    list_resp.text = HDSKY_SPSTATE7_HTML  # 4 条列表（3 个有促销 + 1 个无）
     detail_resp = MagicMock()
     detail_resp.status_code = 200
     detail_resp.text = HDSKY_DETAIL_HTML_10001
-    adapter._client.get = AsyncMock(side_effect=[list_resp, detail_resp, detail_resp, detail_resp])
+    adapter._client.get = AsyncMock(
+        side_effect=[list_resp, detail_resp, detail_resp, detail_resp, detail_resp]
+    )
 
     items = await adapter.search_torrents({}, page_size=100, page_number=1)
     # 找限时条（item_id=10002）
@@ -220,9 +227,11 @@ async def test_search_torrents_details_failure_keeps_list(adapter: HdskyAdapter)
     list_resp.text = HDSKY_SPSTATE7_HTML
     fail_resp = MagicMock()
     fail_resp.status_code = 500
-    adapter._client.get = AsyncMock(side_effect=[list_resp, fail_resp, fail_resp, fail_resp])
+    adapter._client.get = AsyncMock(
+        side_effect=[list_resp, fail_resp, fail_resp, fail_resp, fail_resp]
+    )
     items = await adapter.search_torrents({})
-    assert len(items) == 3
+    assert len(items) == 4
     assert all(it.torrent_url is None for it in items)
 
 
@@ -241,7 +250,8 @@ async def test_search_torrents_http_error(adapter: HdskyAdapter) -> None:
 
 def test_parse_spstate7_html_extracts_items() -> None:
     items = HdskyAdapter._parse_spstate7_html(HDSKY_SPSTATE7_HTML, limit=100)
-    assert len(items) == 3
+    # 全量拉取：4 条（3 个有促销 + 1 个无促销普通种子）
+    assert len(items) == 4
     assert items[0].item_id == "10001"
     assert "free" in items[0].free_payload["free_classes"]  # type: ignore[operator]
 
@@ -250,8 +260,11 @@ def test_parse_spstate7_html_empty() -> None:
     assert HdskyAdapter._parse_spstate7_html("<html></html>") == []
 
 
-def test_parse_spstate7_html_skips_non_free() -> None:
-    """spstate=0 包含普通付费种子，没有 pro_free 不应进候选池。"""
+def test_parse_spstate7_html_keeps_non_free() -> None:
+    """spstate=0 拉全量：含普通付费种子（无 pro_* 标记）也必须保留。
+
+    fetch_all_sites 不做免费过滤——是否免费留给 WindowParser enrich 阶段判断。
+    """
     html = (
         '<html><body><table class="torrents">'
         '<tr>'
@@ -273,9 +286,12 @@ def test_parse_spstate7_html_skips_non_free() -> None:
     )
     items = HdskyAdapter._parse_spstate7_html(html, limit=100)
     ids = [it.item_id for it in items]
-    assert ids == ["20001", "20003"]  # 20002（无免费标志）被跳过
-    assert items[1].free_payload is not None
-    assert items[1].free_payload["remaining_abs"] == "2026-12-31 23:59:00"  # type: ignore[index]
+    # 三条全保留：20002 虽无促销标记，也入库（free_payload=None）
+    assert ids == ["20001", "20002", "20003"]
+    assert items[1].free_payload is None
+    # 第二条（Timed）限时字段保留
+    assert items[2].free_payload is not None
+    assert items[2].free_payload["remaining_abs"] == "2026-12-31 23:59:00"  # type: ignore[index]
 
 
 # ---- fixture: HDSky spstate=0 真实结构片段（2026-10 抓取）----
@@ -311,6 +327,13 @@ HDSKY_SPSTATE7_HTML = (
     '<td><a target="_blank" title="Movie C" href="details.php?id=10003&amp;hit=1">Movie C</a></td>'
     '<td><img class="pro_30pctdown" src="30.png" alt="30%"/></td>'
     '<td>2.00<br />GB</td>'
+    '<td>&nbsp;</td>'
+    '</tr>'
+    # 普通种子（spstate=0 拉全量，无任何促销标记）—— 必须保留
+    '<tr>'
+    '<td><a target="_blank" title="Movie D" href="details.php?id=10004&amp;hit=1">Movie D</a></td>'
+    '<td>&nbsp;</td>'
+    '<td>3.50<br />GB</td>'
     '<td>&nbsp;</td>'
     '</tr>'
     '</table></body></html>'
