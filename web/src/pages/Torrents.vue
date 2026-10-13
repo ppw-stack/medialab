@@ -49,6 +49,7 @@ const filterCategory = ref<string>('')
 const filterQ = ref<string>('')
 const selectedRowKeys = ref<string[]>([])
 const batchLoading = ref(false)
+const deleteModalOpen = ref(false)
 
 // 状态 → 中文标签 + 颜色（单一来源）
 // qB/Tr API 返回的状态字符串由 downloaders.py 序列化为 .name
@@ -212,19 +213,26 @@ async function onBatchPause(paused: boolean) {
   }
 }
 
-async function onBatchDelete() {
+function openDeleteModal() {
+  if (!hasSelection.value) return
+  deleteModalOpen.value = true
+}
+
+async function doDelete(deleteData: boolean) {
   const hashes = [...selectedRowKeys.value]
   if (hashes.length === 0 || activeTab.value === null) return
+  deleteModalOpen.value = false
   batchLoading.value = true
   try {
     const r = await api.post<BatchOpResult>(
       `/downloaders/${activeTab.value}/torrents/remove`,
-      { hashes, delete_data: false },
+      { hashes, delete_data: deleteData },
     )
+    const what = deleteData ? '任务 + 磁盘数据' : '任务'
     if (r.failed > 0) {
-      message.warning(`已删除 ${r.succeeded} 个，失败 ${r.failed} 个`)
+      message.warning(`已删除${what} ${r.succeeded} 个，失败 ${r.failed} 个`)
     } else {
-      message.success(`已删除 ${r.succeeded} 个任务`)
+      message.success(`已删除${what} ${r.succeeded} 个`)
     }
     selectedRowKeys.value = []
     loadItems()
@@ -333,21 +341,14 @@ const columns = [
           >
             批量恢复
           </a-button>
-          <a-popconfirm
-            :title="`确认删除 ${selectedRowKeys.length} 个任务？（仅删任务，保留磁盘文件）`"
-            ok-text="删除"
-            cancel-text="取消"
-            :ok-button-props="{ danger: true }"
-            @confirm="onBatchDelete"
+          <a-button
+            danger
+            :disabled="!hasSelection"
+            :loading="batchLoading"
+            @click="openDeleteModal"
           >
-            <a-button
-              danger
-              :disabled="!hasSelection"
-              :loading="batchLoading"
-            >
-              批量删除
-            </a-button>
-          </a-popconfirm>
+            批量删除
+          </a-button>
         </a-space>
 
         <a-typography-paragraph type="secondary" style="margin-top: 0">
@@ -398,5 +399,34 @@ const columns = [
         </a-table>
       </a-tab-pane>
     </a-tabs>
+
+    <a-modal
+      v-model:open="deleteModalOpen"
+      title="删除任务"
+      :footer="null"
+      :mask-closable="false"
+    >
+      <p>
+        即将删除选中下载器中的
+        <b>{{ selectedRowKeys.length }}</b> 个任务，请选择删除方式：
+      </p>
+      <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px">
+        <a-button @click="deleteModalOpen = false">取消</a-button>
+        <a-button :loading="batchLoading" @click="doDelete(false)">
+          仅删任务（保留文件）
+        </a-button>
+        <a-popconfirm
+          title="磁盘数据将被永久删除，无法恢复。确认继续？"
+          ok-text="确认删除"
+          cancel-text="取消"
+          :ok-button-props="{ danger: true }"
+          @confirm="doDelete(true)"
+        >
+          <a-button danger :loading="batchLoading">
+            删任务 + 磁盘数据
+          </a-button>
+        </a-popconfirm>
+      </div>
+    </a-modal>
   </a-card>
 </template>

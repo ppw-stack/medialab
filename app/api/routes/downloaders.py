@@ -18,9 +18,12 @@ from app.adapters.downloaders.base import (
 from app.api.auth import require_session
 from app.core.config import get_settings
 from app.core.crypto import build_cipher
+from app.core.logging import get_logger
 from app.db.models import DownloaderInstance, Torrent
 from app.db.session import session_scope
 from app.services.factory import get_factory
+
+logger = get_logger(__name__)
 
 router = APIRouter(
     prefix="/downloaders",
@@ -383,14 +386,15 @@ async def remove_downloader_torrents(
 ) -> DownloaderBatchOpResult:
     if len(payload.hashes) > 200:
         raise HTTPException(status_code=400, detail="批量操作上限 200")
-    if payload.delete_data:
-        raise HTTPException(
-            status_code=400,
-            detail="下载器原生任务删除数据需前端二次确认后传 force=true（FR-5.2.3）",
-        )
     _, adapter = await _resolve_downloader(downloader_id)
+    # 删数据为不可恢复操作：记审计日志（前端已弹窗二次确认）
+    if payload.delete_data:
+        logger.warning(
+            "删除下载器原生任务并删除磁盘数据：downloader_id=%d 数量=%d",
+            downloader_id, len(payload.hashes),
+        )
     try:
-        ok = await adapter.remove(payload.hashes, delete_data=False)
+        ok = await adapter.remove(payload.hashes, delete_data=payload.delete_data)
     except DownloaderError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return DownloaderBatchOpResult(
