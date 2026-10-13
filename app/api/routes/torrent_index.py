@@ -16,9 +16,23 @@ from fastapi import Query as QueryParam
 from pydantic import BaseModel, field_serializer
 from sqlalchemy import func, select
 
+from app.adapters.downloaders.base import AddTorrentPayload, DownloaderError
 from app.api.auth import require_session
-from app.db.models import Site, TorrentIndex
+from app.core.logging import get_logger
+from app.core.timeutils import utcnow
+from app.db.models import (
+    DownloaderInstance,
+    Site,
+    Source,
+    Torrent,
+    TorrentIndex,
+    TorrentStatus,
+)
 from app.db.session import session_scope
+from app.services.factory import get_factory
+from app.services.push_free import _is_valid_download_url, _synthetic_info_hash
+
+logger = get_logger(__name__)
 
 router = APIRouter(
     prefix="/torrent-index",
@@ -43,6 +57,8 @@ class TorrentIndexItem(BaseModel):
     free_confidence: float | None
     discount_pct: int | None
     has_torrent_url: bool
+    #: 是否可推送（URL 为 http(s)/magnet；mteam 的 api:// 占位为 False）
+    pushable: bool
     published_at: datetime | None
     first_seen_at: datetime
     last_seen_at: datetime
@@ -139,6 +155,7 @@ async def list_torrent_index(
             free_confidence=row.TorrentIndex.free_confidence,
             discount_pct=row.TorrentIndex.discount_pct,
             has_torrent_url=row.TorrentIndex.torrent_url is not None,
+            pushable=_is_valid_download_url(row.TorrentIndex.torrent_url or ""),
             published_at=row.TorrentIndex.published_at,
             first_seen_at=row.TorrentIndex.first_seen_at,
             last_seen_at=row.TorrentIndex.last_seen_at,
@@ -235,7 +252,128 @@ async def get_torrent_index(index_id: int) -> TorrentIndexItem:
         free_confidence=row.TorrentIndex.free_confidence,
         discount_pct=row.TorrentIndex.discount_pct,
         has_torrent_url=row.TorrentIndex.torrent_url is not None,
+        pushable=_is_valid_download_url(row.TorrentIndex.torrent_url or ""),
         published_at=row.TorrentIndex.published_at,
         first_seen_at=row.TorrentIndex.first_seen_at,
         last_seen_at=row.TorrentIndex.last_seen_at,
     )
+
+
+class PushRequest(BaseModel):
+    """推送请求。downloader_id 省略时用默认下载器。"""
+
+    downloader_id: int | None = None
+
+
+class PushResponse(BaseModel):
+    """推送结果。"""
+
+    ok: bool
+    detail: str = ""
+    info_hash: str | None = None
+    downloader_id: int | None = None
+
+
+@router.post("/{index_id}/push", response_model=PushResponse)
+async def push_torrent_index(index_id: int, payload: PushRequest) -> PushResponse:
+    """把单条拉取索引推送到下载器。
+
+    - 未指定 downloader_id → 用 is_default=True 且 enabled 的下载器
+    - 已推送过（同 site_id/item_id/downloader_id）→ 直接返回已存在
+    - torrent_url 非法（如 mteam 的 api://gen/{id}）→ 400
+    """
+    # 1) 读索引条目
+    async with session_scope() as session:
+        item = (
+            await session.execute(select(TorrentIndex).where(TorrentIndex.id == index_id))
+        ).scalar_one_or_none()
+        if item is None:
+            raise HTTPException(status_code=404, detail="索引条目不存在")
+        if not item.item_id:
+            raise HTTPException(status_code=400, detail="该条目缺少 item_id，无法推送")
+        if not _is_valid_download_url(item.torrent_url or ""):
+            raise HTTPException(
+                status_code=400,
+                detail=f"该条目的下载 URL 不可用（{item.torrent_url or '空'}）",
+            )
+
+        # 2) 解析下载器
+        if payload.downloader_id is not None:
+            dl = (
+                await session.execute(
+                    select(DownloaderInstance).where(
+                        DownloaderInstance.id == payload.downloader_id
+                    )
+                )
+            ).scalar_one_or_none()
+            if dl is None:
+                raise HTTPException(status_code=404, detail="下载器不存在")
+            if not dl.enabled:
+                raise HTTPException(status_code=400, detail="下载器已禁用")
+        else:
+            dl = (
+                await session.execute(
+                    select(DownloaderInstance).where(
+                        DownloaderInstance.is_default.is_(True),
+                        DownloaderInstance.enabled.is_(True),
+                    )
+                )
+            ).scalar_one_or_none()
+            if dl is None:
+                raise HTTPException(status_code=400, detail="未配置默认下载器")
+
+        # 3) 去重：已推过则直接返回
+        exists = (
+            await session.execute(
+                select(Torrent.id).where(
+                    Torrent.site_id == item.site_id,
+                    Torrent.item_id == item.item_id,
+                    Torrent.downloader_id == dl.id,
+                )
+            )
+        ).first()
+        if exists is not None:
+            return PushResponse(
+                ok=True, detail="该种已推送过", downloader_id=dl.id
+            )
+
+        site_id = item.site_id
+        item_id = item.item_id
+        name = item.name
+        torrent_url = item.torrent_url
+        assert torrent_url is not None  # 上方 _is_valid_download_url 已校验
+        dl_id = dl.id
+        dl_row = dl
+
+    # 4) 调下载器
+    adapter = get_factory().downloader(dl_row)
+    try:
+        handle = await adapter.add_torrent(
+            AddTorrentPayload(name=name, urls=(torrent_url,), category="manual-push")
+        )
+    except DownloaderError as exc:
+        raise HTTPException(status_code=502, detail=f"下载器推送失败：{exc}") from exc
+
+    info_hash = handle.info_hash.strip() or _synthetic_info_hash(site_id, item_id, dl_id)
+
+    # 5) 写 torrents 表
+    async with session_scope() as session:
+        session.add(
+            Torrent(
+                info_hash=info_hash,
+                name=name,
+                site_id=site_id,
+                downloader_id=dl_id,
+                item_id=item_id,
+                source=Source.MANUAL,
+                status=TorrentStatus.ACTIVE,
+                added_at=utcnow(),
+            )
+        )
+        try:
+            await session.flush()
+        except Exception as exc:  # 并发/唯一冲突
+            logger.info("manual push 记录冲突 item=%s: %s", item_id, exc)
+
+    logger.info("手动推送 index_id=%d → downloader=%d item=%s", index_id, dl_id, item_id)
+    return PushResponse(ok=True, detail="推送成功", info_hash=info_hash, downloader_id=dl_id)

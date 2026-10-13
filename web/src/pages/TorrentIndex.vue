@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { api } from '../api'
+import { message } from 'ant-design-vue'
 
 interface TorrentIndexItem {
   id: number
@@ -17,6 +18,7 @@ interface TorrentIndexItem {
   discount_pct: number | null
   published_at: string | null
   has_torrent_url: boolean
+  pushable: boolean
   first_seen_at: string
   last_seen_at: string
 }
@@ -31,9 +33,23 @@ interface SiteOpt {
   name: string
 }
 
+interface DownloaderOpt {
+  id: number
+  name: string
+  enabled: boolean
+  is_default: boolean
+}
+
 interface TorrentIndexStats {
   total: number
   by_type: Record<string, number>
+}
+
+interface PushResponse {
+  ok: boolean
+  detail: string
+  info_hash: string | null
+  downloader_id: number | null
 }
 
 const FREE_TYPE_LABELS: Record<string, { label: string; color: string }> = {
@@ -49,6 +65,14 @@ const total = ref(0)
 const sites = ref<SiteOpt[]>([])
 const freeTypes = ref<string[]>([])
 const stats = ref<TorrentIndexStats>({ total: 0, by_type: {} })
+const downloaders = ref<DownloaderOpt[]>([])
+
+// 推送弹窗状态
+const pushModalOpen = ref(false)
+const pushItem = ref<TorrentIndexItem | null>(null)
+const pushDownloaderId = ref<number | null>(null)
+const pushing = ref(false)
+const pushingId = ref<number | null>(null)  // 行内 loading
 
 const filterSite = ref<number | null>(null)
 const filterFreeType = ref<string | null>(null)
@@ -92,6 +116,45 @@ async function loadMeta() {
     sites.value = s
     freeTypes.value = ft
   } catch { /* ignore */ }
+}
+
+async function loadDownloaders() {
+  try {
+    const all = await api.get<DownloaderOpt[]>('/downloaders')
+    downloaders.value = all.filter((d) => d.enabled)
+    // 默认选中默认下载器
+    const def = downloaders.value.find((d) => d.is_default)
+    if (def) pushDownloaderId.value = def.id
+    else if (downloaders.value.length > 0) pushDownloaderId.value = downloaders.value[0].id
+  } catch { /* ignore */ }
+}
+
+function openPushModal(record: TorrentIndexItem) {
+  pushItem.value = record
+  pushModalOpen.value = true
+}
+
+async function doPush() {
+  if (!pushItem.value) return
+  pushing.value = true
+  pushingId.value = pushItem.value.id
+  try {
+    const r = await api.post<PushResponse>(
+      `/torrent-index/${pushItem.value.id}/push`,
+      { downloader_id: pushDownloaderId.value },
+    )
+    if (r.ok) {
+      message.success(r.detail || '推送成功')
+      pushModalOpen.value = false
+    } else {
+      message.warning(r.detail || '推送失败')
+    }
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '推送失败')
+  } finally {
+    pushing.value = false
+    pushingId.value = null
+  }
 }
 
 async function loadStats() {
@@ -163,6 +226,7 @@ watch(filterQ, () => {
 onMounted(() => {
   loadMeta()
   loadStats()
+  loadDownloaders()
   load({ reset: true })
   timer = setInterval(() => {
     load({ reset: true })
@@ -244,6 +308,7 @@ const columns = [
     sorter: (a: TorrentIndexItem, b: TorrentIndexItem) =>
       (a.last_seen_at ?? '').localeCompare(b.last_seen_at ?? ''),
   },
+  { title: '操作', key: 'action', width: 100, fixed: 'right' },
 ]
 </script>
 
@@ -304,7 +369,7 @@ const columns = [
       </a-space>
 
       <a-typography-paragraph type="secondary" style="margin-top: 0">
-        共 <b>{{ total }}</b> 条；本作业只刷新「列表 / 过滤」，无写入操作。
+        共 <b>{{ total }}</b> 条；「推送」可将该种子加入下载器。
       </a-typography-paragraph>
 
       <a-table
@@ -319,7 +384,7 @@ const columns = [
         }"
         :on-change="onTableChange"
         row-key="id"
-        :scroll="{ x: 1250 }"
+        :scroll="{ x: 1350 }"
         size="middle"
       >
         <template #bodyCell="{ column, record }">
@@ -367,8 +432,50 @@ const columns = [
           <template v-else-if="column.key === 'last_seen_at'">
             {{ formatDate(record.last_seen_at) }}
           </template>
+          <template v-else-if="column.key === 'action'">
+            <a-tooltip :title="record.pushable ? '' : '该种无可用的下载链接'">
+              <a-button
+                type="link"
+                size="small"
+                :disabled="!record.pushable"
+                :loading="pushingId === record.id"
+                @click="openPushModal(record)"
+              >
+                推送
+              </a-button>
+            </a-tooltip>
+          </template>
         </template>
       </a-table>
+
+      <a-modal
+        v-model:open="pushModalOpen"
+        title="推送种子到下载器"
+        ok-text="推送"
+        cancel-text="取消"
+        :confirm-loading="pushing"
+        @ok="doPush"
+      >
+        <p style="margin-bottom: 12px">
+          <b>{{ pushItem?.name }}</b>
+        </p>
+        <a-form layout="vertical">
+          <a-form-item label="目标下载器">
+            <a-select
+              v-model:value="pushDownloaderId"
+              placeholder="选择下载器"
+              style="width: 100%"
+              :options="downloaders.map((d) => ({ value: d.id, label: d.name + (d.is_default ? '（默认）' : '') }))"
+            />
+          </a-form-item>
+        </a-form>
+        <a-alert
+          v-if="downloaders.length === 0"
+          type="warning"
+          show-icon
+          message="暂无可用的下载器，请先在「下载器」页添加"
+        />
+      </a-modal>
   </a-card>
 </template>
 
