@@ -263,6 +263,8 @@ class TorrentIndex(Base):
     free_end_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     free_source: Mapped[str | None] = mapped_column(String(24), nullable=True)
     free_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    #: 具体下载折扣百分比（NEUTRAL 时为 0–100；永久免费固定 100；其他 NULL）
+    discount_pct: Mapped[int | None] = mapped_column(Integer, nullable=True)
     #: 已签名 download URL（NexusPHP 含 passkey/sign；mteam 走 genDlToken）
     torrent_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     #: 原始 free payload（mteam status dict / NexusPHP free_classes + remaining_*）

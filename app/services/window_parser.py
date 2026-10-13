@@ -47,25 +47,28 @@ _DURATION_RE: Final = re.compile(
     r"(?:(?P<m>\d+)\s*(?:分|分鐘|分钟))?",
 )
 
-#: NexusPHP 免费标记 class → FreeType 映射（旧版 NexusPHP 兼容）
-_FREE_CLASS_MAP: Final[dict[str, str]] = {
-    "free": FreeType.UNKNOWN,  # 需配合剩余时间判断
-    "twoupfree": FreeType.TWOU_TIMED,
-    "twoup": FreeType.TWOU_TIMED,
-    "halfdown": FreeType.NEUTRAL,
-    "twouphalfdown": FreeType.NEUTRAL,
-    "thirtypercent": FreeType.NEUTRAL,
-    "nodead": FreeType.UNKNOWN,
-    "highlight": FreeType.UNKNOWN,
+#: NexusPHP 免费标记 class → (FreeType, default_discount_pct)
+_FREE_CLASS_MAP: Final[dict[str, tuple[str, int | None]]] = {
+    "free": (FreeType.UNKNOWN, None),  # 需配合剩余时间判断
+    "twoupfree": (FreeType.TWOU_TIMED, None),
+    "twoup": (FreeType.TWOU_TIMED, None),
+    "halfdown": (FreeType.NEUTRAL, 50),   # 50% 下载折扣
+    "twouphalfdown": (FreeType.NEUTRAL, 50),
+    "thirtypercent": (FreeType.NEUTRAL, 30),  # 30% 下载折扣
+    "nodead": (FreeType.UNKNOWN, None),
+    "highlight": (FreeType.UNKNOWN, None),
 }
 
-#: HHan 主题促销 class → FreeType
-_PROMO_CLASS_MAP: Final[dict[str, str]] = {
-    "free": FreeType.UNKNOWN,  # 需配合剩余时间判断
-    "2xfree": FreeType.TWOU_TIMED,
-    "50": FreeType.NEUTRAL,  # 50% 下载折扣
-    "30": FreeType.NEUTRAL,  # 30% 下载折扣
+#: HHan 主题促销 class → (FreeType, default_discount_pct)
+_PROMO_CLASS_MAP: Final[dict[str, tuple[str, int | None]]] = {
+    "free": (FreeType.UNKNOWN, None),  # 需配合剩余时间判断
+    "2xfree": (FreeType.TWOU_TIMED, None),
+    "50": (FreeType.NEUTRAL, 50),  # 50% 下载折扣（promotion-tag-50）
+    "30": (FreeType.NEUTRAL, 30),  # 30% 下载折扣（promotion-tag-30）
 }
+
+#: 可见文本里"X%" → 折扣百分比。覆盖 class 名（更精确，能识别 class 之外的值）
+_TEXT_PCT_RE: Final = re.compile(r"(\d{1,3})\s*%")
 
 
 def _parse_iso_dt(value: object) -> datetime | None:
@@ -128,38 +131,68 @@ def _parse_abs_datetime(text: str | None) -> datetime | None:
 def _classify_from_html(
     free_classes: list[str],
     remaining_text: str | None = None,
-) -> tuple[str, timedelta | None, float]:
-    """从免费标记 class + 剩余时间文案提取免费窗口（NexusPHP 通用）。"""
+    *,
+    promo_texts: list[str] | None = None,
+) -> tuple[str, timedelta | None, float, int | None]:
+    """从免费标记 class + 剩余时间文案提取免费窗口（NexusPHP 通用）。
+
+    ``promo_texts``：促销标签的可见文本（如 ``["30%", "50%"]``），
+    用于覆盖 class 推断的 discount_pct（更精确）。
+    返回 ``(free_type, remaining_delta, confidence, discount_pct)``。
+    """
     combined = " ".join(free_classes).lower() + " " + (remaining_text or "").lower()
 
     if any(m in combined for m in _PERMANENT_MARKERS):
-        return FreeType.PERMANENT, None, 1.0
+        return FreeType.PERMANENT, None, 1.0, 100
 
     has_free = any(c.lower() == "free" for c in free_classes)
     if has_free:
         delta = _parse_remaining_delta(remaining_text)
         if delta is not None:
-            return FreeType.TIMED, delta, 0.95
-        return FreeType.PERMANENT, None, 0.85
+            return FreeType.TIMED, delta, 0.95, None
+        return FreeType.PERMANENT, None, 0.85, 100
 
     for cls in free_classes:
         cls_lower = cls.lower()
         mapped = _FREE_CLASS_MAP.get(cls_lower)
-        if mapped and mapped != FreeType.UNKNOWN:
-            delta = _parse_remaining_delta(remaining_text)
-            if delta is not None and mapped != FreeType.NEUTRAL:
-                return mapped, delta, 0.9
-            return mapped, None, 0.85
+        if mapped is None:
+            continue
+        free_type, default_pct = mapped
+        if free_type == FreeType.UNKNOWN:
+            continue
+        delta = _parse_remaining_delta(remaining_text)
+        pct = default_pct
+        if delta is not None and free_type != FreeType.NEUTRAL:
+            return free_type, delta, 0.9, pct
+        return free_type, None, 0.85, pct
 
-    return FreeType.UNKNOWN, None, 0.0
+    # 文本兜底：在剩余文案里识别 "X%" 折扣（class 没匹配到时）
+    if remaining_text:
+        m = _TEXT_PCT_RE.search(remaining_text)
+        if m:
+            try:
+                pct = int(m.group(1))
+            except ValueError:
+                pct = None
+            if pct is not None and 0 < pct < 100:
+                delta = _parse_remaining_delta(remaining_text)
+                if delta is not None:
+                    return FreeType.TIMED, delta, 0.7, pct
+                return FreeType.NEUTRAL, None, 0.6, pct
+
+    return FreeType.UNKNOWN, None, 0.0, None
 
 
-def _classify_from_status(status: dict[str, Any]) -> tuple[str, datetime | None]:
-    """从 m-team search API 的 status 块提取免费窗口。"""
+def _classify_from_status(status: dict[str, Any]) -> tuple[str, datetime | None, int | None]:
+    """从 m-team search API 的 status 块提取免费窗口。
+
+    返回 ``(free_type, end_at, discount_pct)``。``discount_pct`` 仅
+    NEUTRAL 时为 0–100；PERMANENT 固定 100；其他为 None。
+    """
     # 1) 单种特别免费
     mall = status.get("mallSingleFree")
     if isinstance(mall, dict) and mall.get("status") == "ONGOING":
-        return FreeType.TIMED, _parse_iso_dt(mall.get("endDate"))
+        return FreeType.TIMED, _parse_iso_dt(mall.get("endDate")), None
 
     # 2) 全站促销
     promo = status.get("promotionRule")
@@ -167,26 +200,26 @@ def _classify_from_status(status: dict[str, Any]) -> tuple[str, datetime | None]
         disc = promo.get("discount", "NORMAL")
         end = _parse_iso_dt(promo.get("endTime"))
         if disc == "FREE" or disc == 100 or disc == "100":
-            return FreeType.PERMANENT, None
+            return FreeType.PERMANENT, None, 100
         if end is not None:
-            return FreeType.TIMED, end
+            return FreeType.TIMED, end, None
 
     # 3) 标准 discount 字段
     disc_raw = status.get("discount")
     if isinstance(disc_raw, str):
         if disc_raw == "FREE":
-            return FreeType.PERMANENT, None
+            return FreeType.PERMANENT, None, 100
         if disc_raw.upper().startswith("PERCENT_"):
             try:
                 pct = int(disc_raw.split("_", 1)[1])
             except (IndexError, ValueError):
                 pct = 0
             if pct <= 0:
-                return FreeType.PERMANENT, None
+                return FreeType.PERMANENT, None, 100
             if 1 <= pct <= 75:
-                return FreeType.NEUTRAL, None
+                return FreeType.NEUTRAL, None, pct
             if pct >= 100:
-                return FreeType.PERMANENT, None
+                return FreeType.PERMANENT, None, 100
         disc_val = 0
     else:
         try:
@@ -195,16 +228,16 @@ def _classify_from_status(status: dict[str, Any]) -> tuple[str, datetime | None]
             disc_val = 0
 
     if disc_val >= 100:
-        return FreeType.PERMANENT, None
+        return FreeType.PERMANENT, None, 100
     if disc_val < 0 and disc_val >= -75:
-        return FreeType.NEUTRAL, None
+        return FreeType.NEUTRAL, None, abs(disc_val)
     if disc_val < -75:
-        return FreeType.TWOU_TIMED, None
+        return FreeType.TWOU_TIMED, None, None
 
     end = _parse_iso_dt(status.get("discountEndTime"))
     if end is not None:
-        return FreeType.TIMED, end
-    return FreeType.UNKNOWN, None
+        return FreeType.TIMED, end, None
+    return FreeType.UNKNOWN, None, None
 
 
 def _parse_dict(item: FeedItem) -> FreeWindow | None:
@@ -215,7 +248,7 @@ def _parse_dict(item: FeedItem) -> FreeWindow | None:
     status = payload["status"]
     if not isinstance(status, dict):
         return None
-    free_type, end_at = _classify_from_status(status)
+    free_type, end_at, discount_pct = _classify_from_status(status)
     if free_type == FreeType.PERMANENT:
         return FreeWindow(
             free_type=FreeType.PERMANENT,
@@ -223,6 +256,7 @@ def _parse_dict(item: FeedItem) -> FreeWindow | None:
             free_source=FreeSource.API,
             raw_text=_stringify_safe(payload),
             confidence=1.0,
+            discount_pct=discount_pct,
         )
     if end_at is not None:
         return FreeWindow(
@@ -231,6 +265,7 @@ def _parse_dict(item: FeedItem) -> FreeWindow | None:
             free_source=FreeSource.API,
             raw_text=_stringify_safe(payload),
             confidence=0.95,
+            discount_pct=discount_pct,
         )
     return FreeWindow(
         free_type=free_type,
@@ -238,6 +273,7 @@ def _parse_dict(item: FeedItem) -> FreeWindow | None:
         free_source=FreeSource.SITE_DEFAULT,
         raw_text=_stringify_safe(payload),
         confidence=0.3,
+        discount_pct=discount_pct,
     )
 
 
@@ -260,9 +296,13 @@ def _parse_nexushp_html(item: FeedItem) -> FreeWindow | None:
     remaining_text = remaining_text_raw if isinstance(remaining_text_raw, str) else None
     remaining_abs_raw = payload.get("remaining_abs")
     remaining_abs = remaining_abs_raw if isinstance(remaining_abs_raw, str) else None
+    promo_texts_raw = payload.get("promo_texts", [])
+    promo_texts = (
+        [str(t) for t in promo_texts_raw] if isinstance(promo_texts_raw, list) else []
+    )
 
-    free_type, remaining_delta, confidence = _classify_from_html(
-        free_classes, remaining_text
+    free_type, remaining_delta, confidence, discount_pct = _classify_from_html(
+        free_classes, remaining_text, promo_texts=promo_texts
     )
 
     end_at: datetime | None = None
@@ -283,12 +323,15 @@ def _parse_nexushp_html(item: FeedItem) -> FreeWindow | None:
         FreeType.TIMED,
         FreeType.UNKNOWN,
     ):
+        # 降级为限时（PERMANENT 改判 TIMED）：不再视作 100% 免费
+        effective_pct = None if free_type == FreeType.PERMANENT else discount_pct
         return FreeWindow(
             free_type=FreeType.TIMED,
             free_end_at=end_at,
             free_source=FreeSource.API,
             raw_text=_stringify_safe(payload),
             confidence=0.95,
+            discount_pct=effective_pct,
         )
     if free_type == FreeType.PERMANENT:
         return FreeWindow(
@@ -297,6 +340,7 @@ def _parse_nexushp_html(item: FeedItem) -> FreeWindow | None:
             free_source=FreeSource.API,
             raw_text=_stringify_safe(payload),
             confidence=confidence,
+            discount_pct=discount_pct,
         )
     if end_at is not None:
         return FreeWindow(
@@ -305,6 +349,7 @@ def _parse_nexushp_html(item: FeedItem) -> FreeWindow | None:
             free_source=FreeSource.API,
             raw_text=_stringify_safe(payload),
             confidence=confidence,
+            discount_pct=discount_pct,
         )
     if (
         free_type != FreeType.UNKNOWN
@@ -316,6 +361,7 @@ def _parse_nexushp_html(item: FeedItem) -> FreeWindow | None:
             free_source=FreeSource.API,
             raw_text=_stringify_safe(payload),
             confidence=confidence,
+            discount_pct=discount_pct,
         )
     return FreeWindow(
         free_type=FreeType.UNKNOWN,
@@ -323,6 +369,7 @@ def _parse_nexushp_html(item: FeedItem) -> FreeWindow | None:
         free_source=FreeSource.SITE_DEFAULT,
         raw_text=_stringify_safe(payload),
         confidence=confidence,
+        discount_pct=discount_pct,
     )
 
 

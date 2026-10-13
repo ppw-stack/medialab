@@ -290,6 +290,7 @@ class HhanclubAdapter(SiteAdapter):
 
             # ---------------- 免费标记：promotion-tag-*（HHan 主题）/ pro_* / free 等
             free_classes: list[str] = []
+            promo_texts: list[str] = []
             remaining_abs: str | None = None
             if container is not None:
                 for tag in container.find_all(class_=True):
@@ -298,12 +299,21 @@ class HhanclubAdapter(SiteAdapter):
                         if cls.startswith("promotion-tag-"):
                             # promotion-tag-free / -2xfree / -50 / -30 → free/2xfree/50/30
                             free_classes.append(cls[len("promotion-tag-"):])
+                            text = tag.get_text(strip=True)
+                            if text and "%" in text:
+                                promo_texts.append(text)
                         elif cls in _PROMO_CLASSES:
                             free_classes.append(cls)
+                            text = tag.get_text(strip=True)
+                            if text and "%" in text:
+                                promo_texts.append(text)
                         elif cls.startswith("pro_"):
                             mapped = cls[4:]
                             if mapped in _PROMO_CLASSES:
                                 free_classes.append(mapped)
+                                text = tag.get_text(strip=True)
+                                if text and "%" in text:
+                                    promo_texts.append(text)
 
                 # 限时剩余时刻：<span title="YYYY-MM-DD HH:MM:SS">（排除发布时间 span）
                 for span in container.find_all("span", attrs={"title": True}):
@@ -321,6 +331,8 @@ class HhanclubAdapter(SiteAdapter):
                     "free_classes": free_classes,
                     "remaining_abs": remaining_abs,
                 }
+                if promo_texts:
+                    free_payload["promo_texts"] = promo_texts
 
             items.append(
                 FeedItem(

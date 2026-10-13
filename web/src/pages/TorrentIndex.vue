@@ -15,6 +15,7 @@ interface TorrentIndexItem {
   free_end_at: string | null
   free_source: string | null
   free_confidence: number | null
+  discount_pct: number | null
   has_torrent_url: boolean
   first_seen_at: string
   last_seen_at: string
@@ -33,7 +34,7 @@ interface SiteOpt {
 const FREE_TYPE_LABELS: Record<string, { label: string; color: string }> = {
   freeleech_permanent: { label: '永久免费', color: 'green' },
   freeleech_timed:     { label: '限时免费', color: 'gold'  },
-  neutral_leech:       { label: '中性下载', color: 'blue'  },
+  neutral_leech:       { label: '折扣',     color: 'blue'  },
   twoup_timed:         { label: '2X 限时',  color: 'orange' },
   unknown:             { label: '未知',     color: 'default' },
 }
@@ -130,8 +131,12 @@ function formatDate(s: string | null): string {
   return d.toLocaleString('zh-CN', { hour12: false })
 }
 
-function freeTypeLabel(ft: string) {
-  return FREE_TYPE_LABELS[ft] ?? { label: ft, color: 'default' }
+function freeTypeLabel(ft: string, discountPct?: number | null) {
+  const base = FREE_TYPE_LABELS[ft] ?? { label: ft, color: 'default' }
+  if (ft === 'neutral_leech' && discountPct != null && discountPct > 0 && discountPct < 100) {
+    return { label: `${discountPct}% 折扣`, color: 'blue' }
+  }
+  return base
 }
 
 function freeEndColor(end: string | null): string {
@@ -236,8 +241,8 @@ const columns = [
             <a-typography-text v-else type="secondary">—</a-typography-text>
           </template>
           <template v-else-if="column.key === 'free_type'">
-            <a-tag :color="freeTypeLabel(record.free_type).color">
-              {{ freeTypeLabel(record.free_type).label }}
+            <a-tag :color="freeTypeLabel(record.free_type, record.discount_pct).color">
+              {{ freeTypeLabel(record.free_type, record.discount_pct).label }}
             </a-tag>
           </template>
           <template v-else-if="column.key === 'free_end_at'">

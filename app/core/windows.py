@@ -40,6 +40,9 @@ class FreeWindow:
     free_source: str = FreeSource.SITE_DEFAULT
     raw_text: str = ""
     confidence: float = 0.0
+    #: 具体下载折扣百分比（0–100）。仅当 free_type=NEUTRAL 时才有意义
+    #: （50 = 半价下载、30 = 三折下载）；永久免费固定 100；其他为 None。
+    discount_pct: int | None = None
 
     @property
     def is_permanent(self) -> bool:

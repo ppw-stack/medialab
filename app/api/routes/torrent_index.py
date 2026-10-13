@@ -41,6 +41,7 @@ class TorrentIndexItem(BaseModel):
     free_end_at: datetime | None
     free_source: str | None
     free_confidence: float | None
+    discount_pct: int | None
     has_torrent_url: bool
     first_seen_at: datetime
     last_seen_at: datetime
@@ -105,6 +106,7 @@ async def list_torrent_index(
             free_end_at=row.TorrentIndex.free_end_at,
             free_source=row.TorrentIndex.free_source,
             free_confidence=row.TorrentIndex.free_confidence,
+            discount_pct=row.TorrentIndex.discount_pct,
             has_torrent_url=row.TorrentIndex.torrent_url is not None,
             first_seen_at=row.TorrentIndex.first_seen_at,
             last_seen_at=row.TorrentIndex.last_seen_at,
@@ -166,6 +168,7 @@ async def get_torrent_index(index_id: int) -> TorrentIndexItem:
         free_end_at=row.TorrentIndex.free_end_at,
         free_source=row.TorrentIndex.free_source,
         free_confidence=row.TorrentIndex.free_confidence,
+        discount_pct=row.TorrentIndex.discount_pct,
         has_torrent_url=row.TorrentIndex.torrent_url is not None,
         first_seen_at=row.TorrentIndex.first_seen_at,
         last_seen_at=row.TorrentIndex.last_seen_at,

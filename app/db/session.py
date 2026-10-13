@@ -141,6 +141,90 @@ async def migrate_adapter_values() -> None:
         await session.commit()
 
 
+def _extract_discount_pct_from_payload(payload: object) -> int | None:
+    """从已落库的 free_payload 反推 discount_pct（用于历史回填）。
+
+    支持 mteam status.discount == "PERCENT_N"，以及 NexusPHP
+    free_classes 含 halfdown / thirtypercent / 50 / 30。
+    """
+    if not isinstance(payload, dict):
+        return None
+    status = payload.get("status")
+    if isinstance(status, dict):
+        disc = status.get("discount")
+        if isinstance(disc, str):
+            up = disc.upper()
+            if up == "FREE":
+                return 100
+            if up.startswith("PERCENT_"):
+                try:
+                    return int(up.split("_", 1)[1])
+                except (IndexError, ValueError):
+                    return None
+        if isinstance(disc, (int, float)):
+            return abs(int(disc))
+    free_classes = payload.get("free_classes")
+    if isinstance(free_classes, list):
+        for cls in free_classes:
+            if not isinstance(cls, str):
+                continue
+            c = cls.lower()
+            if c in ("halfdown", "twouphalfdown", "50"):
+                return 50
+            if c in ("thirtypercent", "30"):
+                return 30
+    return None
+
+
+async def _backfill_discount_pct() -> None:
+    """回填 torrent_index.discount_pct。
+
+    仅更新 free_type ∈ {neutral_leech, freeleech_permanent} 的行；
+    幂等：仅在 discount_pct IS NULL 时填，已填的不动。
+    """
+    from sqlalchemy import select, update
+
+    from app.db.models import FreeType, TorrentIndex
+
+    factory = get_session_factory()
+    async with factory() as session:
+        stmt = select(
+            TorrentIndex.id, TorrentIndex.free_type, TorrentIndex.free_payload
+        ).where(
+            TorrentIndex.free_type.in_(
+                (FreeType.NEUTRAL, FreeType.PERMANENT)
+            ),
+            TorrentIndex.discount_pct.is_(None),
+        )
+        rows = (await session.execute(stmt)).all()
+        if not rows:
+            return
+        updates: list[tuple[int, int]] = []
+        for row_id, free_type, free_payload in rows:
+            if free_type == FreeType.PERMANENT:
+                pct: int | None = 100
+            else:
+                pct = _extract_discount_pct_from_payload(free_payload)
+            if pct is not None:
+                updates.append((row_id, pct))
+        if not updates:
+            return
+        # 批量更新（按值分组）
+        from collections import defaultdict
+
+        by_pct: dict[int, list[int]] = defaultdict(list)
+        for row_id, pct in updates:
+            by_pct[pct].append(row_id)
+        for pct, ids in by_pct.items():
+            await session.execute(
+                update(TorrentIndex)
+                .where(TorrentIndex.id.in_(ids))
+                .values(discount_pct=pct)
+            )
+        await session.commit()
+        logger.info("discount_pct 历史回填：%d 行", len(updates))
+
+
 class SingleWriterQueue:
     """进程内单写者串行队列（§8 约定 2）。
 
@@ -179,10 +263,12 @@ class SingleWriterQueue:
                 "ALTER TABLE torrents ADD COLUMN zero_seed_rounds INTEGER DEFAULT 0",
                 "ALTER TABLE sites ADD COLUMN cookies_enc TEXT",
                 "ALTER TABLE free_candidates ADD COLUMN torrent_url VARCHAR(512)",
+                "ALTER TABLE torrent_index ADD COLUMN discount_pct INTEGER",
             ):
                 with suppress(Exception):  # 列已存在
                     await conn.execute(text(stmt))
         logger.info("数据表已就绪")
+        await _backfill_discount_pct()
 
     async def healthcheck(self) -> bool:
         try:
