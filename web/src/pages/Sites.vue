@@ -124,22 +124,30 @@ async function onTest() {
 }
 
 const columns = [
-  { title: '名称', dataIndex: 'name', key: 'name' },
-  { title: '适配器', dataIndex: 'adapter', key: 'adapter' },
-  { title: '域名', dataIndex: 'domain', key: 'domain' },
+  { title: '名称', key: 'name' },
+  { title: '适配器', key: 'adapter' },
+  { title: '域名', key: 'domain' },
   { title: '凭据', key: 'credentials' },
-  { title: '启用', dataIndex: 'enabled', key: 'enabled' },
-  { title: '操作', key: 'action' },
+  { title: '间隔', key: 'interval', width: 90 },
+  { title: '启用', key: 'enabled', width: 80 },
+  { title: '', key: 'action', width: 140 },
 ]
 </script>
 
 <template>
   <div>
-    <a-typography-title :level="4">站点管理</a-typography-title>
-    <a-card title="站点列表（凭据脱敏）">
-      <template #extra>
-        <a-button type="primary" @click="onCreate">新增站点</a-button>
-      </template>
+    <header class="page-header">
+      <div>
+        <div class="page-header__eyebrow">站点 · SITES</div>
+        <h1 class="page-header__title">站点适配器</h1>
+        <div class="page-header__sub">凭据脱敏存储（AES-256-GCM）· 支持 4 类私有种子站点</div>
+      </div>
+      <a-button type="primary" @click="onCreate">新增站点</a-button>
+    </header>
+
+    <hr class="divider-hairline" style="margin: 0" />
+
+    <section class="section">
       <a-table
         :data-source="data"
         :columns="columns"
@@ -148,13 +156,13 @@ const columns = [
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'name'">
-            <b>{{ record.name }}</b>
+            <span class="row-name">{{ record.name }}</span>
           </template>
           <template v-else-if="column.key === 'adapter'">
-            <a-tag>{{ record.adapter }}</a-tag>
+            <span class="mono dim">{{ record.adapter }}</span>
           </template>
           <template v-else-if="column.key === 'domain'">
-            <a-typography-text code style="font-size: 12px">{{ record.domain || '-' }}</a-typography-text>
+            <span class="mono code">{{ record.domain || '—' }}</span>
           </template>
           <template v-else-if="column.key === 'credentials'">
             <a-space :size="4">
@@ -164,25 +172,28 @@ const columns = [
               <a-tag v-if="!record.rss_url_masked && !record.has_apikey && !record.has_cookies">—</a-tag>
             </a-space>
           </template>
+          <template v-else-if="column.key === 'interval'">
+            <span class="mono">{{ record.min_interval_minutes }}m</span>
+          </template>
           <template v-else-if="column.key === 'enabled'">
-            <a-tag v-if="record.enabled" color="green">✓</a-tag>
-            <a-tag v-else>—</a-tag>
+            <span v-if="record.enabled" class="status-dot status-dot--ok" />
+            <span v-else class="status-dot status-dot--off" />
           </template>
           <template v-else-if="column.key === 'action'">
-            <a-space>
-              <a-button size="small" @click="onEdit(record)">编辑</a-button>
+            <a-space :size="4">
+              <a-button size="small" type="link" @click="onEdit(record)">编辑</a-button>
               <a-popconfirm title="确认删除？" @confirm="onDelete(record.id)">
-                <a-button size="small" danger>删除</a-button>
+                <a-button size="small" type="link" danger>删除</a-button>
               </a-popconfirm>
             </a-space>
           </template>
         </template>
       </a-table>
-    </a-card>
+    </section>
 
     <a-modal
       :open="modalOpen"
-      :title="creating ? '新增站点' : `编辑站点 - ${editing?.name || ''}`"
+      :title="creating ? '新增站点' : `编辑站点 · ${editing?.name || ''}`"
       :width="640"
       @cancel="() => { modalOpen = false; editing = null; creating = false; testResult = null }"
       @ok="onSave"
@@ -243,16 +254,53 @@ const columns = [
         </a-form-item>
       </a-form>
 
-      <template v-if="editing">
-        <a-card size="small" style="margin-top: 16px; background: #1f1f1f">
-          <a-space>
-            <a-button :loading="testing" @click="onTest">连通性测试</a-button>
-            <a-tag v-if="testResult" :color="testResult.status === 'ok' ? 'green' : 'red'">
-              {{ testResult.status }} | {{ testResult.detail }}
-            </a-tag>
-          </a-space>
-        </a-card>
-      </template>
+      <div v-if="editing" class="test-card">
+        <a-space>
+          <a-button :loading="testing" @click="onTest">连通性测试</a-button>
+          <a-tag v-if="testResult" :color="testResult.status === 'ok' ? 'green' : 'red'">
+            {{ testResult.status }} | {{ testResult.detail }}
+          </a-tag>
+        </a-space>
+      </div>
     </a-modal>
   </div>
 </template>
+
+<style scoped>
+.row-name {
+  font-weight: 500;
+}
+
+.dim {
+  color: var(--text-secondary);
+}
+
+.code {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+.status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.status-dot--ok {
+  background: var(--status-green);
+  box-shadow: 0 0 8px var(--status-green-soft);
+}
+
+.status-dot--off {
+  background: var(--text-tertiary);
+}
+
+.test-card {
+  margin-top: var(--sp-4);
+  padding: var(--sp-3);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--r-md);
+}
+</style>

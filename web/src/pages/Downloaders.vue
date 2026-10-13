@@ -165,40 +165,45 @@ function isImplemented(type: string): boolean {
 }
 
 const columns = [
-  { title: '名称', dataIndex: 'name', key: 'name' },
-  { title: '类型', dataIndex: 'type', key: 'type' },
-  { title: 'URL', dataIndex: 'url', key: 'url' },
-  { title: '用户名', key: 'username' },
-  { title: '凭据', key: 'password' },
-  { title: '默认', dataIndex: 'is_default', key: 'default' },
-  { title: '启用', dataIndex: 'enabled', key: 'enabled' },
-  { title: '操作', key: 'action' },
+  { title: '名称', key: 'name' },
+  { title: '类型', key: 'type', width: 140 },
+  { title: 'URL', key: 'url' },
+  { title: '凭据', key: 'password', width: 100 },
+  { title: '默认', key: 'default', width: 80 },
+  { title: '启用', key: 'enabled', width: 60 },
+  { title: '', key: 'action', width: 180 },
 ]
 </script>
 
 <template>
   <div>
-    <a-typography-title :level="4">下载器管理</a-typography-title>
-    <a-card title="下载器实例（凭据脱敏）">
-      <template #extra>
-        <a-button type="primary" @click="onCreate">新增下载器</a-button>
-      </template>
+    <header class="page-header">
+      <div>
+        <div class="page-header__eyebrow">下载器 · DOWNLOADERS</div>
+        <h1 class="page-header__title">下载器实例</h1>
+        <div class="page-header__sub">qBittorrent · Transmission 已完整适配 · 凭据 AES-256-GCM</div>
+      </div>
+      <a-button type="primary" @click="onCreate">新增下载器</a-button>
+    </header>
+
+    <hr class="divider-hairline" style="margin: 0" />
+
+    <section class="section">
       <a-table :data-source="data" :columns="columns" row-key="id" :pagination="{ pageSize: 20 }">
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'name'">
-            <b>{{ record.name }}</b>
+            <span class="row-name">{{ record.name }}</span>
           </template>
           <template v-else-if="column.key === 'type'">
-            <a-tag :color="isImplemented(record.type) ? 'blue' : 'default'">
-              {{ typeLabel(record.type) }}
-            </a-tag>
-            <a-tag v-if="!isImplemented(record.type)" color="orange">未实现</a-tag>
+            <a-space :size="4">
+              <a-tag :color="isImplemented(record.type) ? 'blue' : 'default'">
+                {{ typeLabel(record.type) }}
+              </a-tag>
+              <a-tag v-if="!isImplemented(record.type)" color="orange">未实现</a-tag>
+            </a-space>
           </template>
           <template v-else-if="column.key === 'url'">
-            <a-typography-text code style="font-size: 12px">{{ record.url }}</a-typography-text>
-          </template>
-          <template v-else-if="column.key === 'username'">
-            {{ record.username || '—' }}
+            <span class="mono code">{{ record.url }}</span>
           </template>
           <template v-else-if="column.key === 'password'">
             <a-tag v-if="record.has_password" color="green">已配置</a-tag>
@@ -206,28 +211,28 @@ const columns = [
           </template>
           <template v-else-if="column.key === 'default'">
             <a-tag v-if="record.is_default" color="purple">★ 默认</a-tag>
-            <span v-else>—</span>
+            <span v-else class="dim">—</span>
           </template>
           <template v-else-if="column.key === 'enabled'">
-            <a-tag v-if="record.enabled" color="green">✓</a-tag>
-            <a-tag v-else>—</a-tag>
+            <span v-if="record.enabled" class="status-dot status-dot--ok" />
+            <span v-else class="status-dot status-dot--off" />
           </template>
           <template v-else-if="column.key === 'action'">
-            <a-space>
-              <a-button size="small" @click="onEdit(record)">编辑</a-button>
-              <a-button size="small" :loading="testing" :disabled="!isImplemented(record.type)" @click="onTest(record)">测连</a-button>
+            <a-space :size="4">
+              <a-button size="small" type="link" @click="onEdit(record)">编辑</a-button>
+              <a-button size="small" type="link" :loading="testing" :disabled="!isImplemented(record.type)" @click="onTest(record)">测连</a-button>
               <a-popconfirm title="确认删除？" @confirm="onDelete(record.id)">
-                <a-button size="small" danger>删除</a-button>
+                <a-button size="small" type="link" danger>删除</a-button>
               </a-popconfirm>
             </a-space>
           </template>
         </template>
       </a-table>
-    </a-card>
+    </section>
 
     <a-modal
       :open="modalOpen"
-      :title="creating ? '新增下载器' : `编辑下载器 - ${editing?.name || ''}`"
+      :title="creating ? '新增下载器' : `编辑下载器 · ${editing?.name || ''}`"
       :width="640"
       :confirm-loading="saving"
       @cancel="closeModal"
@@ -282,7 +287,7 @@ const columns = [
         </a-form-item>
       </a-form>
 
-      <a-card v-if="editing" size="small" style="margin-top: 16px; background: #1f1f1f">
+      <div v-if="editing" class="test-card">
         <a-space direction="vertical" style="width: 100%">
           <a-space>
             <a-button :loading="testing" @click="onTest()">测连（实际适配器 ping）</a-button>
@@ -291,11 +296,50 @@ const columns = [
             </a-tag>
             <a-tag v-if="testResult?.supports_data_deletion" color="purple">支持数据删除</a-tag>
           </a-space>
-          <a-typography-text v-if="testResult?.capabilities" type="secondary" style="font-size: 12px">
+          <span v-if="testResult?.capabilities" class="mono dim">
             能力：{{ testResult.capabilities.join(', ') }}
-          </a-typography-text>
+          </span>
         </a-space>
-      </a-card>
+      </div>
     </a-modal>
   </div>
 </template>
+
+<style scoped>
+.row-name {
+  font-weight: 500;
+}
+
+.dim {
+  color: var(--text-tertiary);
+}
+
+.code {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+.status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.status-dot--ok {
+  background: var(--status-green);
+  box-shadow: 0 0 8px var(--status-green-soft);
+}
+
+.status-dot--off {
+  background: var(--text-tertiary);
+}
+
+.test-card {
+  margin-top: var(--sp-4);
+  padding: var(--sp-3);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--r-md);
+}
+</style>

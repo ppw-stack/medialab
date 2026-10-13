@@ -97,75 +97,170 @@ function formatResult(r: RunResult): string {
 function jobLabel(name: string) {
   return JOB_LABELS[name]
 }
-
-const columns = [
-  { title: '作业', dataIndex: 'name', key: 'name' },
-  { title: '说明', key: 'desc' },
-  { title: 'cron', dataIndex: 'cron', key: 'cron', width: 160 },
-  { title: '运行中', dataIndex: 'running', key: 'running' },
-  { title: '启用', dataIndex: 'enabled', key: 'enabled' },
-  { title: '操作', key: 'actions', width: 140 },
-]
 </script>
 
 <template>
-  <a-card v-if="!data">
-    <a-typography-text>加载中...</a-typography-text>
-  </a-card>
-  <a-card
-    v-else
-    :title="`调度器（${data.accepting_new_work ? '工作中' : '停机中'}，在途 ${data.inflight}）`"
-  >
-    <a-table
-      :data-source="data.jobs"
-      row-key="name"
-      :pagination="false"
-      :columns="columns"
-    >
-      <template #bodyCell="{ column, record }">
-        <template v-if="column.key === 'name'">
-          <div>
-            <b>{{ jobLabel(record.name)?.name || record.name }}</b>
-            <a-typography-text type="secondary" style="font-size: 12px">{{ record.name }}</a-typography-text>
+  <div>
+    <div v-if="!data" class="loading-row">
+      <span class="mono dim">加载中...</span>
+    </div>
+    <div v-else>
+      <div class="scheduler-head">
+        <div>
+          <span class="label-caps">调度器状态</span>
+          <div class="scheduler-head__state">
+            <span
+              class="live-dot"
+              :class="{ 'live-dot--idle': !data.accepting_new_work }"
+            />
+            <span class="mono">{{ data.accepting_new_work ? 'WORKING' : 'STOPPED' }}</span>
+            <span class="dim mono" style="margin-left: var(--sp-2)">inflight {{ data.inflight }}</span>
           </div>
-        </template>
-        <template v-else-if="column.key === 'desc'">
-          {{ jobLabel(record.name)?.desc || '-' }}
-        </template>
-        <template v-else-if="column.key === 'cron'">
-          <code style="font-size: 12px">{{ record.cron }}</code>
-        </template>
-        <template v-else-if="column.key === 'running'">
-          <a-tag v-if="record.running" color="processing">是</a-tag>
-          <a-tag v-else>否</a-tag>
-        </template>
-        <template v-else-if="column.key === 'enabled'">
-          <a-switch
-            :checked="record.enabled"
-            @change="(e: boolean) => toggle(record.name, e)"
-          />
-        </template>
-        <template v-else-if="column.key === 'actions'">
-          <a-button
-            size="small"
-            :loading="runningJob === record.name"
-            :disabled="!data.accepting_new_work"
-            @click="runNow(record.name)"
-          >
-            立即执行
-          </a-button>
-        </template>
-      </template>
-    </a-table>
-    <a-typography-paragraph v-if="!data.enabled" type="warning" style="margin-top: 16px">
-      调度器已禁用（SCHEDULER_ENABLED=false）。所有周期性作业都不会执行。
-    </a-typography-paragraph>
-    <a-typography-paragraph
-      v-else-if="!data.accepting_new_work"
-      type="warning"
-      style="margin-top: 16px"
-    >
-      调度器停机中，正在等待在途作业收敛。立即执行不可用。
-    </a-typography-paragraph>
-  </a-card>
+        </div>
+      </div>
+
+      <div class="job-list">
+        <div
+          v-for="job in data.jobs"
+          :key="job.name"
+          class="job-item"
+        >
+          <div class="job-item__main">
+            <div class="job-item__title-row">
+              <span
+                class="live-dot"
+                :class="{ 'live-dot--idle': !job.running }"
+              />
+              <span class="job-item__name">{{ jobLabel(job.name)?.name || job.name }}</span>
+              <span class="job-item__id mono">{{ job.name }}</span>
+            </div>
+            <div class="job-item__desc">{{ jobLabel(job.name)?.desc || '—' }}</div>
+            <div class="job-item__cron mono">{{ job.cron }}</div>
+          </div>
+          <div class="job-item__actions">
+            <a-switch
+              :checked="job.enabled"
+              @change="(e: boolean) => toggle(job.name, e)"
+            />
+            <a-button
+              size="small"
+              type="default"
+              :loading="runningJob === job.name"
+              :disabled="!data.accepting_new_work"
+              @click="runNow(job.name)"
+            >
+              立即执行 →
+            </a-button>
+          </div>
+        </div>
+      </div>
+
+      <a-alert
+        v-if="!data.enabled"
+        type="warning"
+        show-icon
+        style="margin-top: var(--sp-4)"
+        message="调度器已禁用"
+        description="SCHEDULER_ENABLED=false。所有周期性作业都不会执行。"
+      />
+      <a-alert
+        v-else-if="!data.accepting_new_work"
+        type="warning"
+        show-icon
+        style="margin-top: var(--sp-4)"
+        message="调度器停机中"
+        description="正在等待在途作业收敛，立即执行暂不可用。"
+      />
+    </div>
+  </div>
 </template>
+
+<style scoped>
+.loading-row {
+  padding: var(--sp-4) 0;
+}
+
+.scheduler-head {
+  margin-bottom: var(--sp-4);
+}
+
+.scheduler-head__state {
+  margin-top: var(--sp-2);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--text-md);
+}
+
+.dim {
+  color: var(--text-tertiary);
+}
+
+.job-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--r-md);
+  background: var(--bg-surface);
+}
+
+.job-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-3) var(--sp-4);
+  gap: var(--sp-4);
+  border-bottom: 1px solid var(--border-hairline);
+}
+
+.job-item:last-child {
+  border-bottom: 0;
+}
+
+.job-item:hover {
+  background: var(--bg-elevated);
+}
+
+.job-item__main {
+  flex: 1;
+  min-width: 0;
+}
+
+.job-item__title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-1);
+}
+
+.job-item__name {
+  font-weight: 500;
+  font-size: var(--text-md);
+}
+
+.job-item__id {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  margin-left: var(--sp-1);
+}
+
+.job-item__desc {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin-bottom: var(--sp-1);
+  line-height: 1.5;
+}
+
+.job-item__cron {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  letter-spacing: 0.05em;
+}
+
+.job-item__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex: 0 0 auto;
+}
+</style>

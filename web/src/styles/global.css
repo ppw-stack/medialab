@@ -1,0 +1,751 @@
+@import "./tokens.css";
+
+/* ============================================================
+   Global reset + canvas
+   ============================================================ */
+
+html, body {
+  margin: 0;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  font-feature-settings: "ss01", "cv11";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+/* Use tabular numerals everywhere by default — turns out to look right
+   for an operations console and costs nothing. */
+body, button, input, select, textarea {
+  font-variant-numeric: tabular-nums;
+}
+
+code, kbd, pre, samp {
+  font-family: var(--font-mono);
+}
+
+/* ============================================================
+   Ant Design Vue overrides — kill the blue, flatten surfaces
+   ============================================================ */
+
+.ant-layout, .ant-layout-sider, .ant-layout-header, .ant-layout-content {
+  background: transparent !important;
+}
+
+.ant-layout-sider {
+  background: var(--bg-surface) !important;
+  border-right: 1px solid var(--border-hairline);
+}
+
+.ant-layout-header {
+  height: var(--header-h) !important;
+  line-height: var(--header-h) !important;
+  padding: 0 var(--sp-4) !important;
+  background: var(--bg-canvas) !important;
+  border-bottom: 1px solid var(--border-hairline);
+}
+
+.ant-layout-content {
+  padding: 0 !important;
+}
+
+/* Menu — flat, hairline, amber accent on active */
+.ant-menu {
+  background: transparent !important;
+  border-inline-end: none !important;
+  font-family: var(--font-sans);
+}
+
+.ant-menu-item, .ant-menu-submenu-title {
+  margin: 0 !important;
+  width: 100% !important;
+  height: 36px !important;
+  line-height: 36px !important;
+  color: var(--text-secondary) !important;
+  border-radius: 0 !important;
+  font-size: var(--text-base) !important;
+}
+
+.ant-menu-item:hover, .ant-menu-submenu-title:hover {
+  color: var(--text-primary) !important;
+  background: var(--bg-elevated) !important;
+}
+
+.ant-menu-item-selected {
+  background: transparent !important;
+  color: var(--accent-amber) !important;
+}
+
+.ant-menu-item-selected::after {
+  display: none !important;
+}
+
+.ant-menu-item-selected .ant-menu-title-content,
+.ant-menu-item-selected > span {
+  color: var(--accent-amber) !important;
+}
+
+/* Cards — flat, hairline border, no shadow */
+.ant-card {
+  background: var(--bg-surface) !important;
+  border: 1px solid var(--border-hairline) !important;
+  border-radius: var(--r-md) !important;
+  box-shadow: none !important;
+}
+
+.ant-card-head {
+  border-bottom: 1px solid var(--border-hairline) !important;
+  min-height: 44px !important;
+  padding: 0 var(--sp-4) !important;
+  color: var(--text-primary) !important;
+  font-weight: 500;
+}
+
+.ant-card-head-title {
+  font-size: var(--text-md) !important;
+  font-weight: 500 !important;
+  letter-spacing: 0.01em;
+}
+
+.ant-card-body {
+  padding: var(--sp-4) !important;
+}
+
+.ant-card-bordered {
+  border-color: var(--border-hairline) !important;
+}
+
+/* Buttons — restrained */
+.ant-btn {
+  border-radius: var(--r-md) !important;
+  font-weight: 400 !important;
+  transition: all var(--t-fast) var(--ease) !important;
+}
+
+.ant-btn-primary {
+  background: var(--accent-amber) !important;
+  border-color: var(--accent-amber) !important;
+  color: #1A1206 !important;
+}
+
+.ant-btn-primary:hover {
+  background: #FFB740 !important;
+  border-color: #FFB740 !important;
+  color: #1A1206 !important;
+}
+
+.ant-btn-default {
+  background: transparent !important;
+  border-color: var(--border-strong) !important;
+  color: var(--text-primary) !important;
+}
+
+.ant-btn-default:hover {
+  border-color: var(--border-active) !important;
+  background: var(--bg-elevated) !important;
+  color: var(--text-primary) !important;
+}
+
+.ant-btn-link {
+  color: var(--accent-amber) !important;
+  padding: 0 var(--sp-2) !important;
+}
+
+.ant-btn-link:hover {
+  color: #FFB740 !important;
+}
+
+.ant-btn-dangerous {
+  color: var(--status-red) !important;
+  border-color: var(--border-strong) !important;
+}
+
+.ant-btn-dangerous:hover {
+  background: var(--status-red-soft) !important;
+  border-color: var(--status-red) !important;
+  color: var(--status-red) !important;
+}
+
+/* Inputs — flat */
+.ant-input, .ant-input-password, .ant-input-affix-wrapper,
+.ant-input-number, .ant-select-selector, .ant-picker {
+  background: var(--bg-inset) !important;
+  border-color: var(--border-strong) !important;
+  border-radius: var(--r-md) !important;
+  color: var(--text-primary) !important;
+  font-family: var(--font-sans);
+}
+
+.ant-input:focus, .ant-input-affix-wrapper:focus,
+.ant-input-affix-wrapper-focused, .ant-select-focused .ant-select-selector,
+.ant-input-number-focused {
+  border-color: var(--accent-amber) !important;
+  box-shadow: none !important;
+}
+
+.ant-input::placeholder, .ant-input-affix-wrapper input::placeholder {
+  color: var(--text-tertiary) !important;
+}
+
+.ant-select-selection-item, .ant-select-selection-placeholder {
+  color: var(--text-primary) !important;
+}
+
+.ant-select-dropdown {
+  background: var(--bg-elevated) !important;
+  border: 1px solid var(--border-strong) !important;
+  border-radius: var(--r-md) !important;
+  box-shadow: none !important;
+}
+
+.ant-select-item {
+  color: var(--text-primary) !important;
+  border-radius: var(--r-sm) !important;
+}
+
+.ant-select-item-option-selected {
+  background: var(--accent-amber-soft) !important;
+  color: var(--accent-amber) !important;
+}
+
+.ant-select-item-option-active {
+  background: var(--bg-surface) !important;
+}
+
+/* Tables — flat, compact, mono numerics */
+.ant-table {
+  background: transparent !important;
+  color: var(--text-primary) !important;
+  font-size: var(--text-base) !important;
+}
+
+.ant-table-thead > tr > th {
+  background: var(--bg-surface) !important;
+  border-bottom: 1px solid var(--border-hairline) !important;
+  color: var(--text-secondary) !important;
+  font-weight: 500 !important;
+  font-size: var(--text-xs) !important;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: var(--sp-2) var(--sp-3) !important;
+  height: 36px;
+}
+
+.ant-table-tbody > tr > td {
+  border-bottom: 1px solid var(--border-hairline) !important;
+  padding: var(--sp-2) var(--sp-3) !important;
+  background: transparent !important;
+  color: var(--text-primary) !important;
+}
+
+.ant-table-tbody > tr:hover > td,
+.ant-table-tbody > tr.ant-table-row-hover > td {
+  background: var(--bg-elevated) !important;
+}
+
+.ant-table-tbody > tr.ant-table-row-selected > td {
+  background: var(--accent-amber-soft) !important;
+}
+
+.ant-table-cell-fix-left, .ant-table-cell-fix-right {
+  background: var(--bg-surface) !important;
+}
+
+.ant-table-tbody > tr.ant-table-row-selected:hover > td,
+.ant-table-tbody > tr.ant-table-row-selected.ant-table-row-hover > td {
+  background: var(--accent-amber-strong) !important;
+}
+
+.ant-table-placeholder {
+  background: transparent !important;
+}
+
+.ant-table-pagination.ant-pagination {
+  margin: var(--sp-4) 0 0 !important;
+  color: var(--text-secondary) !important;
+}
+
+/* Tabs — minimal strip */
+.ant-tabs {
+  color: var(--text-primary) !important;
+}
+
+.ant-tabs-tab {
+  padding: var(--sp-2) var(--sp-3) !important;
+  font-size: var(--text-base) !important;
+}
+
+.ant-tabs-tab-active .ant-tabs-tab-btn {
+  color: var(--accent-amber) !important;
+}
+
+.ant-tabs-ink-bar {
+  background: var(--accent-amber) !important;
+  height: 2px !important;
+}
+
+/* Tags — restrained */
+.ant-tag {
+  border-radius: var(--r-sm) !important;
+  font-family: var(--font-sans);
+  font-weight: 500;
+  padding: 0 var(--sp-2) !important;
+  line-height: 18px !important;
+  font-size: var(--text-xs) !important;
+  border: 1px solid var(--border-strong) !important;
+  color: var(--text-primary) !important;
+  background: var(--bg-elevated) !important;
+}
+
+.ant-tag-default {
+  color: var(--text-secondary) !important;
+  background: var(--bg-surface) !important;
+}
+
+/* Modal */
+.ant-modal-content {
+  background: var(--bg-elevated) !important;
+  border: 1px solid var(--border-strong) !important;
+  border-radius: var(--r-md) !important;
+  box-shadow: none !important;
+}
+
+.ant-modal-header {
+  background: transparent !important;
+  border-bottom: 1px solid var(--border-hairline) !important;
+  margin-bottom: 0 !important;
+  padding: var(--sp-3) var(--sp-4) !important;
+}
+
+.ant-modal-title {
+  color: var(--text-primary) !important;
+  font-size: var(--text-md) !important;
+  font-weight: 500;
+}
+
+.ant-modal-body {
+  padding: var(--sp-4) !important;
+}
+
+.ant-modal-footer {
+  border-top: 1px solid var(--border-hairline) !important;
+  padding: var(--sp-3) var(--sp-4) !important;
+}
+
+.ant-modal-mask {
+  background: rgba(0, 0, 0, 0.55) !important;
+}
+
+/* Typography */
+.ant-typography {
+  color: var(--text-primary) !important;
+}
+
+.ant-typography.ant-typography-secondary {
+  color: var(--text-secondary) !important;
+}
+
+/* Forms */
+.ant-form-item-label > label {
+  color: var(--text-secondary) !important;
+  font-size: var(--text-xs) !important;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 500 !important;
+}
+
+.ant-form-item {
+  margin-bottom: var(--sp-3) !important;
+}
+
+/* Statistic */
+.ant-statistic-title {
+  color: var(--text-secondary) !important;
+  font-size: var(--text-xs) !important;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: var(--sp-1) !important;
+}
+
+.ant-statistic-content {
+  color: var(--text-primary) !important;
+  font-family: var(--font-mono);
+  font-size: var(--text-xl) !important;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.ant-statistic-content-suffix {
+  color: var(--text-tertiary) !important;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm) !important;
+  font-weight: 400;
+}
+
+/* Progress */
+.ant-progress-bg {
+  background: var(--accent-amber) !important;
+}
+
+/* Switch — small, flat */
+.ant-switch {
+  background: var(--border-strong) !important;
+}
+
+.ant-switch.ant-switch-checked {
+  background: var(--accent-amber) !important;
+}
+
+/* Empty */
+.ant-empty-description {
+  color: var(--text-secondary) !important;
+}
+
+/* Popconfirm / Tooltip */
+.ant-popover-inner, .ant-tooltip-inner {
+  background: var(--bg-elevated) !important;
+  border: 1px solid var(--border-strong) !important;
+  color: var(--text-primary) !important;
+  border-radius: var(--r-md) !important;
+  box-shadow: none !important;
+}
+
+.ant-popover-arrow::before,
+.ant-popover-arrow::after,
+.ant-tooltip-arrow::before {
+  background: var(--bg-elevated) !important;
+}
+
+/* Notification / Message — keep dark, monochrome */
+.ant-message-notice-content {
+  background: var(--bg-elevated) !important;
+  color: var(--text-primary) !important;
+  border: 1px solid var(--border-strong) !important;
+  border-radius: var(--r-md) !important;
+  box-shadow: none !important;
+}
+
+/* Alert */
+.ant-alert {
+  background: var(--bg-elevated) !important;
+  border: 1px solid var(--border-strong) !important;
+  border-radius: var(--r-md) !important;
+  color: var(--text-primary) !important;
+}
+
+.ant-alert-info {
+  border-color: var(--border-strong) !important;
+}
+
+.ant-alert-warning {
+  border-color: var(--status-amber) !important;
+  background: var(--status-amber-soft) !important;
+}
+
+/* Divider */
+.ant-divider {
+  border-color: var(--border-hairline) !important;
+}
+
+/* Layout sider collapse button */
+.ant-layout-sider-trigger {
+  background: var(--bg-surface) !important;
+  border-top: 1px solid var(--border-hairline) !important;
+  color: var(--text-secondary) !important;
+}
+
+/* Dropdown */
+.ant-dropdown-menu {
+  background: var(--bg-elevated) !important;
+  border: 1px solid var(--border-strong) !important;
+  border-radius: var(--r-md) !important;
+  box-shadow: none !important;
+}
+
+.ant-dropdown-menu-item {
+  color: var(--text-primary) !important;
+}
+
+.ant-dropdown-menu-item:hover {
+  background: var(--bg-surface) !important;
+}
+
+/* Pagination */
+.ant-pagination-item, .ant-pagination-prev .ant-pagination-item-link,
+.ant-pagination-next .ant-pagination-item-link {
+  background: transparent !important;
+  border-color: var(--border-strong) !important;
+  color: var(--text-secondary) !important;
+  border-radius: var(--r-md) !important;
+}
+
+.ant-pagination-item-active {
+  background: var(--accent-amber-soft) !important;
+  border-color: var(--accent-amber) !important;
+  color: var(--accent-amber) !important;
+}
+
+.ant-pagination-item-active a {
+  color: var(--accent-amber) !important;
+}
+
+/* Avatar */
+.ant-avatar {
+  background: var(--bg-elevated) !important;
+  color: var(--text-secondary) !important;
+}
+
+/* Scrollbar — quiet */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--border-active);
+}
+
+/* ============================================================
+   Reusable utility classes
+   ============================================================ */
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.label-caps {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.divider-hairline {
+  height: 1px;
+  background: var(--border-hairline);
+  border: 0;
+  margin: var(--sp-3) 0;
+}
+
+.section {
+  padding: var(--sp-5) var(--sp-6);
+}
+
+.section + .section {
+  border-top: 1px solid var(--border-hairline);
+}
+
+/* Live status pulse */
+@keyframes live-pulse {
+  0%, 100% { opacity: 0.4; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+.live-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-amber);
+  animation: live-pulse 2s var(--ease) infinite;
+  vertical-align: middle;
+}
+
+.live-dot--idle {
+  background: var(--text-tertiary);
+  animation: none;
+  opacity: 0.6;
+}
+
+/* Countdown chip — color shift based on urgency */
+.countdown {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-xs);
+  letter-spacing: 0.02em;
+}
+
+.countdown--safe   { color: var(--status-green); }
+.countdown--soon   { color: var(--status-amber); }
+.countdown--urgent { color: var(--status-red); }
+.countdown--perm   { color: var(--accent-teal); }
+.countdown--none   { color: var(--text-tertiary); }
+
+/* Stat tile — left-aligned, mono number, accent bar when active */
+.stat-tile {
+  position: relative;
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+
+.stat-tile:hover {
+  border-color: var(--border-strong);
+}
+
+.stat-tile--active {
+  background: var(--accent-amber-soft);
+  border-color: var(--accent-amber);
+}
+
+.stat-tile--active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--accent-amber);
+}
+
+.stat-tile__label {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+  font-weight: 500;
+  margin-bottom: var(--sp-2);
+}
+
+.stat-tile__value {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xl);
+  font-weight: 500;
+  line-height: 1;
+  color: var(--text-primary);
+}
+
+.stat-tile--active .stat-tile__value {
+  color: var(--accent-amber);
+}
+
+.stat-tile__hint {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  margin-top: var(--sp-1);
+}
+
+/* Telemetry strip — slim KPI bar in the header */
+.telemetry-strip {
+  display: flex;
+  align-items: center;
+  height: var(--telemetry-h);
+  gap: var(--sp-5);
+  flex: 1;
+}
+
+.telemetry-kpi {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.telemetry-kpi__label {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 500;
+}
+
+.telemetry-kpi__value {
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.telemetry-kpi__value--warn { color: var(--status-amber); }
+.telemetry-kpi__value--ok   { color: var(--status-green); }
+.telemetry-kpi__value--idle { color: var(--text-tertiary); }
+
+.telemetry-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--border-hairline);
+}
+
+/* Page header — eyebrow + title + actions */
+.page-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding: var(--sp-5) var(--sp-6) var(--sp-3);
+  gap: var(--sp-4);
+}
+
+.page-header__eyebrow {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--accent-amber);
+  font-weight: 500;
+  margin-bottom: var(--sp-1);
+}
+
+.page-header__title {
+  font-size: var(--text-xl);
+  font-weight: 500;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+
+.page-header__sub {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin-top: var(--sp-1);
+}
+
+/* Logo in sidebar */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-4);
+  height: var(--header-h);
+  border-bottom: 1px solid var(--border-hairline);
+}
+
+.brand__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-amber);
+  box-shadow: 0 0 12px var(--accent-amber-strong);
+}
+
+.brand__name {
+  font-family: var(--font-sans);
+  font-weight: 500;
+  font-size: var(--text-md);
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.brand__name-mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-weight: 400;
+  margin-left: var(--sp-2);
+}

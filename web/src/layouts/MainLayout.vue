@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
   DashboardOutlined,
@@ -12,6 +12,7 @@ import {
   DatabaseOutlined,
 } from '@ant-design/icons-vue'
 import { useAuthStore } from '../stores/auth'
+import { api } from '../api'
 
 const router = useRouter()
 const route = useRoute()
@@ -37,24 +38,72 @@ async function handleLogout() {
   await auth.logout()
   router.push('/login')
 }
+
+// Telemetry — pulled on a slow interval, used in the top strip
+interface SchedulerInfo {
+  enabled: boolean
+  inflight: number
+  accepting_new_work: boolean
+  jobs: { name: string; enabled: boolean; running: boolean }[]
+}
+
+const scheduler = ref<SchedulerInfo | null>(null)
+
+// Free leech windows ending soon — only fetched on the TorrentIndex page,
+// but we want a global "anything ending in <6h" glance. We re-use the
+// dashboard endpoint when available.
+interface DashboardSnap {
+  free_ending_soon?: number
+  scheduler_inflight?: number
+  scheduler_accepting?: boolean
+}
+const snap = ref<DashboardSnap | null>(null)
+
+async function loadSnap() {
+  try {
+    snap.value = await api.get<DashboardSnap>('/dashboard')
+  } catch {
+    /* ignore */
+  }
+}
+async function loadScheduler() {
+  try {
+    scheduler.value = await api.get<SchedulerInfo>('/scheduler')
+  } catch {
+    /* ignore */
+  }
+}
+
+let timer: ReturnType<typeof setInterval> | null = null
+
+onMounted(() => {
+  loadScheduler()
+  loadSnap()
+  timer = setInterval(() => {
+    loadScheduler()
+    loadSnap()
+  }, 5000)
+})
+onUnmounted(() => {
+  if (timer) clearInterval(timer)
+})
+
+const inflight = computed(() => scheduler.value?.inflight ?? 0)
+const accepting = computed(() => scheduler.value?.accepting_new_work ?? false)
+const endingSoon = computed(() => snap.value?.free_ending_soon ?? null)
+const schedulerEnabled = computed(() => scheduler.value?.enabled ?? null)
+const anyRunning = computed(() => (scheduler.value?.jobs ?? []).some((j) => j.running))
 </script>
 
 <template>
   <a-layout style="min-height: 100vh">
     <a-layout-sider v-model:collapsed="collapsed" collapsible>
-      <div
-        :style="{
-          height: '48px',
-          margin: '12px',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          color: '#1677ff',
-          fontWeight: 'bold',
-          fontSize: collapsed ? '16px' : '18px',
-        }"
-      >
-        {{ collapsed ? 'SH' : 'SeedHelper' }}
+      <div class="brand">
+        <span class="brand__dot" />
+        <template v-if="!collapsed">
+          <span class="brand__name">SeedHelper</span>
+          <span class="brand__name-mono">v0.5</span>
+        </template>
       </div>
       <a-menu
         theme="dark"
@@ -69,20 +118,55 @@ async function handleLogout() {
       </a-menu>
     </a-layout-sider>
     <a-layout>
-      <a-layout-header
-        :style="{
-          display: 'flex',
-          justifyContent: 'flex-end',
-          alignItems: 'center',
-          padding: '0 24px',
-        }"
-      >
+      <a-layout-header>
+        <div class="telemetry-strip">
+          <span class="telemetry-kpi">
+            <span
+              class="live-dot"
+              :class="{ 'live-dot--idle': !anyRunning }"
+            />
+            <span class="telemetry-kpi__label">调度</span>
+            <span
+              class="telemetry-kpi__value"
+              :class="{
+                'telemetry-kpi__value--ok': accepting && inflight > 0,
+                'telemetry-kpi__value--idle': !accepting,
+              }"
+            >
+              {{ accepting ? (inflight > 0 ? `${inflight} 在途` : '工作中') : '停机' }}
+            </span>
+          </span>
+          <span class="telemetry-divider" />
+          <span class="telemetry-kpi">
+            <span class="telemetry-kpi__label">免费即将截止</span>
+            <span
+              class="telemetry-kpi__value"
+              :class="{
+                'telemetry-kpi__value--warn': endingSoon !== null && endingSoon > 0,
+                'telemetry-kpi__value--idle': endingSoon === null || endingSoon === 0,
+              }"
+            >
+              {{ endingSoon !== null ? endingSoon : '—' }}
+            </span>
+          </span>
+          <span class="telemetry-divider" />
+          <span class="telemetry-kpi">
+            <span class="telemetry-kpi__label">作业启用</span>
+            <span
+              class="telemetry-kpi__value"
+              :class="{
+                'telemetry-kpi__value--ok': schedulerEnabled === true,
+                'telemetry-kpi__value--idle': schedulerEnabled === false,
+              }"
+            >
+              {{ schedulerEnabled === null ? '—' : schedulerEnabled ? '是' : '否' }}
+            </span>
+          </span>
+        </div>
         <a-dropdown :trigger="['click']">
-          <span
-            style="cursor: pointer; display: flex; align-items: center; gap: 8px"
-          >
-            <a-avatar><UserOutlined /></a-avatar>
-            <a-typography-text style="color: white">{{ auth.username }}</a-typography-text>
+          <span class="user-chip">
+            <a-avatar :size="22"><UserOutlined style="font-size: 12px" /></a-avatar>
+            <span class="user-chip__name">{{ auth.username }}</span>
           </span>
           <template #overlay>
             <a-menu>
@@ -94,11 +178,31 @@ async function handleLogout() {
           </template>
         </a-dropdown>
       </a-layout-header>
-      <a-layout-content
-        :style="{ margin: '16px', padding: '24px', background: '#141414', borderRadius: '8px' }"
-      >
+      <a-layout-content>
         <RouterView />
       </a-layout-content>
     </a-layout>
   </a-layout>
 </template>
+
+<style scoped>
+.user-chip {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  cursor: pointer;
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-md);
+  transition: background var(--t-fast) var(--ease);
+}
+
+.user-chip:hover {
+  background: var(--bg-elevated);
+}
+
+.user-chip__name {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+</style>
