@@ -283,6 +283,64 @@ async def _backfill_published_at_tz() -> None:
         logger.info("published_at 时区回填（-8h）：%d 行", len(rows))
 
 
+async def _backfill_free_window_into_torrents() -> None:
+    """把 ``torrent_index`` 的 ``free_type`` / ``free_end_at`` 回填到 ``torrents``。
+
+    早期 ``push_free._record_push`` 写入 ``torrents`` 时**没有** copy
+    ``free_type`` / ``free_end_at``（bug），导致 ``is_free=1`` 的行这两个字段
+    均为 NULL。监测作业需要它们判断限时窗口剩余时间。
+
+    策略：按 ``(site_id, item_id)`` 关联 ``torrent_index`` 取最新值，仅
+    更新 ``is_free=1`` 且 ``free_type`` / ``free_end_at`` 至少有一为 NULL 的行。
+    幂等：已填的行再次运行会被 ``WHERE`` 过滤掉。
+    """
+    from sqlalchemy import select
+
+    from app.db.models import FreeType, Torrent
+
+    factory = get_session_factory()
+    async with factory() as session:
+        # 先数一下需回填的行数（仅日志用）。
+        # 排除永久免费：它的 free_end_at 永远为 NULL，无需回填。
+        need_count = (
+            await session.execute(
+                select(Torrent.id)
+                .where(
+                    Torrent.is_free.is_(True),
+                    Torrent.free_type != FreeType.PERMANENT,
+                    (Torrent.free_type.is_(None)) | (Torrent.free_end_at.is_(None)),
+                )
+            )
+        ).all()
+        if not need_count:
+            return
+        ids = [r[0] for r in need_count]
+        # 用子查询按 (site_id, item_id) 取最新 free_type/free_end_at
+        # SQLite 支持 UPDATE ... FROM 语法（3.33+）。id 列表仅用于日志。
+        from sqlalchemy import text
+        await session.execute(
+            text(
+                """
+                UPDATE torrents SET
+                    free_type = (
+                        SELECT ti.free_type FROM torrent_index ti
+                        WHERE ti.site_id = torrents.site_id
+                          AND ti.item_id = torrents.item_id
+                    ),
+                    free_end_at = (
+                        SELECT ti.free_end_at FROM torrent_index ti
+                        WHERE ti.site_id = torrents.site_id
+                          AND ti.item_id = torrents.item_id
+                    )
+                WHERE torrents.is_free = 1
+                  AND (torrents.free_type IS NULL OR torrents.free_end_at IS NULL)
+                """
+            )
+        )
+        await session.commit()
+        logger.info("免费窗口字段回填到 torrents：%d 行", len(ids))
+
+
 class SingleWriterQueue:
     """进程内单写者串行队列（§8 约定 2）。
 
@@ -335,6 +393,7 @@ class SingleWriterQueue:
         logger.info("数据表已就绪")
         await _backfill_discount_pct()
         await _backfill_published_at_tz()
+        await _backfill_free_window_into_torrents()
 
     async def healthcheck(self) -> bool:
         try:

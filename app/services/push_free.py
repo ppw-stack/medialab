@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from sqlalchemy import or_, select
@@ -140,7 +140,8 @@ class PushFreeService:
 
             async with session_scope() as session:
                 await self._record_push(
-                    session, info_hash, c.name, c.site_id, c.item_id, downloader_id
+                    session, info_hash, c.name, c.site_id, c.item_id,
+                    downloader_id, c.free_type, c.free_end_at,
                 )
             pushed += 1
 
@@ -215,6 +216,8 @@ class PushFreeService:
                     item_id=item_id,
                     name=name,
                     torrent_url=torrent_url,
+                    free_type=free_type,
+                    free_end_at=free_end_at,
                 )
             )
             if len(candidates) >= self._settings.push_max_per_run:
@@ -251,8 +254,52 @@ class PushFreeService:
         real_hash = handle.info_hash.strip() or None
         if real_hash:
             return real_hash
-        # 用合成 hash 满足 UNIQUE 约束（dev DB 旧 schema）
+
+        # qB 不返 hash：触发"推送后回填"——拉一次 auto-push 类目，按归一化
+        # 名字匹配拿到真实 hash。回填失败时退回合成占位。
+        resolved = await self._reconcile_hash(adapter, c.name)
+        if resolved:
+            return resolved
         return _synthetic_info_hash(c.site_id, c.item_id, downloader_id)
+
+    async def _reconcile_hash(
+        self, adapter: DownloaderAdapter, name: str
+    ) -> str | None:
+        """qB 推送后，按 category=auto-push 过滤 list_torrents，用归一化
+        名字匹配刚加入的种子，回填真实 info_hash。失败返回 None。
+
+        名字归一化：转小写、去所有非字母数字字符（应对站点用空格 / 点
+        不同的差异，如 "Death is Coming" vs "Death.is.Coming"）。
+        """
+        from app.adapters.downloaders.base import TorrentFilter, TorrentState
+
+        try:
+            infos = await adapter.list_torrents(
+                TorrentFilter(
+                    category="auto-push",
+                    states=frozenset({
+                        TorrentState.DOWNLOADING,
+                        TorrentState.STALLED_DL,
+                        TorrentState.CHECKING,
+                        TorrentState.PAUSED_DL,
+                        TorrentState.SEEDING,
+                        TorrentState.UPLOADING,
+                        TorrentState.PAUSED_UP,
+                        TorrentState.ERROR,
+                        TorrentState.MISSING_FILES,
+                    }),
+                )
+            )
+        except DownloaderError as exc:
+            logger.debug("push_free: 回填 hash 时 list_torrents 失败：%s", exc)
+            return None
+
+        needle = "".join(ch for ch in name.lower() if ch.isalnum())
+        for t in infos:
+            tname = "".join(ch for ch in t.name.lower() if ch.isalnum())
+            if tname and (needle in tname or tname in needle):
+                return t.hash
+        return None
 
     async def _record_push(
         self,
@@ -262,6 +309,8 @@ class PushFreeService:
         site_id: int,
         item_id: str,
         downloader_id: int,
+        free_type: str | None = None,
+        free_end_at: datetime | None = None,
     ) -> None:
         """写入 torrents 表（最小集）。"""
         now = utcnow()
@@ -274,6 +323,8 @@ class PushFreeService:
             source=Source.AUTO_PUSH,
             status=TorrentStatus.ACTIVE,
             is_free=True,
+            free_type=free_type,
+            free_end_at=free_end_at,
             added_at=now,
         )
         session.add(row)
@@ -294,3 +345,5 @@ class _Candidate:
     item_id: str
     name: str
     torrent_url: str
+    free_type: str | None = None
+    free_end_at: datetime | None = None

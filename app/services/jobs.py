@@ -1,10 +1,12 @@
-"""调度作业注册——统一 RSS 拉取。
+"""调度作业注册——统一 RSS 拉取 + 自动推送 + 免费窗口监测。
 
-唯一的调度任务是 :func:`fetch_all_sites`：按站遍历所有启用站点，
-调用各 adapter 的 :meth:`SiteAdapter.search_torrents` 拉取最新 RSS，
-把 :class:`FeedItem` upsert 到 :class:`TorrentIndex` 表。
+已注册作业：
 
-周期由 cron 配置（默认 ``*/10 * * * *``，每 10 分钟）。
+- :func:`fetch_all_sites` — 按站遍历所有启用站点，调用各 adapter 的
+  :meth:`SiteAdapter.search_torrents` 拉取最新 RSS，把 :class:`FeedItem`
+  upsert 到 :class:`TorrentIndex` 表。
+- :func:`push_free_torrents` — 选免费种自动推到默认下载器。
+- :func:`monitor_free_window` — 巡检已推免费种，临近窗口截止自动暂停。
 
 注：本模块不再做辅种匹配或限免过滤——全部 RSS 项目都写入索引表
 供查询/筛选，外部系统按需使用。
@@ -179,6 +181,17 @@ def register_jobs(
         "已注册免费种推送作业：push_free_torrents cron=%r",
         cfg.push_free_cron,
     )
+    scheduler_center.register(
+        JobSpec(
+            name="monitor_free_window",
+            func=lambda: _run_and_return(_run_monitor_free_window(factory, cfg)),
+            cron=cfg.monitor_free_window_cron,
+        )
+    )
+    logger.info(
+        "已注册免费窗口监测作业：monitor_free_window cron=%r (pre_pause=%dmin)",
+        cfg.monitor_free_window_cron, cfg.monitor_pre_pause_minutes,
+    )
 
 
 async def _run_push_free(factory: AdapterFactory, cfg: AppSettings) -> dict[str, object]:
@@ -188,6 +201,19 @@ async def _run_push_free(factory: AdapterFactory, cfg: AppSettings) -> dict[str,
     from app.services.push_free import PushFreeService
 
     svc = PushFreeService(cfg, factory)
+    result = await svc.run()
+    return asdict(result)
+
+
+async def _run_monitor_free_window(
+    factory: AdapterFactory, cfg: AppSettings
+) -> dict[str, object]:
+    """执行免费窗口监测并把结果序列化为 dict（供 API 返回）。"""
+    from dataclasses import asdict
+
+    from app.services.monitor import MonitorFreeWindowService
+
+    svc = MonitorFreeWindowService(factory, cfg.monitor_pre_pause_minutes)
     result = await svc.run()
     return asdict(result)
 

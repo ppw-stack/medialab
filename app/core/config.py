@@ -78,6 +78,10 @@ class AppSettings(BaseSettings):
     fetch_all_sites_cron: str = "*/10 * * * *"
     #: 自动推送免费种到默认下载器的 cron（默认 30 分钟一次，与 fetch 错开）
     push_free_cron: str = "*/30 * * * *"
+    #: 免费窗口巡检 cron（5/15/25/... 错峰 fetch 0/10/20/30 与 push 0/30）
+    monitor_free_window_cron: str = "5,15,25,35,45,55 * * * *"
+    #: 距 free_end_at 不足此分钟数且未完成 → 自动暂停下载器任务
+    monitor_pre_pause_minutes: int = 10
     #: 限时种剩余时间低于此值不推（小时，默认 24）
     push_min_remaining_hours: int = 24
     #: 每次推送最多 N 个（避免下载器瞬时过载）
