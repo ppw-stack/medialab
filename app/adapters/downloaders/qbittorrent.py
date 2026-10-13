@@ -134,9 +134,8 @@ class QbittorrentAdapter(DownloaderAdapter):
         return out
 
     async def add_torrent(self, payload: AddTorrentPayload) -> TorrentHandle:
-        """附录 A：``urls`` / ``savepath`` / ``category`` / ``tags`` / ``skip_checking``。"""
+        """附录 A：``urls`` / ``category`` / ``tags`` / ``skip_checking``。"""
         kwargs: dict[str, Any] = {
-            "savepath": payload.save_path,
             "category": payload.category,
             "skip_checking": payload.skip_checking,
             "paused": payload.paused,

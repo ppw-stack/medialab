@@ -110,13 +110,10 @@ class AddTorrentPayload:
     name: str
     urls: Sequence[str] = ()
     torrent_bytes: bytes | None = None
-    save_path: str | None = None
     category: str | None = None
     tags: frozenset[str] = frozenset()
     paused: bool = False
     skip_checking: bool = False
-    #: 幂等键：同一 hash 在同一站点不重复添加（非功能·幂等性）
-    idem_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

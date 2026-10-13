@@ -195,7 +195,6 @@ class Torrent(Base):
 
     category: Mapped[str | None] = mapped_column(String(64), nullable=True)
     tags: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    save_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     size: Mapped[int] = mapped_column(BigInteger, default=0)
     ratio: Mapped[float] = mapped_column(Float, default=0.0)
     uploaded: Mapped[int] = mapped_column(BigInteger, default=0)

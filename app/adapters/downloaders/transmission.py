@@ -292,8 +292,6 @@ class TransmissionAdapter(DownloaderAdapter):
             )
 
         arguments: dict[str, Any] = {"paused": payload.paused}
-        if payload.save_path:
-            arguments["download-dir"] = payload.save_path
         # TR 无 category 字段，把 payload.category 与 tags 合并到 labels（第一个
         # 为 category，保持 _row_to_info 反向解析一致）。
         labels: list[str] = []
