@@ -218,7 +218,7 @@ function jobLabel(name: string) {
 }
 
 .job-item:hover {
-  background: var(--bg-elevated);
+  background: var(--bg-inset);
 }
 
 .job-item__main {

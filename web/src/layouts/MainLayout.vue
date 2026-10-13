@@ -20,15 +20,16 @@ const auth = useAuthStore()
 const collapsed = ref(false)
 
 const menuItems = [
-  { key: '/', icon: DashboardOutlined, label: '总览' },
-  { key: '/sites', icon: CloudServerOutlined, label: '站点' },
-  { key: '/downloaders', icon: ApiOutlined, label: '下载器' },
-  { key: '/torrents', icon: DownloadOutlined, label: '任务' },
-  { key: '/torrent-index', icon: DatabaseOutlined, label: '拉取索引' },
-  { key: '/settings', icon: SettingOutlined, label: '设置' },
+  { key: '/', icon: DashboardOutlined, label: '总览', sub: '仪表盘概览', iconColor: 'red' },
+  { key: '/sites', icon: CloudServerOutlined, label: '站点', sub: 'NexusPHP 适配', iconColor: 'violet' },
+  { key: '/downloaders', icon: ApiOutlined, label: '下载器', sub: 'qB · Transmission', iconColor: 'green' },
+  { key: '/torrents', icon: DownloadOutlined, label: '任务', sub: '辅种运行中', iconColor: 'blue' },
+  { key: '/torrent-index', icon: DatabaseOutlined, label: '拉取索引', sub: '免费种源', iconColor: 'amber' },
+  { key: '/settings', icon: SettingOutlined, label: '设置', sub: '系统配置', iconColor: 'pink' },
 ]
 
 const selectedKeys = computed(() => [route.path])
+const activeMenu = computed(() => menuItems.find((m) => m.key === route.path))
 
 function onMenuClick({ key }: { key: string }) {
   router.push(key)
@@ -49,9 +50,6 @@ interface SchedulerInfo {
 
 const scheduler = ref<SchedulerInfo | null>(null)
 
-// Free leech windows ending soon — only fetched on the TorrentIndex page,
-// but we want a global "anything ending in <6h" glance. We re-use the
-// dashboard endpoint when available.
 interface DashboardSnap {
   free_ending_soon?: number
   scheduler_inflight?: number
@@ -97,7 +95,7 @@ const anyRunning = computed(() => (scheduler.value?.jobs ?? []).some((j) => j.ru
 
 <template>
   <a-layout style="min-height: 100vh">
-    <a-layout-sider v-model:collapsed="collapsed" collapsible>
+    <a-layout-sider v-model:collapsed="collapsed" collapsible :width="280">
       <div class="brand">
         <span class="brand__dot" />
         <template v-if="!collapsed">
@@ -106,19 +104,27 @@ const anyRunning = computed(() => (scheduler.value?.jobs ?? []).some((j) => j.ru
         </template>
       </div>
       <a-menu
-        theme="dark"
         mode="inline"
         :selected-keys="selectedKeys"
         @click="onMenuClick"
       >
         <a-menu-item v-for="item in menuItems" :key="item.key">
-          <component :is="item.icon" />
-          <span>{{ item.label }}</span>
+          <span class="menu-icon" :class="`menu-icon--${item.iconColor}`">
+            <component :is="item.icon" />
+          </span>
+          <span v-if="!collapsed" class="menu-label">
+            <span class="menu-label__name">{{ item.label }}</span>
+            <span class="menu-label__sub">{{ item.sub }}</span>
+          </span>
         </a-menu-item>
       </a-menu>
     </a-layout-sider>
     <a-layout>
       <a-layout-header>
+        <div class="header-title">
+          <span class="header-title__name">{{ activeMenu?.label ?? '总览' }}</span>
+          <span class="header-title__sub">{{ activeMenu?.sub ?? '' }}</span>
+        </div>
         <div class="telemetry-strip">
           <span class="telemetry-kpi">
             <span
@@ -165,7 +171,7 @@ const anyRunning = computed(() => (scheduler.value?.jobs ?? []).some((j) => j.ru
         </div>
         <a-dropdown :trigger="['click']">
           <span class="user-chip">
-            <a-avatar :size="22"><UserOutlined style="font-size: 12px" /></a-avatar>
+            <a-avatar :size="28"><UserOutlined style="font-size: 13px" /></a-avatar>
             <span class="user-chip__name">{{ auth.username }}</span>
           </span>
           <template #overlay>
@@ -192,17 +198,39 @@ const anyRunning = computed(() => (scheduler.value?.jobs ?? []).some((j) => j.ru
   gap: var(--sp-2);
   cursor: pointer;
   padding: var(--sp-1) var(--sp-2);
-  border-radius: var(--r-md);
+  border-radius: var(--r-sm);
   transition: background var(--t-fast) var(--ease);
 }
 
 .user-chip:hover {
-  background: var(--bg-elevated);
+  background: var(--bg-inset);
 }
 
 .user-chip__name {
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.menu-label {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+  justify-content: center;
+}
+
+.menu-label__name {
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.menu-label__sub {
+  font-size: var(--text-2xs);
+  color: var(--text-tertiary);
+}
+
+.ant-menu-item-selected .menu-label__sub {
+  color: var(--accent-red);
+  opacity: 0.7;
 }
 </style>

@@ -391,6 +391,7 @@ const columns = [
     </section>
 
     <section class="section">
+      <div class="panel">
       <div class="filter-row">
         <a-select
           v-model:value="filterSite"
@@ -455,9 +456,11 @@ const columns = [
             <span v-else class="dim">—</span>
           </template>
           <template v-else-if="column.key === 'name'">
-            <a-typography-text :ellipsis="true" style="max-width: 480px">
-              {{ record.name }}
-            </a-typography-text>
+            <a-typography-text
+              :ellipsis="true"
+              :content="record.name"
+              style="max-width: 480px"
+            />
           </template>
           <template v-else-if="column.key === 'size'">
             <span v-if="record.size > 0" class="mono">{{ formatSize(record.size) }}</span>
@@ -491,6 +494,7 @@ const columns = [
           </template>
         </template>
       </a-table>
+      </div>
     </section>
 
     <a-modal
@@ -543,7 +547,7 @@ const columns = [
   display: inline-block;
   padding: 1px 6px;
   border-radius: var(--r-sm);
-  background: var(--bg-elevated);
+  background: var(--bg-inset);
   font-size: var(--text-xs);
   letter-spacing: 0.05em;
   color: var(--text-secondary);

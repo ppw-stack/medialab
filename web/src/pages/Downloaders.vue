@@ -189,6 +189,7 @@ const columns = [
     <hr class="divider-hairline" style="margin: 0" />
 
     <section class="section">
+      <div class="panel">
       <a-table :data-source="data" :columns="columns" row-key="id" :pagination="{ pageSize: 20 }">
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'name'">
@@ -228,6 +229,7 @@ const columns = [
           </template>
         </template>
       </a-table>
+      </div>
     </section>
 
     <a-modal

@@ -310,8 +310,8 @@ const columns = [
         style="margin-bottom: var(--sp-3)"
       />
 
+      <div v-if="downloaders.length > 0" class="panel">
       <a-tabs
-        v-if="downloaders.length > 0"
         v-model:active-key="activeTab"
         :tab-bar-style="{ marginBottom: 'var(--sp-3)' }"
       >
@@ -345,7 +345,7 @@ const columns = [
             />
             <span class="mono filter-row__meta">
               <span v-if="filterQ.trim()" style="color: var(--text-secondary)">
-                匹配 <b style="color: var(--accent-amber)">{{ filtered.length }}</b> /
+                匹配 <b style="color: var(--accent-red)">{{ filtered.length }}</b> /
               </span>
               <span style="color: var(--text-secondary)">总计 <b style="color: var(--text-primary)">{{ total }}</b></span>
             </span>
@@ -388,9 +388,11 @@ const columns = [
                 <a-tag :color="stateColor(record.state)">{{ stateLabel(record.state) }}</a-tag>
               </template>
               <template v-else-if="column.key === 'name'">
-                <a-typography-text :ellipsis="true" style="max-width: 360px">
-                  {{ record.name }}
-                </a-typography-text>
+                <a-typography-text
+                  :ellipsis="true"
+                  :content="record.name"
+                  style="max-width: 360px"
+                />
               </template>
               <template v-else-if="['size','downloaded','uploaded','dlspeed','upspeed','ratio'].includes(column.key as string)">
                 <span class="mono">{{ column.customRender?.({ record }) }}</span>
@@ -399,6 +401,7 @@ const columns = [
           </a-table>
         </a-tab-pane>
       </a-tabs>
+      </div>
     </section>
 
     <a-modal

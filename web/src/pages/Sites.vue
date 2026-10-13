@@ -148,6 +148,7 @@ const columns = [
     <hr class="divider-hairline" style="margin: 0" />
 
     <section class="section">
+      <div class="panel">
       <a-table
         :data-source="data"
         :columns="columns"
@@ -189,6 +190,7 @@ const columns = [
           </template>
         </template>
       </a-table>
+      </div>
     </section>
 
     <a-modal
