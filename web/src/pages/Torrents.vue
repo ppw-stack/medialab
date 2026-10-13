@@ -41,36 +41,58 @@ const filterState = ref<string | null>(null)
 const filterCategory = ref<string>('')
 const filterQ = ref<string>('')
 
-// 常见状态选项（qBittorrent / Transmission 主要 state）
+// 状态 → 中文标签 + 颜色（单一来源）
+// qB/Tr API 返回的状态字符串由 downloaders.py 序列化为 .name
+// （即大写枚举值如 SEEDING / UPLOADING / DOWNLOADING）。
+const STATE_META: Record<string, { label: string; color: string }> = {
+  // qBittorrent / Transmission 大小写（实际接收值）
+  DOWNLOADING: { label: '下载中', color: 'blue' },
+  UPLOADING: { label: '上传中', color: 'green' },
+  SEEDING: { label: '做种中', color: 'green' },
+  PAUSED_DL: { label: '暂停下载', color: 'orange' },
+  PAUSED_UP: { label: '暂停上传', color: 'orange' },
+  STALLED_DL: { label: '下载停滞', color: 'orange' },
+  STALLED_UP: { label: '上传停滞', color: 'orange' },
+  CHECKING: { label: '校验中', color: 'cyan' },
+  CHECKING_RESUME_DATA: { label: '校验恢复数据', color: 'cyan' },
+  ERROR: { label: '错误', color: 'red' },
+  MISSING_FILES: { label: '文件丢失', color: 'red' },
+  QUEUED: { label: '排队', color: 'default' },
+  ALLOCATING: { label: '分配空间', color: 'cyan' },
+  META_DL: { label: '下载元数据', color: 'cyan' },
+  FORCED_DL: { label: '强制下载', color: 'blue' },
+  FORCED_UP: { label: '强制上传', color: 'green' },
+  MOVING: { label: '移动文件', color: 'cyan' },
+  UNKNOWN: { label: '未知', color: 'default' },
+  // 兼容小写（备用，避免遗漏）
+  downloading: { label: '下载中', color: 'blue' },
+  uploading: { label: '上传中', color: 'green' },
+  seeding: { label: '做种中', color: 'green' },
+  pausedDL: { label: '暂停下载', color: 'orange' },
+  pausedUP: { label: '暂停上传', color: 'orange' },
+  stalledDL: { label: '下载停滞', color: 'orange' },
+  stalledUP: { label: '上传停滞', color: 'orange' },
+  checking: { label: '校验中', color: 'cyan' },
+  error: { label: '错误', color: 'red' },
+  missingFiles: { label: '文件丢失', color: 'red' },
+  queued: { label: '排队', color: 'default' },
+  unknown: { label: '未知', color: 'default' },
+}
+
 const STATE_OPTIONS = [
   { value: '', label: '全部状态' },
-  { value: 'downloading', label: '下载中' },
-  { value: 'uploading', label: '上传中' },
-  { value: 'paused', label: '已暂停' },
-  { value: 'stalledDL', label: '下载停滞' },
-  { value: 'stalledUP', label: '上传停滞' },
-  { value: 'checking', label: '校验中' },
-  { value: 'error', label: '错误' },
-  { value: 'missingFiles', label: '文件丢失' },
-  { value: 'queued', label: '排队' },
+  // 下拉只展示一次（去重）：用 UPPER 大写 key 作为 value
+  ...Object.entries(STATE_META)
+    .filter(([key]) => key === key.toUpperCase())
+    .map(([value, m]) => ({ value, label: m.label })),
 ]
 
-// 状态 → 颜色
-const STATE_COLOR: Record<string, string> = {
-  downloading: 'blue',
-  uploading: 'green',
-  paused: 'orange',
-  stalledDL: 'orange',
-  stalledUP: 'orange',
-  checking: 'cyan',
-  error: 'red',
-  missingFiles: 'red',
-  queued: 'default',
-  allocating: 'cyan',
-  metaDL: 'cyan',
-  forcedDL: 'blue',
-  forcedUP: 'green',
-  unknown: 'default',
+function stateLabel(s: string): string {
+  return STATE_META[s]?.label ?? s
+}
+
+function stateColor(s: string): string {
+  return STATE_META[s]?.color ?? 'default'
 }
 
 async function loadDownloaders() {
@@ -88,7 +110,11 @@ async function loadItems() {
   loading.value = true
   try {
     const params = new URLSearchParams()
-    if (filterState.value) params.set('state', filterState.value)
+    // 前端用大写枚举值展示；后端 TorrentState 接受小写 enum value
+    if (filterState.value) {
+      const lower = filterState.value.toLowerCase()
+      params.set('state', lower)
+    }
     if (filterCategory.value.trim()) params.set('category', filterCategory.value.trim())
     params.set('page', String(page.value))
     params.set('page_size', String(pageSize.value))
@@ -144,10 +170,6 @@ function formatRate(n: number): string {
   return `${formatSize(n)}/s`
 }
 
-function stateColor(s: string): string {
-  return STATE_COLOR[s] ?? 'default'
-}
-
 function activeTabName(): string {
   return downloaders.value.find((d) => d.id === activeTab.value)?.name ?? ''
 }
@@ -180,7 +202,8 @@ const columns = [
   { title: 'UL', key: 'upspeed', width: 100,
     customRender: ({ record }: { record: DownloaderTorrent }) => formatRate(record.upspeed) },
   { title: '状态', key: 'state', width: 100,
-    customRender: ({ record }: { record: DownloaderTorrent }) => record.state },
+    sorter: (a: DownloaderTorrent, b: DownloaderTorrent) => a.state.localeCompare(b.state),
+    customRender: ({ record }: { record: DownloaderTorrent }) => stateLabel(record.state) },
   { title: '分类', key: 'category', width: 120,
     customRender: ({ record }: { record: DownloaderTorrent }) => record.category ?? '—' },
   { title: '标签', key: 'tags', width: 160,
@@ -262,7 +285,7 @@ const columns = [
               />
             </template>
             <template v-else-if="column.key === 'state'">
-              <a-tag :color="stateColor(record.state)">{{ record.state }}</a-tag>
+              <a-tag :color="stateColor(record.state)">{{ stateLabel(record.state) }}</a-tag>
             </template>
             <template v-else-if="column.key === 'name'">
               <a-typography-text :ellipsis="true" style="max-width: 360px">
