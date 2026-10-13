@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.adapters.downloaders.base import AddTorrentPayload, DownloaderError
 from app.core.config import AppSettings
@@ -168,20 +168,30 @@ class PushFreeService:
         threshold = now + min_remaining
 
         # 候选集：torrent_index 上 free_type ∈ 真免费/限时免费 的种
-        stmt = select(
-            TorrentIndex.id,
-            TorrentIndex.site_id,
-            TorrentIndex.item_id,
-            TorrentIndex.name,
-            TorrentIndex.torrent_url,
-            TorrentIndex.free_type,
-            TorrentIndex.free_end_at,
-        ).where(
-            TorrentIndex.free_type.in_(
-                (FreeType.PERMANENT, FreeType.TIMED)
-            ),
-            TorrentIndex.item_id.is_not(None),
-            TorrentIndex.torrent_url.is_not(None),
+        # 过滤无效 URL（mteam 的 api://gen/{id} 占位）+ 按 last_seen_at DESC
+        stmt = (
+            select(
+                TorrentIndex.id,
+                TorrentIndex.site_id,
+                TorrentIndex.item_id,
+                TorrentIndex.name,
+                TorrentIndex.torrent_url,
+                TorrentIndex.free_type,
+                TorrentIndex.free_end_at,
+            )
+            .where(
+                TorrentIndex.free_type.in_(
+                    (FreeType.PERMANENT, FreeType.TIMED)
+                ),
+                TorrentIndex.item_id.is_not(None),
+                TorrentIndex.torrent_url.is_not(None),
+                # 排除 mteam 的 api://gen/{id} 合成占位 URL
+                or_(
+                    TorrentIndex.torrent_url.like("http%"),
+                    TorrentIndex.torrent_url.like("magnet:%"),
+                ),
+            )
+            .order_by(TorrentIndex.last_seen_at.desc())
         )
         rows = (await session.execute(stmt)).all()
 
