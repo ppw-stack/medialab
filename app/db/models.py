@@ -135,10 +135,6 @@ class DownloaderInstance(Base):
     url: Mapped[str] = mapped_column(String(512))
     username: Mapped[str | None] = mapped_column(String(128), nullable=True)
     password_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
-    download_root: Mapped[str | None] = mapped_column(
-        String(512), nullable=True,
-        comment="路径根目录校验基准；无此值则禁用数据删除",
-    )
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     verify_tls: Mapped[bool] = mapped_column(Boolean, default=True)

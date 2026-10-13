@@ -322,6 +322,7 @@ class SingleWriterQueue:
                 "ALTER TABLE sites ADD COLUMN cookies_enc TEXT",
                 "ALTER TABLE free_candidates ADD COLUMN torrent_url VARCHAR(512)",
                 "ALTER TABLE torrent_index ADD COLUMN discount_pct INTEGER",
+                "ALTER TABLE downloader_instances DROP COLUMN download_root",
             ):
                 with suppress(Exception):  # 列已存在
                     await conn.execute(text(stmt))

@@ -10,7 +10,6 @@ interface Downloader {
   url: string
   username: string | null
   has_password: boolean
-  download_root: string | null
   is_default: boolean
   enabled: boolean
   verify_tls: boolean
@@ -39,7 +38,6 @@ const formState = reactive<Record<string, unknown>>({
   url: '',
   username: '',
   password: '',
-  download_root: '',
   is_default: false,
   enabled: true,
   verify_tls: true,
@@ -66,7 +64,6 @@ function onCreate() {
     url: 'http://',
     username: 'admin',
     password: '',
-    download_root: '',
     is_default: false,
     enabled: true,
     verify_tls: true,
@@ -84,7 +81,6 @@ function onEdit(d: Downloader) {
     url: d.url,
     username: d.username || '',
     password: '',
-    download_root: d.download_root || '',
     is_default: d.is_default,
     enabled: d.enabled,
     verify_tls: d.verify_tls,
@@ -108,7 +104,6 @@ async function onSave() {
     const payload: Record<string, unknown> = { ...formState }
     if (!payload.password) delete payload.password
     if (!payload.username) payload.username = null
-    if (!payload.download_root) payload.download_root = null
     if (creating.value) {
       await api.post('/downloaders', payload)
       message.success('已创建')
@@ -175,7 +170,6 @@ const columns = [
   { title: 'URL', dataIndex: 'url', key: 'url' },
   { title: '用户名', key: 'username' },
   { title: '凭据', key: 'password' },
-  { title: '存储根', key: 'download_root' },
   { title: '默认', dataIndex: 'is_default', key: 'default' },
   { title: '启用', dataIndex: 'enabled', key: 'enabled' },
   { title: '操作', key: 'action' },
@@ -209,12 +203,6 @@ const columns = [
           <template v-else-if="column.key === 'password'">
             <a-tag v-if="record.has_password" color="green">已配置</a-tag>
             <a-tag v-else>—</a-tag>
-          </template>
-          <template v-else-if="column.key === 'download_root'">
-            <a-typography-text v-if="record.download_root" code style="font-size: 12px">
-              {{ record.download_root }}
-            </a-typography-text>
-            <span v-else>—</span>
           </template>
           <template v-else-if="column.key === 'default'">
             <a-tag v-if="record.is_default" color="purple">★ 默认</a-tag>
@@ -283,12 +271,6 @@ const columns = [
             <a-input-password v-model:value="formState.password" autocomplete="new-password" />
           </a-form-item>
         </a-space>
-        <a-form-item
-          label="下载根目录（路径校验基准；空 = 禁用数据删除）"
-          name="download_root"
-        >
-          <a-input v-model:value="formState.download_root" placeholder="/downloads" />
-        </a-form-item>
         <a-form-item label="设为默认下载器" name="is_default" tooltip="辅种和免费种会自动投到默认下载器">
           <a-switch v-model:checked="formState.is_default" />
         </a-form-item>

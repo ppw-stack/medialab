@@ -39,7 +39,6 @@ class DownloaderIn(BaseModel):
     url: str = Field(..., min_length=1, max_length=512)
     username: str | None = Field(default=None, max_length=128)
     password: str | None = Field(default=None, max_length=512)
-    download_root: str | None = Field(default=None, max_length=512)
     is_default: bool = False
     enabled: bool = True
     verify_tls: bool = True
@@ -53,7 +52,6 @@ class DownloaderUpdate(BaseModel):
     url: str | None = Field(default=None, min_length=1, max_length=512)
     username: str | None = Field(default=None, max_length=128)
     password: str | None = Field(default=None, max_length=512)
-    download_root: str | None = Field(default=None, max_length=512)
     is_default: bool | None = None
     enabled: bool | None = None
     verify_tls: bool | None = None
@@ -66,7 +64,6 @@ class DownloaderOut(BaseModel):
     url: str
     username: str | None
     has_password: bool
-    download_root: str | None
     is_default: bool
     enabled: bool
     verify_tls: bool
@@ -82,7 +79,6 @@ def _to_out(row: DownloaderInstance) -> DownloaderOut:
         url=row.url,
         username=row.username,
         has_password=bool(row.password_enc),
-        download_root=row.download_root,
         is_default=row.is_default,
         enabled=row.enabled,
         verify_tls=row.verify_tls,
@@ -147,7 +143,6 @@ async def create_downloader(payload: DownloaderIn) -> DownloaderOut:
             type=payload.type,
             url=payload.url,
             username=payload.username,
-            download_root=payload.download_root,
             is_default=payload.is_default,
             enabled=payload.enabled,
             verify_tls=payload.verify_tls,

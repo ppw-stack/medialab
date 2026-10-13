@@ -1,12 +1,18 @@
-"""保存路径模板渲染（FR-2.3 / FR-3.3 / FR-5.2.5c）。
+"""保存路径模板渲染（FR-2.3 / FR-3.3）。
 
-两条职责边界：
+职责：把 ``{site}/{name}/{category}/{info_hash}`` 占位符模板渲染为
+安全的下载器保存路径。
 
-1. **模板只用于"生成新任务路径"**，绝不能用于推导删除目标（FR-5.2.5a）。
-   删除目标必须来自下载器上报的文件清单。
+边界：
+
+1. **模板只用于"生成新任务路径"**，绝不能用于推导删除目标。
+   删除目标必须来自下载器上报的文件清单（adapter.get_files）。
 2. 渲染结果必须做**路径清洗**：种子名来自站点，可能含 ``../``、绝对路径、
-   控制字符、控制台零宽字符等。任何清洗失败都必须抛错而不是"尽力而为"——
-   路径穿越是 FR-5.2.5c 要防的首要风险。
+   控制字符、零宽字符等。任何清洗失败都必须抛错而不是"尽力而为"——
+
+# TODO: FR-5.2.5c 路径 jail（is_within / st_dev 设备号校验）已移除。
+# 历史实现见 git log 4c7059b 之前的 paths.py。后续如需"删除数据前
+# 路径白名单"，重写一个 is_within() 并在 adapter.remove() 前调用。
 """
 
 from __future__ import annotations
@@ -14,7 +20,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 
 #: 模板占位符
 PLACEHOLDERS = frozenset({"site", "name", "category", "info_hash"})
@@ -152,41 +158,3 @@ def render_save_path(
         raise PathRenderError("渲染路径过长")
 
     return RenderedPath(path=pure, template=tpl)
-
-
-def is_within(root: str, candidate: str) -> bool:
-    """候选路径是否位于根目录之下（FR-5.2.5c 第三重校验）。
-
-    两侧都做 ``realpath``：macOS 下 ``tempfile`` 给 ``/var/folders/...`` 但
-    ``realpath`` 解析到 ``/private/var/folders/...``，不归一化会让
-    字面前缀匹配失败从而误报越界。
-    """
-    import os
-    try:
-        root_abs = os.path.realpath(root)
-        cand_abs = os.path.realpath(candidate)
-    except (TypeError, ValueError, OSError):
-        return False
-    try:
-        root_p = PurePosixPath(root_abs)
-        cand_p = PurePosixPath(cand_abs)
-    except (TypeError, ValueError):
-        return False
-    if not root_p.is_absolute():
-        return False
-    root_parts = root_p.parts
-    cand_parts = cand_p.parts
-    if len(cand_parts) <= len(root_parts):
-        return False
-    return cand_parts[: len(root_parts)] == root_parts
-
-
-def device_of(path: str) -> int | None:
-    """取路径所在设备号（FR-5.2.5c ``st_dev`` 校验）。
-
-    路径不存在时返回 ``None``。
-    """
-    try:
-        return Path(path).stat().st_dev
-    except OSError:
-        return None
