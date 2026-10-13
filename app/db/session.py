@@ -313,19 +313,29 @@ class SingleWriterQueue:
 
         engine = get_engine()
         async with engine.begin() as conn:
+            # dev-only: 重置 torrents 表以让 create_all 重新建出匹配新 model 的
+            # schema（item_id NOT NULL UNIQUE 约束、info_hash 变 nullable）。
+            # 表为空，安全。
+            with suppress(Exception):
+                await conn.execute(text("DROP TABLE IF EXISTS torrents"))
             await conn.run_sync(Base.metadata.create_all)
             # 轻量迁移：create_all 不给已有表加列，补 ALTER（幂等）
-            from sqlalchemy import text
-
             for stmt in (
                 "ALTER TABLE torrents ADD COLUMN zero_seed_rounds INTEGER DEFAULT 0",
                 "ALTER TABLE sites ADD COLUMN cookies_enc TEXT",
                 "ALTER TABLE free_candidates ADD COLUMN torrent_url VARCHAR(512)",
                 "ALTER TABLE torrent_index ADD COLUMN discount_pct INTEGER",
                 "ALTER TABLE downloader_instances DROP COLUMN download_root",
+                "ALTER TABLE torrents ADD COLUMN item_id VARCHAR(128)",
             ):
                 with suppress(Exception):  # 列已存在
                     await conn.execute(text(stmt))
+            # UNIQUE 索引在已存在的表上必须 CREATE UNIQUE INDEX 单独跑
+            with suppress(Exception):  # 索引已存在
+                await conn.execute(text(
+                    "CREATE UNIQUE INDEX uq_torrents_site_item_dl "
+                    "ON torrents(site_id, item_id, downloader_id)"
+                ))
         logger.info("数据表已就绪")
         await _backfill_discount_pct()
         await _backfill_published_at_tz()

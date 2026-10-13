@@ -21,6 +21,8 @@ services:
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       # 统一 RSS 拉取 cron
       FETCH_ALL_SITES_CRON: ${FETCH_ALL_SITES_CRON:-*/10 * * * *}
+      # 免费种自动推送 cron
+      PUSH_FREE_CRON: ${PUSH_FREE_CRON:-*/30 * * * *}
     env_file:
       - .env
     volumes:

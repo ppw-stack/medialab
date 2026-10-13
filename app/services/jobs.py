@@ -150,10 +150,10 @@ def register_jobs(
     *,
     settings: AppSettings | None = None,
 ) -> None:
-    """注册唯一的 RSS 拉取作业。
+    """注册周期性作业：RSS 拉取 + 免费种自动推送。
 
     :meth:`register_jobs` 接收 :class:`AdapterFactory` 而不是具体
-    adapter——作业函数本身负责按站创建 adapter。这是与之前
+    adapter——作业函数本身负责按站/按下载器创建 adapter。这是与之前
     :func:`register_seed_jobs`（接受 engine+hunter 实例）最大的区别。
     """
     cfg = settings or get_settings()
@@ -168,6 +168,24 @@ def register_jobs(
         "已注册 RSS 拉取作业：fetch_all_sites cron=%r",
         cfg.fetch_all_sites_cron,
     )
+    scheduler_center.register(
+        JobSpec(
+            name="push_free_torrents",
+            func=lambda: _swallow(_run_push_free(factory, cfg)),
+            cron=cfg.push_free_cron,
+        )
+    )
+    logger.info(
+        "已注册免费种推送作业：push_free_torrents cron=%r",
+        cfg.push_free_cron,
+    )
+
+
+async def _run_push_free(factory: AdapterFactory, cfg: AppSettings) -> None:
+    from app.services.push_free import PushFreeService
+
+    svc = PushFreeService(cfg, factory)
+    await svc.run()
 
 
 async def _swallow(result: Awaitable[object]) -> None:

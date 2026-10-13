@@ -76,6 +76,12 @@ class AppSettings(BaseSettings):
     scheduler_enabled: bool = True
     #: 统一 RSS 拉取 cron 表达式（5 字段：分 时 日 月 星期），默认每 10 分钟
     fetch_all_sites_cron: str = "*/10 * * * *"
+    #: 自动推送免费种到默认下载器的 cron（默认 30 分钟一次，与 fetch 错开）
+    push_free_cron: str = "*/30 * * * *"
+    #: 限时种剩余时间低于此值不推（小时，默认 24）
+    push_min_remaining_hours: int = 24
+    #: 每次推送最多 N 个（避免下载器瞬时过载）
+    push_max_per_run: int = 20
 
     # -- 优雅停机（FR-8.2）--
     shutdown_grace_seconds: int = 60

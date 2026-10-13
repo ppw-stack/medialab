@@ -38,6 +38,7 @@ class Source:
     MANUAL = "manual"
     AUTO_SEED = "auto_seed"
     FREE_SEED = "free_seed"
+    AUTO_PUSH = "auto_push"
 
 
 class TorrentStatus:
@@ -176,13 +177,21 @@ class Torrent(Base):
         Index("ix_torrents_status_abort_at", "status", "abort_at"),
         Index("ix_torrents_source_status_free_end", "source", "status", "free_end_at"),
         Index("ix_torrents_site_source", "site_id", "source"),
+        UniqueConstraint(
+            "site_id", "item_id", "downloader_id",
+            name="uq_torrents_site_item_dl",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    info_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    #: BT 协议级 SHA-1。qB/Tr add_torrent 不一定返回（已知 qB 返空字符串），
+    #: 此时留 NULL；Transmission 返真实 hash。
+    info_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(1024))
     site_id: Mapped[int] = mapped_column(ForeignKey("sites.id"))
     downloader_id: Mapped[int] = mapped_column(ForeignKey("downloader_instances.id"))
+    #: 站内 ID（m-team 数字 / NexusPHP details.php?id=X），用于跨表去重
+    item_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
 
     category: Mapped[str | None] = mapped_column(String(64), nullable=True)
     tags: Mapped[str | None] = mapped_column(String(512), nullable=True)
