@@ -209,6 +209,8 @@ const columns = [
   { title: '标签', key: 'tags', width: 160,
     customRender: ({ record }: { record: DownloaderTorrent }) =>
       record.tags.length > 0 ? record.tags.join(', ') : '—' },
+  { title: '保存路径', key: 'save_path', width: 200, ellipsis: true,
+    customRender: ({ record }: { record: DownloaderTorrent }) => record.save_path ?? '—' },
 ]
 </script>
 
@@ -273,7 +275,7 @@ const columns = [
             onChange: (p: number) => { page = p; loadItems() },
             onShowSizeChange: (p: number, ps: number) => { page = p; pageSize = ps; loadItems() },
           }"
-          :scroll="{ x: 1400 }"
+          :scroll="{ x: 1600 }"
           size="small"
         >
           <template #bodyCell="{ column, record }">
