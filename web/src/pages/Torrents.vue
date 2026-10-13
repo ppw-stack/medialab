@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import { api } from '../api'
+import { message } from 'ant-design-vue'
 
 interface DownloaderInfo {
   id: number
@@ -29,6 +30,12 @@ interface ListResp {
   items: DownloaderTorrent[]
 }
 
+interface BatchOpResult {
+  requested: number
+  succeeded: number
+  failed: number
+}
+
 const downloaders = ref<DownloaderInfo[]>([])
 const activeTab = ref<number | null>(null)
 const items = ref<DownloaderTorrent[]>([])
@@ -40,6 +47,8 @@ const pageSize = ref(100)
 const filterState = ref<string | null>(null)
 const filterCategory = ref<string>('')
 const filterQ = ref<string>('')
+const selectedRowKeys = ref<string[]>([])
+const batchLoading = ref(false)
 
 // 状态 → 中文标签 + 颜色（单一来源）
 // qB/Tr API 返回的状态字符串由 downloaders.py 序列化为 .name
@@ -132,7 +141,7 @@ async function loadItems() {
   finally { loading.value = false }
 }
 
-watch(activeTab, () => { page.value = 1; loadItems() })
+watch(activeTab, () => { page.value = 1; selectedRowKeys.value = []; loadItems() })
 watch(filterState, () => { page.value = 1; loadItems() })
 watch(filterCategory, () => { page.value = 1; loadItems() })
 
@@ -172,6 +181,58 @@ function formatRate(n: number): string {
 
 function activeTabName(): string {
   return downloaders.value.find((d) => d.id === activeTab.value)?.name ?? ''
+}
+
+const hasSelection = computed(() => selectedRowKeys.value.length > 0)
+
+function onSelectChange(keys: string[]) {
+  selectedRowKeys.value = keys
+}
+
+async function onBatchPause(paused: boolean) {
+  const hashes = [...selectedRowKeys.value]
+  if (hashes.length === 0 || activeTab.value === null) return
+  batchLoading.value = true
+  try {
+    const r = await api.post<BatchOpResult>(
+      `/downloaders/${activeTab.value}/torrents/pause`,
+      { hashes, paused },
+    )
+    if (r.failed > 0) {
+      message.warning(`已${paused ? '暂停' : '恢复'} ${r.succeeded} 个，失败 ${r.failed} 个`)
+    } else {
+      message.success(`已${paused ? '暂停' : '恢复'} ${r.succeeded} 个任务`)
+    }
+    selectedRowKeys.value = []
+    loadItems()
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '操作失败')
+  } finally {
+    batchLoading.value = false
+  }
+}
+
+async function onBatchDelete() {
+  const hashes = [...selectedRowKeys.value]
+  if (hashes.length === 0 || activeTab.value === null) return
+  batchLoading.value = true
+  try {
+    const r = await api.post<BatchOpResult>(
+      `/downloaders/${activeTab.value}/torrents/remove`,
+      { hashes, delete_data: false },
+    )
+    if (r.failed > 0) {
+      message.warning(`已删除 ${r.succeeded} 个，失败 ${r.failed} 个`)
+    } else {
+      message.success(`已删除 ${r.succeeded} 个任务`)
+    }
+    selectedRowKeys.value = []
+    loadItems()
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '删除失败')
+  } finally {
+    batchLoading.value = false
+  }
 }
 
 const columns = [
@@ -255,11 +316,46 @@ const columns = [
             style="width: 240px"
             :allow-clear="true"
           />
+
+          <a-divider type="vertical" />
+
+          <a-button
+            :disabled="!hasSelection"
+            :loading="batchLoading"
+            @click="onBatchPause(true)"
+          >
+            批量暂停
+          </a-button>
+          <a-button
+            :disabled="!hasSelection"
+            :loading="batchLoading"
+            @click="onBatchPause(false)"
+          >
+            批量恢复
+          </a-button>
+          <a-popconfirm
+            :title="`确认删除 ${selectedRowKeys.length} 个任务？（仅删任务，保留磁盘文件）`"
+            ok-text="删除"
+            cancel-text="取消"
+            :ok-button-props="{ danger: true }"
+            @confirm="onBatchDelete"
+          >
+            <a-button
+              danger
+              :disabled="!hasSelection"
+              :loading="batchLoading"
+            >
+              批量删除
+            </a-button>
+          </a-popconfirm>
         </a-space>
 
         <a-typography-paragraph type="secondary" style="margin-top: 0">
           {{ activeTabName() }}：共 <b>{{ total }}</b> 条
           <span v-if="filterQ.trim()">（已显示 {{ filtered.length }} 条匹配）</span>
+          <span v-if="hasSelection" style="margin-left: 8px; color: #1677ff">
+            已选 {{ selectedRowKeys.length }} 项
+          </span>
         </a-typography-paragraph>
 
         <a-table
@@ -267,6 +363,10 @@ const columns = [
           :columns="columns"
           :loading="loading"
           row-key="hash"
+          :row-selection="{
+            selectedRowKeys: selectedRowKeys,
+            onChange: onSelectChange,
+          }"
           :pagination="{
             current: page,
             pageSize: pageSize,
