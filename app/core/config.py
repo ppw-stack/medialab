@@ -74,8 +74,8 @@ class AppSettings(BaseSettings):
 
     # -- 调度 --
     scheduler_enabled: bool = True
-    #: 统一 RSS 拉取 cron 表达式（5 字段：分 时 日 月 星期），默认每 10 分钟
-    fetch_all_sites_cron: str = "*/10 * * * *"
+    #: 统一 RSS 拉取 cron 表达式（5 字段：分 时 日 月 星期），默认每小时整点
+    fetch_all_sites_cron: str = "0 * * * *"
 
     # -- 优雅停机（FR-8.2）--
     shutdown_grace_seconds: int = 60
