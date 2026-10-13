@@ -14,7 +14,7 @@ from typing import Any, Final
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi import Query as QueryParam
 from pydantic import BaseModel, field_serializer
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 
 from app.api.auth import require_session
 from app.db.models import Site, TorrentIndex
@@ -34,7 +34,6 @@ class TorrentIndexItem(BaseModel):
     site_id: int
     site_name: str
     item_id: str | None
-    info_hash: str | None
     name: str
     size: int
     category: str | None
@@ -91,7 +90,7 @@ _SORTABLE_COLUMNS: Final[dict[str, Any]] = {
 async def list_torrent_index(
     site_id: int | None = QueryParam(default=None, description="按站点过滤"),
     free_type: str | None = QueryParam(default=None, description="按 free_type 过滤"),
-    q: str | None = QueryParam(default=None, description="种子名 / info_hash 关键字"),
+    q: str | None = QueryParam(default=None, description="种子名关键字"),
     sort_by: str = QueryParam(default="last_seen_at", description="排序字段"),
     order: str = QueryParam(default="desc", description="asc | desc"),
     offset: int = QueryParam(default=0, ge=0),
@@ -105,13 +104,7 @@ async def list_torrent_index(
     if free_type:
         stmt = stmt.where(TorrentIndex.free_type == free_type)
     if q:
-        stmt = stmt.where(
-            or_(
-                TorrentIndex.name.contains(q),
-                TorrentIndex.info_hash == q.lower(),
-                TorrentIndex.info_hash.contains(q.lower()),
-            )
-        )
+        stmt = stmt.where(TorrentIndex.name.contains(q))
 
     # 排序：sort_by 必须在白名单内；order 只能是 asc/desc
     sort_col = _SORTABLE_COLUMNS.get(sort_by, TorrentIndex.last_seen_at)
@@ -137,7 +130,6 @@ async def list_torrent_index(
             site_id=row.TorrentIndex.site_id,
             site_name=row.name,
             item_id=row.TorrentIndex.item_id,
-            info_hash=row.TorrentIndex.info_hash,
             name=row.TorrentIndex.name,
             size=row.TorrentIndex.size,
             category=row.TorrentIndex.category,
@@ -234,7 +226,6 @@ async def get_torrent_index(index_id: int) -> TorrentIndexItem:
         site_id=row.TorrentIndex.site_id,
         site_name=row.name,
         item_id=row.TorrentIndex.item_id,
-        info_hash=row.TorrentIndex.info_hash,
         name=row.TorrentIndex.name,
         size=row.TorrentIndex.size,
         category=row.TorrentIndex.category,

@@ -7,7 +7,6 @@ interface TorrentIndexItem {
   site_id: number
   site_name: string
   item_id: string | null
-  info_hash: string | null
   name: string
   size: number
   category: string | null
@@ -241,9 +240,6 @@ const columns = [
       (a.published_at ?? '').localeCompare(b.published_at ?? ''),
   },
   {
-    title: 'info_hash', key: 'info_hash', dataIndex: 'info_hash', width: 130,
-  },
-  {
     title: '最近拉取', key: 'last_seen_at', dataIndex: 'last_seen_at', width: 170,
     sorter: (a: TorrentIndexItem, b: TorrentIndexItem) =>
       (a.last_seen_at ?? '').localeCompare(b.last_seen_at ?? ''),
@@ -299,7 +295,7 @@ const columns = [
 
         <a-input-search
           v-model:value="filterQ"
-          placeholder="按名字 / info_hash 搜索"
+          placeholder="按名字搜索"
           style="width: 280px"
           :allow-clear="true"
         />
@@ -367,12 +363,6 @@ const columns = [
             <a-tag v-else :color="freeEndColor(record.free_end_at)">
               {{ formatDate(record.free_end_at) }}
             </a-tag>
-          </template>
-          <template v-else-if="column.key === 'info_hash'">
-            <code v-if="record.info_hash" style="font-size: 12px">
-              {{ record.info_hash.slice(0, 16) }}…
-            </code>
-            <a-typography-text v-else type="secondary">—</a-typography-text>
           </template>
           <template v-else-if="column.key === 'last_seen_at'">
             {{ formatDate(record.last_seen_at) }}
