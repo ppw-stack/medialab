@@ -1,4 +1,8 @@
-"""总览仪表盘 API（FR-6.1）。"""
+"""总览仪表盘 API（FR-6.1）。
+
+轻量版：仅展示基础信息（站点/下载器启用情况），不含任务统计。
+任务视图改由下载器原生接口提供（直读，不落表）。
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 
 from app.api.auth import require_session
-from app.db.models import Site, Torrent, TorrentStatus
+from app.db.models import DownloaderInstance, Site
 from app.db.session import session_scope
 
 router = APIRouter(dependencies=[Depends(require_session)], tags=["dashboard"])
@@ -16,7 +20,7 @@ router = APIRouter(dependencies=[Depends(require_session)], tags=["dashboard"])
 
 @router.get("/dashboard", summary="总览概览")
 async def dashboard() -> dict[str, Any]:
-    """站点在线状态、任务统计与磁盘概览（M1 提供统计部分）。"""
+    """站点在线状态、下载器启用情况（轻量版）。"""
     async with session_scope() as session:
         site_total = (
             await session.execute(select(func.count(Site.id)))
@@ -27,28 +31,6 @@ async def dashboard() -> dict[str, Any]:
             )
         ).scalar_one()
 
-        by_status = (
-            await session.execute(
-                select(Torrent.status, func.count(Torrent.id)).group_by(Torrent.status)
-            )
-        ).all()
-        by_source = (
-            await session.execute(
-                select(Torrent.source, func.count(Torrent.id)).group_by(Torrent.source)
-            )
-        ).all()
-
-        in_flight_free = (
-            await session.execute(
-                select(func.count(Torrent.id)).where(
-                    Torrent.source == "free_seed",
-                    Torrent.status.in_([TorrentStatus.ACTIVE, TorrentStatus.PAUSED]),
-                )
-            )
-        ).scalar_one()
-
-        # 下载器统计
-        from app.db.models import DownloaderInstance
         dl_total = (
             await session.execute(select(func.count(DownloaderInstance.id)))
         ).scalar_one()
@@ -63,9 +45,4 @@ async def dashboard() -> dict[str, Any]:
     return {
         "sites": {"total": site_total, "enabled": site_enabled},
         "downloaders": {"total": dl_total, "enabled": dl_enabled},
-        "torrents": {
-            "by_status": dict(by_status),
-            "by_source": dict(by_source),
-        },
-        "free_seed": {"in_flight": in_flight_free},
     }

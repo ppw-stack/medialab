@@ -5,7 +5,6 @@ import {
   DashboardOutlined,
   CloudServerOutlined,
   ApiOutlined,
-  DownloadOutlined,
   SettingOutlined,
   LogoutOutlined,
   UserOutlined,
@@ -22,7 +21,6 @@ const menuItems = [
   { key: '/', icon: DashboardOutlined, label: '总览' },
   { key: '/sites', icon: CloudServerOutlined, label: '站点' },
   { key: '/downloaders', icon: ApiOutlined, label: '下载器' },
-  { key: '/torrents', icon: DownloadOutlined, label: '任务' },
   { key: '/torrent-index', icon: DatabaseOutlined, label: '拉取索引' },
   { key: '/settings', icon: SettingOutlined, label: '设置' },
 ]

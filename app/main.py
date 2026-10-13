@@ -119,13 +119,11 @@ def _mount_routes(app: FastAPI) -> None:
         downloaders,
         sites,
         torrent_index,
-        torrents,
     )
 
     for router in (
         dashboard.router,
         sites.router,
-        torrents.router,
         downloaders.router,
         cross_seed.router,
         torrent_index.router,
