@@ -13,7 +13,7 @@ from typing import Any, Final
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi import Query as QueryParam
-from pydantic import BaseModel
+from pydantic import BaseModel, field_serializer
 from sqlalchemy import func, or_, select
 
 from app.api.auth import require_session
@@ -47,6 +47,24 @@ class TorrentIndexItem(BaseModel):
     published_at: datetime | None
     first_seen_at: datetime
     last_seen_at: datetime
+
+    @field_serializer(
+        "free_end_at", "published_at", "first_seen_at", "last_seen_at",
+        check_fields=False,
+    )
+    def _ser_dt(self, v: datetime | None) -> str | None:
+        """naive datetime 视为 UTC，序列化为带 ``Z`` 的 ISO 8601。
+
+        数据库统一以 UTC 存储（``app.core.timeutils.utcnow``），但 Pydantic 默认
+        把 naive datetime 当作本地时间输出。显式追加 ``Z`` 让浏览器/客户端按 UTC
+        解析并在本地时区显示——避免"7:30 拉取、15:25 发布"的视觉错乱。
+        """
+        if v is None:
+            return None
+        from datetime import UTC
+
+        v = v.replace(tzinfo=UTC) if v.tzinfo is None else v.astimezone(UTC)
+        return v.strftime("%Y-%m-%dT%H:%M:%S.") + f"{v.microsecond // 1000:03d}Z"
 
 
 class TorrentIndexPage(BaseModel):

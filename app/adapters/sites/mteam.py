@@ -177,8 +177,18 @@ class MteamAdapter(SiteAdapter):
 
     @staticmethod
     def _parse_iso_dt(value: object):
-        """Unix 秒 / ISO 8601 / 数字字符串 → naive UTC datetime。"""
+        """Unix 秒 / ISO 8601 / 数字字符串 → naive UTC datetime。
+
+        mteam API 返回的 ``createdDate`` / ``lastModifiedDate`` / ``endDate`` 等
+        字符串**无时区标记**，实际是 HKT（=CST，UTC+8）本地时间。本函数：
+        - Unix 秒：按 UTC 解析
+        - ISO 字符串含 ``Z`` 或 ``+HH:MM``：按自带时区解析再转 UTC
+        - ISO 字符串**无时区标记**：按 :attr:`AppSettings.timezone` 解释
+          （默认 Asia/Shanghai），再转 UTC
+        """
         from datetime import UTC, datetime
+
+        from app.core.config import get_settings
 
         if value is None or value == "":
             return None
@@ -199,7 +209,17 @@ class MteamAdapter(SiteAdapter):
                 dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
             except ValueError:
                 return None
-            return dt.astimezone(UTC).replace(tzinfo=None) if dt.tzinfo else dt
+            if dt.tzinfo is not None:
+                return dt.astimezone(UTC).replace(tzinfo=None)
+            # 无时区标记：按站点本地时区解释再转 UTC
+            try:
+                from zoneinfo import ZoneInfo
+                local = dt.replace(tzinfo=ZoneInfo(get_settings().timezone))
+            except Exception:
+                from datetime import timedelta as _td
+                from datetime import timezone as _tz
+                local = dt.replace(tzinfo=_tz(_td(hours=8)))
+            return local.astimezone(UTC).replace(tzinfo=None)
         return None
 
     # ------------------------------------------------------------ 1. check_reachability

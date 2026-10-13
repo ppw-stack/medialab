@@ -16,10 +16,13 @@ from __future__ import annotations
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, tzinfo
 from enum import StrEnum
+from zoneinfo import ZoneInfo
 
 from bs4.element import Tag
+
+from app.core.config import get_settings
 
 
 class TorrentBrief(StrEnum):
@@ -245,7 +248,10 @@ def bs4_attr(value: object) -> str:
 def parse_abs_datetime(text: str | None) -> datetime | None:
     """把 ``"2026-10-15 14:51:34"`` 解析为 naive UTC datetime。
 
-    输入为站点本地时间（Asia/Shanghai），业务层 timestamp 用作历史排序。
+    输入为站点本地时间字符串（无时区标记），按 ``settings.timezone``（默认
+    Asia/Shanghai, UTC+8）解释，然后**减去偏移转为 UTC** 返回。便于和
+    :func:`app.core.timeutils.utcnow`（也是 naive UTC）做差值比较。
+
     无法解析（含 ``None`` / 空串 / 格式异常）时返回 ``None``。
     """
     if not text:
@@ -255,9 +261,18 @@ def parse_abs_datetime(text: str | None) -> datetime | None:
         return None
     try:
         y, mo, d, h, mi, s = (int(x) for x in m.groups())
-        return datetime(y, mo, d, h, mi, s)
+        local = datetime(y, mo, d, h, mi, s, tzinfo=_SITE_TZ)
+        return local.astimezone(UTC).replace(tzinfo=None)
     except ValueError:
         return None
+
+
+#: 站点本地时区（用于把"无时区标记的字符串"解释为本地时间再转 UTC）。
+#: 运行时按 :attr:`app.core.config.AppSettings.timezone` 调整。
+try:
+    _SITE_TZ: tzinfo = ZoneInfo(get_settings().timezone)
+except Exception:
+    _SITE_TZ = UTC
 
 
 #: 发布时间单元格文本（纯相对时长）：``"5时14分"`` / ``"2天18时"`` / ``"1月0天"``

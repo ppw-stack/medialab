@@ -225,6 +225,64 @@ async def _backfill_discount_pct() -> None:
         logger.info("discount_pct 历史回填：%d 行", len(updates))
 
 
+async def _backfill_published_at_tz() -> None:
+    """把历史 published_at 从"站点本地时间"统一减 8h 转为 UTC。
+
+    历史数据中所有 published_at 均按"原样"写入（即按各站点时区，CST/HKT
+    无时区标记的字符串）。系统内部统一以 UTC 存储（``utcnow()``），两者
+    存在 8h 偏移。回填等价于 ``new_published_at = old - 8h``。
+
+    幂等：仅当**任一行仍存在 ``published_at > last_seen_at``** 时才回填——
+    一旦所有行都满足 ``published_at <= last_seen_at``，说明已回填过。
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import func, select, update
+
+    from app.db.models import TorrentIndex
+
+    factory = get_session_factory()
+    async with factory() as session:
+        # 仅当 last_seen_at 距今 < 30 天 才回填
+        cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=30)
+        anomaly_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(TorrentIndex)
+                .where(
+                    TorrentIndex.published_at.is_not(None),
+                    TorrentIndex.published_at > TorrentIndex.last_seen_at,
+                    TorrentIndex.last_seen_at >= cutoff,
+                )
+            )
+        ).scalar_one() or 0
+        if anomaly_count == 0:
+            return  # 已回填过
+        stmt = select(TorrentIndex.id, TorrentIndex.published_at).where(
+            TorrentIndex.published_at.is_not(None),
+            TorrentIndex.last_seen_at >= cutoff,
+        )
+        rows = (await session.execute(stmt)).all()
+        if not rows:
+            return
+        shift = timedelta(hours=-8)
+        from collections import defaultdict
+
+        by_new: dict[datetime, list[int]] = defaultdict(list)
+        for row_id, old_pub in rows:
+            if old_pub is None:
+                continue
+            by_new[old_pub + shift].append(row_id)
+        for new_pub, ids in by_new.items():
+            await session.execute(
+                update(TorrentIndex)
+                .where(TorrentIndex.id.in_(ids))
+                .values(published_at=new_pub)
+            )
+        await session.commit()
+        logger.info("published_at 时区回填（-8h）：%d 行", len(rows))
+
+
 class SingleWriterQueue:
     """进程内单写者串行队列（§8 约定 2）。
 
@@ -269,6 +327,7 @@ class SingleWriterQueue:
                     await conn.execute(text(stmt))
         logger.info("数据表已就绪")
         await _backfill_discount_pct()
+        await _backfill_published_at_tz()
 
     async def healthcheck(self) -> bool:
         try:
