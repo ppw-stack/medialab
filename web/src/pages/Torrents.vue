@@ -85,7 +85,7 @@ const FREE_TYPE_LABELS: Record<string, string> = {
   freeleech_timed: '限时免费',
   twoup_timed: '限时 2X',
   neutral_leech: '中性种',
-  unknown: '未知',
+  unknown: '收费',
 }
 
 const STATE_LABEL: Record<string, string> = {

@@ -142,6 +142,40 @@ async def list_free_types() -> list[str]:
     return [r[0] for r in rows if r[0]]
 
 
+class TorrentIndexStats(BaseModel):
+    """拉取索引统计：总条数 + 按 free_type 分布。"""
+
+    total: int
+    by_type: dict[str, int]
+
+
+@router.get("/stats", response_model=TorrentIndexStats)
+async def get_torrent_index_stats(
+    site_id: int | None = QueryParam(default=None, description="按站点过滤"),
+) -> TorrentIndexStats:
+    """总条数 + 按 free_type 分布，供前端 stat 卡片使用。
+
+    注意：与列表页 query（关键字 `q`）解耦——统计反映库内全量，避免
+    卡片数字与列表筛选相互干扰。
+    """
+    base = select(TorrentIndex.free_type).where(TorrentIndex.free_type.is_not(None))
+    if site_id is not None:
+        base = base.where(TorrentIndex.site_id == site_id)
+
+    async with session_scope() as session:
+        total_stmt = select(func.count()).select_from(TorrentIndex)
+        if site_id is not None:
+            total_stmt = total_stmt.where(TorrentIndex.site_id == site_id)
+        total = (await session.execute(total_stmt)).scalar_one() or 0
+        rows = (await session.execute(base)).all()
+    by_type: dict[str, int] = {}
+    for (ft,) in rows:
+        if not ft:
+            continue
+        by_type[ft] = by_type.get(ft, 0) + 1
+    return TorrentIndexStats(total=int(total), by_type=by_type)
+
+
 @router.get("/{index_id}", response_model=TorrentIndexItem)
 async def get_torrent_index(index_id: int) -> TorrentIndexItem:
     """返回单条拉取索引详情。"""

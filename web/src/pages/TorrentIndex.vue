@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { api } from '../api'
 
 interface TorrentIndexItem {
@@ -31,18 +31,24 @@ interface SiteOpt {
   name: string
 }
 
+interface TorrentIndexStats {
+  total: number
+  by_type: Record<string, number>
+}
+
 const FREE_TYPE_LABELS: Record<string, { label: string; color: string }> = {
   freeleech_permanent: { label: '永久免费', color: 'green' },
   freeleech_timed:     { label: '限时免费', color: 'gold'  },
   neutral_leech:       { label: '折扣',     color: 'blue'  },
   twoup_timed:         { label: '2X 限时',  color: 'orange' },
-  unknown:             { label: '未知',     color: 'default' },
+  unknown:             { label: '收费',     color: 'default' },
 }
 
 const items = ref<TorrentIndexItem[]>([])
 const total = ref(0)
 const sites = ref<SiteOpt[]>([])
 const freeTypes = ref<string[]>([])
+const stats = ref<TorrentIndexStats>({ total: 0, by_type: {} })
 
 const filterSite = ref<number | null>(null)
 const filterFreeType = ref<string | null>(null)
@@ -84,6 +90,32 @@ async function loadMeta() {
   } catch { /* ignore */ }
 }
 
+async function loadStats() {
+  try {
+    const params = new URLSearchParams()
+    if (filterSite.value !== null) params.set('site_id', String(filterSite.value))
+    stats.value = await api.get<TorrentIndexStats>(
+      `/torrent-index/stats?${params.toString()}`,
+    )
+  } catch { /* ignore */ }
+}
+
+function toggleTypeFilter(ft: string) {
+  filterFreeType.value = filterFreeType.value === ft ? null : ft
+}
+
+const STAT_CARDS = computed(() => {
+  const bt = stats.value.by_type
+  return [
+    { key: '__total__',       label: '总条数',   count: stats.value.total,    color: '#1677ff', active: filterFreeType.value === null },
+    { key: 'freeleech_timed', label: '限时免费', count: bt.freeleech_timed   || 0, color: '#faad14', active: filterFreeType.value === 'freeleech_timed' },
+    { key: 'freeleech_permanent', label: '永久免费', count: bt.freeleech_permanent || 0, color: '#52c41a', active: filterFreeType.value === 'freeleech_permanent' },
+    { key: 'neutral_leech',   label: '折扣',     count: bt.neutral_leech     || 0, color: '#2f54eb', active: filterFreeType.value === 'neutral_leech' },
+    { key: 'twoup_timed',     label: '2X 限时',  count: bt.twoup_timed       || 0, color: '#fa8c16', active: filterFreeType.value === 'twoup_timed' },
+    { key: 'unknown',         label: '收费',     count: bt.unknown           || 0, color: '#8c8c8c', active: filterFreeType.value === 'unknown' },
+  ]
+})
+
 function resetFilters() {
   filterSite.value = null
   filterFreeType.value = null
@@ -96,7 +128,11 @@ function onPageChange(p: number) {
   load()
 }
 
-watch([filterSite, filterFreeType], () => load({ reset: true }))
+watch(filterFreeType, () => load({ reset: true }))
+watch(filterSite, () => {
+  load({ reset: true })
+  loadStats()
+})
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 watch(filterQ, () => {
   if (searchTimer) clearTimeout(searchTimer)
@@ -105,8 +141,12 @@ watch(filterQ, () => {
 
 onMounted(() => {
   loadMeta()
+  loadStats()
   load({ reset: true })
-  timer = setInterval(() => load({ reset: true }), 5000)
+  timer = setInterval(() => {
+    load({ reset: true })
+    loadStats()
+  }, 5000)
 })
 
 onUnmounted(() => {
@@ -161,6 +201,19 @@ const columns = [
 
 <template>
   <a-card title="拉取索引（torrent_index）">
+    <a-row :gutter="[12, 12]" style="margin-bottom: 16px">
+      <a-col v-for="card in STAT_CARDS" :key="card.key" :xs="12" :sm="8" :md="4">
+        <div
+          class="stat-card"
+          :class="{ 'stat-card-active': card.active }"
+          :style="{ borderColor: card.active ? card.color : undefined, background: card.active ? card.color + '14' : undefined }"
+          @click="card.key === '__total__' ? (filterFreeType = null) : toggleTypeFilter(card.key)"
+        >
+          <div class="stat-card-label" :style="{ color: card.color }">{{ card.label }}</div>
+          <div class="stat-card-count">{{ card.count }}</div>
+        </div>
+      </a-col>
+    </a-row>
     <a-space style="margin-bottom: 16px" :wrap="true">
         <a-select
           v-model:value="filterSite"
@@ -272,3 +325,35 @@ const columns = [
       </a-table>
   </a-card>
 </template>
+
+<style scoped>
+.stat-card {
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  background: #fff;
+  user-select: none;
+}
+.stat-card:hover {
+  border-color: #d9d9d9;
+  transform: translateY(-1px);
+}
+.stat-card-active {
+  border-width: 2px;
+  padding: 11px 13px;
+}
+.stat-card-label {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+.stat-card-count {
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.2;
+  color: rgba(0, 0, 0, 0.88);
+}
+</style>
