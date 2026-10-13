@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any, Final
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi import Query as QueryParam
@@ -43,6 +44,7 @@ class TorrentIndexItem(BaseModel):
     free_confidence: float | None
     discount_pct: int | None
     has_torrent_url: bool
+    published_at: datetime | None
     first_seen_at: datetime
     last_seen_at: datetime
 
@@ -54,15 +56,30 @@ class TorrentIndexPage(BaseModel):
     items: list[TorrentIndexItem]
 
 
+#: 允许排序的列白名单（防止任意属性访问）
+_SORTABLE_COLUMNS: Final[dict[str, Any]] = {
+    "name": TorrentIndex.name,
+    "size": TorrentIndex.size,
+    "category": TorrentIndex.category,
+    "free_type": TorrentIndex.free_type,
+    "free_end_at": TorrentIndex.free_end_at,
+    "published_at": TorrentIndex.published_at,
+    "first_seen_at": TorrentIndex.first_seen_at,
+    "last_seen_at": TorrentIndex.last_seen_at,
+}
+
+
 @router.get("", response_model=TorrentIndexPage)
 async def list_torrent_index(
     site_id: int | None = QueryParam(default=None, description="按站点过滤"),
     free_type: str | None = QueryParam(default=None, description="按 free_type 过滤"),
     q: str | None = QueryParam(default=None, description="种子名 / info_hash 关键字"),
+    sort_by: str = QueryParam(default="last_seen_at", description="排序字段"),
+    order: str = QueryParam(default="desc", description="asc | desc"),
     offset: int = QueryParam(default=0, ge=0),
     limit: int = QueryParam(default=50, ge=1, le=200),
 ) -> TorrentIndexPage:
-    """返回拉取索引分页列表，按 ``last_seen_at DESC`` 排序。"""
+    """返回拉取索引分页列表。默认按 ``last_seen_at DESC`` 排序。"""
     stmt = select(TorrentIndex, Site.name).join(Site, Site.id == TorrentIndex.site_id)
 
     if site_id is not None:
@@ -78,17 +95,21 @@ async def list_torrent_index(
             )
         )
 
+    # 排序：sort_by 必须在白名单内；order 只能是 asc/desc
+    sort_col = _SORTABLE_COLUMNS.get(sort_by, TorrentIndex.last_seen_at)
+    sort_dir = order.lower()
+    if sort_dir not in ("asc", "desc"):
+        sort_dir = "desc"
+    sort_fn = sort_col.asc() if sort_dir == "asc" else sort_col.desc()
+    # 二级排序：id 保证稳定
+    stmt = stmt.order_by(sort_fn, TorrentIndex.id.desc())
+
     count_stmt = select(func.count()).select_from(stmt.subquery())
     async with session_scope() as session:
         total = (await session.execute(count_stmt)).scalar_one() or 0
         rows = (
             await session.execute(
-                stmt.order_by(
-                    TorrentIndex.last_seen_at.desc(),
-                    TorrentIndex.id.desc(),
-                )
-                .offset(offset)
-                .limit(limit)
+                stmt.offset(offset).limit(limit)
             )
         ).all()
 
@@ -108,6 +129,7 @@ async def list_torrent_index(
             free_confidence=row.TorrentIndex.free_confidence,
             discount_pct=row.TorrentIndex.discount_pct,
             has_torrent_url=row.TorrentIndex.torrent_url is not None,
+            published_at=row.TorrentIndex.published_at,
             first_seen_at=row.TorrentIndex.first_seen_at,
             last_seen_at=row.TorrentIndex.last_seen_at,
         )
@@ -204,6 +226,7 @@ async def get_torrent_index(index_id: int) -> TorrentIndexItem:
         free_confidence=row.TorrentIndex.free_confidence,
         discount_pct=row.TorrentIndex.discount_pct,
         has_torrent_url=row.TorrentIndex.torrent_url is not None,
+        published_at=row.TorrentIndex.published_at,
         first_seen_at=row.TorrentIndex.first_seen_at,
         last_seen_at=row.TorrentIndex.last_seen_at,
     )

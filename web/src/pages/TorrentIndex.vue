@@ -16,6 +16,7 @@ interface TorrentIndexItem {
   free_source: string | null
   free_confidence: number | null
   discount_pct: number | null
+  published_at: string | null
   has_torrent_url: boolean
   first_seen_at: string
   last_seen_at: string
@@ -53,6 +54,8 @@ const stats = ref<TorrentIndexStats>({ total: 0, by_type: {} })
 const filterSite = ref<number | null>(null)
 const filterFreeType = ref<string | null>(null)
 const filterQ = ref<string>('')
+const sortBy = ref<string>('last_seen_at')
+const sortOrder = ref<'asc' | 'desc'>('desc')
 const limit = ref(50)
 const offset = ref(0)
 const loading = ref(false)
@@ -66,6 +69,8 @@ async function load(opts?: { reset?: boolean }) {
     if (filterSite.value !== null) params.set('site_id', String(filterSite.value))
     if (filterFreeType.value) params.set('free_type', filterFreeType.value)
     if (filterQ.value.trim()) params.set('q', filterQ.value.trim())
+    params.set('sort_by', sortBy.value)
+    params.set('order', sortOrder.value)
     params.set('limit', String(limit.value))
     params.set('offset', String((opts?.reset ? 0 : offset.value)))
 
@@ -123,9 +128,26 @@ function resetFilters() {
   load({ reset: true })
 }
 
-function onPageChange(p: number) {
-  offset.value = (p - 1) * limit.value
-  load()
+function onTableChange(
+  pagination: { current?: number; pageSize?: number },
+  _filters: unknown,
+  sorter: { field?: string; order?: 'ascend' | 'descend' | null } | { field?: string; order?: 'ascend' | 'descend' | null }[],
+) {
+  // 排序变化：仅当点击表头时才更新 sortBy/sortOrder
+  const s = Array.isArray(sorter) ? sorter[0] : sorter
+  if (s && s.field) {
+    sortBy.value = String(s.field)
+    sortOrder.value = s.order === 'ascend' ? 'asc' : 'desc'
+  } else if (s && s.order === null) {
+    // 取消排序：恢复默认
+    sortBy.value = 'last_seen_at'
+    sortOrder.value = 'desc'
+  }
+  // 分页变化
+  if (pagination?.current) {
+    offset.value = (pagination.current - 1) * limit.value
+  }
+  load({ reset: true })
 }
 
 watch(filterFreeType, () => load({ reset: true }))
@@ -188,14 +210,44 @@ function freeEndColor(end: string | null): string {
 }
 
 const columns = [
-  { title: '站点', key: 'site', width: 110 },
-  { title: '分类', key: 'category', width: 130, ellipsis: true },
-  { title: '种子名', key: 'name', ellipsis: true },
-  { title: '大小', key: 'size', width: 100 },
-  { title: '免费类型', key: 'free_type', width: 110 },
-  { title: '免费截止', key: 'free_end_at', width: 170 },
-  { title: 'info_hash', key: 'info_hash', width: 130 },
-  { title: '最近拉取', key: 'last_seen_at', width: 170 },
+  { title: '站点', key: 'site_name', dataIndex: 'site_name', width: 110 },
+  {
+    title: '分类', key: 'category', dataIndex: 'category', width: 130, ellipsis: true,
+    sorter: (a: TorrentIndexItem, b: TorrentIndexItem) =>
+      (a.category ?? '').localeCompare(b.category ?? ''),
+  },
+  {
+    title: '种子名', key: 'name', dataIndex: 'name', ellipsis: true,
+    sorter: (a: TorrentIndexItem, b: TorrentIndexItem) =>
+      (a.name ?? '').localeCompare(b.name ?? ''),
+  },
+  {
+    title: '大小 (B)', key: 'size', dataIndex: 'size', width: 110,
+    sorter: (a: TorrentIndexItem, b: TorrentIndexItem) => (a.size ?? 0) - (b.size ?? 0),
+  },
+  {
+    title: '免费类型', key: 'free_type', dataIndex: 'free_type', width: 120,
+    sorter: (a: TorrentIndexItem, b: TorrentIndexItem) =>
+      (a.free_type ?? '').localeCompare(b.free_type ?? ''),
+  },
+  {
+    title: '免费截止', key: 'free_end_at', dataIndex: 'free_end_at', width: 170,
+    sorter: (a: TorrentIndexItem, b: TorrentIndexItem) =>
+      (a.free_end_at ?? '').localeCompare(b.free_end_at ?? ''),
+  },
+  {
+    title: '发布', key: 'published_at', dataIndex: 'published_at', width: 170,
+    sorter: (a: TorrentIndexItem, b: TorrentIndexItem) =>
+      (a.published_at ?? '').localeCompare(b.published_at ?? ''),
+  },
+  {
+    title: 'info_hash', key: 'info_hash', dataIndex: 'info_hash', width: 130,
+  },
+  {
+    title: '最近拉取', key: 'last_seen_at', dataIndex: 'last_seen_at', width: 170,
+    sorter: (a: TorrentIndexItem, b: TorrentIndexItem) =>
+      (a.last_seen_at ?? '').localeCompare(b.last_seen_at ?? ''),
+  },
 ]
 </script>
 
@@ -268,15 +320,19 @@ const columns = [
           pageSize: limit,
           total: total,
           showSizeChanger: false,
-          onChange: onPageChange,
         }"
+        :on-change="onTableChange"
         row-key="id"
         :scroll="{ x: 1250 }"
         size="middle"
       >
         <template #bodyCell="{ column, record }">
-          <template v-if="column.key === 'site'">
+          <template v-if="column.key === 'site_name'">
             <a-tag color="blue">{{ record.site_name }}</a-tag>
+          </template>
+          <template v-else-if="column.key === 'published_at'">
+            <a-typography-text v-if="record.published_at">{{ formatDate(record.published_at) }}</a-typography-text>
+            <a-typography-text v-else type="secondary">—</a-typography-text>
           </template>
           <template v-else-if="column.key === 'category'">
             <a-typography-text v-if="record.category">{{ record.category }}</a-typography-text>
