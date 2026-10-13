@@ -26,7 +26,7 @@ from app.core.metrics import stage_duration
 
 logger = get_logger(__name__)
 
-JobFn = Callable[[], Awaitable[None]]
+JobFn = Callable[[], Awaitable[object | None]]
 
 
 @dataclass(slots=True)
@@ -49,6 +49,8 @@ class RunResult:
     finished_at: datetime
     duration_ms: int
     error: str = ""
+    #: 作业函数返回值（dict / dataclass.toDict / str / None），供前端展示详情
+    result: object = None
 
 
 class SchedulerCenter:
@@ -223,8 +225,9 @@ class SchedulerCenter:
         task = asyncio.current_task()
         if task is not None:
             self._inflight.add(task)
+        result: object = None
         try:
-            await spec.func()
+            result = await spec.func()
         except asyncio.CancelledError:
             finished = datetime.now(UTC)
             logger.info("手动触发作业 %s 被取消", name)
@@ -234,6 +237,7 @@ class SchedulerCenter:
                 finished_at=finished,
                 duration_ms=int((finished - started).total_seconds() * 1000),
                 error="cancelled",
+                result=result,
             )
         except Exception as exc:
             finished = datetime.now(UTC)
@@ -244,6 +248,7 @@ class SchedulerCenter:
                 finished_at=finished,
                 duration_ms=int((finished - started).total_seconds() * 1000),
                 error=str(exc),
+                result=result,
             )
         finally:
             self._running.discard(name)
@@ -255,6 +260,7 @@ class SchedulerCenter:
             started_at=started,
             finished_at=finished,
             duration_ms=int((finished - started).total_seconds() * 1000),
+            result=result,
         )
 
 

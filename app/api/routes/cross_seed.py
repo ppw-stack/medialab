@@ -51,6 +51,8 @@ class RunJobResult(BaseModel):
     finished_at: datetime
     duration_ms: int
     error: str = ""
+    #: 作业函数返回值（dict / None），供前端展示详情
+    result: dict[str, object] | None = None
 
 
 @router.get("/scheduler", summary="调度作业状态")
@@ -96,6 +98,8 @@ async def run_job(job_name: str) -> RunJobResult:
         finished_at=r.finished_at,
         duration_ms=r.duration_ms,
         error=r.error,
+        # r.result 是 dataclass 序列化的 dict（PushResult.asdict）或 None
+        result=r.result if isinstance(r.result, dict) else None,
     )
 
 

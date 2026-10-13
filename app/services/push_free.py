@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 
@@ -37,6 +37,22 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def _is_valid_download_url(url: str) -> bool:
+    """是否可被 qB/Tr 解析的下载 URL。
+
+    拒绝合成/占位 URL（如 mteam adapter 写的 ``api://gen/{id}``，
+    qB 会 409 拒绝）。仅接受 http/https/magnet 三种 scheme。
+    """
+    if not url:
+        return False
+    lower = url.lower().strip()
+    return (
+        lower.startswith("http://")
+        or lower.startswith("https://")
+        or lower.startswith("magnet:?xt=urn:btih:")
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class PushResult:
     """单次推送作业的运行结果。"""
@@ -45,6 +61,7 @@ class PushResult:
     pushed: int = 0
     skipped_already_pushed: int = 0
     skipped_remaining_too_short: int = 0
+    skipped_invalid_url: int = 0
     failed: int = 0
     errors: tuple[str, ...] = ()
 
@@ -95,11 +112,17 @@ class PushFreeService:
         # 3) 逐个推送
         pushed = 0
         skipped_dup = 0
+        skipped_invalid = 0
         failed = 0
         errors: list[str] = []
 
         adapter = self._factory.downloader(default_dl)
         for c in candidates:
+            # URL 合法性：合成/占位 URL（如 mteam 的 api://gen/{id}）qB 必拒绝
+            # —— 在选种阶段就过滤，避免产生无意义 409 错误
+            if not _is_valid_download_url(c.torrent_url):
+                skipped_invalid += 1
+                continue
             # 去重（运行时再查一次，防止两作业并发）
             async with session_scope() as session:
                 exists = await self._is_already_pushed(
@@ -125,18 +148,20 @@ class PushFreeService:
             selected=len(candidates),
             pushed=pushed,
             skipped_already_pushed=skipped_dup,
+            skipped_invalid_url=skipped_invalid,
             failed=failed,
             errors=tuple(errors[:10]),
         )
         logger.info(
-            "push_free: 选中 %d，推送 %d，跳过重复 %d，失败 %d",
-            result.selected, result.pushed, result.skipped_already_pushed, result.failed,
+            "push_free: 选中 %d，推送 %d，跳过重复 %d，无效URL %d，失败 %d",
+            result.selected, result.pushed, result.skipped_already_pushed,
+            result.skipped_invalid_url, result.failed,
         )
         return result
 
     async def _select_candidates(
-        self, session: "AsyncSession", downloader_id: int
-    ) -> list["_Candidate"]:
+        self, session: AsyncSession, downloader_id: int
+    ) -> list[_Candidate]:
         """选候选免费种：未推过 + 剩余时间满足阈值。"""
         now = utcnow()
         min_remaining = timedelta(hours=self._settings.push_min_remaining_hours)
@@ -187,7 +212,7 @@ class PushFreeService:
         return candidates
 
     async def _is_already_pushed(
-        self, session: "AsyncSession", site_id: int, item_id: str, downloader_id: int
+        self, session: AsyncSession, site_id: int, item_id: str, downloader_id: int
     ) -> bool:
         """是否已推过：(site_id, item_id, downloader_id) 在 torrents 表里。"""
         stmt = select(Torrent.id).where(
@@ -198,7 +223,7 @@ class PushFreeService:
         return (await session.execute(stmt)).first() is not None
 
     async def _add_one(
-        self, adapter: "DownloaderAdapter", c: "_Candidate", downloader_id: int
+        self, adapter: DownloaderAdapter, c: _Candidate, downloader_id: int
     ) -> str | None:
         """调 add_torrent，返回 info_hash（qB 返空串时用合成占位）。"""
         try:
@@ -221,7 +246,7 @@ class PushFreeService:
 
     async def _record_push(
         self,
-        session: "AsyncSession",
+        session: AsyncSession,
         info_hash: str | None,
         name: str,
         site_id: int,

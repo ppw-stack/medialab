@@ -23,10 +23,12 @@ interface RunResult {
   finished_at: string;
   duration_ms: number;
   error: string;
+  result?: Record<string, unknown> | null;
 }
 
 const JOB_LABELS: Record<string, { name: string; desc: string }> = {
-  fetch_all_sites: { name: 'RSS 拉取',    desc: '遍历所有启用站点拉取 RSS，写入 torrent_index 表' },
+  fetch_all_sites:   { name: 'RSS 拉取',     desc: '遍历所有启用站点拉取 RSS，写入 torrent_index 表' },
+  push_free_torrents: { name: '免费种推送',  desc: '从 torrent_index 选免费种 → 默认下载器（每 30 分钟）' },
 }
 
 const data = ref<SchedulerInfo | null>(null)
@@ -59,10 +61,11 @@ async function runNow(name: string) {
   const hide = message.loading(`正在执行 ${name}...`, 0)
   try {
     const r = await api.post<RunResult>(`/scheduler/${name}/run`)
+    const summary = formatResult(r)
     if (r.ok) {
-      message.success(`${name} 完成（${r.duration_ms} ms）`)
+      message.success(`${name} 完成：${summary}（${r.duration_ms} ms）`)
     } else {
-      message.error(`${name} 失败：${r.error || '未知错误'}`)
+      message.error(`${name} 失败：${summary || r.error || '未知错误'}`)
     }
   } catch (e) {
     message.error(e instanceof Error ? e.message : '触发失败')
@@ -71,6 +74,24 @@ async function runNow(name: string) {
     runningJob.value = null
     load()
   }
+}
+
+function formatResult(r: RunResult): string {
+  const v = r.result
+  if (!v || typeof v !== 'object') return ''
+  if ('selected' in v && 'pushed' in v) {
+    const pushed = Number(v.pushed) || 0
+    const failed = Number(v.failed) || 0
+    const skippedDup = Number(v.skipped_already_pushed) || 0
+    const skippedInvalid = Number(v.skipped_invalid_url) || 0
+    const selected = Number(v.selected) || 0
+    const parts: string[] = [`选中 ${selected}`, `推送 ${pushed}`]
+    if (skippedDup > 0) parts.push(`重复 ${skippedDup}`)
+    if (skippedInvalid > 0) parts.push(`无效URL ${skippedInvalid}`)
+    if (failed > 0) parts.push(`失败 ${failed}`)
+    return parts.join('，')
+  }
+  return ''
 }
 
 function jobLabel(name: string) {

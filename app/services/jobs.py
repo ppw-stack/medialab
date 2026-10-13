@@ -160,7 +160,7 @@ def register_jobs(
     scheduler_center.register(
         JobSpec(
             name="fetch_all_sites",
-            func=lambda: _swallow(fetch_all_sites(factory)),
+            func=lambda: _run_and_return(fetch_all_sites(factory)),
             cron=cfg.fetch_all_sites_cron,
         )
     )
@@ -171,7 +171,7 @@ def register_jobs(
     scheduler_center.register(
         JobSpec(
             name="push_free_torrents",
-            func=lambda: _swallow(_run_push_free(factory, cfg)),
+            func=lambda: _run_and_return(_run_push_free(factory, cfg)),
             cron=cfg.push_free_cron,
         )
     )
@@ -181,13 +181,17 @@ def register_jobs(
     )
 
 
-async def _run_push_free(factory: AdapterFactory, cfg: AppSettings) -> None:
+async def _run_push_free(factory: AdapterFactory, cfg: AppSettings) -> dict[str, object]:
+    """执行推送并把结果序列化为 dict（供 API 返回）。"""
+    from dataclasses import asdict
+
     from app.services.push_free import PushFreeService
 
     svc = PushFreeService(cfg, factory)
-    await svc.run()
+    result = await svc.run()
+    return asdict(result)
 
 
-async def _swallow(result: Awaitable[object]) -> None:
-    """作业返回值对调度器无意义；仅确保 await 完成。"""
-    await result
+async def _run_and_return(result: Awaitable[object]) -> object:
+    """await 作业函数并把返回值透传出去，供 manual run 展示详情。"""
+    return await result
