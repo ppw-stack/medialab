@@ -313,11 +313,6 @@ class SingleWriterQueue:
 
         engine = get_engine()
         async with engine.begin() as conn:
-            # dev-only: 重置 torrents 表以让 create_all 重新建出匹配新 model 的
-            # schema（item_id NOT NULL UNIQUE 约束、info_hash 变 nullable）。
-            # 表为空，安全。
-            with suppress(Exception):
-                await conn.execute(text("DROP TABLE IF EXISTS torrents"))
             await conn.run_sync(Base.metadata.create_all)
             # 轻量迁移：create_all 不给已有表加列，补 ALTER（幂等）
             for stmt in (
