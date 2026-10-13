@@ -295,6 +295,15 @@ class PushFreeService:
             return None
 
         needle = "".join(ch for ch in name.lower() if ch.isalnum())
+        if not needle:
+            return None
+        # 两轮匹配：先精确归一化相等，再允许子串（处理"Death is Coming" vs
+        # "[死刑将至].Death.is.Coming..." 之类前缀/分隔符差异）。
+        # 优先精确等，避免对"A Will Eternal S04E15"匹配上"S04E15-S04E20"。
+        for t in infos:
+            tname = "".join(ch for ch in t.name.lower() if ch.isalnum())
+            if tname and tname == needle:
+                return t.hash
         for t in infos:
             tname = "".join(ch for ch in t.name.lower() if ch.isalnum())
             if tname and (needle in tname or tname in needle):

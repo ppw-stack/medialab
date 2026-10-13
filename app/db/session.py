@@ -302,12 +302,15 @@ async def _backfill_free_window_into_torrents() -> None:
     async with factory() as session:
         # 先数一下需回填的行数（仅日志用）。
         # 排除永久免费：它的 free_end_at 永远为 NULL，无需回填。
+        # 三值逻辑注意：``free_type != PERMANENT`` 在 free_type IS NULL 时为
+        # NULL（=false），必须显式 OR 上 is_(None) 否则会漏掉。
         need_count = (
             await session.execute(
                 select(Torrent.id)
                 .where(
                     Torrent.is_free.is_(True),
-                    Torrent.free_type != FreeType.PERMANENT,
+                    (Torrent.free_type.is_(None))
+                    | (Torrent.free_type != FreeType.PERMANENT),
                     (Torrent.free_type.is_(None)) | (Torrent.free_end_at.is_(None)),
                 )
             )
@@ -315,25 +318,28 @@ async def _backfill_free_window_into_torrents() -> None:
         if not need_count:
             return
         ids = [r[0] for r in need_count]
-        # 用子查询按 (site_id, item_id) 取最新 free_type/free_end_at
-        # SQLite 支持 UPDATE ... FROM 语法（3.33+）。id 列表仅用于日志。
+        # 用子查询按 (site_id, item_id) 取最新 free_type/free_end_at。
+        # COALESCE：只填 NULL 字段，保留已有非 NULL 值（避免 torrent_index
+        # 缺数据时 NULL 覆盖已有 free_type）。
+        # WHERE 排除永久免费，与上方 count 一致。
         from sqlalchemy import text
         await session.execute(
             text(
                 """
                 UPDATE torrents SET
-                    free_type = (
+                    free_type = COALESCE(torrents.free_type, (
                         SELECT ti.free_type FROM torrent_index ti
                         WHERE ti.site_id = torrents.site_id
                           AND ti.item_id = torrents.item_id
-                    ),
-                    free_end_at = (
+                    )),
+                    free_end_at = COALESCE(torrents.free_end_at, (
                         SELECT ti.free_end_at FROM torrent_index ti
                         WHERE ti.site_id = torrents.site_id
                           AND ti.item_id = torrents.item_id
-                    )
+                    ))
                 WHERE torrents.is_free = 1
                   AND (torrents.free_type IS NULL OR torrents.free_end_at IS NULL)
+                  AND (torrents.free_type IS NULL OR torrents.free_type != 'freeleech_permanent')
                 """
             )
         )
