@@ -232,7 +232,7 @@ class Torrent(Base):
 class TorrentIndex(Base):
     """通用拉取索引：所有站点的 RSS feed 拉取结果。
 
-    单个调度任务 ``fetch_all_sites``（cron ``0 * * * *``）按站遍历
+    单个调度任务 ``fetch_all_sites``（cron ``*/10 * * * *``）按站遍历
     调用各 adapter 的 :meth:`SiteAdapter.search_torrents`，把返回的
     :class:`FeedItem` 全部 upsert 写到这里（唯一约束 ``(site_id, item_id)``）。
 

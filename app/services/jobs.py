@@ -4,7 +4,7 @@
 调用各 adapter 的 :meth:`SiteAdapter.search_torrents` 拉取最新 RSS，
 把 :class:`FeedItem` upsert 到 :class:`TorrentIndex` 表。
 
-周期由 cron 配置（默认 ``0 * * * *``，每小时整点）。
+周期由 cron 配置（默认 ``*/10 * * * *``，每 10 分钟）。
 
 注：本模块不再做辅种匹配或限免过滤——全部 RSS 项目都写入索引表
 供查询/筛选，外部系统按需使用。
