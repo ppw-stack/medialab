@@ -68,23 +68,24 @@ jobs:
           DH_NAMESPACE: ppw111
           DH_REPO: seedhelper
         run: |
-          # Docker Hub v2 API：PATCH /v2/repositories/{namespace}/{repo}/
-          # Authorization: JWT（用 username + token 换短时 JWT）
-          # 详细：https://docs.docker.com/docker-hub/api/latest/
           for i in 1 2 3 4 5; do
-            JWT=$(curl -sS -X POST \
+            LOGIN_RESP=$(curl -sS -X POST \
               -H "Content-Type: application/json" \
               -d "{\"username\":\"${{ secrets.DOCKERHUB_USERNAME }}\",\"password\":\"${{ secrets.DOCKERHUB_TOKEN }}\"}" \
-              "https://hub.docker.com/v2/users/login/" | jq -r .token 2>/dev/null)
+              -w "\nHTTP=%{http_code}" \
+              "https://hub.docker.com/v2/users/login/")
+            HTTP=$(echo "$LOGIN_RESP" | tail -n1 | sed 's/HTTP=//')
+            BODY=$(echo "$LOGIN_RESP" | head -n-1)
+            echo "login attempt=$i http=$HTTP body=$BODY"
+            JWT=$(echo "$BODY" | jq -r .token 2>/dev/null)
             if [ -n "$JWT" ] && [ "$JWT" != "null" ]; then
               echo "✓ got JWT (len=${#JWT})"
               break
             fi
-            echo "attempt=$i: no JWT, retry in 3s"
             sleep 3
           done
           if [ -z "$JWT" ] || [ "$JWT" = "null" ]; then
-            echo "::error::failed to obtain Docker Hub JWT"
+            echo "::error::failed to obtain Docker Hub JWT after 5 attempts"
             exit 1
           fi
           for i in 1 2 3 4 5; do
@@ -96,7 +97,7 @@ jobs:
               "https://hub.docker.com/v2/repositories/${DH_NAMESPACE}/${DH_REPO}/")
             HTTP_CODE=$(echo "$RESP" | tail -n1)
             BODY=$(echo "$RESP" | head -n-1)
-            echo "attempt=$i http_code=$HTTP_CODE body=$BODY"
+            echo "patch attempt=$i http_code=$HTTP_CODE body=$BODY"
             if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "204" ]; then
               echo "✓ ${DH_NAMESPACE}/${DH_REPO} set to public"
               exit 0
