@@ -123,10 +123,21 @@ class Qb5ApiClient:
             ) from exc
 
         # qB 5.x 错误分类：
-        #   200 + body="Ok."     → 成功
+        #   200 + body="Ok."     → 成功（qB 4.x 旧行为）
+        #   204 No Content       → 成功（qB 5.0+ 新行为）
         #   200 + body="Fails."  → 密码错（qB 4.x 旧行为）
         #   401 + body="..."     → 密码错（qB 5.x 新行为）
         #   403 + body 含"IP"    → 累计 5 次错后 ban 30 分钟
+        if resp.status_code in (200, 204):
+            # 200/204 都算成功；body 可空或 "Ok."（旧版）
+            if resp.text and "Fails" in resp.text:
+                raise Qb5ApiError(
+                    "qBittorrent 登录失败：密码错误",
+                    status_code=resp.status_code,
+                    transient=False,
+                )
+            self._authed = True
+            return
         if resp.status_code == 403:
             # 检查是否 ban（qB 中文 qB 5.x 返"您的 IP 地址已被封禁"）
             body = resp.text
@@ -151,16 +162,6 @@ class Qb5ApiClient:
                 status_code=401,
                 transient=False,
             )
-        if resp.status_code == 200:
-            if "Fails" in resp.text:
-                raise Qb5ApiError(
-                    "qBittorrent 登录失败：密码错误",
-                    status_code=200,
-                    transient=False,
-                )
-            if "Ok" in resp.text:
-                self._authed = True
-                return
         # 其它未知状态
         raise Qb5ApiError(
             f"qBittorrent 登录异常：HTTP {resp.status_code} body={resp.text[:200]}",
