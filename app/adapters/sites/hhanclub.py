@@ -103,6 +103,10 @@ class HhanclubAdapter(SiteAdapter):
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             },
         )
+        #: 列表页 ``<a href="...download.php?id=X&passkey=Y">`` 抽出的下载 URL
+        #: （item_id → 绝对 URL），由 :meth:`search_torrents` 刷新。
+        #: ``get_torrent_url`` 优先查此处 → 0 HTTP；miss 时回退详情页。
+        self._download_url_cache: dict[str, str] = {}
 
     # ------------------------------------------------------------ 内部工具
     @staticmethod
@@ -128,6 +132,22 @@ class HhanclubAdapter(SiteAdapter):
 
     def _download_url(self, item_id: str) -> str:
         return f"{self._base_url()}/download.php?id={item_id}"
+
+    @staticmethod
+    def _extract_download_urls(html: str, base_url: str) -> dict[str, str]:
+        """从列表页 HTML 抽 ``download.php?id=X&passkey=Y`` anchor → 绝对 URL。
+
+        复用 :data:`_SIGNED_DL_RE`（与详情页 anchor 同源 regex）。同 item_id
+        出现多次（理论上不会，HHan 列表页 anchor 无 ``&type=zip`` 变体）
+        取首条。
+        """
+        out: dict[str, str] = {}
+        for m in _SIGNED_DL_RE.finditer(html):
+            item_id, passkey = m.group(1), m.group(2)
+            if item_id in out:
+                continue
+            out[item_id] = f"{base_url}/download.php?id={item_id}&passkey={passkey}"
+        return out
 
     # ------------------------------------------------------------ 1. check_reachability
     async def check_reachability(self) -> SiteHealth:
@@ -184,16 +204,27 @@ class HhanclubAdapter(SiteAdapter):
             logger.warning("HHanClub 拉取 HTTP %d", resp.status_code)
             return []
         items = HhanclubAdapter._parse_spstate2_html(resp.text, limit=page_size)
+        # 同步刷新 download URL cache（供 get_torrent_url 0-HTTP 命中）
+        self._download_url_cache = HhanclubAdapter._extract_download_urls(
+            resp.text, self._base_url()
+        )
         return items
 
     # ------------------------------------------------------------ 2.5 get_torrent_url
     async def get_torrent_url(self, item_id: str) -> str | None:
         """返回 ``{base}/download.php?id=X&passkey=Y`` 绝对 URL。
 
-        HHanClub 不带 ``https`` flag，URL 形如 ``?id=X&passkey=Y``。
+        流程：
+        1. 查 :attr:`_download_url_cache`（由 :meth:`search_torrents` 从列表页
+           anchor 维护）→ 命中返回，0 HTTP
+        2. miss → 回退抓详情页抽 ``passkey=...`` 拼 URL（1 HTTP）
         """
         if not item_id:
             return None
+        cached = self._download_url_cache.get(item_id)
+        if cached:
+            return cached
+        # miss: 详情页兜底（与上一版一致）
         try:
             resp = await self._client.get(self._detail_url(item_id), timeout=self._timeout)
         except httpx.HTTPError as exc:
