@@ -136,8 +136,7 @@ const columns = [
   { title: '凭据', key: 'credentials' },
   { title: '间隔', key: 'interval', width: 90 },
   { title: '启用', key: 'enabled', width: 80 },
-  { title: '测连', key: 'test', width: 220 },
-  { title: '', key: 'action', width: 140 },
+  { title: '', key: 'action', width: 280 },
 ]
 </script>
 
@@ -190,8 +189,8 @@ const columns = [
               @change="(v: boolean) => onToggleEnabled(record, v)"
             />
           </template>
-          <template v-else-if="column.key === 'test'">
-            <a-space :size="6" align="center">
+          <template v-else-if="column.key === 'action'">
+            <a-space :size="4" align="center">
               <a-button
                 size="small"
                 type="link"
@@ -207,10 +206,6 @@ const columns = [
               >
                 {{ testResults[record.id].status }} · {{ testResults[record.id].detail }}
               </a-tag>
-            </a-space>
-          </template>
-          <template v-else-if="column.key === 'action'">
-            <a-space :size="4">
               <a-button size="small" type="link" @click="onEdit(record)">编辑</a-button>
               <a-popconfirm title="确认删除？" @confirm="onDelete(record.id)">
                 <a-button size="small" type="link" danger>删除</a-button>
