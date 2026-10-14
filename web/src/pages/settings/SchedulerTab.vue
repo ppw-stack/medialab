@@ -27,8 +27,9 @@ interface RunResult {
 }
 
 const JOB_LABELS: Record<string, { name: string; desc: string }> = {
-  fetch_all_sites:   { name: 'RSS 拉取',     desc: '遍历所有启用站点拉取 RSS，写入 torrent_index 表' },
-  push_free_torrents: { name: '免费种推送',  desc: '从 torrent_index 选免费种 → 默认下载器（每 30 分钟）' },
+  fetch_all_sites:     { name: 'RSS 拉取',     desc: '遍历所有启用站点拉取 RSS，写入 torrent_index 表' },
+  push_free_torrents:  { name: '免费种推送',   desc: '从 torrent_index 选免费种 → 默认下载器（每 30 分钟）' },
+  monitor_free_window: { name: '免费窗口监测', desc: '巡检已推免费种，临近 free_end_at 自动暂停下载器（pre_pause=10 min）' },
 }
 
 const data = ref<SchedulerInfo | null>(null)
@@ -205,14 +206,16 @@ function jobLabel(name: string) {
                   </div>
                 </div>
               </template>
-              <div
-                class="job-item__cron mono"
+              <button
+                type="button"
+                class="job-item__cron"
                 :class="{ 'job-item__cron--editing': editingCron === job.name }"
+                :title="`点击修改 cron：${job.cron}`"
                 @click.stop="openCronEditor(job)"
               >
-                {{ job.cron }}
-                <span class="job-item__cron-edit">编辑</span>
-              </div>
+                <span class="job-item__cron-text mono">{{ job.cron }}</span>
+                <span class="job-item__cron-edit" aria-hidden="true">编辑</span>
+              </button>
             </a-popover>
           </div>
           <div class="job-item__actions">
@@ -331,34 +334,46 @@ function jobLabel(name: string) {
 
 .job-item__cron {
   font-size: var(--text-xs);
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   letter-spacing: 0.05em;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
-  padding: 2px 6px;
+  padding: 3px 8px;
   border-radius: var(--r-sm, 4px);
-  transition: background 0.12s ease;
+  border: 1px solid var(--border-hairline);
+  background: var(--bg-inset);
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  font-family: inherit;
 }
 .job-item__cron:hover {
   background: var(--bg-hover, rgba(0, 0, 0, 0.04));
+  border-color: var(--brand-300, #f4b8a3);
   color: var(--text-primary);
+}
+.job-item__cron:focus-visible {
+  outline: 2px solid var(--brand-500, #e55d2c);
+  outline-offset: 1px;
 }
 .job-item__cron--editing {
   background: var(--brand-50, #fef3ee);
+  border-color: var(--brand-500, #e55d2c);
   color: var(--brand-700, #c84a1f);
+}
+.job-item__cron-text {
+  font-size: var(--text-xs);
 }
 .job-item__cron-edit {
   font-size: 10px;
   padding: 1px 6px;
   border: 1px solid currentColor;
   border-radius: 3px;
-  opacity: 0;
+  opacity: 0.65;
   transition: opacity 0.12s ease;
 }
 .job-item__cron:hover .job-item__cron-edit {
-  opacity: 0.7;
+  opacity: 1;
 }
 
 .cron-editor {
