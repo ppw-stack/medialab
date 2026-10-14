@@ -279,6 +279,14 @@ function formatDate(s: string | null): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
+function formatDateFull(s: string | null): string {
+  if (!s) return ''
+  const d = new Date(s)
+  const pad = (n: number) => n.toString().padStart(2, '0')
+  const w = ['日', '一', '二', '三', '四', '五', '六'][d.getDay()]
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} 周${w} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
 function freeTypeLabel(ft: string, discountPct?: number | null) {
   const base = FREE_TYPE_LABELS[ft] ?? { label: ft, color: 'default' }
   if (ft === 'neutral_leech' && discountPct != null && discountPct > 0 && discountPct < 100) {
@@ -344,16 +352,16 @@ const columns = [
       (a.free_end_at ?? '').localeCompare(b.free_end_at ?? ''),
   },
   {
-    title: '发布', key: 'published_at', dataIndex: 'published_at', width: 160,
+    title: '发布', key: 'published_at', dataIndex: 'published_at', width: 160, ellipsis: true,
     sorter: (a: TorrentIndexItem, b: TorrentIndexItem) =>
       (a.published_at ?? '').localeCompare(b.published_at ?? ''),
   },
   {
-    title: '最近拉取', key: 'last_seen_at', dataIndex: 'last_seen_at', width: 160,
+    title: '最近拉取', key: 'last_seen_at', dataIndex: 'last_seen_at', width: 150, ellipsis: true,
     sorter: (a: TorrentIndexItem, b: TorrentIndexItem) =>
       (a.last_seen_at ?? '').localeCompare(b.last_seen_at ?? ''),
   },
-  { title: '', key: 'action', width: 100, fixed: 'right' },
+  { title: '', key: 'action', width: 100 },
 ]
 </script>
 
@@ -440,7 +448,6 @@ const columns = [
         }"
         :on-change="onTableChange"
         row-key="id"
-        :scroll="{ x: 1310 }"
         size="middle"
       >
         <template #bodyCell="{ column, record }">
@@ -448,7 +455,9 @@ const columns = [
             <span class="site-tag mono">{{ record.site_name }}</span>
           </template>
           <template v-else-if="column.key === 'published_at'">
-            <span v-if="record.published_at" class="mono dim">{{ formatDate(record.published_at) }}</span>
+            <a-tooltip v-if="record.published_at" :title="formatDateFull(record.published_at)">
+              <span class="mono dim">{{ formatDate(record.published_at) }}</span>
+            </a-tooltip>
             <span v-else class="dim">—</span>
           </template>
           <template v-else-if="column.key === 'category'">
@@ -456,11 +465,13 @@ const columns = [
             <span v-else class="dim">—</span>
           </template>
           <template v-else-if="column.key === 'name'">
-            <a-typography-text
-              :ellipsis="true"
-              :content="record.name"
-              style="max-width: 480px"
-            />
+            <a-tooltip :title="record.name">
+              <a-typography-text
+                :ellipsis="true"
+                :content="record.name"
+                style="max-width: 480px"
+              />
+            </a-tooltip>
           </template>
           <template v-else-if="column.key === 'size'">
             <span v-if="record.size > 0" class="mono">{{ formatSize(record.size) }}</span>
@@ -477,7 +488,10 @@ const columns = [
             </span>
           </template>
           <template v-else-if="column.key === 'last_seen_at'">
-            <span class="mono dim">{{ formatDate(record.last_seen_at) }}</span>
+            <a-tooltip v-if="record.last_seen_at" :title="formatDateFull(record.last_seen_at)">
+              <span class="mono dim">{{ formatDate(record.last_seen_at) }}</span>
+            </a-tooltip>
+            <span v-else class="dim">—</span>
           </template>
           <template v-else-if="column.key === 'action'">
             <a-tooltip :title="record.pushable ? '' : '该种无可用的下载链接'">
