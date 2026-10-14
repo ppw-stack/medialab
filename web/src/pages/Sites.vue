@@ -28,8 +28,8 @@ function domainFor(adapter: string): string {
 const data = ref<Site[]>([])
 const editing = ref<Site | null>(null)
 const creating = ref(false)
-const testing = ref(false)
-const testResult = ref<{ status: string; detail: string; cap: object } | null>(null)
+const testingId = ref<number | null>(null)
+const testResults = ref<Record<number, { status: string; detail: string }>>({})
 const modalOpen = ref(false)
 
 const formState = reactive<Record<string, unknown>>({})
@@ -46,7 +46,6 @@ function onCreate() {
   editing.value = null
   creating.value = true
   modalOpen.value = true
-  testResult.value = null
   Object.assign(formState, {
     adapter: 'mteam',
     min_interval_minutes: 60,
@@ -70,7 +69,6 @@ function onEdit(s: Site) {
   editing.value = s
   creating.value = false
   modalOpen.value = true
-  testResult.value = null
   Object.assign(formState, {
     ...s,
     rss_url: '',
@@ -103,23 +101,31 @@ async function onSave() {
   }
 }
 
-async function onTest() {
-  if (!editing.value) return
-  testing.value = true
-  testResult.value = null
+async function onTestRow(s: Site) {
+  if (testingId.value !== null) return
+  testingId.value = s.id
+  delete testResults.value[s.id]
   try {
     const r = await api.post<{ ok: boolean; status: string; detail: string; self_test: object }>(
-      `/sites/${editing.value.id}/test`,
+      `/sites/${s.id}/test`,
     )
-    testResult.value = {
-      status: r.status,
-      detail: r.detail,
-      cap: r.self_test,
-    }
+    testResults.value[s.id] = { status: r.status, detail: r.detail }
   } catch (exc) {
     message.error(exc instanceof Error ? exc.message : '测连失败')
   } finally {
-    testing.value = false
+    testingId.value = null
+  }
+}
+
+async function onToggleEnabled(s: Site, next: boolean) {
+  // 乐观更新：先改 UI，失败回滚
+  const prev = s.enabled
+  s.enabled = next
+  try {
+    await api.post('/sites/update', { id: s.id, enabled: next })
+  } catch (exc) {
+    s.enabled = prev
+    message.error(exc instanceof Error ? exc.message : '切换失败')
   }
 }
 
@@ -130,6 +136,7 @@ const columns = [
   { title: '凭据', key: 'credentials' },
   { title: '间隔', key: 'interval', width: 90 },
   { title: '启用', key: 'enabled', width: 80 },
+  { title: '测连', key: 'test', width: 220 },
   { title: '', key: 'action', width: 140 },
 ]
 </script>
@@ -177,8 +184,30 @@ const columns = [
             <span class="mono">{{ record.min_interval_minutes }}m</span>
           </template>
           <template v-else-if="column.key === 'enabled'">
-            <span v-if="record.enabled" class="status-dot status-dot--ok" />
-            <span v-else class="status-dot status-dot--off" />
+            <a-switch
+              :checked="record.enabled"
+              size="small"
+              @change="(v: boolean) => onToggleEnabled(record, v)"
+            />
+          </template>
+          <template v-else-if="column.key === 'test'">
+            <a-space :size="6" align="center">
+              <a-button
+                size="small"
+                type="link"
+                :loading="testingId === record.id"
+                @click="onTestRow(record)"
+              >
+                测连
+              </a-button>
+              <a-tag
+                v-if="testResults[record.id]"
+                :color="testResults[record.id].status === 'ok' ? 'green' : 'red'"
+                size="small"
+              >
+                {{ testResults[record.id].status }} · {{ testResults[record.id].detail }}
+              </a-tag>
+            </a-space>
           </template>
           <template v-else-if="column.key === 'action'">
             <a-space :size="4">
@@ -197,7 +226,7 @@ const columns = [
       :open="modalOpen"
       :title="creating ? '新增站点' : `编辑站点 · ${editing?.name || ''}`"
       :width="640"
-      @cancel="() => { modalOpen = false; editing = null; creating = false; testResult = null }"
+      @cancel="() => { modalOpen = false; editing = null; creating = false }"
       @ok="onSave"
     >
       <a-form layout="vertical">
@@ -255,15 +284,6 @@ const columns = [
           <a-switch v-model:checked="formState.enabled" />
         </a-form-item>
       </a-form>
-
-      <div v-if="editing" class="test-card">
-        <a-space>
-          <a-button :loading="testing" @click="onTest">连通性测试</a-button>
-          <a-tag v-if="testResult" :color="testResult.status === 'ok' ? 'green' : 'red'">
-            {{ testResult.status }} | {{ testResult.detail }}
-          </a-tag>
-        </a-space>
-      </div>
     </a-modal>
   </div>
 </template>
@@ -280,29 +300,5 @@ const columns = [
 .code {
   font-size: var(--text-xs);
   color: var(--text-tertiary);
-}
-
-.status-dot {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-}
-
-.status-dot--ok {
-  background: var(--status-green);
-  box-shadow: 0 0 8px var(--status-green-soft);
-}
-
-.status-dot--off {
-  background: var(--text-tertiary);
-}
-
-.test-card {
-  margin-top: var(--sp-4);
-  padding: var(--sp-3);
-  background: var(--bg-surface);
-  border: 1px solid var(--border-hairline);
-  border-radius: var(--r-md);
 }
 </style>
