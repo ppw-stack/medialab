@@ -66,6 +66,8 @@ jobs:
 
       - name: Set GHCR package visibility to public
         if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PACKAGE_NAME="seedhelper"
           OWNER="${GITHUB_REPOSITORY_OWNER:-ppw-stack}"
