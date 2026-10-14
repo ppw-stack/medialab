@@ -72,7 +72,6 @@ jobs:
           PACKAGE_NAME="seedhelper"
           OWNER="${GITHUB_REPOSITORY_OWNER:-ppw-stack}"
           REPO="${GITHUB_REPOSITORY##*/}"
-          # 4 个候选 endpoint 依次尝试
           ENDPOINTS=(
             "/user/packages/container/${PACKAGE_NAME}"
             "/users/${OWNER}/packages/container/${PACKAGE_NAME}"
@@ -81,19 +80,22 @@ jobs:
           )
           for EP in "${ENDPOINTS[@]}"; do
             echo "::group::trying $EP"
-            for i in 1 2 3 4 5 6 7 8 9 10; do
+            for i in 1 2 3; do
+              RESP=$(gh api -X PATCH -f visibility=public "$EP" 2>&1)
               HTTP_CODE=$(gh api -X PATCH -f visibility=public -i "$EP" 2>/dev/null | head -1 | awk '{print $2}')
               echo "  attempt=$i http_code=$HTTP_CODE"
+              echo "  body: $RESP" | head -c 400
+              echo
               if [ "$HTTP_CODE" = "200" ]; then
                 echo "✓ ${PACKAGE_NAME} set to public via $EP"
                 echo "::endgroup::"
                 exit 0
               fi
-              sleep 3
+              sleep 2
             done
             echo "::endgroup::"
           done
-          # 全部 404：可能是没 packages: read scope，输出详细 debug
-          echo "::warning::all 4 endpoints returned non-200, dumping debug info"
-          gh api /user/packages?package_type=container -i 2>&1 | head -10 || true
+          # 全部 404：检查当前 token 权限
+          echo "::warning::all 4 endpoints failed, dumping token scope"
+          gh api -i /user 2>&1 | head -5
           exit 1
