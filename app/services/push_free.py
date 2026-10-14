@@ -80,7 +80,12 @@ def _synthetic_info_hash(site_id: int, item_id: str, downloader_id: int) -> str:
 
 
 class PushFreeService:
-    """定时推送免费种到默认下载器。"""
+    """定时推送免费种到默认下载器。
+
+    运行参数（``push_min_remaining_hours`` / ``push_max_per_run``）从
+    :class:`app.services.runtime_params.RuntimeParamManager` 读取——
+    每次 run() 实时取，DB 改完下次作业生效，无需重启。
+    """
 
     def __init__(self, settings: AppSettings, factory: AdapterFactory) -> None:
         self._settings = settings
@@ -189,7 +194,11 @@ class PushFreeService:
         :meth:`SiteAdapter.get_torrent_url` 获取。
         """
         now = utcnow()
-        min_remaining = timedelta(hours=self._settings.push_min_remaining_hours)
+        # 运行时参数（DB 持久化，UI 可调；详见 app.services.runtime_params）
+        from app.services.runtime_params import get_runtime_params
+
+        rp = get_runtime_params()
+        min_remaining = timedelta(hours=rp.get_int("push_min_remaining_hours"))
         threshold = now + min_remaining
 
         # 候选集：torrent_index 上 free_type ∈ 真免费/限时免费 且 item_id 非空
@@ -238,7 +247,7 @@ class PushFreeService:
                     free_end_at=free_end_at,
                 )
             )
-            if len(candidates) >= self._settings.push_max_per_run:
+            if len(candidates) >= rp.get_int("push_max_per_run"):
                 break
         return candidates
 

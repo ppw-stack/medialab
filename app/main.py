@@ -65,6 +65,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     state["db_healthy"].set(1 if await writer.healthcheck() else 0)
 
     if settings.scheduler_enabled:
+        # 运行时参数（DB 持久化的可调设置）必须在 register_jobs 之前
+        # 初始化，让作业函数首次运行就能拿到最新值
+        from app.services.runtime_params import (
+            init_runtime_params,
+            set_runtime_params,
+        )
+
+        set_runtime_params(init_runtime_params(settings))
         scheduler_center.start()
         register_jobs(factory)
 

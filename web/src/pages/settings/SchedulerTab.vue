@@ -26,6 +26,19 @@ interface RunResult {
   result?: Record<string, unknown> | null;
 }
 
+interface RuntimeParamSpec {
+  key: string;
+  label: string;
+  min: number;
+  max: number;
+  default: number;
+}
+
+interface RuntimeParams {
+  params: Record<string, number>;
+  specs: RuntimeParamSpec[];
+}
+
 const JOB_LABELS: Record<string, { name: string; desc: string }> = {
   fetch_all_sites:     { name: 'RSS 拉取',     desc: '遍历所有启用站点拉取 RSS，写入 torrent_index 表' },
   push_free_torrents:  { name: '免费种推送',   desc: '从 torrent_index 选免费种 → 默认下载器（每 30 分钟）' },
@@ -36,11 +49,21 @@ const data = ref<SchedulerInfo | null>(null)
 const runningJob = ref<string | null>(null)
 const cronDraft = ref<string>('')
 const savingCron = ref(false)
+const runtimeParams = ref<RuntimeParams | null>(null)
+const runtimeDraft = ref<Record<string, number>>({})
+const savingRuntime = ref(false)
 let timer: ReturnType<typeof setInterval> | null = null
 
 async function load() {
   try {
     data.value = await api.get<SchedulerInfo>('/scheduler')
+  } catch { /* ignore */ }
+  try {
+    runtimeParams.value = await api.get<RuntimeParams>('/scheduler/runtime-params')
+    // 仅在未编辑时同步服务端最新值（避免覆盖用户正在输入的内容）
+    if (!savingRuntime.value) {
+      runtimeDraft.value = { ...runtimeParams.value.params }
+    }
   } catch { /* ignore */ }
 }
 
@@ -89,6 +112,43 @@ async function saveCron(job: Job) {
     message.error(e instanceof Error ? e.message : '修改失败')
   } finally {
     savingCron.value = false
+  }
+}
+
+function isRuntimeDirty(): boolean {
+  if (!runtimeParams.value) return false
+  for (const [k, v] of Object.entries(runtimeDraft.value)) {
+    if (runtimeParams.value.params[k] !== v) return true
+  }
+  return false
+}
+
+async function saveRuntimeParams() {
+  if (!runtimeParams.value) return
+  if (!isRuntimeDirty()) return
+  savingRuntime.value = true
+  try {
+    const updates: Record<string, number> = {}
+    for (const spec of runtimeParams.value.specs) {
+      const draft = runtimeDraft.value[spec.key]
+      if (draft !== runtimeParams.value.params[spec.key]) {
+        updates[spec.key] = draft
+      }
+    }
+    const r = await api.put<RuntimeParams>('/scheduler/runtime-params', updates)
+    runtimeParams.value = r
+    runtimeDraft.value = { ...r.params }
+    message.success('运行参数已保存，下次作业生效')
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '保存失败')
+  } finally {
+    savingRuntime.value = false
+  }
+}
+
+function resetRuntimeDraft() {
+  if (runtimeParams.value) {
+    runtimeDraft.value = { ...runtimeParams.value.params }
   }
 }
 
@@ -230,14 +290,66 @@ function jobLabel(name: string) {
               :disabled="!data.accepting_new_work"
               @click="runNow(job.name)"
             >
-              立即执行 →
-            </a-button>
-          </div>
-        </div>
-      </div>
+               立即执行 →
+             </a-button>
+           </div>
+         </div>
+       </div>
 
-      <a-alert
-        v-if="!data.enabled"
+       <div v-if="runtimeParams" class="runtime-params">
+         <div class="runtime-params__head">
+           <span class="label-caps">作业运行参数</span>
+           <span class="dim mono" style="margin-left: var(--sp-2)">
+             下次作业生效 · DB 持久化
+           </span>
+         </div>
+         <div class="runtime-params__grid">
+           <div
+             v-for="spec in runtimeParams.specs"
+             :key="spec.key"
+             class="runtime-params__row"
+           >
+             <label class="runtime-params__label">
+               {{ spec.label }}
+               <span class="dim mono runtime-params__hint">
+                 范围 {{ spec.min }}–{{ spec.max }}
+               </span>
+             </label>
+             <a-input-number
+               v-model:value="runtimeDraft[spec.key]"
+               :min="spec.min"
+               :max="spec.max"
+               :step="1"
+               size="small"
+               style="width: 140px"
+             />
+             <span class="dim mono runtime-params__default">
+               默认 {{ spec.default }}
+             </span>
+           </div>
+         </div>
+         <div class="runtime-params__actions">
+           <a-button
+             size="small"
+             :disabled="!isRuntimeDirty() || savingRuntime"
+             @click="resetRuntimeDraft"
+           >
+             还原
+           </a-button>
+           <a-button
+             size="small"
+             type="primary"
+             :loading="savingRuntime"
+             :disabled="!isRuntimeDirty()"
+             @click="saveRuntimeParams"
+           >
+             保存
+           </a-button>
+         </div>
+       </div>
+
+       <a-alert
+         v-if="!data.enabled"
         type="warning"
         show-icon
         style="margin-top: var(--sp-4)"
@@ -398,5 +510,60 @@ function jobLabel(name: string) {
   align-items: center;
   gap: var(--sp-3);
   flex: 0 0 auto;
+}
+
+.runtime-params {
+  margin-top: var(--sp-4);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--r-md);
+  background: var(--bg-surface);
+  padding: var(--sp-3) var(--sp-4);
+}
+.runtime-params__head {
+  margin-bottom: var(--sp-3);
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+.runtime-params__grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+}
+.runtime-params__row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+  border-bottom: 1px dashed var(--border-hairline);
+}
+.runtime-params__row:last-child {
+  border-bottom: 0;
+}
+.runtime-params__label {
+  display: flex;
+  flex-direction: column;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  font-weight: 500;
+  gap: 2px;
+}
+.runtime-params__hint {
+  font-size: var(--text-xs);
+  font-weight: 400;
+}
+.runtime-params__default {
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+.runtime-params__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border-hairline);
 }
 </style>

@@ -299,3 +299,27 @@ class TaskQueue(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=_utcnow, onupdate=_utcnow
     )
+
+
+class AppRuntimeParam(Base):
+    """应用运行时参数（DB 持久化的可调设置，启动期从 env 加载，运行期可改）。
+
+    单行 kv 表，键名 = 参数名（与前端表单字段一致）：
+    - ``push_min_remaining_hours``：限时免费种最低剩余小时数
+    - ``push_max_per_run``：每次推送免费种上限
+    - ``monitor_pre_pause_minutes``：免费窗口监测提前暂停分钟数
+
+    值类型与 :class:`AppSettings` 一致：int / str / float 任一。
+    """
+
+    __tablename__ = "app_runtime_params"
+
+    #: 参数名（PK）—— 与前端字段同名
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    #: 整型值（与前端 input-number 一致；str 字段留作未来扩展）
+    value_int: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    value_str: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    #: 最近一次修改时间
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_utcnow, onupdate=_utcnow
+    )

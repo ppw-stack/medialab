@@ -29,6 +29,11 @@ from app.db.models import Site
 from app.db.session import session_scope
 from app.services.factory import AdapterFactory, get_factory
 from app.services.feed_fetcher import FeedFetcher
+from app.services.runtime_params import (
+    PARAM_SPECS,
+    get_runtime_params,
+    validate,
+)
 from app.services.scheduler import RunResult, scheduler_center
 
 logger = get_logger(__name__)
@@ -98,6 +103,71 @@ async def update_job_cron(job_name: str, payload: UpdateCronIn) -> dict[str, Any
     if not scheduler_center.update_cron(job_name, payload.cron):
         raise HTTPException(status_code=404, detail=f"作业不存在：{job_name}")
     return {"job": job_name, "cron": payload.cron}
+
+
+class RuntimeParamsOut(BaseModel):
+    """运行时参数响应。"""
+
+    params: dict[str, int]
+    specs: list[dict[str, object]]
+
+
+class RuntimeParamsUpdateIn(BaseModel):
+    """运行时参数更新请求（部分更新）。"""
+
+    push_min_remaining_hours: int | None = None
+    push_max_per_run: int | None = None
+    monitor_pre_pause_minutes: int | None = None
+
+
+@router.get("/scheduler/runtime-params", summary="查询作业运行参数")
+async def get_runtime_params_view() -> RuntimeParamsOut:
+    """返回当前所有可调运行参数 + 元数据（label/min/max）供前端渲染表单。"""
+    mgr = get_runtime_params()
+    return RuntimeParamsOut(
+        params=mgr.all(),
+        specs=[
+            {
+                "key": spec.key,
+                "label": spec.label,
+                "min": spec.min,
+                "max": spec.max,
+                "default": spec.default,
+            }
+            for spec in PARAM_SPECS
+        ],
+    )
+
+
+@router.put("/scheduler/runtime-params", summary="修改作业运行参数")
+async def update_runtime_params(payload: RuntimeParamsUpdateIn) -> RuntimeParamsOut:
+    """运行时修改可调参数（DB 持久化）。下次作业立即生效。
+
+    仅更新 body 中显式给出的字段（partial update）。
+    """
+    updates = {k: v for k, v in payload.model_dump().items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="未提供任何要修改的参数")
+    try:
+        validate(updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    mgr = get_runtime_params()
+    async with session_scope() as session:
+        result = await mgr.apply(session, updates)
+    return RuntimeParamsOut(
+        params=result,
+        specs=[
+            {
+                "key": spec.key,
+                "label": spec.label,
+                "min": spec.min,
+                "max": spec.max,
+                "default": spec.default,
+            }
+            for spec in PARAM_SPECS
+        ],
+    )
 
 
 @router.post(

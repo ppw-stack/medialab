@@ -63,7 +63,11 @@ class _Candidate:
 
 
 class MonitorFreeWindowService:
-    """免费窗口巡检 + 临近截止自动暂停。"""
+    """免费窗口巡检 + 临近截止自动暂停。
+
+    提前暂停分钟数从 :class:`app.services.runtime_params.RuntimeParamManager`
+    实时读取，DB 改完下次作业生效。
+    """
 
     def __init__(self, factory: AdapterFactory, pre_pause_minutes: int) -> None:
         self._factory = factory
@@ -72,6 +76,12 @@ class MonitorFreeWindowService:
     async def run(self) -> MonitorResult:
         """执行一次监测作业。"""
         now = utcnow()
+        # 运行时参数实时取（UI 可调）
+        from app.services.runtime_params import get_runtime_params
+
+        self._pre_pause = timedelta(
+            minutes=get_runtime_params().get_int("monitor_pre_pause_minutes")
+        )
         threshold = now + self._pre_pause
 
         # 1) 拉所有 is_free=1 active 行；筛选与计数都在主循环里
