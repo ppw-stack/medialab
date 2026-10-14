@@ -16,8 +16,6 @@ from app.adapters.downloaders.base import (
     TorrentState,
 )
 from app.api.auth import require_session
-from app.core.config import get_settings
-from app.core.crypto import build_cipher
 from app.core.logging import get_logger
 from app.db.models import DownloaderInstance, Torrent
 from app.db.session import session_scope
@@ -81,7 +79,7 @@ def _to_out(row: DownloaderInstance) -> DownloaderOut:
         type=row.type,
         url=row.url,
         username=row.username,
-        has_password=bool(row.password_enc),
+        has_password=bool(row.password),
         is_default=row.is_default,
         enabled=row.enabled,
         verify_tls=row.verify_tls,
@@ -132,7 +130,6 @@ async def create_downloader(payload: DownloaderIn) -> DownloaderOut:
         raise HTTPException(
             status_code=501, detail=f"下载器类型 {payload.type} 尚未实现"
         )
-    cipher = build_cipher(get_settings())
     async with session_scope() as session:
         exists = (
             await session.execute(
@@ -146,14 +143,11 @@ async def create_downloader(payload: DownloaderIn) -> DownloaderOut:
             type=payload.type,
             url=payload.url,
             username=payload.username,
+            password=payload.password,
             is_default=payload.is_default,
             enabled=payload.enabled,
             verify_tls=payload.verify_tls,
         )
-        if payload.password:
-            row.password_enc = cipher.encrypt(
-                payload.password, owner_type="downloader", owner_id=payload.name
-            )
         session.add(row)
         await session.flush()
         if payload.is_default:
@@ -163,7 +157,6 @@ async def create_downloader(payload: DownloaderIn) -> DownloaderOut:
 
 @router.post("/update", summary="更新下载器")
 async def update_downloader(payload: DownloaderUpdate) -> DownloaderOut:
-    cipher = build_cipher(get_settings())
     async with session_scope() as session:
         row = (
             await session.execute(
@@ -172,7 +165,6 @@ async def update_downloader(payload: DownloaderUpdate) -> DownloaderOut:
         ).scalar_one_or_none()
         if row is None:
             raise HTTPException(status_code=404, detail="下载器不存在")
-        old_name = row.name
         if payload.name and payload.name != row.name:
             if (
                 await session.execute(
@@ -190,17 +182,7 @@ async def update_downloader(payload: DownloaderUpdate) -> DownloaderOut:
         ).items():
             setattr(row, key, value)
         if payload.password:
-            row.password_enc = cipher.encrypt(
-                payload.password, owner_type="downloader", owner_id=row.name
-            )
-        elif old_name != row.name and row.password_enc:
-            # 改名时用新名重加密既有密码，否则 AAD 失配无法解密
-            rekeyed = cipher.rekey(
-                row.password_enc,
-                owner_type="downloader", old_id=old_name, new_id=row.name,
-            )
-            if rekeyed:
-                row.password_enc = rekeyed
+            row.password = payload.password
         if payload.is_default:
             await _apply_default(session, row.id)
         return _to_out(row)

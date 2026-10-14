@@ -135,7 +135,7 @@ class DownloaderInstance(Base):
     type: Mapped[str] = mapped_column(String(32))
     url: Mapped[str] = mapped_column(String(512))
     username: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    password_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    password: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     verify_tls: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -155,10 +155,10 @@ class Site(Base):
     domain: Mapped[str] = mapped_column(String(255))
     adapter: Mapped[str] = mapped_column(String(64), default="mteam")
 
-    # 认证与凭据（加密存储）
-    rss_url_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
-    apikey_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
-    cookies_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 认证与凭据
+    rss_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    apikey: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cookies: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     min_interval_minutes: Mapped[int] = mapped_column(Integer, default=60)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)

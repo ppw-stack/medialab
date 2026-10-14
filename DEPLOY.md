@@ -26,7 +26,7 @@ Docker 单机双环境部署（dev + prod），共享同一镜像但完全独立
 
 > 注：prod 用 8091 而非 8081 是因为本机 8081 已被 qBittorrent 容器占用。生产服务器无此冲突时改回 8081 也可（修改 `docker-compose.prod.yml` 的 ports）。
 
-两套**完全独立**：不同端口、不同 SQLite DB、不同加密密钥（凭据互不互通）、不同 Web Token。**生产从 dev 导入数据**用 `sqlite3 .backup`（见第 7 节）。
+两套**完全独立**：不同端口、不同 SQLite DB、不同 Web Token。**生产从 dev 导入数据**用 `sqlite3 .backup`（见第 7 节）。
 
 ## 1. 前置条件
 
@@ -43,12 +43,9 @@ Docker 单机双环境部署（dev + prod），共享同一镜像但完全独立
 cp .env.example .env
 ```
 
-用密码管理器生成以下三个值（**不能留默认值**）：
+用密码管理器生成以下值（**不能留默认值**）：
 
 ```bash
-# 凭据加密密钥（FR-7.1，缺失则启动失败）
-python -c "import secrets; print('ENCRYPTION_KEY=' + secrets.token_urlsafe(32))"
-
 # Web 面板密码（>= 12 位）
 python -c "import secrets; print('WEB_PASSWORD=' + secrets.token_urlsafe(16))"
 
@@ -59,7 +56,6 @@ python -c "import secrets; print('WEB_TOKEN=' + secrets.token_urlsafe(32))"
 填入 `.env`：
 
 ```ini
-ENCRYPTION_KEY=...                  # 必填
 WEB_USERNAME=admin                  # 默认
 WEB_PASSWORD=...                    # 必填
 WEB_TOKEN=...                       # 必填
@@ -72,7 +68,7 @@ PUSH_FREE_CRON=*/30 * * * *
 
 ## 2.5 准备 `.env.prod`（生产）
 
-**生产密钥必须与 dev 不同**（否则凭据互可解密，违反隔离原则）。直接用 `deploy.sh prod` 第一次会引导生成。
+**生产 Token 必须与 dev 不同**（直接用 `deploy.sh prod` 第一次会引导生成）。
 
 ```bash
 # 方式 A：一键脚本自动创建 .env.prod（如果不存在）
@@ -80,10 +76,10 @@ PUSH_FREE_CRON=*/30 * * * *
 
 # 方式 B：手工
 cp .env.example .env.prod
-# 用上面的 secrets 命令生成 3 个新值，覆盖 .env.prod 里的占位
+# 用上面的 secrets 命令生成 2 个新值，覆盖 .env.prod 里的占位
 ```
 
-**注意**：`.env` 和 `.env.prod` 都已在 `.gitignore`，不会进 git。但应**额外备份到密码管理器**（密钥丢失 = 凭据不可恢复，FR-7.1）。
+**注意**：`.env` 和 `.env.prod` 都已在 `.gitignore`，不会进 git。但应**额外备份到密码管理器**。
 
 ## 3. 启动
 
@@ -151,7 +147,7 @@ echo "TAG=0.1.1" >> .env.prod    # prod
 
 | 现象 | 排查 |
 |---|---|
-| 容器启动后立即 Exit 1 | `docker logs seedhelper` 看 ENCRYPTION_KEY / WEB_TOKEN 是否缺失 |
+| 容器启动后立即 Exit 1 | `docker logs seedhelper` 看 WEB_PASSWORD / WEB_TOKEN 是否缺失 |
 | `curl /healthz` connection refused | `docker compose ps` 看是否 healthy；`docker logs seedhelper` 看启动日志 |
 | `db: false` in /healthz | SQLite WAL 文件权限：`ls -la ./data/`；`docker exec seedhelper ls -la /app/data` |
 | 浏览器登录后 session 立即丢失 | 检查浏览器是否禁用第三方 cookie；本机 HTTP 部署下应为同站 cookie，**不会**因 Secure 标志被拒 |
@@ -197,8 +193,7 @@ docker compose -f docker-compose.prod.yml stop
 sqlite3 ./data-prod/seedhelper.db ".backup './data-prod/seedhelper.db.bak'"
 sqlite3 ./data-dev/seedhelper.db ".backup './data-prod/seedhelper.db'"
 
-# 3) 起 prod（因 .env.prod 的 ENCRYPTION_KEY 与 .env 不同，DB 内已加密的凭据无法解密）
-# 需重新配置站点/下载器凭据（这是有意为之，隔离设计）
+# 3) 起 prod
 docker compose -f docker-compose.prod.yml start
 ```
 

@@ -21,14 +21,10 @@ _SECRET_KEYS: Final = frozenset({
     "token",
     "cookie",
     "cookies",
-    "cookies_enc",
     "apikey",
-    "apikey_enc",
     "authorization",
     "secret",
-    "encryption_key",
-    "rss_url_enc",
-    "password_enc",
+    "rss_url",
     "session",
 })
 

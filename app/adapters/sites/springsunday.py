@@ -22,7 +22,7 @@ springsunday.net (SSD) 是 NexusPHP 架构（自定义 Bootstrap 主题）的 PT
 - 剩余时间：``(限时<span title="绝对时刻">X时Y分</span>)`` 紧跟在促销标记 span 之后。
 
 cookie 模式：用户手动从浏览器获取 ``SPRINGID`` cookie，
-加密存储在 sites.cookies_enc，由 AdapterFactory.site 解密注入。
+存储在 sites.cookies，由 AdapterFactory.site 注入。
 不自动登录（AGENTS.md：不引入验证码绕过）。
 """
 

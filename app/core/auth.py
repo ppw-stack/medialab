@@ -25,10 +25,10 @@ PBKDF2_ITERATIONS: Final = 600_000
 _hmac_key: bytes | None = None
 
 
-def init_hmac_key(encryption_key: str) -> None:
-    """从 ENCRYPTION_KEY 派生 session HMAC 密钥（防硬编码盐伪造 cookie）。"""
+def init_hmac_key(web_token: str) -> None:
+    """从 WEB_TOKEN 派生 session HMAC 密钥（防硬编码盐伪造 cookie）。"""
     global _hmac_key
-    _hmac_key = hashlib.sha256(encryption_key.encode() + b"session-hmac").digest()
+    _hmac_key = hashlib.sha256(web_token.encode() + b"session-hmac").digest()
 
 
 def _require_key() -> bytes:

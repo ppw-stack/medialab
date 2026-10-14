@@ -6,8 +6,6 @@
 - **适配器实例**持有 HTTP 连接池，必须复用（每轮新建连接池会耗尽
   PT 站与下载器的连接配额）。因此工厂缓存实例，并在配置变更时
   通过 :meth:`AdapterFactory.invalidate` 重建。
-
-凭据解密在此集中完成——适配层本身不碰数据库、不碰密钥。
 """
 
 from __future__ import annotations
@@ -17,29 +15,10 @@ from app.adapters.downloaders.qbittorrent import QbittorrentAdapter
 from app.adapters.downloaders.transmission import TransmissionAdapter
 from app.adapters.sites import resolve as resolve_site_adapter
 from app.adapters.sites.base import SiteAdapter, SiteProfile
-from app.core.crypto import CredentialCipher
 from app.core.logging import get_logger
 from app.db.models import DownloaderInstance, Site
 
 logger = get_logger(__name__)
-
-class CredentialMissing(RuntimeError):
-    """凭据无法解密（密钥不匹配或记录被篡改，R6）。"""
-
-
-def decrypt_field(
-    cipher: CredentialCipher, value: str | None, *, owner_type: str, owner_id: str | int
-) -> str | None:
-    """解密单个凭据字段；失败时抛错而非静默降级（FR-7 禁止明文回退）。"""
-    if not value:
-        return None
-    plain = cipher.try_decrypt(value, owner_type=owner_type, owner_id=owner_id)
-    if plain is None:
-        raise CredentialMissing(
-            f"{owner_type}:{owner_id} 的凭据无法解密——"
-            "请检查 ENCRYPTION_KEY 是否与写入时一致（FR-7.1）"
-        )
-    return plain
 
 
 def profile_from_site(site: Site) -> SiteProfile:
@@ -57,8 +36,7 @@ class AdapterFactory:
     若将来引入多进程部署，此处需换为进程内单例 + IPC。
     """
 
-    def __init__(self, cipher: CredentialCipher) -> None:
-        self._cipher = cipher
+    def __init__(self) -> None:
         self._downloaders: dict[int, DownloaderAdapter] = {}
         self._sites: dict[int, SiteAdapter] = {}
 
@@ -69,12 +47,7 @@ class AdapterFactory:
         if cached is not None:
             return cached
 
-        password = decrypt_field(
-            self._cipher,
-            row.password_enc,
-            owner_type="downloader",
-            owner_id=row.name,
-        )
+        password = row.password
         adapter = self._build_downloader(row, password)
         self._downloaders[row.id] = adapter
         logger.info(
@@ -123,26 +96,9 @@ class AdapterFactory:
         if cached is not None:
             return cached
         adapter_cls = resolve_site_adapter(row.adapter)
-        # m-team 等现代站点的 API key（FR-1.5.1：解密后注入，不暴露到日志）
-        apikey = None
-        if row.apikey_enc:
-            apikey = decrypt_field(
-                self._cipher,
-                row.apikey_enc,
-                owner_type="site",
-                owner_id=row.name,
-            )
-        # NexusPHP 等站点 session cookies（加密解密后注入）
+        apikey = row.apikey
         # 调用方显式传入的 cookies 优先于 DB 值（覆盖场景）
-        db_cookies = None
-        if row.cookies_enc:
-            db_cookies = decrypt_field(
-                self._cipher,
-                row.cookies_enc,
-                owner_type="site",
-                owner_id=row.name,
-            )
-        resolved_cookies = cookies or db_cookies
+        resolved_cookies = cookies or row.cookies
         adapter = adapter_cls(
             profile_from_site(row),
             cookies=resolved_cookies,
@@ -152,16 +108,13 @@ class AdapterFactory:
         return adapter
 
     def site_rss_url(self, row: Site) -> str | None:
-        """解密站点 RSS 地址（含 passkey，R6 高敏感）。
+        """站点 RSS 地址（含 passkey，R6 高敏感）。
 
         API 模式站点（如 m-team 有 apikey）可能未配置 RSS 地址——
         此时返回 None，由 adapter 内部决定走 API 还是需要 URL。
         调用方不应假定站点一定有 RSS URL（FR-1.5 适配层收拢差异）。
         """
-        url = decrypt_field(
-            self._cipher, row.rss_url_enc, owner_type="site", owner_id=row.name
-        )
-        return url or None
+        return row.rss_url or None
 
     async def downloader_for_id(self, downloader_id: int) -> object | None:
         """按 id 取下载器，缺失返回 None（Cleaner 用）。
@@ -262,9 +215,9 @@ _factory: AdapterFactory | None = None
 
 
 
-def init_factory(cipher: CredentialCipher) -> AdapterFactory:
+def init_factory() -> AdapterFactory:
     global _factory
-    _factory = AdapterFactory(cipher)
+    _factory = AdapterFactory()
     return _factory
 
 

@@ -16,7 +16,7 @@
 #   ./scripts/deploy.sh all status          # 查两套状态
 #   ./scripts/deploy.sh help               # 帮助
 #
-# 前置：每套环境各自的 .env / .env.prod 已就绪（含 ENCRYPTION_KEY / WEB_PASSWORD / WEB_TOKEN）
+# 前置：每套环境各自的 .env / .env.prod 已就绪（含 WEB_PASSWORD / WEB_TOKEN）
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -54,11 +54,11 @@ check_env() {
   local env_file="$1"
   if [ ! -f "$env_file" ]; then
     err "$env_file 不存在"
-    err "  cp .env.example $env_file  并填入 ENCRYPTION_KEY / WEB_PASSWORD / WEB_TOKEN"
+    err "  cp .env.example $env_file  并填入 WEB_PASSWORD / WEB_TOKEN"
     err "  生成命令：python -c \"import secrets; print(secrets.token_urlsafe(32))\""
     return 1
   fi
-  for key in ENCRYPTION_KEY WEB_PASSWORD WEB_TOKEN; do
+  for key in WEB_PASSWORD WEB_TOKEN; do
     if ! grep -q "^${key}=" "$env_file" || [ -z "$(grep "^${key}=" "$env_file" | cut -d= -f2)" ]; then
       err "$env_file 缺少或为空：${key}"
       err "  生成：python -c \"import secrets; print(secrets.token_urlsafe(32))\""

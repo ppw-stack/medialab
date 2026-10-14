@@ -15,11 +15,6 @@ from typing import Literal
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.core.crypto import CredentialCipher
-
-#: 密钥生成提示，避免用户猜测格式
-KEY_HINT = 'python -c "import secrets; print(secrets.token_urlsafe(32))"'
-
 
 class AppSettings(BaseSettings):
     """应用启动配置。所有字段均可用同名大写环境变量覆盖。"""
@@ -59,13 +54,6 @@ class AppSettings(BaseSettings):
     # -- 前端静态资源路径（FR-6.1 SPA 托管）--
     frontend_dist: Path = Path("/app/web/dist")
 
-    # -- 凭据加密（FR-7.1）--
-    encryption_key: SecretStr = Field(
-        ...,
-        description="32 字节 URL-safe base64；缺失则启动失败，禁止明文降级",
-    )
-    key_version: int = 1
-
     # -- 数据库（§8 SQLite 约定）--
     db_path: Path | None = Field(default=None, description="默认 data_dir/seedhelper.db")
     db_journal_mode: Literal["WAL", "DELETE"] = "WAL"
@@ -89,23 +77,6 @@ class AppSettings(BaseSettings):
 
     # -- 优雅停机（FR-8.2）--
     shutdown_grace_seconds: int = 60
-
-    @field_validator("encryption_key")
-    @classmethod
-    def _validate_key(cls, v: SecretStr) -> SecretStr:
-        """fail-fast：密钥必须是 32 字节 base64（FR-7.1）。
-
-        接受 ``secrets.token_urlsafe(32)`` 产出的无填充 URL-safe base64——
-        这是文档与 ``.env.example`` 推荐的生成方式。
-        """
-        raw = v.get_secret_value().strip()
-        if not raw:
-            raise ValueError("ENCRYPTION_KEY 不能为空；生成命令：" + KEY_HINT)
-        try:
-            CredentialCipher(raw)
-        except ValueError as exc:
-            raise ValueError(f"{exc}；生成命令：{KEY_HINT}") from exc
-        return v
 
     @field_validator("web_username")
     @classmethod
@@ -143,5 +114,5 @@ class AppSettings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> AppSettings:
-    """进程内单例。首次调用即触发 ENCRYPTION_KEY 校验，失败则进程启动中止。"""
+    """进程内单例。"""
     return AppSettings()

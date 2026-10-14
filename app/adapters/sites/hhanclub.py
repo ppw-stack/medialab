@@ -18,7 +18,7 @@ HHan 使用 Tailwind 自定义主题，与标准 NexusPHP 表格布局不同，D
 - 折扣：``<font class="halfdown">30%</font>`` 等
 
 cookie 模式：用户手动从浏览器获取 session cookies（c_secure_uid / c_secure_pass 等），
-加密存储在 sites.cookies_enc，由 AdapterFactory.site 解密注入。
+存储在 sites.cookies，由 AdapterFactory.site 注入。
 不自动登录（AGENTS.md：不引入验证码绕过）。
 """
 
