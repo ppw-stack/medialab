@@ -45,7 +45,12 @@ class SiteHealth:
 
 @dataclass(frozen=True, slots=True)
 class FeedItem:
-    """归一化的种子条目（search_torrents 返回值）。"""
+    """归一化的种子条目（search_torrents 返回值）。
+
+    注：本类不再带 ``torrent_url`` 字段——URL 的获取由
+    :meth:`SiteAdapter.get_torrent_url` 在消费时（push / manual push）实时
+    调用，避免"列表页刷时拼"与"详情页拼"的不一致。
+    """
 
     title: str
     link: str
@@ -55,7 +60,6 @@ class FeedItem:
     category: str | None = None
     published_at: datetime | None = None
     description: str = ""
-    torrent_url: str | None = None
     download_factor: float | None = None
     free_payload: dict[str, object] | None = None
 
@@ -95,12 +99,13 @@ class BreakerTripped(RuntimeError):
 class SiteAdapter(ABC):
     """站点统一接口（FR-1.5）。
 
-    5 个契约方法：
+    5+1 个契约方法：
     1. check_reachability: 校验域名可达与登录态
     2. search_torrents: 种子搜索
     3. download_torrent: 下载 .torrent 字节
     4. check_status: 种子状态检查
     5. get_torrent_detail: 种子详情查询
+    6. get_torrent_url: 实时返回 item 的可下载绝对 URL（push 时调用）
     """
 
     #: 适配器类型标识（站点配置 ``adapter`` 字段）
@@ -158,6 +163,19 @@ class SiteAdapter(ABC):
         resp = await self._client.get(url, timeout=self._timeout)
         resp.raise_for_status()
         return resp.content
+
+    @abstractmethod
+    async def get_torrent_url(self, item_id: str) -> str | None:
+        """6. 实时返回该 item 的可下载绝对 URL。
+
+        语义：
+        - 返回 ``None``：无法提供可消费的 URL（如鉴权失败、详情页不可达）。
+        - 返回 ``http(s)://`` 绝对 URL：可直接被 qB/Tr 抓取。
+        - 返回 ``magnet:?xt=urn:btih:...``：BTIH 链接。
+
+        基类不提供默认实现——各 adapter 必须实现。push / manual push 链路
+        在选种/推送时调此方法，URL 不再持久化到 ``torrent_index`` 表。
+        """
 
     @abstractmethod
     async def check_status(self, item_id: str) -> TorrentBrief:

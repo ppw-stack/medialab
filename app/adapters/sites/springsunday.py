@@ -124,6 +124,8 @@ class SpringsundayAdapter(SiteAdapter):
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             },
         )
+        #: 首次 ``get_torrent_url`` 时从 ``/torrents.php`` 列表页抓取并缓存
+        self._passkey_cache: str | None = None
 
     # ------------------------------------------------------------ 内部工具
     @staticmethod
@@ -187,8 +189,9 @@ class SpringsundayAdapter(SiteAdapter):
         注：SSD 的 spstate 语义与标准 NexusPHP 不同——
         ``0``=全部, ``2``=免费, ``7``=30%（不是"所有免费"）。
 
-        返回的 FeedItem.torrent_url 字段已携带完整 passkey URL（从列表页
-        ``<a href="download.php?id=X&passkey=Y">`` 提取），可直接 GET 下载。
+        返回的条目不带下载 URL；下载时调 :meth:`get_torrent_url`，
+        内部分两阶段：(1) 缓存当前用户的 passkey（拉一次列表页）；
+        (2) 拼 ``{base}/download.php?id=X&passkey=Y&https=Z``。
         """
         url = (
             f"{self._base_url()}/torrents.php"
@@ -204,6 +207,49 @@ class SpringsundayAdapter(SiteAdapter):
             return []
         items = SpringsundayAdapter._parse_torrents_html(resp.text, limit=page_size)
         return items
+
+    # ------------------------------------------------------------ 2.5 get_torrent_url
+    async def get_torrent_url(self, item_id: str) -> str | None:
+        """返回 ``{base}/download.php?id=X&passkey=Y&https=Z`` 绝对 URL。
+
+        流程：
+        1. 缓存当前用户 passkey（首次拉一次 ``/torrents.php`` 列表页提取）。
+        2. 拼绝对 URL。
+        """
+        if not item_id:
+            return None
+        pk, https_flag = await self._fetch_passkey()
+        if not pk:
+            return None
+        return (
+            f"{self._base_url()}/download.php"
+            f"?id={item_id}&passkey={pk}&https={https_flag}"
+        )
+
+    async def _fetch_passkey(self) -> tuple[str | None, str]:
+        """从列表页抽一份 passkey + https flag。失败返回 (None, "1")。
+
+        passkey 对当前用户恒定——缓存复用（self._passkey_cache），同一
+        Adapter 实例生命周期内不再二次拉取。
+        """
+        if self._passkey_cache is not None:
+            return self._passkey_cache, "1"
+        url = f"{self._base_url()}/torrents.php?spstate=0"
+        try:
+            resp = await self._client.get(url, timeout=self._timeout)
+        except httpx.HTTPError as exc:
+            logger.warning("SpringSunday 拉列表页（passkey）失败：%s", exc)
+            return None, "1"
+        if resp.status_code >= 400:
+            logger.warning("SpringSunday 拉列表页（passkey）HTTP %d", resp.status_code)
+            return None, "1"
+        m = _SIGNED_DL_RE.search(resp.text)
+        if not m:
+            return None, "1"
+        pk = m.group(2)
+        https_flag = m.group(3) or "1"
+        self._passkey_cache = pk
+        return pk, https_flag
 
     @staticmethod
     def _parse_torrents_html(html: str, *, limit: int = 100) -> list[FeedItem]:
@@ -331,19 +377,6 @@ class SpringsundayAdapter(SiteAdapter):
                     "remaining_abs": remaining_abs,
                 }
 
-            # ---------------- torrent_url：列表页直出 passkey URL
-            torrent_url: str | None = None
-            for dl_a in tr.find_all("a", href=True):
-                dl_href = str(dl_a.get("href") or "")
-                m2 = _SIGNED_DL_RE.search(dl_href)
-                if m2 and m2.group(1) == item_id:
-                    pk, https_flag = m2.group(2), m2.group(3) or "1"
-                    torrent_url = (
-                        f"download.php?id={item_id}"
-                        f"&passkey={pk}&https={https_flag}"
-                    )
-                    break
-
             items.append(
                 FeedItem(
                     title=title,
@@ -354,7 +387,6 @@ class SpringsundayAdapter(SiteAdapter):
                     category=category,
                     description="",
                     published_at=published_at,
-                    torrent_url=torrent_url,
                     free_payload=free_payload,
                 )
             )

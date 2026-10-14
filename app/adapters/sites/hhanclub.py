@@ -167,6 +167,9 @@ class HhanclubAdapter(SiteAdapter):
         注：当前只覆盖"永久免费"窗口；限时活动（HHan 自定义等 → 一）
         因 JS 渲染暂不可见，需要 site 升级为 API 抓取或 headless 浏览器
         才能识别（不引入反爬对抗，AGENTS.md）。
+
+        返回的条目不带下载 URL；下载时调 :meth:`get_torrent_url` 抓详情页
+        提取 ``passkey=...`` 拼 download URL。
         """
         url = (
             f"{self._base_url()}/torrents.php"
@@ -181,38 +184,31 @@ class HhanclubAdapter(SiteAdapter):
             logger.warning("HHanClub 拉取 HTTP %d", resp.status_code)
             return []
         items = HhanclubAdapter._parse_spstate2_html(resp.text, limit=page_size)
-        await self._fill_download_signs(items)
         return items
 
-    async def _fill_download_signs(self, items: list[FeedItem]) -> None:
-        """批量抓 details 页提取 ``passkey=...`` 完整 download URL。
+    # ------------------------------------------------------------ 2.5 get_torrent_url
+    async def get_torrent_url(self, item_id: str) -> str | None:
+        """返回 ``{base}/download.php?id=X&passkey=Y`` 绝对 URL。
 
-        FeedItem 是 frozen dataclass，用 ``dataclasses.replace`` 重建实例并替换原位。
+        HHanClub 不带 ``https`` flag，URL 形如 ``?id=X&passkey=Y``。
         """
-        if not items:
-            return
-        from dataclasses import replace
-
-        for idx, item in enumerate(items):
-            if item.torrent_url or not item.item_id:
-                continue
-            try:
-                resp = await self._client.get(self._detail_url(item.item_id))
-            except httpx.HTTPError as exc:
-                logger.debug("HHanClub 详情页拉取失败 %s: %s", item.item_id, exc)
-                continue
-            if resp.status_code >= 400:
-                continue
-            m = _SIGNED_DL_RE.search(resp.text)
-            if m:
-                item_id, passkey = m.group(1), m.group(2)
-                items[idx] = replace(
-                    item,
-                    torrent_url=(
-                        f"{self._base_url()}/download.php"
-                        f"?id={item_id}&passkey={passkey}"
-                    ),
-                )
+        if not item_id:
+            return None
+        try:
+            resp = await self._client.get(self._detail_url(item_id), timeout=self._timeout)
+        except httpx.HTTPError as exc:
+            logger.debug("HHanClub 详情页拉取失败 %s: %s", item_id, exc)
+            return None
+        if resp.status_code >= 400:
+            return None
+        m = _SIGNED_DL_RE.search(resp.text)
+        if not m:
+            return None
+        signed_id, passkey = m.group(1), m.group(2)
+        return (
+            f"{self._base_url()}/download.php"
+            f"?id={signed_id}&passkey={passkey}"
+        )
 
     @staticmethod
     def _parse_spstate2_html(html: str, *, limit: int = 100) -> list[FeedItem]:
@@ -344,7 +340,6 @@ class HhanclubAdapter(SiteAdapter):
                     category=category,
                     description="",
                     published_at=published_at,
-                    torrent_url=None,  # 由 _fill_download_signs 后填（含 passkey）
                     free_payload=free_payload,
                 )
             )
@@ -357,7 +352,7 @@ class HhanclubAdapter(SiteAdapter):
     async def download_torrent(self, item_id: str) -> bytes:
         """3. 下载 .torrent。
 
-        流程（与 pull 阶段 `_fill_download_signs` 一致）：
+        流程与 :meth:`get_torrent_url` 一致：
         1. GET /details.php?id=X 提取 anchor href 中的 ``passkey=...`` 完整 URL
         2. GET 该完整 URL 拿 bencoded bytes
 

@@ -167,8 +167,8 @@ class OurbitsAdapter(SiteAdapter):
         fetch_all_sites 拉全量入库（含无促销标记的普通种子）—— 是否免费
         留给 WindowParser enrich 阶段判断。
 
-        返回的 FeedItem.torrent_url 字段已携带完整 passkey URL（通过
-        details 页 anchor href 提取），可直接 GET 下载。
+        返回的条目不带下载 URL；下载时调 :meth:`get_torrent_url` 抓详情页
+        提取 ``passkey=...&https=Z`` 拼 download URL。
         """
         url = (
             f"{self._base_url()}/torrents.php"
@@ -183,38 +183,32 @@ class OurbitsAdapter(SiteAdapter):
             logger.warning("OurBits 拉取 HTTP %d", resp.status_code)
             return []
         items = OurbitsAdapter._parse_spstate7_html(resp.text, limit=page_size)
-        await self._fill_download_signs(items)
         return items
 
-    async def _fill_download_signs(self, items: list[FeedItem]) -> None:
-        """批量抓 details 页提取 ``passkey=...`` 完整 download URL。
+    # ------------------------------------------------------------ 2.5 get_torrent_url
+    async def get_torrent_url(self, item_id: str) -> str | None:
+        """返回 ``{base}/download.php?id=X&passkey=Y&https=Z`` 绝对 URL。
 
-        FeedItem 是 frozen dataclass，用 ``dataclasses.replace`` 重建实例并替换原位。
+        流程：GET ``details.php?id=X``，从 anchor href 提取 ``passkey`` 与
+        ``https`` flag 拼完整 download URL。
         """
-        if not items:
-            return
-        from dataclasses import replace
-
-        for idx, item in enumerate(items):
-            if item.torrent_url or not item.item_id:
-                continue
-            try:
-                resp = await self._client.get(self._detail_url(item.item_id))
-            except httpx.HTTPError as exc:
-                logger.debug("OurBits 详情页拉取失败 %s: %s", item.item_id, exc)
-                continue
-            if resp.status_code >= 400:
-                continue
-            m = _SIGNED_DL_RE.search(resp.text)
-            if m:
-                item_id, passkey, https_flag = m.group(1), m.group(2), m.group(3) or "1"
-                items[idx] = replace(
-                    item,
-                    torrent_url=(
-                        f"{self._base_url()}/download.php"
-                        f"?id={item_id}&passkey={passkey}&https={https_flag}"
-                    ),
-                )
+        if not item_id:
+            return None
+        try:
+            resp = await self._client.get(self._detail_url(item_id), timeout=self._timeout)
+        except httpx.HTTPError as exc:
+            logger.debug("OurBits 详情页拉取失败 %s: %s", item_id, exc)
+            return None
+        if resp.status_code >= 400:
+            return None
+        m = _SIGNED_DL_RE.search(resp.text)
+        if not m:
+            return None
+        signed_id, passkey, https_flag = m.group(1), m.group(2), m.group(3) or "1"
+        return (
+            f"{self._base_url()}/download.php"
+            f"?id={signed_id}&passkey={passkey}&https={https_flag}"
+        )
 
     @staticmethod
     def _parse_spstate7_html(html: str, *, limit: int = 100) -> list[FeedItem]:
@@ -341,7 +335,6 @@ class OurbitsAdapter(SiteAdapter):
                     category=category,
                     description="",
                     published_at=published_at,
-                    torrent_url=None,  # 由 _fill_download_signs 后填（含 passkey）
                     free_payload=free_payload,
                 )
             )
@@ -352,7 +345,7 @@ class OurbitsAdapter(SiteAdapter):
     async def download_torrent(self, item_id: str) -> bytes:
         """3. 下载 .torrent。
 
-        流程（与 pull 阶段 `_fill_download_signs` 一致）：
+        流程与 :meth:`get_torrent_url` 一致：
         1. GET /details.php?id=X 提取 anchor href 中的 ``passkey=...`` 完整 URL
         2. GET 该完整 URL 拿 bencoded bytes
 

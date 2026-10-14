@@ -173,8 +173,9 @@ class HdskyAdapter(SiteAdapter):
         - ``free_classes``: 标准 free/twoupfree/halfdown/thirtypercent 等
         - ``remaining_abs``: 限时结束绝对时刻（仅限时条目有）
 
-        返回的 FeedItem.torrent_url 字段（可选）已携带 ``t=...&sign=...``
-        签名参数，可直接 GET 下载 .torrent（绕过 `/download.php?id=X` 的 404）。
+        返回的条目不带下载 URL；下载时调 :meth:`get_torrent_url` 抓详情页
+        提取 ``t=...&sign=...`` 签名参数再拼 download URL（裸 ``/download.php?id=X``
+        永远 404，必须带签名）。
         """
         url = (
             f"{self._base_url()}/torrents.php"
@@ -189,40 +190,32 @@ class HdskyAdapter(SiteAdapter):
             logger.warning("HDSky 拉取 HTTP %d", resp.status_code)
             return []
         items = HdskyAdapter._parse_spstate7_html(resp.text, limit=page_size)
-        # 批量抓详情页提取 t&sign，HDSky 的 /download.php?id=X 直链 404，
-        # 需用 details.php 中的 form action（含 t&sign）才能下载。
-        await self._fill_download_signs(items)
         return items
 
-    async def _fill_download_signs(self, items: list[FeedItem]) -> None:
-        """批量抓 details 页提取 ``t=...&sign=...`` 完整 download URL。
+    # ------------------------------------------------------------ 2.5 get_torrent_url
+    async def get_torrent_url(self, item_id: str) -> str | None:
+        """返回 ``{base}/download.php?id=X&t=...&sign=...`` 绝对 URL。
 
-        FeedItem 是 frozen dataclass，用 ``dataclasses.replace`` 重建实例并替换原位。
+        HDSky 的裸 ``/download.php?id=X`` 永远 404；签名参数只能从详情页
+        ``details.php?id=X`` 的 form action 中提取。
         """
-        if not items:
-            return
-        for idx, item in enumerate(items):
-            if item.torrent_url or not item.item_id:
-                continue
-            try:
-                resp = await self._client.get(self._detail_url(item.item_id))
-            except httpx.HTTPError as exc:
-                logger.debug("HDSky 详情页拉取失败 %s: %s", item.item_id, exc)
-                continue
-            if resp.status_code >= 400:
-                continue
-            m = _SIGNED_DL_RE.search(resp.text)
-            if m:
-                item_id, ts, sign = m.group(1), m.group(2), m.group(3)
-                from dataclasses import replace
-
-                items[idx] = replace(
-                    item,
-                    torrent_url=(
-                        f"{self._base_url()}/download.php"
-                        f"?id={item_id}&t={ts}&sign={sign}"
-                    ),
-                )
+        if not item_id:
+            return None
+        try:
+            resp = await self._client.get(self._detail_url(item_id), timeout=self._timeout)
+        except httpx.HTTPError as exc:
+            logger.debug("HDSky 详情页拉取失败 %s: %s", item_id, exc)
+            return None
+        if resp.status_code >= 400:
+            return None
+        m = _SIGNED_DL_RE.search(resp.text)
+        if not m:
+            return None
+        signed_id, ts, sign = m.group(1), m.group(2), m.group(3)
+        return (
+            f"{self._base_url()}/download.php"
+            f"?id={signed_id}&t={ts}&sign={sign}"
+        )
 
     @staticmethod
     def _parse_spstate7_html(html: str, *, limit: int = 100) -> list[FeedItem]:
@@ -364,7 +357,6 @@ class HdskyAdapter(SiteAdapter):
                     category=category,
                     description="",
                     published_at=published_at,
-                    torrent_url=None,  # 由 _fill_download_signs 后填（含 sign）
                     free_payload=free_payload,
                 )
             )
@@ -375,7 +367,7 @@ class HdskyAdapter(SiteAdapter):
     async def download_torrent(self, item_id: str) -> bytes:
         """3. 下载 .torrent。
 
-        流程（与 pull 阶段 `_fill_download_signs` 一致）：
+        流程与 ``get_torrent_url`` 一致：
         1. GET /details.php?id=X 提取 form action 中的 ``t=...&sign=...`` 完整 URL
         2. GET 该完整 URL 拿 bencoded bytes
 

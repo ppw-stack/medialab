@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 
 from app.adapters.downloaders.base import AddTorrentPayload, DownloaderError
 from app.core.config import AppSettings
@@ -21,6 +21,7 @@ from app.core.timeutils import utcnow
 from app.db.models import (
     DownloaderInstance,
     FreeType,
+    Site,
     Source,
     Torrent,
     TorrentIndex,
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from app.adapters.downloaders.base import DownloaderAdapter
+    from app.adapters.sites.base import SiteAdapter
 
 logger = get_logger(__name__)
 
@@ -109,6 +111,19 @@ class PushFreeService:
             logger.info("push_free: 无新候选")
             return PushResult()
 
+        # 2.5) 按 site_id 预建 adapter 映射——get_torrent_url 实时拉 URL
+        async with session_scope() as session:
+            site_rows = (
+                await session.execute(
+                    select(Site).where(
+                        Site.id.in_({c.site_id for c in candidates})
+                    )
+                )
+            ).scalars().all()
+        site_adapters: dict[int, SiteAdapter] = {
+            row.id: self._factory.site(row) for row in site_rows
+        }
+
         # 3) 逐个推送
         pushed = 0
         skipped_dup = 0
@@ -118,9 +133,14 @@ class PushFreeService:
 
         adapter = self._factory.downloader(default_dl)
         for c in candidates:
-            # URL 合法性：合成/占位 URL（如 mteam 的 api://gen/{id}）qB 必拒绝
-            # —— 在选种阶段就过滤，避免产生无意义 409 错误
-            if not _is_valid_download_url(c.torrent_url):
+            site_adapter = site_adapters.get(c.site_id)
+            if site_adapter is None:
+                failed += 1
+                errors.append(f"site={c.site_id} 适配器缺失")
+                continue
+            # 实时拉取该 item 的可下载 URL
+            url = await site_adapter.get_torrent_url(c.item_id)
+            if not url or not _is_valid_download_url(url):
                 skipped_invalid += 1
                 continue
             # 去重（运行时再查一次，防止两作业并发）
@@ -132,7 +152,7 @@ class PushFreeService:
                 skipped_dup += 1
                 continue
 
-            info_hash = await self._add_one(adapter, c, downloader_id)
+            info_hash = await self._add_one(adapter, c, url, downloader_id)
             if info_hash is None:
                 failed += 1
                 errors.append(f"site={c.site_id} item={c.item_id}: add_torrent failed")
@@ -163,20 +183,22 @@ class PushFreeService:
     async def _select_candidates(
         self, session: AsyncSession, downloader_id: int
     ) -> list[_Candidate]:
-        """选候选免费种：未推过 + 剩余时间满足阈值。"""
+        """选候选免费种：未推过 + 剩余时间满足阈值。
+
+        注：URL 不再从 torrent_index 读——推送时实时调
+        :meth:`SiteAdapter.get_torrent_url` 获取。
+        """
         now = utcnow()
         min_remaining = timedelta(hours=self._settings.push_min_remaining_hours)
         threshold = now + min_remaining
 
-        # 候选集：torrent_index 上 free_type ∈ 真免费/限时免费 的种
-        # 过滤无效 URL（mteam 的 api://gen/{id} 占位）+ 按 last_seen_at DESC
+        # 候选集：torrent_index 上 free_type ∈ 真免费/限时免费 且 item_id 非空
         stmt = (
             select(
                 TorrentIndex.id,
                 TorrentIndex.site_id,
                 TorrentIndex.item_id,
                 TorrentIndex.name,
-                TorrentIndex.torrent_url,
                 TorrentIndex.free_type,
                 TorrentIndex.free_end_at,
             )
@@ -185,12 +207,6 @@ class PushFreeService:
                     (FreeType.PERMANENT, FreeType.TIMED)
                 ),
                 TorrentIndex.item_id.is_not(None),
-                TorrentIndex.torrent_url.is_not(None),
-                # 排除 mteam 的 api://gen/{id} 合成占位 URL
-                or_(
-                    TorrentIndex.torrent_url.like("http%"),
-                    TorrentIndex.torrent_url.like("magnet:%"),
-                ),
             )
             .order_by(TorrentIndex.last_seen_at.desc())
         )
@@ -198,9 +214,9 @@ class PushFreeService:
 
         candidates: list[_Candidate] = []
         for row in rows:
-            idx_id, site_id, item_id, name, torrent_url, free_type, free_end_at = row
+            idx_id, site_id, item_id, name, free_type, free_end_at = row
             # is_not_null 已 WHERE 过滤，类型收窄
-            assert item_id is not None and torrent_url is not None
+            assert item_id is not None
             # 限时种：未过期 且 剩余时间 ≥ 阈值 → 入选
             # 显式拒绝已过期（<= now），避免下载器对一个已失效窗口做无意义拉取
             if (free_type == FreeType.TIMED
@@ -218,7 +234,6 @@ class PushFreeService:
                     site_id=site_id,
                     item_id=item_id,
                     name=name,
-                    torrent_url=torrent_url,
                     free_type=free_type,
                     free_end_at=free_end_at,
                 )
@@ -239,13 +254,13 @@ class PushFreeService:
         return (await session.execute(stmt)).first() is not None
 
     async def _add_one(
-        self, adapter: DownloaderAdapter, c: _Candidate, downloader_id: int
+        self, adapter: DownloaderAdapter, c: _Candidate, url: str, downloader_id: int
     ) -> str | None:
         """调 add_torrent，返回 info_hash（qB 返空串时用合成占位）。"""
         try:
             payload = AddTorrentPayload(
                 name=c.name,
-                urls=(c.torrent_url,),
+                urls=(url,),
                 category="auto-push",
             )
             handle = await adapter.add_torrent(payload)
@@ -356,6 +371,5 @@ class _Candidate:
     site_id: int
     item_id: str
     name: str
-    torrent_url: str
     free_type: str | None = None
     free_end_at: datetime | None = None

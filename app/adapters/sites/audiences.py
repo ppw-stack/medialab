@@ -170,8 +170,8 @@ class AudiencesAdapter(SiteAdapter):
         注：audiences.me 的 spstate 语义与标准 NexusPHP 不同——
         ``0``=全部, ``2``=免费, ``7``=30%（不是"所有免费"）。
 
-        返回的 FeedItem.torrent_url 字段已携带直链 ``download.php?id=X``，
-        可直接 GET 下载 .torrent（无需从详情页提取签名参数）。
+        返回的条目不带下载 URL；下载时调
+        :meth:`get_torrent_url` 拼 ``{base}/download.php?id=X``。
         """
         url = (
             f"{self._base_url()}/torrents.php"
@@ -187,6 +187,16 @@ class AudiencesAdapter(SiteAdapter):
             return []
         items = AudiencesAdapter._parse_torrents_html(resp.text, limit=page_size)
         return items
+
+    # ------------------------------------------------------------ 2.5 get_torrent_url
+    async def get_torrent_url(self, item_id: str) -> str | None:
+        """返回 ``{base}/download.php?id=X`` 绝对 URL（无需签名参数）。
+
+        audiences.me 的 download 直链不需 sign/passkey，可直接 GET。
+        """
+        if not item_id:
+            return None
+        return self._download_url(item_id)
 
     @staticmethod
     def _parse_torrents_html(html: str, *, limit: int = 100) -> list[FeedItem]:
@@ -344,9 +354,6 @@ class AudiencesAdapter(SiteAdapter):
                     "remaining_abs": remaining_abs,
                 }
 
-            # ---------------- torrent_url: 直链（无需签名参数）
-            torrent_url = f"download.php?id={item_id}"
-
             items.append(
                 FeedItem(
                     title=title,
@@ -357,7 +364,6 @@ class AudiencesAdapter(SiteAdapter):
                     category=category,
                     description="",
                     published_at=published_at,
-                    torrent_url=torrent_url,
                     free_payload=free_payload,
                 )
             )

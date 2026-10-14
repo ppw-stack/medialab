@@ -17,7 +17,6 @@ interface TorrentIndexItem {
   free_confidence: number | null
   discount_pct: number | null
   published_at: string | null
-  has_torrent_url: boolean
   pushable: boolean
   first_seen_at: string
   last_seen_at: string

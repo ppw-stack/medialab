@@ -261,6 +261,10 @@ class MteamAdapter(SiteAdapter):
         - keyword: str 关键字
         - categories: list[str] 类目
         - free_only: bool 仅免费
+
+        返回的条目不带下载 URL；下载时调 :meth:`get_torrent_url`，内部分两
+        阶段：(1) ``/api/torrent/genDlToken`` 拿临时下载 URL；(2) 返回
+        该 URL。
         """
         if not self._apikey:
             return []
@@ -324,13 +328,23 @@ class MteamAdapter(SiteAdapter):
                     category=category_map.get(raw_cat, raw_cat) or None,
                     description=raw.get("smallDescr") or "",
                     published_at=MteamAdapter._parse_iso_dt(raw.get("createdDate")),
-                    torrent_url=f"api://gen/{torrent_id}",
                     free_payload={"status": status} if status else None,
                 )
             )
             if len(items) >= _MAX_ITEMS_PER_PULL:
                 break
         return items
+
+    # ------------------------------------------------------------ 2.5 get_torrent_url
+    async def get_torrent_url(self, item_id: str) -> str | None:
+        """返回 m-team 临时下载 URL（``genDlToken`` 产物）。
+
+        流程：POST ``/api/torrent/genDlToken``（form + HMAC-SHA1 签名）→
+        拿到带签名的临时 URL。每次调用都现拿，无缓存（token 一次性、TTL 短）。
+        """
+        if not item_id:
+            return None
+        return await self._gen_dl_token(item_id)
 
     # ------------------------------------------------------------ 3. download_torrent
     async def download_torrent(self, item_id: str) -> bytes:
