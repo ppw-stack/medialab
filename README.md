@@ -13,17 +13,14 @@
 ## 快速开始
 
 ```bash
-# 1. 生成凭据加密密钥（FR-7.1，缺失则启动失败）
-python -c "import secrets; print(secrets.token_urlsafe(32))"
-
-# 2. 配置
+# 1. 配置
 cp .env.example .env
-# 编辑 .env，填入 ENCRYPTION_KEY 与面板凭据
+# 编辑 .env，填入面板凭据
 
-# 3. 启动
+# 2. 启动
 docker compose up -d
 
-# 4. 验证
+# 3. 验证
 curl http://localhost:8080/healthz
 curl http://localhost:8080/metrics | head
 ```
@@ -62,14 +59,13 @@ SQLite (WAL + 单写者队列, §8)
 
 - **`abort_at` 是无例外绝对红线**：所有到点未完成的任务立即中止，不存在豁免。
 - **数据安全第一**：所有删除走 FR-5.2 六重保护 + 路径三重校验；缺失 `get_files` 能力的下载器自动禁用数据删除（R12）。
-- **凭据加密强制**：AES-256-GCM，每条记录 AAD 绑定归属；密钥仅环境变量（AC-17）。
 - **永久免费绝不挂看护**：识别为 `freeleech_permanent` 的任务直接转辅种池（R10）。
 
 ## 目录
 
 ```
 app/
-├── core/          # 配置、加密、时间、日志、指标、窗口核心
+├── core/          # 配置、时间、日志、指标、窗口核心
 ├── adapters/      # 下载器 + 站点双适配层（FR-1 / FR-1.5）
 ├── db/            # SQLAlchemy 2.0 async + WAL + 单写者
 ├── services/      # 调度中心、业务引擎（M2+）
@@ -79,4 +75,4 @@ app/
 
 ## 安全
 
-请**不要**把 `.env` / 数据库备份 / 加密密钥加入 git。密钥丢失 = 凭据不可恢复（FR-7.1）。
+请**不要**把 `.env` / 数据库备份加入 git。

@@ -381,7 +381,6 @@ class SingleWriterQueue:
             # 轻量迁移：create_all 不给已有表加列，补 ALTER（幂等）
             for stmt in (
                 "ALTER TABLE torrents ADD COLUMN zero_seed_rounds INTEGER DEFAULT 0",
-                "ALTER TABLE sites ADD COLUMN cookies_enc TEXT",
                 "ALTER TABLE free_candidates ADD COLUMN torrent_url VARCHAR(512)",
                 "ALTER TABLE torrent_index ADD COLUMN discount_pct INTEGER",
                 "ALTER TABLE downloader_instances DROP COLUMN download_root",

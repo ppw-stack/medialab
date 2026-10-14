@@ -24,7 +24,7 @@ audiences.me 是 NexusPHP 架构（自定义主题）的 PT 站点，基于 cook
 - ``<span title="绝对时刻">剩余时间文案</span>``（紧跟 ``剩余时间：`` 文案）
 
 cookie 模式：用户手动从浏览器获取 session cookies（c_secure_uid / c_secure_pass 等），
-加密存储在 sites.cookies_enc，由 AdapterFactory.site 解密注入。
+存储在 sites.cookies，由 AdapterFactory.site 注入。
 不自动登录（AGENTS.md：不引入验证码绕过）。
 """
 

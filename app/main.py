@@ -1,10 +1,9 @@
 """FastAPI 应用骨架（M1）。
 
 生命周期（lifespan）负责：
-1. 配置校验（``ENCRYPTION_KEY`` fail-fast，FR-7.1）
-2. 数据库初始化（WAL + 单写者，§8）
-3. 调度中心启动（M2 起挂载业务任务）
-4. 优雅停机：停止新调度 → 等待在途命令（最长 60s，FR-8.2）
+1. 数据库初始化（WAL + 单写者，§8）
+2. 调度中心启动（M2 起挂载业务任务）
+3. 优雅停机：停止新调度 → 等待在途命令（最长 60s，FR-8.2）
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ from fastapi.responses import Response
 from app import __version__
 from app.core.auth import hash_password, init_hmac_key
 from app.core.config import AppSettings, get_settings
-from app.core.crypto import build_cipher
 from app.core.logging import configure_logging, get_logger
 from app.core.metrics import render_metrics, state
 from app.db.session import dispose_db, init_db, writer
@@ -38,11 +36,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     grace = float(settings.shutdown_grace_seconds)
 
-    # 适配器工厂必须先于引擎就绪：凭据解密依赖它（FR-7）
-    factory: AdapterFactory = init_factory(build_cipher(settings))
+    # 适配器工厂必须先于引擎就绪（FR-7）
+    factory: AdapterFactory = init_factory()
 
-    # 从 ENCRYPTION_KEY 派生 session HMAC 密钥（防硬编码盐）
-    init_hmac_key(settings.encryption_key.get_secret_value())
+    # 从 WEB_TOKEN 派生 session HMAC 密钥（防硬编码盐）
+    if not settings.web_token:
+        raise RuntimeError("WEB_TOKEN 未配置，无法派生 session HMAC 密钥")
+    init_hmac_key(settings.web_token.get_secret_value())
 
     # 首次启动：明文密码升级为 PBKDF2 哈希（与 web_password 字段存储兼容）
     from pydantic import SecretStr

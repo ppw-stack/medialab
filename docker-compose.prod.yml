@@ -3,7 +3,6 @@
 # - 不同端口（dev:8080 / prod:8081）
 # - 不同 SQLite DB（dev:./data-dev / prod:./data-prod）
 # - 不同日志（dev:./logs-dev / prod:./logs-prod）
-# - 不同 ENCRYPTION_KEY（密钥独立，凭据不互通）
 # - 不同 WEB_TOKEN（互不授权）
 #
 # 启动：
@@ -32,8 +31,6 @@ services:
       WEB_USERNAME: ${WEB_USERNAME:-admin}
       WEB_PASSWORD: ${WEB_PASSWORD}
       WEB_TOKEN: ${WEB_TOKEN}
-      # FR-7.1：缺失则启动失败（AC-17），不要留空
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       # 生产 cron：通常拉取/推送更保守（按主机负载）
       FETCH_ALL_SITES_CRON: ${FETCH_ALL_SITES_CRON:-*/10 * * * *}
       PUSH_FREE_CRON: ${PUSH_FREE_CRON:-*/30 * * * *}
