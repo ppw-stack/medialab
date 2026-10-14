@@ -77,6 +77,9 @@ class Qb5ApiClient:
         self._verify_tls = verify_tls
         self._authed = False
         self._auth_lock = asyncio.Lock()
+        # qB 5.x 失败登录 5 次后 ban IP 30 分钟。记录 ban 截止时间，避免重复触发 ban 计数。
+        # 详见 https://github.com/qbittorrent/qBittorrent/wiki/REST-API-(5.0)#login
+        self._ban_until: float = 0.0
         self._client = httpx.AsyncClient(
             base_url=self._base,
             timeout=timeout,
@@ -100,6 +103,15 @@ class Qb5ApiClient:
                 status_code=0,
                 transient=False,
             )
+        # ban 中直接 raise，不发请求（避免延长 ban 计时器）
+        now = asyncio.get_event_loop().time()
+        if now < self._ban_until:
+            remaining = int(self._ban_until - now)
+            raise Qb5ApiError(
+                f"qBittorrent IP 已被封禁（剩余 {remaining}s，不要继续尝试）",
+                status_code=403,
+                transient=False,
+            )
         try:
             resp = await self._client.post(
                 "/api/v2/auth/login",
@@ -110,20 +122,51 @@ class Qb5ApiClient:
                 f"qBittorrent 网络错误：{exc}", transient=True
             ) from exc
 
-        # qBittorrent 5.x：登录成功返回 200；失败返回 403（IP ban）或 200 但 body="Fails."
+        # qB 5.x 错误分类：
+        #   200 + body="Ok."     → 成功
+        #   200 + body="Fails."  → 密码错（qB 4.x 旧行为）
+        #   401 + body="..."     → 密码错（qB 5.x 新行为）
+        #   403 + body 含"IP"    → 累计 5 次错后 ban 30 分钟
         if resp.status_code == 403:
+            # 检查是否 ban（qB 中文 qB 5.x 返"您的 IP 地址已被封禁"）
+            body = resp.text
+            if "IP" in body or "ip" in body or "封禁" in body or "banned" in body.lower():
+                # 设本地 ban_until = now + 30 分钟（qB 5.x 默认 ban 时长）
+                self._ban_until = asyncio.get_event_loop().time() + 30 * 60
+                raise Qb5ApiError(
+                    "qBittorrent IP 已被封禁 30 分钟（密码可能错，请先确认）",
+                    status_code=403,
+                    transient=False,
+                )
+            # 403 + 非 ban body：可能 Host header validation 失败
             raise Qb5ApiError(
-                "qBittorrent 登录失败（IP 可能被封禁）",
+                f"qBittorrent 拒绝请求（403）：{body[:200]}",
                 status_code=403,
                 transient=False,
             )
-        if "Fails" in resp.text:
+        if resp.status_code == 401:
+            # 401 = 密码错（qB 5.x 新行为）
             raise Qb5ApiError(
-                "qBittorrent 登录失败",
-                status_code=resp.status_code,
+                "qBittorrent 登录失败：密码错误（401）",
+                status_code=401,
                 transient=False,
             )
-        self._authed = True
+        if resp.status_code == 200:
+            if "Fails" in resp.text:
+                raise Qb5ApiError(
+                    "qBittorrent 登录失败：密码错误",
+                    status_code=200,
+                    transient=False,
+                )
+            if "Ok" in resp.text:
+                self._authed = True
+                return
+        # 其它未知状态
+        raise Qb5ApiError(
+            f"qBittorrent 登录异常：HTTP {resp.status_code} body={resp.text[:200]}",
+            status_code=resp.status_code,
+            transient=False,
+        )
 
     async def _request(
         self,
@@ -143,7 +186,8 @@ class Qb5ApiClient:
             ) from exc
 
         # 401/403：可能 cookie 失效，重登一次
-        if resp.status_code in (401, 403) and retry_on_auth:
+        # 仅在 login 成功过（self._authed=True）才重试；login 失败的 401 是密码错
+        if resp.status_code in (401, 403) and retry_on_auth and self._authed:
             self._authed = False
             await self._ensure_auth()
             return await self._request(method, path, retry_on_auth=False, **kw)
