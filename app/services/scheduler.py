@@ -142,6 +142,19 @@ class SchedulerCenter:
             self._scheduler.remove_job(name)
         return True
 
+    def update_cron(self, name: str, cron: str) -> bool:
+        """更新作业的 cron 表达式（运行时切换，立即生效）。"""
+        spec = self._specs.get(name)
+        if spec is None:
+            return False
+        # 先校验 cron 格式（不合法时直接抛，让上层返 400）
+        CronTrigger.from_crontab(cron, timezone=self._tz)
+        spec.cron = cron
+        if self._scheduler is not None and spec.enabled:
+            # replace_existing=True 复用现有 job 槽
+            self._schedule(spec)
+        return True
+
     def list_jobs(self) -> list[dict[str, object]]:
         return [
             {

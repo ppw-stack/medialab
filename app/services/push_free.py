@@ -203,9 +203,11 @@ class PushFreeService:
             assert item_id is not None and torrent_url is not None
             # 限时种：未过期 且 剩余时间 ≥ 阈值 → 入选
             # 显式拒绝已过期（<= now），避免下载器对一个已失效窗口做无意义拉取
-            if free_type == FreeType.TIMED:
-                if free_end_at is None or free_end_at <= now or free_end_at < threshold:
-                    continue
+            if (free_type == FreeType.TIMED
+                    and (free_end_at is None
+                         or free_end_at <= now
+                         or free_end_at < threshold)):
+                continue
             # 永久免费：free_end_at 必为 None，永远入选
             # 已经在 torrents 表里则跳过
             if await self._is_already_pushed(session, site_id, item_id, downloader_id):

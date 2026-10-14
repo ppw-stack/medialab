@@ -33,6 +33,8 @@ const JOB_LABELS: Record<string, { name: string; desc: string }> = {
 
 const data = ref<SchedulerInfo | null>(null)
 const runningJob = ref<string | null>(null)
+const cronDraft = ref<string>('')
+const savingCron = ref(false)
 let timer: ReturnType<typeof setInterval> | null = null
 
 async function load() {
@@ -49,6 +51,45 @@ onMounted(() => {
 onUnmounted(() => {
   if (timer) clearInterval(timer)
 })
+
+// 哪个 job 的 cron popover 打开（用于行高亮），null 表示都关
+const editingCron = ref<string | null>(null)
+const cronPopoverOpen = ref<Record<string, boolean>>({})
+
+function openCronEditor(job: Job) {
+  editingCron.value = job.name
+  cronPopoverOpen.value = { ...cronPopoverOpen.value, [job.name]: true }
+  cronDraft.value = job.cron
+}
+
+function closeCronEditor() {
+  editingCron.value = null
+  cronPopoverOpen.value = {}
+  cronDraft.value = ''
+}
+
+async function saveCron(job: Job) {
+  const v = cronDraft.value.trim()
+  if (!v) {
+    message.warning('cron 不能为空')
+    return
+  }
+  if (v === job.cron) {
+    closeCronEditor()
+    return
+  }
+  savingCron.value = true
+  try {
+    await api.post(`/scheduler/${job.name}/cron`, { cron: v })
+    message.success(`${job.name} cron → ${v}`)
+    closeCronEditor()
+    load()
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '修改失败')
+  } finally {
+    savingCron.value = false
+  }
+}
 
 async function toggle(name: string, enabled: boolean) {
   await api.post(`/scheduler/${name}/toggle?enabled=${enabled}`)
@@ -135,7 +176,44 @@ function jobLabel(name: string) {
               <span class="job-item__id mono">{{ job.name }}</span>
             </div>
             <div class="job-item__desc">{{ jobLabel(job.name)?.desc || '—' }}</div>
-            <div class="job-item__cron mono">{{ job.cron }}</div>
+            <a-popover
+              :open="!!cronPopoverOpen[job.name]"
+              trigger="click"
+              placement="bottomLeft"
+              :destroy-tooltip-on-hide="true"
+              @update:open="(o: boolean) => { cronPopoverOpen = { ...cronPopoverOpen, [job.name]: o }; if (!o) editingCron = null }"
+            >
+              <template #content>
+                <div class="cron-editor">
+                  <div class="cron-editor__label">cron 表达式（5 字段：分 时 日 月 星期）</div>
+                  <a-input
+                    v-model:value="cronDraft"
+                    placeholder="*/10 * * * *"
+                    size="small"
+                    @keydown.enter="saveCron(job)"
+                  />
+                  <div class="cron-editor__actions">
+                    <a-button size="small" @click="closeCronEditor">取消</a-button>
+                    <a-button
+                      size="small"
+                      type="primary"
+                      :loading="savingCron"
+                      @click="saveCron(job)"
+                    >
+                      保存
+                    </a-button>
+                  </div>
+                </div>
+              </template>
+              <div
+                class="job-item__cron mono"
+                :class="{ 'job-item__cron--editing': editingCron === job.name }"
+                @click.stop="openCronEditor(job)"
+              >
+                {{ job.cron }}
+                <span class="job-item__cron-edit">编辑</span>
+              </div>
+            </a-popover>
           </div>
           <div class="job-item__actions">
             <a-switch
@@ -255,6 +333,49 @@ function jobLabel(name: string) {
   font-size: var(--text-xs);
   color: var(--text-tertiary);
   letter-spacing: 0.05em;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 2px 6px;
+  border-radius: var(--r-sm, 4px);
+  transition: background 0.12s ease;
+}
+.job-item__cron:hover {
+  background: var(--bg-hover, rgba(0, 0, 0, 0.04));
+  color: var(--text-primary);
+}
+.job-item__cron--editing {
+  background: var(--brand-50, #fef3ee);
+  color: var(--brand-700, #c84a1f);
+}
+.job-item__cron-edit {
+  font-size: 10px;
+  padding: 1px 6px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.job-item__cron:hover .job-item__cron-edit {
+  opacity: 0.7;
+}
+
+.cron-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  width: 280px;
+}
+.cron-editor__label {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.cron-editor__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
 }
 
 .job-item__actions {

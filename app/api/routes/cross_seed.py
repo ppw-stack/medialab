@@ -5,6 +5,7 @@
 
 - ``GET /scheduler``：查询调度作业状态（自动从注册的 JobSpec 列表生成）
 - ``POST /scheduler/{job_name}/toggle``：启停单个作业
+- ``POST /scheduler/{job_name}/cron``：运行时修改 cron 表达式
 - ``POST /scheduler/{job_name}/run``：手动触发作业（不等 cron）
 - ``GET /sites/{site_id}/feed-test``：测试站点 RSS 可达性，纯诊断
 
@@ -17,10 +18,12 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
+from apscheduler.triggers.cron import CronTrigger
 
 from app.api.auth import require_session
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.db.models import Site
 from app.db.session import session_scope
@@ -75,6 +78,26 @@ async def toggle_job(job_name: str, enabled: bool) -> dict[str, Any]:
     if not scheduler_center.enable(job_name, enabled):
         raise HTTPException(status_code=404, detail=f"作业不存在：{job_name}")
     return {"job": job_name, "enabled": enabled}
+
+
+class UpdateCronIn(BaseModel):
+    cron: str = Field(..., min_length=1, max_length=64,
+                      description="标准 5 字段 cron 表达式")
+
+
+@router.post("/scheduler/{job_name}/cron", summary="修改作业的 cron 表达式")
+async def update_job_cron(job_name: str, payload: UpdateCronIn) -> dict[str, Any]:
+    """运行时切换 cron 表达式，立即对下一次调度生效。
+
+    不合法 cron 返 400（由 :func:`CronTrigger.from_crontab` 抛 ValueError）。
+    """
+    try:
+        CronTrigger.from_crontab(payload.cron, timezone=get_settings().timezone)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=f"cron 表达式不合法：{exc}") from exc
+    if not scheduler_center.update_cron(job_name, payload.cron):
+        raise HTTPException(status_code=404, detail=f"作业不存在：{job_name}")
+    return {"job": job_name, "cron": payload.cron}
 
 
 @router.post(
