@@ -1,0 +1,63 @@
+# 生产环境（部署在 192.168.0.128 — Unraid Tower，端口 8091，独立配置 .env.prod）
+# 与 docker-compose.yml (dev — 本机) 共享同一镜像但完全独立的数据/配置：
+# - 不同主机（dev:192.168.0.92 本机 / prod:192.168.0.128 Unraid）
+# - 不同端口（dev:8080 / prod:8091）
+# - 不同 SQLite DB（dev:./data-dev / prod:/mnt/user/appdata/seedhelper/data）
+# - 不同日志（dev:./logs-dev / prod:/mnt/user/appdata/seedhelper/logs）
+# - 不同 WEB_TOKEN（互不授权）
+#
+# 镜像通过 GH Actions 自动构建并推 Docker Hub（docker.io/ppw111/seedhelper，public）。
+# 128 端正常 docker pull 即用（不需要本机 save/scp 预置）。
+#
+# 启动（从本机推代码后，在 128 上执行）：
+#   cd /mnt/user/appdata/seedhelper/app
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+# 或：
+#   ./scripts/deploy.sh prod
+#
+# 容器网络：Unraid docker bridge (172.17.0.0/16) 无 LAN 隔离，容器直连 192.168.0.0/24。
+# 推送时 qB (192.168.0.172:9090) 直接可达；save_path 是 qB 自身路径 (/share/Public/...)，
+# seedhelper 容器不需挂 172 共享（本地不进行下载）。
+
+services:
+  seedhelper-prod:
+    image: docker.io/ppw111/seedhelper:${TAG:-0.1.0}
+    container_name: seedhelper-prod
+    restart: unless-stopped
+    ports:
+      - "8091:8080"           # 主机 8091 → 容器 8080（避开 8081 qB / 8080 immich）
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_JSON: ${LOG_JSON:-true}
+      WEB_USERNAME: ${WEB_USERNAME:-admin}
+      WEB_PASSWORD: ${WEB_PASSWORD}
+      WEB_TOKEN: ${WEB_TOKEN}
+      # 生产 cron：通常拉取/推送更保守（按主机负载）
+      FETCH_ALL_SITES_CRON: ${FETCH_ALL_SITES_CRON:-*/10 * * * *}
+      PUSH_FREE_CRON: ${PUSH_FREE_CRON:-*/30 * * * *}
+    env_file:
+      - .env.prod
+    volumes:
+      - /mnt/user/appdata/seedhelper/config:/app/config
+      - /mnt/user/appdata/seedhelper/data:/app/data       # SQLite WAL 文件（prod 独立）
+      - /mnt/user/appdata/seedhelper/logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    stop_grace_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 1G              # 生产给稍大（多一组调度作业并发）
+          cpus: "2.0"
+        reservations:
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "10"           # 生产多保留（10 × 20M = 200M）
