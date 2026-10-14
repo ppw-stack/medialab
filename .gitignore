@@ -18,8 +18,11 @@ htmlcov/
 coverage.xml
 
 # ---- Runtime data (FR-8.1 volumes) ----
+# 覆盖 dev/prod 两套环境（data-dev/ data-prod/ logs-dev/ logs-prod/）
 data/
+data-*/
 logs/
+logs-*/
 config/local.yaml
 *.db
 *.db-wal

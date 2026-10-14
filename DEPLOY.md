@@ -1,6 +1,6 @@
 # 部署指南
 
-Docker 单容器生产部署。SQLite + WAL + 命名卷持久化。
+Docker 单机双环境部署（dev + prod），共享同一镜像但完全独立的数据/配置。SQLite + WAL + bind mount 持久化。
 
 ## 0. 安全声明（先读）
 
@@ -12,10 +12,21 @@ Docker 单容器生产部署。SQLite + WAL + 命名卷持久化。
 > 公网直连 **强烈建议** 在反代后做 HTTPS（cookie `Secure` 标志 + Let's Encrypt）。
 
 **未实现的项**（用户已确认）：
-- HTTPS / 反代（`compose.yml` 仅暴露 `8080`）
-- 数据库自动备份（`./data/seedhelper.db` 用户自备份）
+- HTTPS / 反代（仅暴露 HTTP 8080/8091）
+- 数据库自动备份（用户自备份）
 - 监控告警（仅暴露 `/healthz` + `/metrics` 端点）
-- 滚动发布 / 多实例（SQLite 单写者，单容器 + 1 worker）
+- 滚动发布 / 多实例（SQLite 单写者，每套环境单容器 + 1 worker）
+
+## 1. 双环境架构
+
+| 环境 | 端口 | 数据目录 | 凭据文件 | 容器名 |
+|---|---|---|---|---|
+| **dev**  | 8080 | `./data-dev/`  | `.env`      | `seedhelper-dev`  |
+| **prod** | 8091 | `./data-prod/` | `.env.prod` | `seedhelper-prod` |
+
+> 注：prod 用 8091 而非 8081 是因为本机 8081 已被 qBittorrent 容器占用。生产服务器无此冲突时改回 8081 也可（修改 `docker-compose.prod.yml` 的 ports）。
+
+两套**完全独立**：不同端口、不同 SQLite DB、不同加密密钥（凭据互不互通）、不同 Web Token。**生产从 dev 导入数据**用 `sqlite3 .backup`（见第 7 节）。
 
 ## 1. 前置条件
 
@@ -26,7 +37,7 @@ Docker 单容器生产部署。SQLite + WAL + 命名卷持久化。
 | 主机端口 | 8080 空闲 | `lsof -i :8080` |
 | 磁盘 | >= 5 GB 可用 | `df -h .` |
 
-## 2. 准备 `.env`
+## 2. 准备 `.env`（dev）
 
 ```bash
 cp .env.example .env
@@ -59,22 +70,41 @@ FETCH_ALL_SITES_CRON=*/10 * * * *
 PUSH_FREE_CRON=*/30 * * * *
 ```
 
-**注意**：`.env` 已在 `.gitignore`，不会进 git。但应**额外备份到密码管理器**（密钥丢失 = 凭据不可恢复，FR-7.1）。
+## 2.5 准备 `.env.prod`（生产）
+
+**生产密钥必须与 dev 不同**（否则凭据互可解密，违反隔离原则）。直接用 `deploy.sh prod` 第一次会引导生成。
+
+```bash
+# 方式 A：一键脚本自动创建 .env.prod（如果不存在）
+./scripts/deploy.sh prod deploy
+
+# 方式 B：手工
+cp .env.example .env.prod
+# 用上面的 secrets 命令生成 3 个新值，覆盖 .env.prod 里的占位
+```
+
+**注意**：`.env` 和 `.env.prod` 都已在 `.gitignore`，不会进 git。但应**额外备份到密码管理器**（密钥丢失 = 凭据不可恢复，FR-7.1）。
 
 ## 3. 启动
 
 ### 一键脚本
 
 ```bash
-./scripts/deploy.sh
+./scripts/deploy.sh                # dev deploy（8080）
+./scripts/deploy.sh prod           # prod deploy（8091）
+./scripts/deploy.sh all deploy     # dev + prod 都 deploy
 ```
 
 ### 手动
 
 ```bash
+# dev
 docker compose build
 docker compose up -d
-docker compose ps
+
+# prod
+docker compose -f docker-compose.prod.yml --env-file .env.prod build
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
 ```
 
 启动后等待 15 秒让 healthcheck 通过。
@@ -83,16 +113,20 @@ docker compose ps
 
 ```bash
 # 健康检查
-curl -fsS http://localhost:8080/healthz
+curl -fsS http://localhost:8080/healthz  # dev
+curl -fsS http://localhost:8091/healthz  # prod
 # 期望：{"status":"ok","db":true,"version":"0.1.0"}
 
 # 指标端点
 curl -fsS http://localhost:8080/metrics | head
-# 期望：Prometheus 文本（# HELP / # TYPE）
 
 # Web UI
-xdg-open http://localhost:8080  # macOS: open
+xdg-open http://localhost:8080  # dev
+xdg-open http://localhost:8091  # prod
 # 浏览器登录：用户名=WEB_USERNAME、密码=WEB_PASSWORD
+
+# 状态总览
+./scripts/deploy.sh all status
 ```
 
 ## 5. 升级
@@ -101,15 +135,17 @@ xdg-open http://localhost:8080  # macOS: open
 # 1) 拉新代码
 git pull
 
-# 2) 改 TAG（默认 0.1.0）
-echo "TAG=0.1.1" >> .env
+# 2) 改 TAG（默认 0.1.0）—— 一套 .env 改 TAG 即升级对应环境
+echo "TAG=0.1.1" >> .env         # dev
+echo "TAG=0.1.1" >> .env.prod    # prod
 
 # 3) 重新构建 + 滚动重启
-docker compose build
-docker compose up -d
+./scripts/deploy.sh              # 仅 dev
+./scripts/deploy.sh prod         # 仅 prod
+./scripts/deploy.sh all deploy   # 两套都升级
 ```
 
-`stop_grace_period: 60s` 保证 SIGTERM 优雅停机（FR-8.2：等待在途作业收敛）。SQLite WAL 文件在 `./data/seedhelper.db*`，**升级不会丢数据**。
+`stop_grace_period: 60s` 保证 SIGTERM 优雅停机（FR-8.2：等待在途作业收敛）。SQLite WAL 文件在 `./data-{dev,prod}/seedhelper.db*`，**升级不会丢数据**。
 
 ## 6. 排错
 
@@ -130,11 +166,13 @@ docker compose up -d
 
 ```bash
 # 停服（防 SQLite 写中）—— 注意会中断推送/拉取
-docker compose stop
+docker compose stop  # dev
+docker compose -f docker-compose.prod.yml stop  # prod
 
 # 拷贝
 mkdir -p ./backups/$(date +%Y%m%d)
-cp ./data/seedhelper.db* ./backups/$(date +%Y%m%d)/
+cp ./data-dev/seedhelper.db* ./backups/$(date +%Y%m%d)/
+# 或 prod：cp ./data-prod/seedhelper.db* ./backups/$(date +%Y%m%d)/
 
 # 起服
 docker compose start
@@ -143,20 +181,42 @@ docker compose start
 更安全的方式（无需停服，但依赖 `sqlite3` CLI 在主机上）：
 
 ```bash
-sqlite3 ./data/seedhelper.db ".backup './backups/$(date +%Y%m%d)/seedhelper.db'"
+# dev
+sqlite3 ./data-dev/seedhelper.db ".backup './backups/$(date +%Y%m%d)/seedhelper.db'"
+# prod
+sqlite3 ./data-prod/seedhelper.db ".backup './backups/$(date +%Y%m%d)/seedhelper-prod.db'"
+```
+
+**dev → prod 数据迁移**（首次或同步）：
+
+```bash
+# 1) 停 prod 防写中
+docker compose -f docker-compose.prod.yml stop
+
+# 2) 备份式拷贝（保持事务一致）
+sqlite3 ./data-prod/seedhelper.db ".backup './data-prod/seedhelper.db.bak'"
+sqlite3 ./data-dev/seedhelper.db ".backup './data-prod/seedhelper.db'"
+
+# 3) 起 prod（因 .env.prod 的 ENCRYPTION_KEY 与 .env 不同，DB 内已加密的凭据无法解密）
+# 需重新配置站点/下载器凭据（这是有意为之，隔离设计）
+docker compose -f docker-compose.prod.yml start
 ```
 
 ## 8. 目录约定
 
 ```
-./                  # 仓库根（部署主机）
-├── .env            # 凭据（git 忽略）
-├── docker-compose.yml
+./                      # 仓库根（部署主机）
+├── .env                # dev 凭据（git 忽略）
+├── .env.prod           # prod 凭据（git 忽略，必须与 .env 不同）
+├── docker-compose.yml  # dev 配置
+├── docker-compose.prod.yml  # prod 配置
 ├── Dockerfile
-├── data/           # SQLite WAL 持久化（git 忽略）
-├── logs/           # 应用日志（git 忽略）
-├── config/         # 配置文件预留
-├── backups/        # 用户自备份（git 忽略）
+├── data-dev/           # dev SQLite WAL（git 忽略）
+├── data-prod/          # prod SQLite WAL（git 忽略）
+├── logs-dev/           # dev 日志（git 忽略）
+├── logs-prod/          # prod 日志（git 忽略）
+├── config/             # 配置文件预留
+├── backups/            # 用户自备份（git 忽略）
 └── scripts/
     └── deploy.sh
 ```
@@ -164,20 +224,19 @@ sqlite3 ./data/seedhelper.db ".backup './backups/$(date +%Y%m%d)/seedhelper.db'"
 容器内部：
 
 ```
-/app/data/    # 对应 ./data
-/app/logs/     # 对应 ./logs
+/app/data/    # 对应 ./data-{dev,prod}
+/app/logs/     # 对应 ./logs-{dev,prod}
 /app/config/  # 对应 ./config
 /app/web/dist # 前端构建产物（已 bake 进镜像）
 ```
 
 ## 9. 资源基线
 
-`compose.yml` 默认值（可按主机调整）：
-
-| 资源 | 限制 | 预留 |
+| 资源 | dev | prod |
 |---|---|---|
-| Memory | 512 MB | 128 MB |
-| CPU | 1.0 核 | 无（best-effort） |
-| 日志 | 20 MB × 5 = 100 MB | json-file 驱动 |
+| Memory limit | 512 MB | 1 GB |
+| Memory reserved | 128 MB | 256 MB |
+| CPU limit | 1.0 核 | 2.0 核 |
+| 日志 | 20 MB × 5 = 100 MB | 20 MB × 10 = 200 MB |
 
-实测空闲 ~120 MB RSS、CPU < 3%（非功能 §6）。如需更高并发 / 更大 SQLite 连接池，可调高。
+实测空闲 ~120 MB RSS、CPU < 3%（非功能 §6）。如需更高并发 / 更大 SQLite 连接池，可调高。**两套同时跑**总资源 ~1.5 GB 内存 / 3 核。

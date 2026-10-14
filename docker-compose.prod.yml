@@ -1,0 +1,65 @@
+# 生产环境（端口 8081，数据 ./data-prod/，独立配置 .env.prod）
+# 与 docker-compose.yml (dev) 共享同一镜像但完全独立的数据/配置：
+# - 不同端口（dev:8080 / prod:8081）
+# - 不同 SQLite DB（dev:./data-dev / prod:./data-prod）
+# - 不同日志（dev:./logs-dev / prod:./logs-prod）
+# - 不同 ENCRYPTION_KEY（密钥独立，凭据不互通）
+# - 不同 WEB_TOKEN（互不授权）
+#
+# 启动：
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+# 或：
+#   ./scripts/deploy.sh prod
+#
+# 数据迁移（dev → prod）：用 sqlite3 .backup 命令（参考 DEPLOY.md 第 7 节）
+
+services:
+  seedhelper-prod:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PY_IMAGE: ${PY_IMAGE:-python:3.12-slim}
+    image: seedhelper/seedhelper:${TAG:-0.1.0}
+    container_name: seedhelper-prod
+    restart: unless-stopped
+    ports:
+      - "8091:8080"           # 主机 8091 → 容器 8080（避开 8081 qB）
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_JSON: ${LOG_JSON:-true}
+      WEB_USERNAME: ${WEB_USERNAME:-admin}
+      WEB_PASSWORD: ${WEB_PASSWORD}
+      WEB_TOKEN: ${WEB_TOKEN}
+      # FR-7.1：缺失则启动失败（AC-17），不要留空
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      # 生产 cron：通常拉取/推送更保守（按主机负载）
+      FETCH_ALL_SITES_CRON: ${FETCH_ALL_SITES_CRON:-*/10 * * * *}
+      PUSH_FREE_CRON: ${PUSH_FREE_CRON:-*/30 * * * *}
+    env_file:
+      - .env.prod
+    volumes:
+      - ./config:/app/config
+      - ./data-prod:/app/data       # SQLite WAL 文件（prod 独立）
+      - ./logs-prod:/app/logs
+      - /data/torrents:/data/torrents   # 共享下载目录（与 dev 共用主机挂载）
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    stop_grace_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 1G              # 生产给稍大（多一组调度作业并发）
+          cpus: "2.0"
+        reservations:
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "10"           # 生产多保留（10 × 20M = 200M）

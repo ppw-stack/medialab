@@ -1,12 +1,13 @@
 services:
-  seedhelper:
+  # 开发环境（端口 8080，数据 ./data-dev/）
+  seedhelper-dev:
     build:
       context: .
       dockerfile: Dockerfile
       args:
         PY_IMAGE: ${PY_IMAGE:-python:3.12-slim}
     image: seedhelper/seedhelper:${TAG:-0.1.0}
-    container_name: seedhelper
+    container_name: seedhelper-dev
     restart: unless-stopped
     ports:
       - "8080:8080"
@@ -27,8 +28,8 @@ services:
       - .env
     volumes:
       - ./config:/app/config
-      - ./data:/app/data          # SQLite WAL 文件（持久化）
-      - ./logs:/app/logs
+      - ./data-dev:/app/data         # SQLite WAL 文件（dev 独立）
+      - ./logs-dev:/app/logs
       - /data/torrents:/data/torrents   # 共享下载目录（空间统计 + 回收站 rename 目标）
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
