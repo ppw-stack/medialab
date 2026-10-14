@@ -344,16 +344,16 @@ const columns = [
       (a.free_end_at ?? '').localeCompare(b.free_end_at ?? ''),
   },
   {
-    title: '发布', key: 'published_at', dataIndex: 'published_at', width: 170,
+    title: '发布', key: 'published_at', dataIndex: 'published_at', width: 160,
     sorter: (a: TorrentIndexItem, b: TorrentIndexItem) =>
       (a.published_at ?? '').localeCompare(b.published_at ?? ''),
   },
   {
-    title: '最近拉取', key: 'last_seen_at', dataIndex: 'last_seen_at', width: 170,
+    title: '最近拉取', key: 'last_seen_at', dataIndex: 'last_seen_at', width: 160,
     sorter: (a: TorrentIndexItem, b: TorrentIndexItem) =>
       (a.last_seen_at ?? '').localeCompare(b.last_seen_at ?? ''),
   },
-  { title: '', key: 'action', width: 80, fixed: 'right' },
+  { title: '', key: 'action', width: 100, fixed: 'right' },
 ]
 </script>
 
@@ -440,7 +440,7 @@ const columns = [
         }"
         :on-change="onTableChange"
         row-key="id"
-        :scroll="{ x: 1350 }"
+        :scroll="{ x: 1310 }"
         size="middle"
       >
         <template #bodyCell="{ column, record }">
