@@ -8,16 +8,14 @@ on:
     branches: [main]
 
 env:
-  REGISTRY: ghcr.io
-  # 显式命名：避免 GHCR 把仓库名 'ptHelper' 自动小写化为 'pthelper' 导致后续引用错乱
-  IMAGE_NAME: ppw-stack/seedhelper
+  REGISTRY: docker.io
+  IMAGE_NAME: ppw111/seedhelper
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,13 +23,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GHCR
+      - name: Log in to Docker Hub
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract metadata
         id: meta
@@ -64,38 +62,46 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Set GHCR package visibility to public
+      - name: Set Docker Hub repo visibility to public
         if: github.event_name != 'pull_request'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DH_NAMESPACE: ppw111
+          DH_REPO: seedhelper
         run: |
-          PACKAGE_NAME="seedhelper"
-          OWNER="${GITHUB_REPOSITORY_OWNER:-ppw-stack}"
-          REPO="${GITHUB_REPOSITORY##*/}"
-          ENDPOINTS=(
-            "/user/packages/container/${PACKAGE_NAME}"
-            "/users/${OWNER}/packages/container/${PACKAGE_NAME}"
-            "/repos/${OWNER}/${REPO}/packages/container/${PACKAGE_NAME}"
-            "/orgs/${OWNER}/packages/container/${PACKAGE_NAME}"
-          )
-          for EP in "${ENDPOINTS[@]}"; do
-            echo "::group::trying $EP"
-            for i in 1 2 3; do
-              RESP=$(gh api -X PATCH -f visibility=public "$EP" 2>&1)
-              HTTP_CODE=$(gh api -X PATCH -f visibility=public -i "$EP" 2>/dev/null | head -1 | awk '{print $2}')
-              echo "  attempt=$i http_code=$HTTP_CODE"
-              echo "  body: $RESP" | head -c 400
-              echo
-              if [ "$HTTP_CODE" = "200" ]; then
-                echo "✓ ${PACKAGE_NAME} set to public via $EP"
-                echo "::endgroup::"
-                exit 0
-              fi
-              sleep 2
-            done
-            echo "::endgroup::"
+          # Docker Hub v2 API：PATCH /v2/repositories/{namespace}/{repo}/
+          # Authorization: JWT（用 username + token 换短时 JWT）
+          # 详细：https://docs.docker.com/docker-hub/api/latest/
+          for i in 1 2 3 4 5; do
+            JWT=$(curl -sS -X POST \
+              -H "Content-Type: application/json" \
+              -d "{\"username\":\"${{ secrets.DOCKERHUB_USERNAME }}\",\"password\":\"${{ secrets.DOCKERHUB_TOKEN }}\"}" \
+              "https://hub.docker.com/v2/users/login/" | jq -r .token 2>/dev/null)
+            if [ -n "$JWT" ] && [ "$JWT" != "null" ]; then
+              echo "✓ got JWT (len=${#JWT})"
+              break
+            fi
+            echo "attempt=$i: no JWT, retry in 3s"
+            sleep 3
           done
-          # 全部 404：检查当前 token 权限
-          echo "::warning::all 4 endpoints failed, dumping token scope"
-          gh api -i /user 2>&1 | head -5
+          if [ -z "$JWT" ] || [ "$JWT" = "null" ]; then
+            echo "::error::failed to obtain Docker Hub JWT"
+            exit 1
+          fi
+          for i in 1 2 3 4 5; do
+            RESP=$(curl -sS -X PATCH \
+              -H "Authorization: JWT ${JWT}" \
+              -H "Content-Type: application/json" \
+              -d '{"is_private":false}' \
+              -w "\n%{http_code}" \
+              "https://hub.docker.com/v2/repositories/${DH_NAMESPACE}/${DH_REPO}/")
+            HTTP_CODE=$(echo "$RESP" | tail -n1)
+            BODY=$(echo "$RESP" | head -n-1)
+            echo "attempt=$i http_code=$HTTP_CODE body=$BODY"
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "204" ]; then
+              echo "✓ ${DH_NAMESPACE}/${DH_REPO} set to public"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::failed to set visibility=public for ${DH_NAMESPACE}/${DH_REPO}"
           exit 1
