@@ -32,6 +32,15 @@ const testing = ref(false)
 const testResult = ref<{ reachable: boolean; detail: string; capabilities?: string[]; supports_data_deletion?: boolean } | null>(null)
 const modalOpen = ref(false)
 const saving = ref(false)
+const formRef = ref<{ validate: () => Promise<unknown> } | null>(null)
+
+// 统一错误转字符串（避免 message.error 收到 [object Object]）
+function errMsg(e: unknown, fallback: string): string {
+  if (e && typeof e === 'object' && 'message' in e && typeof (e as { message: unknown }).message === 'string') {
+    return (e as { message: string }).message
+  }
+  return fallback
+}
 
 const formState = reactive<Record<string, unknown>>({
   name: '',
@@ -97,7 +106,7 @@ async function onDelete(id: number) {
     message.success('已删除')
     load()
   } catch (exc) {
-    message.error(exc instanceof Error ? exc.message : '删除失败')
+    message.error(errMsg(exc, '删除失败'))
   }
 }
 
@@ -105,6 +114,10 @@ async function onSave() {
   if (saving.value) return
   saving.value = true
   try {
+    // 先校验表单（name 必填 + url 必填 + 名称 pattern）
+    if (formRef.value) {
+      await formRef.value.validate()
+    }
     const payload: Record<string, unknown> = { ...formState }
     if (!payload.password) delete payload.password
     if (!payload.username) payload.username = null
@@ -118,7 +131,9 @@ async function onSave() {
     closeModal()
     load()
   } catch (e) {
-    message.error(e instanceof Error ? e.message : '保存失败')
+    // validate 抛错是字段级 ValidationError（无 message，是数组）；API 抛 ApiError
+    // 两者都走 errMsg 取出可读文本，避免 [object Object]
+    message.error(errMsg(e, '保存失败'))
   } finally {
     saving.value = false
   }
@@ -154,7 +169,7 @@ async function onTest(record?: Downloader) {
       message.error(`测连失败：${r.detail}`)
     }
   } catch (e) {
-    message.error(e instanceof Error ? e.message : '测连失败')
+    message.error(errMsg(e, '测连失败'))
   } finally {
     testing.value = false
   }
@@ -249,7 +264,11 @@ const columns = [
       @cancel="closeModal"
       @ok="onSave"
     >
-      <a-form layout="vertical">
+      <a-form
+        ref="formRef"
+        layout="vertical"
+        :model="formState"
+      >
         <a-space style="width: 100%" size="middle">
           <a-form-item
             label="名称"
