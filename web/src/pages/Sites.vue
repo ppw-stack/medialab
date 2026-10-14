@@ -14,15 +14,35 @@ interface Site {
   updated_at: string;
 }
 
-const ADAPTERS: { value: string; label: string; domain: string }[] = [
+interface AdapterInfo {
+  name: string;
+  label: string;
+  domain: string;
+}
+
+// 硬编码 fallback（后端 /sites/adapters 不可用时使用）
+const ADAPTERS_FALLBACK: { value: string; label: string; domain: string }[] = [
   { value: 'mteam', label: 'M-team', domain: 'm-team.io' },
   { value: 'hhanclub', label: 'HHanClub', domain: 'hhanclub.net' },
   { value: 'hdsky', label: 'HDSky', domain: 'hdsky.me' },
   { value: 'ourbits', label: 'OurBits', domain: 'ourbits.club' },
+  { value: 'audiences', label: 'Audiences', domain: 'audiences.me' },
+  { value: 'springsunday', label: 'Springsunday', domain: 'springsunday.net' },
 ]
 
+const ADAPTERS = ref<{ value: string; label: string; domain: string }[]>(ADAPTERS_FALLBACK)
+
 function domainFor(adapter: string): string {
-  return ADAPTERS.find((a) => a.value === adapter)?.domain ?? ''
+  return ADAPTERS.value.find((a) => a.value === adapter)?.domain ?? ''
+}
+
+async function loadAdapters() {
+  try {
+    const list = await api.get<AdapterInfo[]>('/sites/adapters')
+    if (list.length > 0) {
+      ADAPTERS.value = list.map((a) => ({ value: a.name, label: a.label, domain: a.domain }))
+    }
+  } catch { /* keep fallback */ }
 }
 
 const data = ref<Site[]>([])
@@ -35,6 +55,10 @@ const modalOpen = ref(false)
 const formState = reactive<Record<string, unknown>>({})
 
 async function load() {
+  await Promise.all([loadSites(), loadAdapters()])
+}
+
+async function loadSites() {
   try {
     data.value = await api.get<Site[]>('/sites')
   } catch { /* ignore */ }
@@ -106,10 +130,13 @@ async function onTestRow(s: Site) {
   testingId.value = s.id
   delete testResults.value[s.id]
   try {
-    const r = await api.post<{ ok: boolean; status: string; detail: string; self_test: object }>(
+    const r = await api.post<{ reachable: boolean; logged_in: boolean; detail: string }>(
       `/sites/${s.id}/test`,
     )
-    testResults.value[s.id] = { status: r.status, detail: r.detail }
+    testResults.value[s.id] = {
+      status: r.reachable ? 'ok' : 'error',
+      detail: r.detail,
+    }
   } catch (exc) {
     message.error(exc instanceof Error ? exc.message : '测连失败')
   } finally {
@@ -199,13 +226,12 @@ const columns = [
               >
                 测连
               </a-button>
-              <a-tag
-                v-if="testResults[record.id]"
-                :color="testResults[record.id].status === 'ok' ? 'green' : 'red'"
-                size="small"
-              >
-                {{ testResults[record.id].status }} · {{ testResults[record.id].detail }}
-              </a-tag>
+              <a-tooltip v-if="testResults[record.id]" :title="`${testResults[record.id].status} · ${testResults[record.id].detail}`">
+                <span
+                  class="test-result-dot"
+                  :class="`test-result-dot--${testResults[record.id].status}`"
+                />
+              </a-tooltip>
               <a-button size="small" type="link" @click="onEdit(record)">编辑</a-button>
               <a-popconfirm title="确认删除？" @confirm="onDelete(record.id)">
                 <a-button size="small" type="link" danger>删除</a-button>
@@ -295,5 +321,21 @@ const columns = [
 .code {
   font-size: var(--text-xs);
   color: var(--text-tertiary);
+}
+
+.test-result-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  cursor: help;
+}
+.test-result-dot--ok {
+  background: var(--status-green, #22c55e);
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.4);
+}
+.test-result-dot--error {
+  background: var(--status-red, #ef4444);
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.4);
 }
 </style>
