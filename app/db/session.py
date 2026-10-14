@@ -387,8 +387,14 @@ class SingleWriterQueue:
                 "ALTER TABLE torrents ADD COLUMN item_id VARCHAR(128)",
                 "ALTER TABLE torrents DROP COLUMN save_path",
                 "ALTER TABLE torrent_index DROP COLUMN torrent_url",
+                # 凭据字段去加密：*_enc → 明文列名（值保持原样，由一次性
+                # 迁移脚本/app 读取时按需处理；新库无此列，rename 会失败被 suppress）
+                "ALTER TABLE sites RENAME COLUMN rss_url_enc TO rss_url",
+                "ALTER TABLE sites RENAME COLUMN apikey_enc TO apikey",
+                "ALTER TABLE sites RENAME COLUMN cookies_enc TO cookies",
+                "ALTER TABLE downloader_instances RENAME COLUMN password_enc TO password",
             ):
-                with suppress(Exception):  # 列已存在
+                with suppress(Exception):  # 列已存在 / 已是新名
                     await conn.execute(text(stmt))
             # UNIQUE 索引在已存在的表上必须 CREATE UNIQUE INDEX 单独跑
             with suppress(Exception):  # 索引已存在
