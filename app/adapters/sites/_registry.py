@@ -13,8 +13,17 @@
 from __future__ import annotations
 
 import importlib
+from typing import NamedTuple
 
 from app.adapters.sites.base import SiteAdapter
+
+
+class AdapterMeta(NamedTuple):
+    """前端展示用的 adapter 元数据。"""
+
+    label: str
+    domain: str
+
 
 #: 已注册站点 adapter 白名单。
 #: 键 = Site.adapter 字段值（小写字母数字，下划线），值 = "module.path.ClassName"。
@@ -26,6 +35,23 @@ _BUILTIN: dict[str, str] = {
     "audiences": "app.adapters.sites.audiences.AudiencesAdapter",
     "springsunday": "app.adapters.sites.springsunday.SpringsundayAdapter",
 }
+
+#: 展示用元数据（label + 默认域名）。键集合必须与 ``_BUILTIN`` 一致。
+#: 任何 _BUILTIN 变更需同步这里；启动期 check_meta_consistency 校验。
+_META: dict[str, AdapterMeta] = {
+    "mteam":        AdapterMeta("M-team",        "m-team.io"),
+    "hhanclub":     AdapterMeta("HHanClub",     "hhanclub.net"),
+    "hdsky":        AdapterMeta("HDSky",        "hdsky.me"),
+    "ourbits":      AdapterMeta("OurBits",      "ourbits.club"),
+    "audiences":    AdapterMeta("Audiences",    "audiences.me"),
+    "springsunday": AdapterMeta("Springsunday", "springsunday.net"),
+}
+
+# 启动时检查两个 dict 同步（开发期防御）
+assert set(_BUILTIN) == set(_META), (
+    f"adapter 注册表不一致：_BUILTIN={set(_BUILTIN) - set(_META)} "
+    f"_META={set(_META) - set(_BUILTIN)}"
+)
 
 
 def resolve(name: str) -> type[SiteAdapter]:
@@ -48,4 +74,9 @@ def list_available() -> list[str]:
     return list(_BUILTIN.keys())
 
 
-__all__ = ["list_available", "resolve"]
+def list_meta() -> list[tuple[str, AdapterMeta]]:
+    """返回所有 adapter 的展示元数据 ``[(name, AdapterMeta), ...]``。"""
+    return [(name, _META[name]) for name in _BUILTIN]
+
+
+__all__ = ["AdapterMeta", "list_available", "list_meta", "resolve"]

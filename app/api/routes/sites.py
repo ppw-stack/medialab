@@ -51,6 +51,28 @@ class SiteDeleteIn(BaseModel):
     id: int = Field(..., ge=1)
 
 
+class AdapterInfo(BaseModel):
+    """前端 dropdown 用的 adapter 展示信息。"""
+
+    name: str
+    label: str
+    domain: str
+
+
+@router.get("/adapters", summary="列出已注册站点 adapter（前端下拉用）")
+async def list_adapters() -> list[AdapterInfo]:
+    """返回所有内置 adapter 的 ``{name, label, domain}``。
+
+    前端 ``/sites`` 页面在 mount 时拉这个端点，构造「新增站点」modal 里
+    的适配器下拉。单一数据源：后端 :mod:`app.adapters.sites._registry`。
+    """
+    from app.adapters.sites._registry import list_meta
+    return [
+        AdapterInfo(name=name, label=meta.label, domain=meta.domain)
+        for name, meta in list_meta()
+    ]
+
+
 class SiteOut(BaseModel):
     id: int
     name: str
