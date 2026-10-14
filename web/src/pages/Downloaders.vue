@@ -10,6 +10,7 @@ interface Downloader {
   url: string
   username: string | null
   has_password: boolean
+  save_path: string | null
   is_default: boolean
   enabled: boolean
   verify_tls: boolean
@@ -38,6 +39,7 @@ const formState = reactive<Record<string, unknown>>({
   url: '',
   username: '',
   password: '',
+  save_path: '',
   is_default: false,
   enabled: true,
   verify_tls: true,
@@ -64,6 +66,7 @@ function onCreate() {
     url: 'http://',
     username: 'admin',
     password: '',
+    save_path: '',
     is_default: false,
     enabled: true,
     verify_tls: true,
@@ -81,6 +84,7 @@ function onEdit(d: Downloader) {
     url: d.url,
     username: d.username || '',
     password: '',
+    save_path: d.save_path || '',
     is_default: d.is_default,
     enabled: d.enabled,
     verify_tls: d.verify_tls,
@@ -168,6 +172,7 @@ const columns = [
   { title: '名称', key: 'name' },
   { title: '类型', key: 'type', width: 140 },
   { title: 'URL', key: 'url' },
+  { title: '保存路径', key: 'save_path', width: 200 },
   { title: '凭据', key: 'password', width: 100 },
   { title: '默认', key: 'default', width: 80 },
   { title: '启用', key: 'enabled', width: 60 },
@@ -205,6 +210,10 @@ const columns = [
           </template>
           <template v-else-if="column.key === 'url'">
             <span class="mono code">{{ record.url }}</span>
+          </template>
+          <template v-else-if="column.key === 'save_path'">
+            <span v-if="record.save_path" class="mono code">{{ record.save_path }}</span>
+            <span v-else class="dim">—</span>
           </template>
           <template v-else-if="column.key === 'password'">
             <a-tag v-if="record.has_password" color="green">已配置</a-tag>
@@ -265,6 +274,13 @@ const columns = [
         </a-space>
         <a-form-item label="URL（含协议与端口）" name="url" :rules="[{ required: true }]">
           <a-input v-model:value="formState.url" placeholder="http://qbittorrent:8080" />
+        </a-form-item>
+        <a-form-item
+          label="保存路径（可选）"
+          name="save_path"
+          tooltip="推送/添加种子时传给下载器（qB savepath / TR download_dir）。填下载器容器视角的路径，如 /data/torrents；留空用下载器默认路径。"
+        >
+          <a-input v-model:value="formState.save_path" placeholder="/data/torrents" allow-clear />
         </a-form-item>
         <a-space style="width: 100%" size="middle">
           <a-form-item label="用户名" name="username" style="flex: 1">

@@ -157,7 +157,9 @@ class PushFreeService:
                 skipped_dup += 1
                 continue
 
-            info_hash = await self._add_one(adapter, c, url, downloader_id)
+            info_hash = await self._add_one(
+                adapter, c, url, downloader_id, default_dl.save_path
+            )
             if info_hash is None:
                 failed += 1
                 errors.append(f"site={c.site_id} item={c.item_id}: add_torrent failed")
@@ -263,7 +265,12 @@ class PushFreeService:
         return (await session.execute(stmt)).first() is not None
 
     async def _add_one(
-        self, adapter: DownloaderAdapter, c: _Candidate, url: str, downloader_id: int
+        self,
+        adapter: DownloaderAdapter,
+        c: _Candidate,
+        url: str,
+        downloader_id: int,
+        save_path: str | None = None,
     ) -> str | None:
         """调 add_torrent，返回 info_hash（qB 返空串时用合成占位）。"""
         try:
@@ -271,6 +278,7 @@ class PushFreeService:
                 name=c.name,
                 urls=(url,),
                 category="auto-push",
+                save_path=save_path or None,
             )
             handle = await adapter.add_torrent(payload)
         except DownloaderError as exc:

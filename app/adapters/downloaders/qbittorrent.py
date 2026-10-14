@@ -140,6 +140,8 @@ class QbittorrentAdapter(DownloaderAdapter):
             "skip_checking": payload.skip_checking,
             "paused": payload.paused,
         }
+        if payload.save_path:
+            kwargs["savepath"] = payload.save_path
         if payload.tags:
             kwargs["tags"] = sorted(payload.tags)
         try:

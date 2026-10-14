@@ -40,6 +40,7 @@ class DownloaderIn(BaseModel):
     url: str = Field(..., min_length=1, max_length=512)
     username: str | None = Field(default=None, max_length=128)
     password: str | None = Field(default=None, max_length=512)
+    save_path: str | None = Field(default=None, max_length=512)
     is_default: bool = False
     enabled: bool = True
     verify_tls: bool = True
@@ -53,6 +54,7 @@ class DownloaderUpdate(BaseModel):
     url: str | None = Field(default=None, min_length=1, max_length=512)
     username: str | None = Field(default=None, max_length=128)
     password: str | None = Field(default=None, max_length=512)
+    save_path: str | None = Field(default=None, max_length=512)
     is_default: bool | None = None
     enabled: bool | None = None
     verify_tls: bool | None = None
@@ -65,6 +67,7 @@ class DownloaderOut(BaseModel):
     url: str
     username: str | None
     has_password: bool
+    save_path: str | None
     is_default: bool
     enabled: bool
     verify_tls: bool
@@ -80,6 +83,7 @@ def _to_out(row: DownloaderInstance) -> DownloaderOut:
         url=row.url,
         username=row.username,
         has_password=bool(row.password),
+        save_path=row.save_path,
         is_default=row.is_default,
         enabled=row.enabled,
         verify_tls=row.verify_tls,
@@ -144,6 +148,7 @@ async def create_downloader(payload: DownloaderIn) -> DownloaderOut:
             url=payload.url,
             username=payload.username,
             password=payload.password,
+            save_path=payload.save_path or None,
             is_default=payload.is_default,
             enabled=payload.enabled,
             verify_tls=payload.verify_tls,
@@ -180,6 +185,9 @@ async def update_downloader(payload: DownloaderUpdate) -> DownloaderOut:
         for key, value in payload.model_dump(
             exclude={"id", "password", "name"}, exclude_unset=True
         ).items():
+            # 空串归一为 None（save_path 等可选字段，前端清空即取消）
+            if key == "save_path" and not value:
+                value = None
             setattr(row, key, value)
         if payload.password:
             row.password = payload.password

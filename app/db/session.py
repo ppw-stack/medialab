@@ -393,6 +393,7 @@ class SingleWriterQueue:
                 "ALTER TABLE sites RENAME COLUMN apikey_enc TO apikey",
                 "ALTER TABLE sites RENAME COLUMN cookies_enc TO cookies",
                 "ALTER TABLE downloader_instances RENAME COLUMN password_enc TO password",
+                "ALTER TABLE downloader_instances ADD COLUMN save_path VARCHAR(512)",
             ):
                 with suppress(Exception):  # 列已存在 / 已是新名
                     await conn.execute(text(stmt))

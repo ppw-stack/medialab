@@ -112,6 +112,9 @@ class AddTorrentPayload:
     torrent_bytes: bytes | None = None
     category: str | None = None
     tags: frozenset[str] = frozenset()
+    #: 保存路径（下载器视角）。None = 用下载器默认路径。
+    #: qB → savepath；TR → download_dir
+    save_path: str | None = None
     paused: bool = False
     skip_checking: bool = False
 

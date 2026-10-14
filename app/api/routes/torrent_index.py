@@ -358,7 +358,12 @@ async def push_torrent_index(index_id: int, payload: PushRequest) -> PushRespons
     adapter = factory.downloader(dl_row)
     try:
         handle = await adapter.add_torrent(
-            AddTorrentPayload(name=name, urls=(torrent_url,), category="manual-push")
+            AddTorrentPayload(
+                name=name,
+                urls=(torrent_url,),
+                category="manual-push",
+                save_path=dl_row.save_path or None,
+            )
         )
     except DownloaderError as exc:
         raise HTTPException(status_code=502, detail=f"下载器推送失败：{exc}") from exc

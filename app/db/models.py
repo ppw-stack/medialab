@@ -136,6 +136,9 @@ class DownloaderInstance(Base):
     url: Mapped[str] = mapped_column(String(512))
     username: Mapped[str | None] = mapped_column(String(128), nullable=True)
     password: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 默认保存路径（推送/添加种子时传给下载器：qB savepath / TR download_dir）。
+    #: 下载器容器视角的路径；留空表示用下载器自身默认路径。
+    save_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     verify_tls: Mapped[bool] = mapped_column(Boolean, default=True)
