@@ -61,8 +61,10 @@ RUN apt-get update && \
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONFAULTHANDLER=1 \
-    TZ=Asia/Shanghai
+    PYTHONFAULTHANDLER=1
+
+# TZ 改由 docker-compose.yml 的 environment / env_file 注入（默认 Asia/Shanghai）
+# 不在镜像层 bake 死，避免与运行时 .env 冲突
 
 # 非 root 运行（§9.2 部署安全建议）
 RUN groupadd --system --gid 1000 seedhelper && \
@@ -92,4 +94,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8080/healthz || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--no-access-log"]
+# --no-access-log 由 compose 通过命令行 args 覆盖（默认开 access log 用于生产可观测）
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
