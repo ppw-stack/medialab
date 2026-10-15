@@ -231,7 +231,7 @@ function onTableChange(
   if (pagination?.current) {
     offset.value = (pagination.current - 1) * limit.value
   }
-  load({ reset: true })
+  load()
 }
 
 watch(filterFreeType, () => load({ reset: true }))
