@@ -6,27 +6,36 @@
 - 距 ``free_end_at`` **不足** :data:`pre_pause_minutes` 且未完成
   （``progress<1.0``）→ 调 :meth:`DownloaderAdapter.set_pause` 暂停下载器中的
   任务，并把 :attr:`Torrent.paused_reason` 写为 ``free_expiring``。
-- 其它情况（窗口还远 / 永久免费 / 已完成 / 找不到 hash）→ 跳过或仅计数。
+- 已过 ``free_end_at`` 且下载器中找不到该 hash → 标 ``status=aborted,
+  aborted_reason=window_expired``（qB 自动删除 / 用户手动删 / push 时 hash
+  失败入列的真实反映）。
+- 其它情况（窗口还远 / 永久免费 / 已完成 / 找不到 hash 但未过期）→
+  跳过或仅计数。
 
-**不**删除数据，**不**改动 status——``active`` 是用户可手动恢复的入口。
+**不**删除数据。``active`` 是用户可手动恢复的入口；``aborted`` 是
+"该种子已不在下载器中、不能继续推送"的明确终态。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 
 from app.core.logging import get_logger
 from app.core.timeutils import utcnow
-from app.db.models import DownloaderInstance, FreeType, Torrent, TorrentStatus
+from app.db.models import (
+    AbortedReason,
+    DownloaderInstance,
+    FreeType,
+    Torrent,
+    TorrentStatus,
+)
 from app.db.session import session_scope
 from app.services.factory import AdapterFactory
 
 if TYPE_CHECKING:
-    from datetime import datetime
-
     from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = get_logger(__name__)
@@ -44,6 +53,7 @@ class MonitorResult:
     skipped_already_paused: int = 0
     pre_paused: int = 0
     missing_in_downloader: int = 0
+    expired_missing_in_downloader: int = 0
     failed: int = 0
     errors: tuple[str, ...] = ()
 
@@ -105,6 +115,7 @@ class MonitorFreeWindowService:
         skipped_paused = 0
         pre_paused = 0
         missing = 0
+        expired_missing = 0
         failed = 0
         errors: list[str] = []
 
@@ -165,7 +176,23 @@ class MonitorFreeWindowService:
                             break
 
                 if info is None:
-                    missing += 1
+                    # 种子在下载器里找不到。区分两种情况：
+                    # (1) 距 free_end 还有 > 10 分钟：可能 qB 临时不可见 / 推入未同步，保留 active
+                    # (2) 已过 free_end：推的种子从 qB 上被删/未真正入列，记 aborted
+                    if utcnow() >= cand.free_end_at:
+                        async with session_scope() as session:
+                            row = (
+                                await session.execute(
+                                    select(Torrent).where(Torrent.id == cand.torrent_id)
+                                )
+                            ).scalar_one_or_none()
+                            if row is not None:
+                                row.status = TorrentStatus.ABORTED
+                                row.aborted_reason = AbortedReason.WINDOW_EXPIRED
+                                row.aborted_at = utcnow()
+                        expired_missing += 1
+                    else:
+                        missing += 1
                     continue
                 if info.progress >= 1.0:
                     skipped_completed += 1
@@ -208,13 +235,15 @@ class MonitorFreeWindowService:
             skipped_already_paused=skipped_paused,
             pre_paused=pre_paused,
             missing_in_downloader=missing,
+            expired_missing_in_downloader=expired_missing,
             failed=failed,
             errors=tuple(errors[:10]),
         )
         logger.info(
-            "monitor_free_window: 扫描 %d，触发暂停 %d，缺任务 %d，"
+            "monitor_free_window: 扫描 %d，触发暂停 %d，缺任务 %d (过期 %d)，"
             "跳过(永久/远/空/已完成/已暂停) %d/%d/%d/%d/%d，失败 %d",
             result.scanned, result.pre_paused, result.missing_in_downloader,
+            result.expired_missing_in_downloader,
             result.skipped_permanent, result.skipped_far_from_window,
             result.skipped_no_end_at, result.skipped_already_completed,
             result.skipped_already_paused, result.failed,
