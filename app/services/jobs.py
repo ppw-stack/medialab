@@ -100,7 +100,7 @@ async def _pull_one_site(
         stmt = sqlite_insert(TorrentIndex).values(
             site_id=row.id,
             item_id=item_id,
-            info_hash=fi.info_hash,
+            # info_hash 不写：list 适配器硬编码 None，会污染 push_free 写的真 hash
             name=fi.title[:1024],
             size=fi.size,
             category=fi.category,
@@ -117,7 +117,7 @@ async def _pull_one_site(
         ).on_conflict_do_update(
             index_elements=["site_id", "item_id"],
             set_={
-                "info_hash": fi.info_hash,
+                # info_hash 不覆盖：list 适配器 None 会清空 push_free 写的真 hash
                 "name": fi.title[:1024],
                 "size": fi.size,
                 "category": fi.category,
