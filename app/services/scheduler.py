@@ -179,14 +179,20 @@ class SchedulerCenter:
             task = asyncio.current_task()
             if task is not None:
                 self._inflight.add(task)
+            wall_started = datetime.now(UTC)
             started = asyncio.get_running_loop().time()
+            _ok = True
+            _err: str | None = None
+            _result: object = None
             try:
-                await spec.func()
+                _result = await spec.func()
             except asyncio.CancelledError:
                 logger.info("作业 %s 被取消", spec.name)
                 raise
             except Exception as exc:
                 logger.exception("作业 %s 执行失败：%s", spec.name, exc)
+                _ok = False
+                _err = str(exc)
             finally:
                 stage_duration.labels(stage=spec.name).observe(
                     asyncio.get_running_loop().time() - started
@@ -194,6 +200,15 @@ class SchedulerCenter:
                 self._running.discard(spec.name)
                 if task is not None:
                     self._inflight.discard(task)
+                _record_run(
+                    job_name=spec.name,
+                    trigger="cron",
+                    started_at=wall_started,
+                    finished_at=datetime.now(UTC),
+                    ok=_ok,
+                    error=_err,
+                    result=_result,
+                )
 
         return _run
 
@@ -210,6 +225,11 @@ class SchedulerCenter:
         """
         spec = self._specs.get(name)
         if spec is None:
+            _record_run(
+                job_name=name, trigger="manual",
+                started_at=datetime.now(UTC), finished_at=datetime.now(UTC),
+                ok=False, error=f"unknown job: {name}", result=None,
+            )
             return RunResult(
                 ok=False,
                 started_at=datetime.now(UTC),
@@ -218,6 +238,11 @@ class SchedulerCenter:
                 error=f"unknown job: {name}",
             )
         if not self.accepting_new_work:
+            _record_run(
+                job_name=name, trigger="manual",
+                started_at=datetime.now(UTC), finished_at=datetime.now(UTC),
+                ok=False, error="scheduler not accepting new work", result=None,
+            )
             return RunResult(
                 ok=False,
                 started_at=datetime.now(UTC),
@@ -226,6 +251,11 @@ class SchedulerCenter:
                 error="scheduler not accepting new work",
             )
         if name in self._running:
+            _record_run(
+                job_name=name, trigger="manual",
+                started_at=datetime.now(UTC), finished_at=datetime.now(UTC),
+                ok=False, error=f"job {name} is already running", result=None,
+            )
             return RunResult(
                 ok=False,
                 started_at=datetime.now(UTC),
@@ -244,6 +274,11 @@ class SchedulerCenter:
         except asyncio.CancelledError:
             finished = datetime.now(UTC)
             logger.info("手动触发作业 %s 被取消", name)
+            _record_run(
+                job_name=name, trigger="manual",
+                started_at=started, finished_at=finished,
+                ok=False, error="cancelled", result=result,
+            )
             return RunResult(
                 ok=False,
                 started_at=started,
@@ -255,6 +290,11 @@ class SchedulerCenter:
         except Exception as exc:
             finished = datetime.now(UTC)
             logger.exception("手动触发作业 %s 失败：%s", name, exc)
+            _record_run(
+                job_name=name, trigger="manual",
+                started_at=started, finished_at=finished,
+                ok=False, error=str(exc), result=result,
+            )
             return RunResult(
                 ok=False,
                 started_at=started,
@@ -268,6 +308,11 @@ class SchedulerCenter:
             if task is not None:
                 self._inflight.discard(task)
         finished = datetime.now(UTC)
+        _record_run(
+            job_name=name, trigger="manual",
+            started_at=started, finished_at=finished,
+            ok=True, error=None, result=result,
+        )
         return RunResult(
             ok=True,
             started_at=started,
@@ -279,3 +324,58 @@ class SchedulerCenter:
 
 #: 全局调度中心
 scheduler_center = SchedulerCenter()
+
+
+def _record_run(
+    *,
+    job_name: str,
+    trigger: str,
+    started_at: datetime,
+    finished_at: datetime,
+    ok: bool,
+    error: str | None,
+    result: object,
+) -> None:
+    """把单次作业执行结果写入 job_runs 表（失败不抛，仅 warn）。
+
+    :param trigger: ``'cron'`` 或 ``'manual'``。
+    """
+    import json
+
+    from app.db.models import JobRun
+    from app.db.session import get_session_factory
+
+    result_json: str | None = None
+    try:
+        if result is not None:
+            result_json = json.dumps(result, default=str, ensure_ascii=False)
+    except Exception:
+        result_json = None
+
+    try:
+        factory = get_session_factory()
+        async def _persist() -> None:
+            async with factory() as session:
+                session.add(JobRun(
+                    job_name=job_name,
+                    trigger=trigger,
+                    started_at=started_at.replace(tzinfo=None),
+                    finished_at=finished_at.replace(tzinfo=None),
+                    duration_ms=int((finished_at - started_at).total_seconds() * 1000),
+                    ok=ok,
+                    error=error,
+                    result_json=result_json,
+                ))
+                await session.commit()
+        # 在当前 loop 调度一次性 task
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            loop.create_task(_persist())
+        else:
+            # 无运行 loop（同步上下文）— 直接 asyncio.run
+            asyncio.run(_persist())
+    except Exception as exc:
+        logger.warning("记录作业 %s 执行历史失败：%s", job_name, exc)

@@ -14,18 +14,20 @@
 """
 from __future__ import annotations
 
+import json
+from contextlib import suppress
 from datetime import datetime
 from typing import Any
 
+from apscheduler.triggers.cron import CronTrigger
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
-from apscheduler.triggers.cron import CronTrigger
+from sqlalchemy import func, select
 
 from app.api.auth import require_session
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.db.models import Site
+from app.db.models import JobRun, Site
 from app.db.session import session_scope
 from app.services.factory import AdapterFactory, get_factory
 from app.services.feed_fetcher import FeedFetcher
@@ -193,6 +195,104 @@ async def run_job(job_name: str) -> RunJobResult:
         error=r.error,
         # r.result 是 dataclass 序列化的 dict（PushResult.asdict）或 None
         result=r.result if isinstance(r.result, dict) else None,
+    )
+
+
+class JobRunItem(BaseModel):
+    """单条作业执行历史。"""
+
+    id: int
+    job_name: str
+    trigger: str
+    started_at: datetime
+    finished_at: datetime | None
+    duration_ms: int | None
+    ok: bool
+    error: str | None = None
+    result: dict[str, Any] | None = None
+
+
+class JobRunPage(BaseModel):
+    """作业历史分页响应。"""
+
+    total: int
+    items: list[JobRunItem]
+
+
+@router.get("/scheduler/runs", summary="作业执行历史")
+async def list_job_runs(
+    job_name: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> JobRunPage:
+    """查询作业执行历史（按 started_at desc）。
+
+    :param job_name: 可选过滤单个作业。
+    :param limit: 上限 200。
+    """
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+
+    async with session_scope() as session:
+        base = select(JobRun).order_by(JobRun.started_at.desc())
+        if job_name:
+            base = base.where(JobRun.job_name == job_name)
+
+        total = (
+            await session.execute(
+                select(func.count()).select_from(base.subquery())
+            )
+        ).scalar_one()
+
+        rows = (
+            await session.execute(base.limit(limit).offset(offset))
+        ).scalars().all()
+
+    items: list[JobRunItem] = []
+    for r in rows:
+        parsed: dict[str, Any] | None = None
+        if r.result_json:
+            with suppress(Exception):
+                parsed = json.loads(r.result_json)
+        items.append(JobRunItem(
+            id=r.id,
+            job_name=r.job_name,
+            trigger=r.trigger,
+            started_at=r.started_at,
+            finished_at=r.finished_at,
+            duration_ms=r.duration_ms,
+            ok=r.ok,
+            error=r.error,
+            result=parsed,
+        ))
+
+    return JobRunPage(total=total, items=items)
+
+
+@router.get("/scheduler/runs/{run_id}", summary="作业执行详情")
+async def get_job_run(run_id: int) -> JobRunItem:
+    """单条作业执行详情（含 result JSON 解析）。"""
+    async with session_scope() as session:
+        r = (
+            await session.execute(select(JobRun).where(JobRun.id == run_id))
+        ).scalar_one_or_none()
+        if r is None:
+            raise HTTPException(status_code=404, detail="记录不存在")
+
+    parsed: dict[str, Any] | None = None
+    if r.result_json:
+        with suppress(Exception):
+            parsed = json.loads(r.result_json)
+    return JobRunItem(
+        id=r.id,
+        job_name=r.job_name,
+        trigger=r.trigger,
+        started_at=r.started_at,
+        finished_at=r.finished_at,
+        duration_ms=r.duration_ms,
+        ok=r.ok,
+        error=r.error,
+        result=parsed,
     )
 
 

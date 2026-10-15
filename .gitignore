@@ -54,3 +54,5 @@ web/blob-report/
 
 # 本地测试数据（qBittorrent 容器挂载）
 qbt-data/
+
+.playwright-mcp/

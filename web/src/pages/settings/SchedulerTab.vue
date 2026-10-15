@@ -26,6 +26,23 @@ interface RunResult {
   result?: Record<string, unknown> | null;
 }
 
+interface JobRunItem {
+  id: number;
+  job_name: string;
+  trigger: string;
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number | null;
+  ok: boolean;
+  error: string | null;
+  result: Record<string, unknown> | null;
+}
+
+interface JobRunPage {
+  total: number;
+  items: JobRunItem[];
+}
+
 interface RuntimeParamSpec {
   key: string;
   label: string;
@@ -54,6 +71,49 @@ const runtimeDraft = ref<Record<string, number>>({})
 const savingRuntime = ref(false)
 let timer: ReturnType<typeof setInterval> | null = null
 
+const runsByJob = ref<Record<string, JobRunItem[]>>({})
+const historyModalOpen = ref(false)
+const historyJobName = ref<string>('')
+const historyAll = ref<JobRunItem[]>([])
+
+async function loadRuns() {
+  try {
+    const page = await api.get<JobRunPage>('/scheduler/runs?limit=50')
+    const grouped: Record<string, JobRunItem[]> = {}
+    for (const r of page.items) {
+      (grouped[r.job_name] ??= []).push(r)
+    }
+    runsByJob.value = grouped
+  } catch { /* ignore */ }
+}
+
+async function openHistoryModal(name: string) {
+  historyJobName.value = name
+  try {
+    const page = await api.get<JobRunPage>(`/scheduler/runs?job_name=${name}&limit=100`)
+    historyAll.value = page.items
+  } catch {
+    historyAll.value = runsByJob.value[name] ?? []
+  }
+  historyModalOpen.value = true
+}
+
+function formatRunTime(s: string): string {
+  const d = new Date(s)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+function formatRunFull(s: string): string {
+  const d = new Date(s)
+  const Y = d.getFullYear()
+  const M = String(d.getMonth() + 1).padStart(2, '0')
+  const D = String(d.getDate()).padStart(2, '0')
+  const h = String(d.getHours()).padStart(2, '0')
+  const m = String(d.getMinutes()).padStart(2, '0')
+  const s2 = String(d.getSeconds()).padStart(2, '0')
+  return `${Y}-${M}-${D} ${h}:${m}:${s2}`
+}
+
 async function load() {
   try {
     data.value = await api.get<SchedulerInfo>('/scheduler')
@@ -69,6 +129,7 @@ async function load() {
 
 onMounted(() => {
   load()
+  loadRuns()
   timer = setInterval(load, 5000)
 })
 
@@ -175,6 +236,7 @@ async function runNow(name: string) {
     hide()
     runningJob.value = null
     load()
+    loadRuns()
   }
 }
 
@@ -218,6 +280,15 @@ function formatResult(r: RunResult): string {
 function jobLabel(name: string) {
   return JOB_LABELS[name]
 }
+
+const historyColumns = [
+  { title: '开始时间', key: 'started_at', dataIndex: 'started_at', width: 170 },
+  { title: '触发', key: 'trigger', dataIndex: 'trigger', width: 80 },
+  { title: '时长', key: 'duration_ms', dataIndex: 'duration_ms', width: 100 },
+  { title: '状态', key: 'ok', dataIndex: 'ok', width: 80 },
+  { title: '错误', key: 'error', dataIndex: 'error', ellipsis: true },
+  { title: '结果', key: 'result', width: 80 },
+]
 </script>
 
 <template>
@@ -237,8 +308,57 @@ function jobLabel(name: string) {
             <span class="mono">{{ data.accepting_new_work ? 'WORKING' : 'STOPPED' }}</span>
             <span class="dim mono" style="margin-left: var(--sp-2)">inflight {{ data.inflight }}</span>
           </div>
+          </div>
         </div>
-      </div>
+
+        <a-modal
+          v-model:open="historyModalOpen"
+          :title="`${historyJobName} 执行历史`"
+          :footer="null"
+          width="760px"
+        >
+          <a-table
+            :data-source="historyAll"
+            :pagination="{ pageSize: 10, showSizeChanger: false }"
+            row-key="id"
+            size="small"
+            :columns="historyColumns"
+          >
+            <template #bodyCell="{ column, record }">
+              <template v-if="column.key === 'started_at'">
+                <span class="mono dim">{{ formatRunFull(record.started_at) }}</span>
+              </template>
+              <template v-else-if="column.key === 'ok'">
+                <a-tag :color="record.ok ? 'green' : 'red'">
+                  {{ record.ok ? 'OK' : 'FAIL' }}
+                </a-tag>
+              </template>
+              <template v-else-if="column.key === 'duration_ms'">
+                <span class="mono dim">{{ record.duration_ms ?? '—' }} ms</span>
+              </template>
+              <template v-else-if="column.key === 'error'">
+                <span v-if="record.error" class="error-text">{{ record.error }}</span>
+                <span v-else class="dim">—</span>
+              </template>
+              <template v-else-if="column.key === 'result'">
+                <a-popover trigger="click" placement="left">
+                  <template #content>
+                    <pre class="result-json">{{ JSON.stringify(record.result, null, 2) }}</pre>
+                  </template>
+                  <a-button
+                    v-if="record.result"
+                    type="link"
+                    size="small"
+                    style="padding: 0"
+                  >
+                    查看
+                  </a-button>
+                  <span v-else class="dim">—</span>
+                </a-popover>
+              </template>
+            </template>
+          </a-table>
+        </a-modal>
 
       <div class="job-list">
         <div
@@ -311,7 +431,23 @@ function jobLabel(name: string) {
             >
                立即执行 →
              </a-button>
-           </div>
+          </div>
+          <div v-if="runsByJob[job.name]?.length" class="job-item__runs">
+            <span class="dim mono" style="font-size: var(--text-xs)">最近运行：</span>
+            <a-tooltip
+              v-for="r in runsByJob[job.name].slice(0, 6)"
+              :key="r.id"
+              :title="`${formatRunFull(r.started_at)} · ${r.duration_ms ?? 0}ms · ${r.ok ? 'OK' : 'FAIL'}${r.error ? ' · ' + r.error : ''}`"
+            >
+              <span class="run-chip" :class="r.ok ? 'run-chip--ok' : 'run-chip--fail'">
+                <span class="run-chip__time mono">{{ formatRunTime(r.started_at) }}</span>
+                <span v-if="!r.ok" class="run-chip__x">✕</span>
+              </span>
+            </a-tooltip>
+            <a-button type="link" size="small" @click="openHistoryModal(job.name)">
+              查看全部 →
+            </a-button>
+          </div>
          </div>
        </div>
 
@@ -584,5 +720,55 @@ function jobLabel(name: string) {
   margin-top: var(--sp-2);
   padding-top: var(--sp-2);
   border-top: 1px solid var(--border-hairline);
+}
+
+.job-item__runs {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex-wrap: wrap;
+  padding-top: var(--sp-2);
+  border-top: 1px dashed var(--border-hairline);
+}
+
+.run-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 6px;
+  border-radius: var(--r-sm);
+  font-size: var(--text-xs);
+  border: 1px solid var(--border-hairline);
+  background: var(--bg-surface);
+  cursor: default;
+}
+
+.run-chip--ok {
+  border-color: var(--success-border, rgba(82, 196, 26, 0.5));
+  color: var(--success-text, #52c41a);
+}
+
+.run-chip--fail {
+  border-color: var(--error-border, rgba(245, 34, 45, 0.5));
+  color: var(--error-text, #f5222d);
+  background: var(--error-bg-subtle, rgba(245, 34, 45, 0.04));
+}
+
+.run-chip__x {
+  font-weight: 600;
+}
+
+.error-text {
+  color: var(--error-text, #f5222d);
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-xs);
+}
+
+.result-json {
+  max-width: 480px;
+  max-height: 360px;
+  overflow: auto;
+  font-size: var(--text-xs);
+  margin: 0;
 }
 </style>

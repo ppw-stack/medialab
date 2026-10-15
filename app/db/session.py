@@ -337,6 +337,19 @@ class SingleWriterQueue:
                     "CREATE INDEX IF NOT EXISTS ix_torrent_index_push_status "
                     "ON torrent_index(push_status)"
                 ))
+            with suppress(Exception):  # job_runs 表索引
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_job_runs_job_started "
+                    "ON job_runs(job_name, started_at)"
+                ))
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_job_runs_job_name "
+                    "ON job_runs(job_name)"
+                ))
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_job_runs_started_at "
+                    "ON job_runs(started_at)"
+                ))
         logger.info("数据表已就绪")
         await _backfill_discount_pct()
         await _backfill_published_at_tz()

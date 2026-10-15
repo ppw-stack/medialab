@@ -242,3 +242,24 @@ class AppRuntimeParam(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=_utcnow, onupdate=_utcnow
     )
+
+
+class JobRun(Base):
+    """调度作业单次执行历史（cron 触发 + 手动触发均记录）。"""
+
+    __tablename__ = "job_runs"
+    __table_args__ = (
+        Index("ix_job_runs_job_started", "job_name", "started_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    job_name: Mapped[str] = mapped_column(String(64), index=True)
+    #: 触发方式：'cron' | 'manual'
+    trigger: Mapped[str] = mapped_column(String(16))
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ok: Mapped[bool] = mapped_column(Boolean, default=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 作业返回的 dict（JSON 序列化后存储）
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
