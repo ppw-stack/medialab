@@ -3,24 +3,26 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { api } from '../api'
 import { message } from 'ant-design-vue'
 
-interface TorrentIndexItem {
-  id: number
-  site_id: number
-  site_name: string
-  item_id: string | null
-  name: string
-  size: number
-  category: string | null
-  free_type: string
-  free_end_at: string | null
-  free_source: string | null
-  free_confidence: number | null
-  discount_pct: number | null
-  published_at: string | null
-  pushable: boolean
-  first_seen_at: string
-  last_seen_at: string
-}
+ interface TorrentIndexItem {
+   id: number
+   site_id: number
+   site_name: string
+   item_id: string | null
+   name: string
+   size: number
+   category: string | null
+   free_type: string
+   free_end_at: string | null
+   free_source: string | null
+   free_confidence: number | null
+   discount_pct: number | null
+   published_at: string | null
+   pushable: boolean
+   push_status: string | null
+   pushed_at: string | null
+   first_seen_at: string
+   last_seen_at: string
+ }
 
 interface TorrentIndexPage {
   total: number
@@ -356,6 +358,16 @@ const columns = [
       (a.published_at ?? '').localeCompare(b.published_at ?? ''),
   },
   {
+    title: '推送状态', key: 'push_status', dataIndex: 'push_status', width: 100,
+    sorter: (a: TorrentIndexItem, b: TorrentIndexItem) =>
+      (a.push_status ?? '').localeCompare(b.push_status ?? ''),
+  },
+  {
+    title: '推送时间', key: 'pushed_at', dataIndex: 'pushed_at', width: 150, ellipsis: true,
+    sorter: (a: TorrentIndexItem, b: TorrentIndexItem) =>
+      (a.pushed_at ?? '').localeCompare(b.pushed_at ?? ''),
+  },
+  {
     title: '最近拉取', key: 'last_seen_at', dataIndex: 'last_seen_at', width: 150, ellipsis: true,
     sorter: (a: TorrentIndexItem, b: TorrentIndexItem) =>
       (a.last_seen_at ?? '').localeCompare(b.last_seen_at ?? ''),
@@ -485,6 +497,18 @@ const columns = [
             <span class="countdown" :class="freeEndChip(record.free_end_at, record.free_type).cls">
               {{ freeEndChip(record.free_end_at, record.free_type).label }}
             </span>
+          </template>
+          <template v-else-if="column.key === 'push_status'">
+            <a-tag v-if="record.push_status === 'pushed'" color="green">已推送</a-tag>
+            <a-tag v-else-if="record.push_status === 'failed'" color="red">失败</a-tag>
+            <a-tag v-else-if="record.push_status" color="default">{{ record.push_status }}</a-tag>
+            <span v-else class="dim">—</span>
+          </template>
+          <template v-else-if="column.key === 'pushed_at'">
+            <a-tooltip v-if="record.pushed_at" :title="formatDateFull(record.pushed_at)">
+              <span class="mono dim">{{ formatDate(record.pushed_at) }}</span>
+            </a-tooltip>
+            <span v-else class="dim">—</span>
           </template>
           <template v-else-if="column.key === 'last_seen_at'">
             <a-tooltip v-if="record.last_seen_at" :title="formatDateFull(record.last_seen_at)">
