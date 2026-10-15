@@ -209,7 +209,7 @@ class JobRunItem(BaseModel):
     duration_ms: int | None
     ok: bool
     error: str | None = None
-    result: dict[str, Any] | None = None
+    result: Any | None = None
 
 
 class JobRunPage(BaseModel):
@@ -250,7 +250,7 @@ async def list_job_runs(
 
     items: list[JobRunItem] = []
     for r in rows:
-        parsed: dict[str, Any] | None = None
+        parsed: Any = None
         if r.result_json:
             with suppress(Exception):
                 parsed = json.loads(r.result_json)
@@ -279,7 +279,7 @@ async def get_job_run(run_id: int) -> JobRunItem:
         if r is None:
             raise HTTPException(status_code=404, detail="记录不存在")
 
-    parsed: dict[str, Any] | None = None
+    parsed: Any = None
     if r.result_json:
         with suppress(Exception):
             parsed = json.loads(r.result_json)

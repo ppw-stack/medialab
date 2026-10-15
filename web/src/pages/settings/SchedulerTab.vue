@@ -35,7 +35,7 @@ interface JobRunItem {
   duration_ms: number | null;
   ok: boolean;
   error: string | null;
-  result: Record<string, unknown> | null;
+  result: any;
 }
 
 interface JobRunPage {
