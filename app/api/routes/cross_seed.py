@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 from contextlib import suppress
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from apscheduler.triggers.cron import CronTrigger
@@ -211,6 +211,23 @@ class JobRunItem(BaseModel):
     error: str | None = None
     result: Any | None = None
 
+    @classmethod
+    def from_row(cls, r: JobRun, *, parsed_result: Any = None) -> JobRunItem:
+        """从 ORM 行构建，自动给 datetime 标记 UTC（DB 存的是 naive UTC）。"""
+        def _utc(v: datetime | None) -> datetime | None:
+            return v.replace(tzinfo=UTC) if v is not None else None
+        return cls(
+            id=r.id,
+            job_name=r.job_name,
+            trigger=r.trigger,
+            started_at=_utc(r.started_at),
+            finished_at=_utc(r.finished_at),
+            duration_ms=r.duration_ms,
+            ok=r.ok,
+            error=r.error,
+            result=parsed_result,
+        )
+
 
 class JobRunPage(BaseModel):
     """作业历史分页响应。"""
@@ -254,17 +271,7 @@ async def list_job_runs(
         if r.result_json:
             with suppress(Exception):
                 parsed = json.loads(r.result_json)
-        items.append(JobRunItem(
-            id=r.id,
-            job_name=r.job_name,
-            trigger=r.trigger,
-            started_at=r.started_at,
-            finished_at=r.finished_at,
-            duration_ms=r.duration_ms,
-            ok=r.ok,
-            error=r.error,
-            result=parsed,
-        ))
+        items.append(JobRunItem.from_row(r, parsed_result=parsed))
 
     return JobRunPage(total=total, items=items)
 
@@ -283,17 +290,7 @@ async def get_job_run(run_id: int) -> JobRunItem:
     if r.result_json:
         with suppress(Exception):
             parsed = json.loads(r.result_json)
-    return JobRunItem(
-        id=r.id,
-        job_name=r.job_name,
-        trigger=r.trigger,
-        started_at=r.started_at,
-        finished_at=r.finished_at,
-        duration_ms=r.duration_ms,
-        ok=r.ok,
-        error=r.error,
-        result=parsed,
-    )
+    return JobRunItem.from_row(r, parsed_result=parsed)
 
 
 @router.get("/sites/{site_id}/feed-test", summary="RSS 连通性测试")
