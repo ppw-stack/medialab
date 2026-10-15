@@ -145,6 +145,7 @@ async function doPush() {
     if (r.ok) {
       message.success(r.detail || '推送成功')
       pushModalOpen.value = false
+      await load({ reset: true })
     } else {
       message.warning(r.detail || '推送失败')
     }
