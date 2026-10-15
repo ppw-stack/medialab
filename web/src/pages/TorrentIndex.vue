@@ -250,10 +250,6 @@ onMounted(() => {
   loadStats()
   loadDownloaders()
   load({ reset: true })
-  timer = setInterval(() => {
-    load({ reset: true })
-    loadStats()
-  }, 5000)
 })
 
 onUnmounted(() => {
