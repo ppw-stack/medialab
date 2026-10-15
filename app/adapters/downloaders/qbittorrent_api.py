@@ -505,15 +505,34 @@ class Qb5ApiClient:
         auto_tmm: bool | None = None,
         sequential_download: bool | None = None,
         first_last_piece_prio: bool | None = None,
-    ) -> str:
+    ) -> dict[str, object]:
         """POST /api/v2/torrents/add — 添加种子（multipart/form-data）。
 
         入参（互斥）：
         - urls: magnet/HTTP URL 列表（按 \\n 分隔）
         - torrents: [(filename, content, mimetype), ...]
 
-        返回 qBittorrent 响应（字符串 hash 或 "Ok."）。
+        跨版本响应兼容（实测 qB 4.x / 5.0 / 5.2.x）：
+
+        - **qB 5.1+** 返 **Python repr 字符串**（如
+          ``"{'added_torrent_ids': ['<hash>'], 'failure_count': 0, ...}"``）
+          —— 不是标准 JSON（用单引号），必须用 :func:`ast.literal_eval` 解析。
+          这是 qB 5.x 服务器用 Python dict 的 ``repr()`` 直接序列化，
+          不是 ``json.dumps``，导致 ``json.loads`` 失败。
+        - **qB 5.0 / 4.x 旧版** 返裸 ``"Ok."``（成功）/ ``"Fails."``（失败），
+          或 5.0 某些版本返裸 hash 字符串。
+        - **失败/网络错误**返 ``None``。
+
+        返回统一 dict，字段：
+        - ``added_torrent_ids: list[str]`` — 成功添加的 info_hash 列表（5.0 旧版可能为空）
+        - ``failure_count: int`` — 失败数
+        - ``pending_count: int`` — 等待数
+        - ``success_count: int`` — 成功数
+        - ``ok: bool`` — 5.0 旧版 "Ok." 时设为 True（兼容字段）
+        - ``raw: str`` — 原始响应（debug 用）
         """
+        import ast
+
         data: dict[str, str] = {}
         if urls:
             data["urls"] = "\n".join(urls)
@@ -557,9 +576,58 @@ class Qb5ApiClient:
             data=data or None,
             files=files,
         )
+
+        # 统一解析为 dict（跨 qB 4.x / 5.0 / 5.1+ 版本）
         if result is None:
-            return ""
-        return str(result).strip()
+            return {
+                "added_torrent_ids": [],
+                "failure_count": 0,
+                "pending_count": 0,
+                "success_count": 0,
+                "ok": False,
+                "raw": "",
+            }
+        text = str(result).strip()
+        out: dict[str, object] = {
+            "added_torrent_ids": [],
+            "failure_count": 0,
+            "pending_count": 0,
+            "success_count": 0,
+            "ok": False,
+            "raw": text,
+        }
+        if not text:
+            return out
+        # qB 5.1+ Python repr
+        if text.startswith("{"):
+            try:
+                parsed = ast.literal_eval(text)
+            except (ValueError, SyntaxError):
+                parsed = None
+            if isinstance(parsed, dict):
+                out["added_torrent_ids"] = list(parsed.get("added_torrent_ids") or [])
+                success_count = int(parsed.get("success_count") or 0)
+                out["failure_count"] = int(parsed.get("failure_count") or 0)
+                out["pending_count"] = int(parsed.get("pending_count") or 0)
+                out["success_count"] = success_count
+                out["ok"] = success_count > 0
+                return out
+        # qB 5.0 旧版 "Ok." / "Fails." 或裸 hash
+        if text == "Ok.":
+            out["ok"] = True
+            out["success_count"] = 1
+            return out
+        if text == "Fails.":
+            out["failure_count"] = 1
+            return out
+        # 裸 40 字符 hash（5.0 某些版本）
+        if len(text) == 40 and all(c in "0123456789abcdefABCDEF" for c in text):
+            out["added_torrent_ids"] = [text]
+            out["success_count"] = 1
+            out["ok"] = True
+            return out
+        # 解析失败：保底返 ok=False
+        return out
 
     # ============================================================ 优先级 (4)
     async def increase_priority(self, hashes: list[str] | str) -> None:

@@ -134,7 +134,17 @@ class QbittorrentAdapter(DownloaderAdapter):
         return out
 
     async def add_torrent(self, payload: AddTorrentPayload) -> TorrentHandle:
-        """附录 A：``urls`` / ``category`` / ``tags`` / ``skip_checking``。"""
+        """附录 A：``urls`` / ``category`` / ``tags`` / ``skip_checking``。
+
+        qBittorrent 5.1+ /api/v2/torrents/add 实际**返 dict**（Python repr
+        格式），含 ``added_torrent_ids`` 列表（首个元素就是真 info_hash）。
+        5.0 旧版只返 "Ok." 字符串，无法直接拿 hash，需调用方 fallback 到
+        ``_reconcile_hash`` 按 name 匹配。
+
+        返回 :class:`TorrentHandle`：
+        - ``info_hash`` 写真 hash（5.1+）或空（5.0 旧版）
+        - ``raw`` dict 完整响应（debug 用）
+        """
         kwargs: dict[str, Any] = {
             "category": payload.category,
             "skip_checking": payload.skip_checking,
@@ -144,19 +154,39 @@ class QbittorrentAdapter(DownloaderAdapter):
             kwargs["savepath"] = payload.save_path
         if payload.tags:
             kwargs["tags"] = sorted(payload.tags)
+        result: dict[str, object] = {
+            "added_torrent_ids": [],
+            "failure_count": 0,
+            "pending_count": 0,
+            "success_count": 0,
+            "ok": False,
+            "raw": "",
+        }
         try:
             if payload.torrent_bytes is not None:
-                mimetype = "application/x-bittorrent"
+                mimetype = "application/bittorrent"
                 files = [(f"{payload.name}.torrent", payload.torrent_bytes, mimetype)]
-                await self._qb.add_torrent(torrents=files, **kwargs)
+                result = await self._qb.add_torrent(torrents=files, **kwargs)
             elif payload.urls:
-                await self._qb.add_torrent(urls=list(payload.urls), **kwargs)
+                result = await self._qb.add_torrent(urls=list(payload.urls), **kwargs)
             else:
                 raise DownloaderError("添加任务缺少 urls 或 torrent_bytes")
         except Qb5ApiError as exc:
             raise DownloaderError(str(exc), transient=exc.transient) from exc
-        # qBittorrent 不返回 hash；调用方需按 idem_key 或随后 list 查询
-        return TorrentHandle(info_hash="", downloader=self.name, raw=None)
+
+        # 解析真 hash（5.1+ 返 added_torrent_ids[0]）
+        info_hash = ""
+        added_ids = result.get("added_torrent_ids")
+        if isinstance(added_ids, list) and added_ids:
+            first = added_ids[0]
+            if isinstance(first, str) and len(first) == 40:
+                info_hash = first
+        raw_value = result.get("raw")
+        return TorrentHandle(
+            info_hash=info_hash,
+            downloader=self.name,
+            raw=raw_value if isinstance(raw_value, str) else None,
+        )
 
     async def remove(self, hashes: Sequence[str], *, delete_data: bool) -> bool:
         """附录 A：``deleteFiles`` 独立控制数据删除。"""
