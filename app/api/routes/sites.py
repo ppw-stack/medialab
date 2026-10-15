@@ -13,7 +13,7 @@ from app.adapters.sites import resolve as resolve_site_adapter
 from app.adapters.sites.base import SiteProfile
 from app.api.auth import require_session
 from app.core.logging import get_logger
-from app.db.models import Site, Torrent
+from app.db.models import Site, TorrentIndex
 from app.db.session import session_scope
 
 logger = get_logger(__name__)
@@ -100,12 +100,12 @@ async def delete_site(payload: SiteDeleteIn) -> dict[str, int]:
         ).scalar_one_or_none()
         if site is None:
             raise HTTPException(status_code=404, detail="站点不存在")
-        # 检查引用：torrent 仍依赖 site_id（free_candidates 已删除）
+        # 检查引用：torrent_index 仍依赖 site_id
         torrent_count = (
             await session.execute(
                 select(func.count())
-                .select_from(Torrent)
-                .where(Torrent.site_id == payload.id)
+                .select_from(TorrentIndex)
+                .where(TorrentIndex.site_id == payload.id)
             )
         ).scalar_one()
         if torrent_count:

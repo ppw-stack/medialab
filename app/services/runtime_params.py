@@ -61,6 +61,13 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         min=1,
         max=120,
     ),
+    ParamSpec(
+        key="push_download_interval_ms",
+        label="下载间隔（毫秒）",
+        default=2000,
+        min=0,
+        max=30000,
+    ),
 )
 
 
@@ -132,6 +139,7 @@ def _env_default(settings: AppSettings, key: str) -> int:
         "push_min_remaining_hours": settings.push_min_remaining_hours,
         "push_max_per_run": settings.push_max_per_run,
         "monitor_pre_pause_minutes": settings.monitor_pre_pause_minutes,
+        "push_download_interval_ms": settings.push_download_interval_ms,
     }
     return mapping[key]
 

@@ -34,30 +34,20 @@ def _utcnow() -> datetime:
 
 
 # ---------------------------------------------------------------- 枚举常量
-class Source:
-    MANUAL = "manual"
-    AUTO_SEED = "auto_seed"
-    FREE_SEED = "free_seed"
-    AUTO_PUSH = "auto_push"
-
-
-class TorrentStatus:
-    ACTIVE = "active"
-    PAUSED = "paused"
-    COMPLETED = "completed"
-    FREE_COMPLETED = "free_completed"
-    FREE_COMPLETED_LATE = "free_completed_late"
-    FREE_MISSED = "free_missed"
-    ABORTED = "aborted"
-    DELETED = "deleted"
-
-
 class FreeType:
     TIMED = "freeleech_timed"
     PERMANENT = "freeleech_permanent"
     TWOU_TIMED = "twoup_timed"
     NEUTRAL = "neutral_leech"
     UNKNOWN = "unknown"
+
+
+class PushStatus:
+    """torrent_index 推送状态（替代原 torrents 表去重）。"""
+
+    PENDING = "pending"
+    PUSHED = "pushed"
+    FAILED = "failed"
 
 
 class FreeSource:
@@ -68,15 +58,6 @@ class FreeSource:
     LEARNED = "learned"
 
 
-class AbortedReason:
-    WINDOW_EXPIRED = "window_expired"
-    ERROR = "error"
-    PAUSED = "paused"
-    MANUAL = "manual"
-    DISK_FULL = "disk_full"
-    TRACKER_FAIL = "tracker_fail"
-
-
 class CooldownReason:
     USER_REMOVED = "user_removed"
     USER_BLACKLISTED = "user_blacklisted"
@@ -85,12 +66,6 @@ class CooldownReason:
     DISK_FULL = "disk_full"
     DUPLICATE = "duplicate"
     MANUAL_SKIP = "manual_skip"
-
-
-class PausedReason:
-    YIELD = "yield"
-    USER = "user"
-    SYSTEM = "system"
 
 
 class TriggerSource:
@@ -172,70 +147,6 @@ class Site(Base):
     )
 
 
-class Torrent(Base):
-    """种子池（§8 torrents）。"""
-
-    __tablename__ = "torrents"
-    __table_args__ = (
-        Index("ix_torrents_status_abort_at", "status", "abort_at"),
-        Index("ix_torrents_source_status_free_end", "source", "status", "free_end_at"),
-        Index("ix_torrents_site_source", "site_id", "source"),
-        UniqueConstraint(
-            "site_id", "item_id", "downloader_id",
-            name="uq_torrents_site_item_dl",
-        ),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    #: BT 协议级 SHA-1。qB/Tr add_torrent 不一定返回（已知 qB 返空字符串），
-    #: 此时留 NULL；Transmission 返真实 hash。
-    info_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
-    name: Mapped[str] = mapped_column(String(1024))
-    site_id: Mapped[int] = mapped_column(ForeignKey("sites.id"))
-    downloader_id: Mapped[int] = mapped_column(ForeignKey("downloader_instances.id"))
-    #: 站内 ID（m-team 数字 / NexusPHP details.php?id=X），用于跨表去重
-    item_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
-
-    category: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    tags: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    size: Mapped[int] = mapped_column(BigInteger, default=0)
-    ratio: Mapped[float] = mapped_column(Float, default=0.0)
-    uploaded: Mapped[int] = mapped_column(BigInteger, default=0)
-    downloaded: Mapped[int] = mapped_column(BigInteger, default=0)
-    state: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    num_seeds: Mapped[int] = mapped_column(Integer, default=0)
-
-    source: Mapped[str] = mapped_column(String(16), default=Source.MANUAL)
-    is_free: Mapped[bool] = mapped_column(Boolean, default=False)
-    status: Mapped[str] = mapped_column(String(24), default=TorrentStatus.ACTIVE)
-
-    # 免费窗口锚点（FR-3.4）
-    free_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    free_end_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
-    free_duration: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    free_source: Mapped[str | None] = mapped_column(String(24), nullable=True)
-    free_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
-    clock_offset: Mapped[int] = mapped_column(Integer, default=0)
-    deadline_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    abort_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    window_slack: Mapped[int | None] = mapped_column(Integer, nullable=True)
-
-    paused_reason: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    aborted_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    aborted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    trash_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-
-    added_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    removed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    last_rescued_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True,
-        comment="FR-3.8 抢救策略最后执行时间，用于限速后冷却"
-    )
-    protect_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    #: FR-2.5 空做种连续观察轮数（持久化跨轮计数）
-    zero_seed_rounds: Mapped[int] = mapped_column(Integer, default=0)
-
-
 class TorrentIndex(Base):
     """通用拉取索引：所有站点的 RSS feed 拉取结果。
 
@@ -254,6 +165,7 @@ class TorrentIndex(Base):
         Index("ix_torrent_index_last_seen", "last_seen_at"),
         Index("ix_torrent_index_info_hash", "info_hash"),
         Index("ix_torrent_index_site_free", "site_id", "free_type"),
+        Index("ix_torrent_index_push_status", "push_status"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -279,6 +191,10 @@ class TorrentIndex(Base):
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     #: 最近一次拉取时间（清理过期数据参考）
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+    #: 推送状态（NULL = 未推过；pushed = 已推到默认下载器；failed = 推送失败）
+    push_status: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    #: 推送时间
+    pushed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class TaskQueue(Base):

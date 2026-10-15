@@ -22,6 +22,8 @@ services:
       FETCH_ALL_SITES_CRON: ${FETCH_ALL_SITES_CRON:-*/10 * * * *}
       # 免费种自动推送 cron
       PUSH_FREE_CRON: ${PUSH_FREE_CRON:-*/30 * * * *}
+      # 关闭 WAL：commit 后数据立即落盘主文件，避免重启后 WAL 缓冲未 checkpoint 丢失（推送后 info_hash 写入）
+      DB_JOURNAL_MODE: ${DB_JOURNAL_MODE:-DELETE}
     env_file:
       - .env
     volumes:

@@ -17,20 +17,18 @@ from pydantic import BaseModel, field_serializer
 from sqlalchemy import func, select
 
 from app.adapters.downloaders.base import AddTorrentPayload, DownloaderError
+from app.adapters.sites._bencode import infohash_from_torrent
 from app.api.auth import require_session
 from app.core.logging import get_logger
 from app.core.timeutils import utcnow
 from app.db.models import (
     DownloaderInstance,
+    PushStatus,
     Site,
-    Source,
-    Torrent,
     TorrentIndex,
-    TorrentStatus,
 )
 from app.db.session import session_scope
 from app.services.factory import get_factory
-from app.services.push_free import _is_valid_download_url, _synthetic_info_hash
 
 logger = get_logger(__name__)
 
@@ -56,14 +54,17 @@ class TorrentIndexItem(BaseModel):
     free_source: str | None
     free_confidence: float | None
     discount_pct: int | None
-    #: 是否可推送（item_id 非空 → 可调 SiteAdapter.get_torrent_url 实时拿 URL）
+    #: 是否可推送（item_id 非空 → 可调 SiteAdapter.download_torrent 实时拿 bytes）
     pushable: bool
+    push_status: str | None
+    pushed_at: datetime | None
+    info_hash: str | None
     published_at: datetime | None
     first_seen_at: datetime
     last_seen_at: datetime
 
     @field_serializer(
-        "free_end_at", "published_at", "first_seen_at", "last_seen_at",
+        "free_end_at", "pushed_at", "published_at", "first_seen_at", "last_seen_at",
         check_fields=False,
     )
     def _ser_dt(self, v: datetime | None) -> str | None:
@@ -95,6 +96,8 @@ _SORTABLE_COLUMNS: Final[dict[str, Any]] = {
     "category": TorrentIndex.category,
     "free_type": TorrentIndex.free_type,
     "free_end_at": TorrentIndex.free_end_at,
+    "push_status": TorrentIndex.push_status,
+    "pushed_at": TorrentIndex.pushed_at,
     "published_at": TorrentIndex.published_at,
     "first_seen_at": TorrentIndex.first_seen_at,
     "last_seen_at": TorrentIndex.last_seen_at,
@@ -154,6 +157,9 @@ async def list_torrent_index(
             free_confidence=row.TorrentIndex.free_confidence,
             discount_pct=row.TorrentIndex.discount_pct,
             pushable=row.TorrentIndex.item_id is not None,
+            push_status=row.TorrentIndex.push_status,
+            pushed_at=row.TorrentIndex.pushed_at,
+            info_hash=row.TorrentIndex.info_hash,
             published_at=row.TorrentIndex.published_at,
             first_seen_at=row.TorrentIndex.first_seen_at,
             last_seen_at=row.TorrentIndex.last_seen_at,
@@ -250,6 +256,9 @@ async def get_torrent_index(index_id: int) -> TorrentIndexItem:
         free_confidence=row.TorrentIndex.free_confidence,
         discount_pct=row.TorrentIndex.discount_pct,
         pushable=row.TorrentIndex.item_id is not None,
+        push_status=row.TorrentIndex.push_status,
+        pushed_at=row.TorrentIndex.pushed_at,
+        info_hash=row.TorrentIndex.info_hash,
         published_at=row.TorrentIndex.published_at,
         first_seen_at=row.TorrentIndex.first_seen_at,
         last_seen_at=row.TorrentIndex.last_seen_at,
@@ -276,9 +285,11 @@ async def push_torrent_index(index_id: int, payload: PushRequest) -> PushRespons
     """把单条拉取索引推送到下载器。
 
     - 未指定 downloader_id → 用 is_default=True 且 enabled 的下载器
-    - 已推送过（同 site_id/item_id/downloader_id）→ 直接返回已存在
-    - 实时调 SiteAdapter.get_torrent_url 拿 URL；URL 不可用 → 400
+    - 已推送过（push_status == pushed）→ 直接返回已存在
+    - 实时调 SiteAdapter.download_torrent 拿 .torrent bytes；下载失败 → 400
     """
+    from sqlalchemy import update
+
     from app.db.models import Site
 
     # 1) 读索引条目 + 站点（用于构造 adapter）
@@ -323,44 +334,45 @@ async def push_torrent_index(index_id: int, payload: PushRequest) -> PushRespons
             if dl is None:
                 raise HTTPException(status_code=400, detail="未配置默认下载器")
 
-        # 3) 去重：已推过则直接返回
-        exists = (
-            await session.execute(
-                select(Torrent.id).where(
-                    Torrent.site_id == item.site_id,
-                    Torrent.item_id == item.item_id,
-                    Torrent.downloader_id == dl.id,
-                )
-            )
-        ).first()
-        if exists is not None:
+        # 3) 去重：push_status == pushed 则直接返回
+        if item.push_status == PushStatus.PUSHED:
             return PushResponse(
                 ok=True, detail="该种已推送过", downloader_id=dl.id
             )
 
-        site_id = item.site_id
         item_id = item.item_id
         name = item.name
         dl_id = dl.id
         dl_row = dl
 
-    # 4) 实时拿下载 URL
+    # 4) 下载 .torrent 文件
     factory = get_factory()
     site_adapter = factory.site(site_row)
-    torrent_url = await site_adapter.get_torrent_url(item_id)
-    if not torrent_url or not _is_valid_download_url(torrent_url):
+    try:
+        torrent_bytes = await site_adapter.download_torrent(item_id)
+    except Exception as exc:
         raise HTTPException(
-            status_code=400,
-            detail=f"该条目无法获取下载 URL（{torrent_url or '空'}）",
+            status_code=400, detail=f"下载 torrent 文件失败：{exc}"
+        ) from exc
+    if not torrent_bytes or not torrent_bytes.startswith(b"d"):
+        raise HTTPException(
+            status_code=400, detail="站点返回的不是有效的 torrent 文件"
         )
 
-    # 5) 调下载器
+    # 5) 解析 info_hash
+    info_hash = infohash_from_torrent(torrent_bytes)
+    if info_hash is None:
+        raise HTTPException(
+            status_code=400, detail="torrent 文件解析 info_hash 失败"
+        )
+
+    # 6) 调下载器
     adapter = factory.downloader(dl_row)
     try:
-        handle = await adapter.add_torrent(
+        await adapter.add_torrent(
             AddTorrentPayload(
                 name=name,
-                urls=(torrent_url,),
+                torrent_bytes=torrent_bytes,
                 category="manual-push",
                 save_path=dl_row.save_path or None,
             )
@@ -368,26 +380,17 @@ async def push_torrent_index(index_id: int, payload: PushRequest) -> PushRespons
     except DownloaderError as exc:
         raise HTTPException(status_code=502, detail=f"下载器推送失败：{exc}") from exc
 
-    info_hash = handle.info_hash.strip() or _synthetic_info_hash(site_id, item_id, dl_id)
-
-    # 6) 写 torrents 表
+    # 7) 更新 torrent_index.push_status = pushed
     async with session_scope() as session:
-        session.add(
-            Torrent(
+        await session.execute(
+            update(TorrentIndex)
+            .where(TorrentIndex.id == index_id)
+            .values(
+                push_status=PushStatus.PUSHED,
+                pushed_at=utcnow(),
                 info_hash=info_hash,
-                name=name,
-                site_id=site_id,
-                downloader_id=dl_id,
-                item_id=item_id,
-                source=Source.MANUAL,
-                status=TorrentStatus.ACTIVE,
-                added_at=utcnow(),
             )
         )
-        try:
-            await session.flush()
-        except Exception as exc:  # 并发/唯一冲突
-            logger.info("manual push 记录冲突 item=%s: %s", item_id, exc)
 
     logger.info("手动推送 index_id=%d → downloader=%d item=%s", index_id, dl_id, item_id)
     return PushResponse(ok=True, detail="推送成功", info_hash=info_hash, downloader_id=dl_id)

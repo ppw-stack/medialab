@@ -17,7 +17,7 @@ from app.adapters.downloaders.base import (
 )
 from app.api.auth import require_session
 from app.core.logging import get_logger
-from app.db.models import DownloaderInstance, Torrent
+from app.db.models import DownloaderInstance, PushStatus, TorrentIndex
 from app.db.session import session_scope
 from app.services.factory import get_factory
 
@@ -212,12 +212,12 @@ async def delete_downloader(payload: DownloaderDeleteIn) -> dict[str, int]:
         ).scalar_one_or_none()
         if row is None:
             raise HTTPException(status_code=404, detail="下载器不存在")
-        # 检查引用：有任务绑定则拒绝物理删除
+        # 检查引用：有推送过的种子则拒绝物理删除
         ref_count = (
             await session.execute(
                 select(func.count())
-                .select_from(Torrent)
-                .where(Torrent.downloader_id == payload.id)
+                .select_from(TorrentIndex)
+                .where(TorrentIndex.push_status == PushStatus.PUSHED)
             )
         ).scalar_one()
         if ref_count:

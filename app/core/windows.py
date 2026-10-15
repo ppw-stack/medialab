@@ -19,10 +19,8 @@ from typing import Final
 from app.core.timeutils import ClockOffset, utcnow
 from app.db.models import (
     NON_ABORTABLE_FREE_TYPES,
-    AbortedReason,
     FreeSource,
     FreeType,
-    TorrentStatus,
 )
 
 #: 置信度低于此值按 unknown 保守处理（FR-1.5.3）
@@ -144,45 +142,6 @@ class WindowPolicy:
         return self.clock_offset.remaining_to_absolute(remaining, local_now=now)
 
 
-#: 完成状态集合：已完成的任务不再走中止判定（FR-3.4 表）
-COMPLETED_STATUSES: Final = frozenset(
-    {
-        TorrentStatus.COMPLETED,
-        TorrentStatus.FREE_COMPLETED,
-        TorrentStatus.FREE_COMPLETED_LATE,
-        TorrentStatus.FREE_MISSED,
-    }
-)
-
-
-def classify_completion(
-    completed_at: datetime,
-    free_end_at: datetime,
-    *,
-    tolerance_seconds: int = 120,
-    now: datetime | None = None,
-) -> tuple[str, int | None]:
-    """收益归属四分类（FR-3.4.3）。
-
-    返回 ``(status, window_slack_seconds)``。判定基准是 ``completed_at``，
-    不是巡检时刻 ``now``。
-
-    ``tolerance_seconds`` 用于吸收巡检滞后造成的完成时刻误差。
-
-    **重要**（FR-3.4.3 + FR-3.0.1）：``abort_at`` 恒等于 ``free_end_at``，
-    因此"边界超期完成"这一档只可能由**巡检滞后**观测到——只有
-    ``completed_at`` 落在 ``free_end_at`` 之后一个容差内才归入该档，更大的
-    超期属于看护失效（``free_missed``），须触发 🔴 自检告警。
-    """
-    slack = (free_end_at - completed_at).total_seconds()
-    tol = float(tolerance_seconds)
-    if slack >= -tol:
-        return TorrentStatus.FREE_COMPLETED, int(slack)
-    if slack >= -2 * tol:
-        return TorrentStatus.FREE_COMPLETED_LATE, int(slack)
-    return TorrentStatus.FREE_MISSED, int(slack)
-
-
 def urgency_level(
     remaining: timedelta | None, *, emergency_threshold: int = 1800
 ) -> str:
@@ -239,15 +198,3 @@ def feasibility(
     if needed <= window * CRITICAL_TOLERANCE:
         return "critical"
     return "impossible"
-
-
-def abort_reason_for_state(state: str) -> str:
-    """下载器状态 → 中止原因（FR-3.4 表）。
-
-    ``checking`` 与其他未完成状态统一为 ``window_expired``（红线无例外）。
-    """
-    if state in {"error", "missingFiles"}:
-        return AbortedReason.ERROR
-    if state == "pausedDL":
-        return AbortedReason.PAUSED
-    return AbortedReason.WINDOW_EXPIRED

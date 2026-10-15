@@ -74,6 +74,8 @@ class AppSettings(BaseSettings):
     push_min_remaining_hours: int = 6
     #: 每次推送最多 N 个（避免下载器瞬时过载）
     push_max_per_run: int = 20
+    #: 连续下载 .torrent 文件的间隔（毫秒，默认 2000 = 2 秒），避免触发站点限频
+    push_download_interval_ms: int = 2000
 
     # -- 优雅停机（FR-8.2）--
     shutdown_grace_seconds: int = 60
