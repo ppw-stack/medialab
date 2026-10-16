@@ -178,22 +178,26 @@ class HhanclubAdapter(SiteAdapter):
         page_size: int = 100,
         page_number: int = 1,
     ) -> list[FeedItem]:
-        """2. 抓取免费种子列表：GET /torrents.php?spstate=2，BS4 解析。
+        """2. 抓取活种列表：GET /torrents.php?spstate=0，BS4 解析。
 
-        HHan 自定义主题的 spstate=7（所有免费）是 JS 动态加载，HTML 不含
-        torrent 链接。spstate=2（永久免费）反而是 SSR 全量返回，所以用
-        spstate=2 抓取。
+        与其他 5 站一致用 spstate=0（所有活种）。HHan 自定义主题的
+        spstate=7（所有免费）是 JS 动态加载，HTML 不含 torrent 链接。
+        改用 spstate=0 拉全量活种 + BS4 解析 free_classes：
+        - 永久免费：free_type=PERMANENT
+        - 限免（pro_free/pro_2xfree 等）：free_type=TIMED
+        - 折扣（pro_50pctdown 等）：free_type=NEUTRAL
+        - 普通：free_type=UNKNOWN
 
-        注：当前只覆盖"永久免费"窗口；限时活动（HHan 自定义等 → 一）
-        因 JS 渲染暂不可见，需要 site 升级为 API 抓取或 headless 浏览器
-        才能识别（不引入反爬对抗，AGENTS.md）。
+        注：HHan 限免块（剩余时间）藏在 onmouseover 鼠标提示里（Tailwind
+        自定义主题），BS4 解析时已提取。HDSky 的 spstate=0 行为也是
+        "所有活种"，对齐为标准做法。
 
         返回的条目不带下载 URL；下载时调 :meth:`get_torrent_url` 抓详情页
         提取 ``passkey=...`` 拼 download URL。
         """
         url = (
             f"{self._base_url()}/torrents.php"
-            f"?spstate=2&page={max(0, page_number - 1)}"
+            f"?spstate=0&page={max(0, page_number - 1)}"
         )
         try:
             resp = await self._client.get(url, timeout=self._timeout)
@@ -203,7 +207,7 @@ class HhanclubAdapter(SiteAdapter):
         if resp.status_code >= 400:
             logger.warning("HHanClub 拉取 HTTP %d", resp.status_code)
             return []
-        items = HhanclubAdapter._parse_spstate2_html(resp.text, limit=page_size)
+        items = HhanclubAdapter._parse_spstate0_html(resp.text, limit=page_size)
         # 同步刷新 download URL cache（供 get_torrent_url 0-HTTP 命中）
         self._download_url_cache = HhanclubAdapter._extract_download_urls(
             resp.text, self._base_url()
@@ -242,8 +246,8 @@ class HhanclubAdapter(SiteAdapter):
         )
 
     @staticmethod
-    def _parse_spstate2_html(html: str, *, limit: int = 100) -> list[FeedItem]:
-        """BS4 解析 HHanClub spstate=2 页面（永久免费 SSR）。
+    def _parse_spstate0_html(html: str, *, limit: int = 100) -> list[FeedItem]:
+        """BS4 解析 HHanClub spstate=0 页面（所有活种 SSR）。
 
         HHan 使用 Tailwind 自定义主题：
         - 锚点 ``href="https://hhanclub.net/details.php?id=N"`` 含完整域名
