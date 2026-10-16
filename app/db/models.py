@@ -1,18 +1,16 @@
 """ORM 模型（§8 关键数据模型）。
 
-M1 建立全部表结构（M2~M5 只填充逻辑）。时间列统一 naive UTC。
+M1 建立全部表结构（M2~M5 只填充逻辑）。时间列统一北京时间字符串。
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Final
 
 from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
-    DateTime,
     Float,
     ForeignKey,
     Index,
@@ -28,9 +26,10 @@ class Base(DeclarativeBase):
     pass
 
 
-def _utcnow() -> datetime:
-    """naive UTC，替代已废弃的 ``_utcnow()``（Python 3.12）。"""
-    return datetime.now(UTC).replace(tzinfo=None)
+def _bj_now() -> str:
+    """北京时间字符串，替代已废弃的 ``_utcnow()``。"""
+    from app.core.timeutils import bj_now
+    return bj_now()
 
 
 # ---------------------------------------------------------------- 枚举常量
@@ -120,9 +119,9 @@ class DownloaderInstance(Base):
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     verify_tls: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=_utcnow, onupdate=_utcnow
+    created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
+    updated_at: Mapped[str] = mapped_column(
+        String(32), default=_bj_now, onupdate=_bj_now
     )
 
 
@@ -144,9 +143,9 @@ class Site(Base):
     min_interval_minutes: Mapped[int] = mapped_column(Integer, default=60)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=_utcnow, onupdate=_utcnow
+    created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
+    updated_at: Mapped[str] = mapped_column(
+        String(32), default=_bj_now, onupdate=_bj_now
     )
 
 
@@ -182,22 +181,22 @@ class TorrentIndex(Base):
     category: Mapped[str | None] = mapped_column(String(64), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     free_type: Mapped[str] = mapped_column(String(32), default=FreeType.UNKNOWN)
-    free_end_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    free_end_at: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     free_source: Mapped[str | None] = mapped_column(String(24), nullable=True)
     free_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     #: 具体下载折扣百分比（NEUTRAL 时为 0–100；永久免费固定 100；其他 NULL）
     discount_pct: Mapped[int | None] = mapped_column(Integer, nullable=True)
     #: 原始 free payload（mteam status dict / NexusPHP free_classes + remaining_*）
     free_payload: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
-    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    published_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
     #: 首次入库时间（历史分析用）
-    first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    first_seen_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
     #: 最近一次拉取时间（清理过期数据参考）
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+    last_seen_at: Mapped[str] = mapped_column(String(32), default=_bj_now, index=True)
     #: 推送状态（NULL = 未推过；pushed = 已推到默认下载器；failed = 推送失败）
     push_status: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     #: 推送时间
-    pushed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    pushed_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class TaskQueue(Base):
@@ -215,11 +214,11 @@ class TaskQueue(Base):
     payload: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(16), default="pending")
     attempts: Mapped[int] = mapped_column(Integer, default=0)
-    run_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    run_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=_utcnow, onupdate=_utcnow
+    created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
+    updated_at: Mapped[str] = mapped_column(
+        String(32), default=_bj_now, onupdate=_bj_now
     )
 
 
@@ -242,8 +241,8 @@ class AppRuntimeParam(Base):
     value_int: Mapped[int | None] = mapped_column(Integer, nullable=True)
     value_str: Mapped[str | None] = mapped_column(String(256), nullable=True)
     #: 最近一次修改时间
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=_utcnow, onupdate=_utcnow
+    updated_at: Mapped[str] = mapped_column(
+        String(32), default=_bj_now, onupdate=_bj_now
     )
 
 
@@ -259,8 +258,8 @@ class JobRun(Base):
     job_name: Mapped[str] = mapped_column(String(64), index=True)
     #: 触发方式：'cron' | 'manual'
     trigger: Mapped[str] = mapped_column(String(16))
-    started_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    started_at: Mapped[str] = mapped_column(String(32), default=_bj_now, index=True)
+    finished_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     ok: Mapped[bool] = mapped_column(Boolean, default=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

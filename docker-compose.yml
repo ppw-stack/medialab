@@ -12,7 +12,6 @@ services:
     ports:
       - "8080:8080"
     environment:
-      TZ: ${TZ:-Asia/Shanghai}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_JSON: ${LOG_JSON:-true}
       WEB_USERNAME: ${WEB_USERNAME:-admin}

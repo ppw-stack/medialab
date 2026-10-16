@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -81,8 +80,8 @@ class SiteOut(BaseModel):
     has_apikey: bool
     has_cookies: bool
     min_interval_minutes: int
-    created_at: datetime
-    updated_at: datetime
+    created_at: str
+    updated_at: str
 
 
 @router.get("", summary="站点列表")
@@ -226,6 +225,6 @@ def _to_out(site: Site) -> SiteOut:
         has_apikey=bool(site.apikey),
         has_cookies=bool(site.cookies),
         min_interval_minutes=site.min_interval_minutes,
-        created_at=site.created_at or datetime.min,
-        updated_at=site.updated_at or datetime.min,
+        created_at=site.created_at or "",
+        updated_at=site.updated_at or "",
     )

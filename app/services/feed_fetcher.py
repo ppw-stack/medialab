@@ -24,7 +24,7 @@ import httpx
 
 from app.adapters.sites.base import BreakerTripped, FeedItem, SiteAdapter
 from app.core.logging import get_logger
-from app.core.timeutils import utcnow
+from app.core.timeutils import bj_now_dt, parse_bj
 
 logger = get_logger(__name__)
 
@@ -66,7 +66,7 @@ class BreakerState:
     """熔断状态。"""
 
     tripped: bool
-    until: object | None = None
+    until: str | None = None
 
     @classmethod
     def clear(cls) -> BreakerState:
@@ -90,15 +90,17 @@ class FeedFetcher:
         self._timeout = timeout
         self._jitter = jitter
 
-    def should_pull(self, breaker_until: object | None) -> tuple[bool, str]:
+    def should_pull(self, breaker_until: str | None) -> tuple[bool, str]:
         """是否应该拉取：当前仅保留熔断检查（FR-2.2 频率下限已移除）。
 
-        :param breaker_until: 该站点的熔断结束时刻（datetime 或 None）。
+        :param breaker_until: 该站点的熔断结束时刻（北京时间字符串或 None）。
         """
-        now = utcnow()
-        if breaker_until and breaker_until > now:
-            remain = int((breaker_until - now).total_seconds())
-            return False, f"熔断中，剩余 {remain}s"
+        now = bj_now_dt()
+        if breaker_until:
+            until_dt = parse_bj(breaker_until)
+            if until_dt is not None and until_dt > now:
+                remain = int((until_dt - now).total_seconds())
+                return False, f"熔断中，剩余 {remain}s"
         return True, ""
 
     def compute_backoff(self, attempt: int) -> float:

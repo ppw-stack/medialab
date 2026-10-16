@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import AppSettings, get_settings
 from app.core.logging import get_logger
 from app.core.metrics import feed_pulls, stage_duration
-from app.core.timeutils import utcnow
+from app.core.timeutils import bj_now
 from app.db.models import Site, TorrentIndex
 from app.db.session import session_scope
 from app.services.factory import AdapterFactory
@@ -93,7 +93,7 @@ async def _pull_one_site(
 
     # upsert
     ok = 0
-    now = utcnow()
+    now = bj_now()
     for fi in feed_items:
         item_id = (fi.item_id or "").strip() or None
         window = WindowParser.parse(fi)

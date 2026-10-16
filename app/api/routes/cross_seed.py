@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 from contextlib import suppress
-from datetime import UTC, datetime
 from typing import Any
 
 from apscheduler.triggers.cron import CronTrigger
@@ -57,8 +56,8 @@ class RunJobResult(BaseModel):
     """手动触发作业响应（对齐 :class:`RunResult`）。"""
 
     ok: bool
-    started_at: datetime
-    finished_at: datetime
+    started_at: str
+    finished_at: str
     duration_ms: int
     error: str = ""
     #: 作业函数返回值（dict / None），供前端展示详情
@@ -204,8 +203,8 @@ class JobRunItem(BaseModel):
     id: int
     job_name: str
     trigger: str
-    started_at: datetime
-    finished_at: datetime | None
+    started_at: str
+    finished_at: str | None
     duration_ms: int | None
     ok: bool
     error: str | None = None
@@ -213,15 +212,13 @@ class JobRunItem(BaseModel):
 
     @classmethod
     def from_row(cls, r: JobRun, *, parsed_result: Any = None) -> JobRunItem:
-        """从 ORM 行构建，自动给 datetime 标记 UTC（DB 存的是 naive UTC）。"""
-        def _utc(v: datetime | None) -> datetime | None:
-            return v.replace(tzinfo=UTC) if v is not None else None
+        """从 ORM 行构建（DB 存北京时间字符串，直接使用）。"""
         return cls(
             id=r.id,
             job_name=r.job_name,
             trigger=r.trigger,
-            started_at=_utc(r.started_at),
-            finished_at=_utc(r.finished_at),
+            started_at=r.started_at,
+            finished_at=r.finished_at,
             duration_ms=r.duration_ms,
             ok=r.ok,
             error=r.error,

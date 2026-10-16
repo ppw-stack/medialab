@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
 from apscheduler.executors.asyncio import AsyncIOExecutor
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -23,6 +22,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.core.logging import get_logger
 from app.core.metrics import stage_duration
+from app.core.timeutils import bj_now, bj_now_dt, format_bj
 
 logger = get_logger(__name__)
 
@@ -45,8 +45,8 @@ class RunResult:
     """手动触发作业的执行结果。"""
 
     ok: bool
-    started_at: datetime
-    finished_at: datetime
+    started_at: str
+    finished_at: str
     duration_ms: int
     error: str = ""
     #: 作业函数返回值（dict / dataclass.toDict / str / None），供前端展示详情
@@ -179,7 +179,7 @@ class SchedulerCenter:
             task = asyncio.current_task()
             if task is not None:
                 self._inflight.add(task)
-            wall_started = datetime.now(UTC)
+            wall_started = bj_now_dt()
             started = asyncio.get_running_loop().time()
             _ok = True
             _err: str | None = None
@@ -194,6 +194,7 @@ class SchedulerCenter:
                 _ok = False
                 _err = str(exc)
             finally:
+                finished_dt = bj_now_dt()
                 stage_duration.labels(stage=spec.name).observe(
                     asyncio.get_running_loop().time() - started
                 )
@@ -203,8 +204,9 @@ class SchedulerCenter:
                 _record_run(
                     job_name=spec.name,
                     trigger="cron",
-                    started_at=wall_started,
-                    finished_at=datetime.now(UTC),
+                    started_at=format_bj(wall_started),
+                    finished_at=format_bj(finished_dt),
+                    duration_ms=int((finished_dt - wall_started).total_seconds() * 1000),
                     ok=_ok,
                     error=_err,
                     result=_result,
@@ -225,45 +227,51 @@ class SchedulerCenter:
         """
         spec = self._specs.get(name)
         if spec is None:
+            now_str = bj_now()
             _record_run(
                 job_name=name, trigger="manual",
-                started_at=datetime.now(UTC), finished_at=datetime.now(UTC),
+                started_at=now_str, finished_at=now_str,
+                duration_ms=0,
                 ok=False, error=f"unknown job: {name}", result=None,
             )
             return RunResult(
                 ok=False,
-                started_at=datetime.now(UTC),
-                finished_at=datetime.now(UTC),
+                started_at=now_str,
+                finished_at=now_str,
                 duration_ms=0,
                 error=f"unknown job: {name}",
             )
         if not self.accepting_new_work:
+            now_str = bj_now()
             _record_run(
                 job_name=name, trigger="manual",
-                started_at=datetime.now(UTC), finished_at=datetime.now(UTC),
+                started_at=now_str, finished_at=now_str,
+                duration_ms=0,
                 ok=False, error="scheduler not accepting new work", result=None,
             )
             return RunResult(
                 ok=False,
-                started_at=datetime.now(UTC),
-                finished_at=datetime.now(UTC),
+                started_at=now_str,
+                finished_at=now_str,
                 duration_ms=0,
                 error="scheduler not accepting new work",
             )
         if name in self._running:
+            now_str = bj_now()
             _record_run(
                 job_name=name, trigger="manual",
-                started_at=datetime.now(UTC), finished_at=datetime.now(UTC),
+                started_at=now_str, finished_at=now_str,
+                duration_ms=0,
                 ok=False, error=f"job {name} is already running", result=None,
             )
             return RunResult(
                 ok=False,
-                started_at=datetime.now(UTC),
-                finished_at=datetime.now(UTC),
+                started_at=now_str,
+                finished_at=now_str,
                 duration_ms=0,
                 error=f"job {name} is already running",
             )
-        started = datetime.now(UTC)
+        started_dt = bj_now_dt()
         self._running.add(name)
         task = asyncio.current_task()
         if task is not None:
@@ -272,34 +280,40 @@ class SchedulerCenter:
         try:
             result = await spec.func()
         except asyncio.CancelledError:
-            finished = datetime.now(UTC)
+            finished_dt = bj_now_dt()
+            started_str = format_bj(started_dt)
+            finished_str = format_bj(finished_dt)
             logger.info("手动触发作业 %s 被取消", name)
             _record_run(
                 job_name=name, trigger="manual",
-                started_at=started, finished_at=finished,
+                started_at=started_str, finished_at=finished_str,
+                duration_ms=int((finished_dt - started_dt).total_seconds() * 1000),
                 ok=False, error="cancelled", result=result,
             )
             return RunResult(
                 ok=False,
-                started_at=started,
-                finished_at=finished,
-                duration_ms=int((finished - started).total_seconds() * 1000),
+                started_at=started_str,
+                finished_at=finished_str,
+                duration_ms=int((finished_dt - started_dt).total_seconds() * 1000),
                 error="cancelled",
                 result=result,
             )
         except Exception as exc:
-            finished = datetime.now(UTC)
+            finished_dt = bj_now_dt()
+            started_str = format_bj(started_dt)
+            finished_str = format_bj(finished_dt)
             logger.exception("手动触发作业 %s 失败：%s", name, exc)
             _record_run(
                 job_name=name, trigger="manual",
-                started_at=started, finished_at=finished,
+                started_at=started_str, finished_at=finished_str,
+                duration_ms=int((finished_dt - started_dt).total_seconds() * 1000),
                 ok=False, error=str(exc), result=result,
             )
             return RunResult(
                 ok=False,
-                started_at=started,
-                finished_at=finished,
-                duration_ms=int((finished - started).total_seconds() * 1000),
+                started_at=started_str,
+                finished_at=finished_str,
+                duration_ms=int((finished_dt - started_dt).total_seconds() * 1000),
                 error=str(exc),
                 result=result,
             )
@@ -307,17 +321,20 @@ class SchedulerCenter:
             self._running.discard(name)
             if task is not None:
                 self._inflight.discard(task)
-        finished = datetime.now(UTC)
+        finished_dt = bj_now_dt()
+        started_str = format_bj(started_dt)
+        finished_str = format_bj(finished_dt)
         _record_run(
             job_name=name, trigger="manual",
-            started_at=started, finished_at=finished,
+            started_at=started_str, finished_at=finished_str,
+            duration_ms=int((finished_dt - started_dt).total_seconds() * 1000),
             ok=True, error=None, result=result,
         )
         return RunResult(
             ok=True,
-            started_at=started,
-            finished_at=finished,
-            duration_ms=int((finished - started).total_seconds() * 1000),
+            started_at=started_str,
+            finished_at=finished_str,
+            duration_ms=int((finished_dt - started_dt).total_seconds() * 1000),
             result=result,
         )
 
@@ -330,8 +347,9 @@ def _record_run(
     *,
     job_name: str,
     trigger: str,
-    started_at: datetime,
-    finished_at: datetime,
+    started_at: str,
+    finished_at: str,
+    duration_ms: int,
     ok: bool,
     error: str | None,
     result: object,
@@ -339,6 +357,9 @@ def _record_run(
     """把单次作业执行结果写入 job_runs 表（失败不抛，仅 warn）。
 
     :param trigger: ``'cron'`` 或 ``'manual'``。
+    :param started_at: 北京时间字符串。
+    :param finished_at: 北京时间字符串。
+    :param duration_ms: 执行时长（毫秒），由调用方计算。
     """
     import json
 
@@ -359,9 +380,9 @@ def _record_run(
                 session.add(JobRun(
                     job_name=job_name,
                     trigger=trigger,
-                    started_at=started_at.replace(tzinfo=None),
-                    finished_at=finished_at.replace(tzinfo=None),
-                    duration_ms=int((finished_at - started_at).total_seconds() * 1000),
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    duration_ms=duration_ms,
                     ok=ok,
                     error=error,
                     result_json=result_json,

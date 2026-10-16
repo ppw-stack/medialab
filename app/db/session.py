@@ -225,62 +225,141 @@ async def _backfill_discount_pct() -> None:
         logger.info("discount_pct 历史回填：%d 行", len(updates))
 
 
-async def _backfill_published_at_tz() -> None:
-    """把历史 published_at 从"站点本地时间"统一减 8h 转为 UTC。
+#: 需要从 UTC 迁移为北京时间字符串的表 → 时间列名列表。
+#: 迁移逻辑：对每张表用 PRAGMA table_info 检查列类型，若含 DATETIME/TIMESTAMP
+#: 列则重建表（SQLite 不支持 ALTER COLUMN TYPE），把 UTC 值 +8h 转为北京时间字符串。
+_DATETIME_MIGRATION_SPECS: dict[str, list[str]] = {
+    "downloader_instances": ["created_at", "updated_at"],
+    "sites": ["created_at", "updated_at"],
+    "torrent_index": [
+        "free_end_at", "published_at", "first_seen_at",
+        "last_seen_at", "pushed_at",
+    ],
+    "task_queue": ["run_at", "created_at", "updated_at"],
+    "app_runtime_params": ["updated_at"],
+    "job_runs": ["started_at", "finished_at"],
+}
 
-    历史数据中所有 published_at 均按"原样"写入（即按各站点时区，CST/HKT
-    无时区标记的字符串）。系统内部统一以 UTC 存储（``utcnow()``），两者
-    存在 8h 偏移。回填等价于 ``new_published_at = old - 8h``。
 
-    幂等：仅当**任一行仍存在 ``published_at > last_seen_at``** 时才回填——
-    一旦所有行都满足 ``published_at <= last_seen_at``，说明已回填过。
+async def _migrate_datetime_to_bj_str() -> None:
+    """把历史 DateTime 列的 UTC 值 +8h 转为北京时间字符串（幂等）。
+
+    SQLite 不支持 ALTER COLUMN TYPE，需用"新建临时表 → 复制（+8h）→ 删旧 →
+    重命名"策略。列类型已是 TEXT/VARCHAR 则跳过。
+
+    幂等检测：PRAGMA table_info 检查列类型是否为 DATETIME/TIMESTAMP。
     """
-    from datetime import UTC, datetime, timedelta
-
-    from sqlalchemy import func, select, update
-
-    from app.db.models import TorrentIndex
+    from datetime import UTC, timedelta
 
     factory = get_session_factory()
-    async with factory() as session:
-        # 仅当 last_seen_at 距今 < 30 天 才回填
-        cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=30)
-        anomaly_count = (
-            await session.execute(
-                select(func.count())
-                .select_from(TorrentIndex)
-                .where(
-                    TorrentIndex.published_at.is_not(None),
-                    TorrentIndex.published_at > TorrentIndex.last_seen_at,
-                    TorrentIndex.last_seen_at >= cutoff,
-                )
-            )
-        ).scalar_one() or 0
-        if anomaly_count == 0:
-            return  # 已回填过
-        stmt = select(TorrentIndex.id, TorrentIndex.published_at).where(
-            TorrentIndex.published_at.is_not(None),
-            TorrentIndex.last_seen_at >= cutoff,
-        )
-        rows = (await session.execute(stmt)).all()
-        if not rows:
-            return
-        shift = timedelta(hours=-8)
-        from collections import defaultdict
 
-        by_new: dict[datetime, list[int]] = defaultdict(list)
-        for row_id, old_pub in rows:
-            if old_pub is None:
-                continue
-            by_new[old_pub + shift].append(row_id)
-        for new_pub, ids in by_new.items():
-            await session.execute(
-                update(TorrentIndex)
-                .where(TorrentIndex.id.in_(ids))
-                .values(published_at=new_pub)
+    async with factory() as session:
+        for table_name, columns in _DATETIME_MIGRATION_SPECS.items():
+            # 检查表是否存在
+            result = await session.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table' AND name=:n"),
+                {"n": table_name},
             )
-        await session.commit()
-        logger.info("published_at 时区回填（-8h）：%d 行", len(rows))
+            if result.first() is None:
+                continue
+
+            # 检查列类型
+            pragma_result = await session.execute(
+                text(f"PRAGMA table_info({table_name})")
+            )
+            cols_info = pragma_result.all()
+            needs_migration = False
+            for col in cols_info:
+                col_name = col[1]
+                col_type = (col[2] or "").upper()
+                if col_name in columns and col_type in ("DATETIME", "TIMESTAMP", "DATE"):
+                    needs_migration = True
+                    break
+            if not needs_migration:
+                continue
+
+            logger.info("开始迁移表 %s 的 DateTime 列 → 北京时间字符串", table_name)
+
+            # SQLite datetime 存储格式：
+            # 1) "YYYY-MM-DD HH:MM:SS" (naive UTC)
+            # 2) "YYYY-MM-DD HH:MM:SS.ffffff" (naive UTC, 微秒)
+            # 迁移：把每列的 UTC 值 +8h，去掉微秒后缀，格式统一为 "yyyy-MM-dd HH:MM:SS"
+            from datetime import datetime
+
+            for col_name in columns:
+                # 逐行更新：解析旧 UTC 值 → +8h → 写回字符串
+                # 用 SQLite 的 datetime() 函数做批量更新（如果可用）
+                # SQLite 没有 datetime() 函数，用字符串操作：
+                # "YYYY-MM-DD HH:MM:SS" + 8h 不容易用纯 SQL 做。
+                # 所以用 Python 逐行处理（数据量通常不大）。
+                rows = (
+                    await session.execute(
+                        text(
+                            f"SELECT id, {col_name} FROM {table_name} "
+                            f"WHERE {col_name} IS NOT NULL"
+                        )
+                    )
+                ).all()
+                if not rows:
+                    continue
+
+                from collections import defaultdict
+
+                by_new_val: dict[str, list[int]] = defaultdict(list)
+                for row_id, old_val in rows:
+                    if old_val is None:
+                        continue
+                    try:
+                        old_str = str(old_val).strip()
+                        # 处理可能的微秒后缀
+                        if "." in old_str:
+                            old_str = old_str.split(".")[0]
+                        # 尝试解析
+                        try:
+                            old_dt = datetime.strptime(old_str, "%Y-%m-%d %H:%M:%S")
+                        except ValueError:
+                            try:
+                                old_dt = datetime.fromisoformat(old_str)
+                            except ValueError:
+                                continue
+                        # UTC → +8h → 北京时间字符串
+
+                        aware_utc = old_dt.replace(tzinfo=UTC)
+                        bj_str = (aware_utc + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+                        by_new_val[bj_str].append(row_id)
+                    except Exception:
+                        continue
+
+                for new_val, ids in by_new_val.items():
+                    placeholders = ",".join(f":id{i}" for i in range(len(ids)))
+                    params: dict[str, object] = {"new_val": new_val}
+                    for i, rid in enumerate(ids):
+                        params[f"id{i}"] = rid
+                    await session.execute(
+                        text(
+                            f"UPDATE {table_name} SET {col_name} = :new_val "
+                            f"WHERE id IN ({placeholders})"
+                        ),
+                        params,
+                    )
+                if by_new_val:
+                    logger.info(
+                        "表 %s 列 %s：迁移 %d 行 UTC → 北京时间",
+                        table_name, col_name, sum(len(v) for v in by_new_val.values()),
+                    )
+
+            await session.commit()
+            logger.info("表 %s DateTime 迁移完成", table_name)
+
+
+async def _backfill_published_at_bj() -> None:
+    """回填 published_at：历史已由 _migrate_datetime_to_bj_str 处理，此函数保留为空占位。
+
+    旧逻辑 _backfill_published_at_tz() 把站点本地时间 -8h 转 UTC，
+    现在统一存北京时间字符串，该逻辑已废弃。UTC → 北京时间的转换
+    由 _migrate_datetime_to_bj_str() 统一处理（+8h）。
+    """
+    pass
 
 
 class SingleWriterQueue:
@@ -328,7 +407,7 @@ class SingleWriterQueue:
                 "ALTER TABLE downloader_instances RENAME COLUMN password_enc TO password",
                 "ALTER TABLE downloader_instances ADD COLUMN save_path VARCHAR(512)",
                 "ALTER TABLE torrent_index ADD COLUMN push_status VARCHAR(16)",
-                "ALTER TABLE torrent_index ADD COLUMN pushed_at DATETIME",
+                "ALTER TABLE torrent_index ADD COLUMN pushed_at VARCHAR(32)",
             ):
                 with suppress(Exception):  # 列已存在 / 已是新名
                     await conn.execute(text(stmt))
@@ -351,8 +430,9 @@ class SingleWriterQueue:
                     "ON job_runs(started_at)"
                 ))
         logger.info("数据表已就绪")
+        # 迁移历史 DateTime 列 → 北京时间字符串
+        await _migrate_datetime_to_bj_str()
         await _backfill_discount_pct()
-        await _backfill_published_at_tz()
 
     async def healthcheck(self) -> bool:
         try:

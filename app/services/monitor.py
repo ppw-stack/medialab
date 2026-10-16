@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 
 from app.core.logging import get_logger
-from app.core.timeutils import utcnow
+from app.core.timeutils import bj_now_dt, format_bj
 from app.db.models import (
     DownloaderInstance,
     FreeType,
@@ -102,8 +102,7 @@ class MonitorFreeWindowService:
         self._pre_pause = timedelta(
             minutes=get_runtime_params().get_int("monitor_pre_pause_minutes")
         )
-        now = utcnow()
-        threshold = now + self._pre_pause
+        threshold = format_bj(bj_now_dt() + self._pre_pause)
 
         qb_hashes: set[str] = {
             (info.hash or "").lower()

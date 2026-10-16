@@ -176,19 +176,20 @@ class MteamAdapter(SiteAdapter):
         return urlencode(data)
 
     @staticmethod
-    def _parse_iso_dt(value: object):
-        """Unix 秒 / ISO 8601 / 数字字符串 → naive UTC datetime。
+    def _parse_iso_dt(value: object) -> str | None:
+        """Unix 秒 / ISO 8601 / 数字字符串 → 北京时间字符串。
 
         mteam API 返回的 ``createdDate`` / ``lastModifiedDate`` / ``endDate`` 等
         字符串**无时区标记**，实际是 HKT（=CST，UTC+8）本地时间。本函数：
-        - Unix 秒：按 UTC 解析
-        - ISO 字符串含 ``Z`` 或 ``+HH:MM``：按自带时区解析再转 UTC
-        - ISO 字符串**无时区标记**：按 :attr:`AppSettings.timezone` 解释
-          （默认 Asia/Shanghai），再转 UTC
+        - Unix 秒：按 UTC 解析，转北京时间字符串
+        - ISO 字符串含 ``Z`` 或 ``+HH:MM``：按自带时区解析，转北京时间字符串
+        - ISO 字符串**无时区标记**：视为北京时间，格式化后返回
         """
         from datetime import UTC, datetime
+        from datetime import timedelta as _td
+        from datetime import timezone as _tz
 
-        from app.core.config import get_settings
+        from app.core.timeutils import format_bj
 
         if value is None or value == "":
             return None
@@ -197,7 +198,8 @@ class MteamAdapter(SiteAdapter):
         if isinstance(value, (int, float)):
             ts = float(value)
             if 1_000_000_000 < ts < 4_102_444_800:
-                return datetime.fromtimestamp(ts, UTC).replace(tzinfo=None)
+                dt = datetime.fromtimestamp(ts, UTC)
+                return format_bj(dt)
             return None
         if isinstance(value, str):
             text = value.strip()
@@ -210,16 +212,14 @@ class MteamAdapter(SiteAdapter):
             except ValueError:
                 return None
             if dt.tzinfo is not None:
-                return dt.astimezone(UTC).replace(tzinfo=None)
-            # 无时区标记：按站点本地时区解释再转 UTC
-            try:
-                from zoneinfo import ZoneInfo
-                local = dt.replace(tzinfo=ZoneInfo(get_settings().timezone))
-            except Exception:
-                from datetime import timedelta as _td
-                from datetime import timezone as _tz
-                local = dt.replace(tzinfo=_tz(_td(hours=8)))
-            return local.astimezone(UTC).replace(tzinfo=None)
+                return format_bj(dt)
+            # 无时区标记：视为北京时间，格式化后返回
+            # 如果格式已经是 "yyyy-MM-dd HH:mm:ss"，直接返回
+            if len(text) == 19 and text[4] == "-" and text[7] == "-" and text[10] == " ":
+                return text
+            # 否则 format 一下确保统一格式
+            bj_tz = _tz(_td(hours=8))
+            return dt.replace(tzinfo=bj_tz).strftime("%Y-%m-%d %H:%M:%S")
         return None
 
     # ------------------------------------------------------------ 1. check_reachability

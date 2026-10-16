@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Final
 
-from app.core.timeutils import ClockOffset, utcnow
+from app.core.timeutils import ClockOffset, bj_now_dt, format_bj, parse_bj
 from app.db.models import (
     NON_ABORTABLE_FREE_TYPES,
     FreeSource,
@@ -34,7 +34,7 @@ class FreeWindow:
     """站点适配层解析出的窗口信息（FR-1.5.3 契约）。"""
 
     free_type: str = FreeType.UNKNOWN
-    free_end_at: datetime | None = None
+    free_end_at: str | None = None
     free_source: str = FreeSource.SITE_DEFAULT
     raw_text: str = ""
     confidence: float = 0.0
@@ -72,9 +72,9 @@ class FreeWindow:
 class WindowDeadlines:
     """任务创建时一次算清的截止时间三元组（FR-3.0.1）。"""
 
-    free_end_at: datetime
-    deadline_at: datetime
-    abort_at: datetime
+    free_end_at: str
+    deadline_at: str
+    abort_at: str
     safety_gap: timedelta
 
 
@@ -96,15 +96,18 @@ class WindowPolicy:
         )
 
     def deadlines_for(
-        self, free_end_at: datetime, *, now: datetime | None = None
+        self, free_end_at: str, *, now: datetime | None = None
     ) -> WindowDeadlines:
         """核心公式。``abort_at`` 即 ``free_end_at``，无任何调整。"""
-        ref = now or utcnow()
-        duration = max(free_end_at - ref, timedelta(0))
+        ref = now or bj_now_dt()
+        end_dt = parse_bj(free_end_at)
+        if end_dt is None:
+            end_dt = ref
+        duration = max(end_dt - ref, timedelta(0))
         gap = self.safety_gap(duration)
         return WindowDeadlines(
             free_end_at=free_end_at,
-            deadline_at=free_end_at - gap,
+            deadline_at=format_bj(end_dt - gap),
             abort_at=free_end_at,
             safety_gap=gap,
         )
@@ -120,12 +123,15 @@ class WindowPolicy:
 
         同一条件只有一种动作：跳过。不存在"仍抓取但高优先级看护"的分支。
         """
-        ref = now or utcnow()
+        ref = now or bj_now_dt()
         if window.is_permanent:
             return False, ""
         if window.free_end_at is None:
             return False, ""  # 走 source 4/5 兜底后再判
-        remaining = window.free_end_at - ref
+        end_dt = parse_bj(window.free_end_at)
+        if end_dt is None:
+            return False, ""
+        remaining = end_dt - ref
         if remaining <= timedelta(0):
             return True, "window_expired"
         if remaining < self.skip_threshold():
@@ -137,7 +143,7 @@ class WindowPolicy:
 
     def deadline_from_remaining(
         self, remaining: timedelta, *, now: datetime | None = None
-    ) -> datetime:
+    ) -> str:
         """从"站点声明的剩余时长"求绝对结束时刻（含时钟校正，FR-3.0.2）。"""
         return self.clock_offset.remaining_to_absolute(remaining, local_now=now)
 

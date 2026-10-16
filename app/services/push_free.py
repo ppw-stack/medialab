@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from sqlalchemy import or_, select, update
@@ -23,7 +23,7 @@ from app.adapters.downloaders.base import AddTorrentPayload, DownloaderError
 from app.adapters.sites._bencode import infohash_from_torrent
 from app.core.config import AppSettings
 from app.core.logging import get_logger
-from app.core.timeutils import utcnow
+from app.core.timeutils import bj_now, bj_now_dt, format_bj
 from app.db.models import (
     DownloaderInstance,
     FreeType,
@@ -190,7 +190,7 @@ class PushFreeService:
                     .where(TorrentIndex.id == c.index_id)
                     .values(
                         push_status=PushStatus.PUSHED,
-                        pushed_at=utcnow(),
+                        pushed_at=bj_now(),
                         info_hash=info_hash,
                     )
                 )
@@ -222,13 +222,13 @@ class PushFreeService:
         注：不再从 torrent_index 读 URL——推送时实时调
         :meth:`SiteAdapter.download_torrent` 获取 .torrent bytes。
         """
-        now = utcnow()
+        now = bj_now()
         # 运行时参数（DB 持久化，UI 可调；详见 app.services.runtime_params）
         from app.services.runtime_params import get_runtime_params
 
         rp = get_runtime_params()
         min_remaining = timedelta(hours=rp.get_int("push_min_remaining_hours"))
-        threshold = now + min_remaining
+        threshold = format_bj(bj_now_dt() + min_remaining)
 
         # 候选集：torrent_index 上 free_type ∈ 真免费/限时免费 且 item_id 非空
         #         且 push_status 未推过（NULL 或 != pushed）
@@ -310,4 +310,4 @@ class _Candidate:
     item_id: str
     name: str
     free_type: str | None = None
-    free_end_at: datetime | None = None
+    free_end_at: str | None = None

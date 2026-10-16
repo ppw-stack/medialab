@@ -8,19 +8,18 @@
 """
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Final
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi import Query as QueryParam
-from pydantic import BaseModel, field_serializer
+from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from app.adapters.downloaders.base import AddTorrentPayload, DownloaderError
 from app.adapters.sites._bencode import infohash_from_torrent
 from app.api.auth import require_session
 from app.core.logging import get_logger
-from app.core.timeutils import utcnow
+from app.core.timeutils import bj_now
 from app.db.models import (
     DownloaderInstance,
     PushStatus,
@@ -50,36 +49,18 @@ class TorrentIndexItem(BaseModel):
     size: int
     category: str | None
     free_type: str
-    free_end_at: datetime | None
+    free_end_at: str | None
     free_source: str | None
     free_confidence: float | None
     discount_pct: int | None
     #: 是否可推送（item_id 非空 → 可调 SiteAdapter.download_torrent 实时拿 bytes）
     pushable: bool
     push_status: str | None
-    pushed_at: datetime | None
+    pushed_at: str | None
     info_hash: str | None
-    published_at: datetime | None
-    first_seen_at: datetime
-    last_seen_at: datetime
-
-    @field_serializer(
-        "free_end_at", "pushed_at", "published_at", "first_seen_at", "last_seen_at",
-        check_fields=False,
-    )
-    def _ser_dt(self, v: datetime | None) -> str | None:
-        """naive datetime 视为 UTC，序列化为带 ``Z`` 的 ISO 8601。
-
-        数据库统一以 UTC 存储（``app.core.timeutils.utcnow``），但 Pydantic 默认
-        把 naive datetime 当作本地时间输出。显式追加 ``Z`` 让浏览器/客户端按 UTC
-        解析并在本地时区显示——避免"7:30 拉取、15:25 发布"的视觉错乱。
-        """
-        if v is None:
-            return None
-        from datetime import UTC
-
-        v = v.replace(tzinfo=UTC) if v.tzinfo is None else v.astimezone(UTC)
-        return v.strftime("%Y-%m-%dT%H:%M:%S.") + f"{v.microsecond // 1000:03d}Z"
+    published_at: str | None
+    first_seen_at: str
+    last_seen_at: str
 
 
 class TorrentIndexPage(BaseModel):
@@ -387,7 +368,7 @@ async def push_torrent_index(index_id: int, payload: PushRequest) -> PushRespons
             .where(TorrentIndex.id == index_id)
             .values(
                 push_status=PushStatus.PUSHED,
-                pushed_at=utcnow(),
+                pushed_at=bj_now(),
                 info_hash=info_hash,
             )
         )

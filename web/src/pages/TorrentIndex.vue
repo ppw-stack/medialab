@@ -271,19 +271,13 @@ function formatSize(n: number): string {
 
 function formatDate(s: string | null): string {
   if (!s) return '—'
-  const d = new Date(s)
-  // Compact YYYY-MM-DD HH:mm
-  const pad = (n: number) => n.toString().padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  // 后端返回 "yyyy-MM-dd HH:mm:ss" 北京时间字符串，直接截取显示
+  return s.length >= 16 ? s.substring(0, 16) : s
 }
 
 function formatDateFull(s: string | null): string {
   if (!s) return ''
-  const d = new Date(s)
-  const pad = (n: number) => n.toString().padStart(2, '0')
-  const w = ['日', '一', '二', '三', '四', '五', '六'][d.getDay()]
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} 周${w} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-}
+  return s}
 
 function freeTypeLabel(ft: string, discountPct?: number | null) {
   const base = FREE_TYPE_LABELS[ft] ?? { label: ft, color: 'default' }
@@ -301,7 +295,8 @@ interface Countdown {
 
 function countdownFor(end: string | null): Countdown {
   if (!end) return { ms: Infinity, label: '—', cls: 'countdown--none' }
-  const ms = new Date(end).getTime() - Date.now()
+  // 后端返回北京时间字符串 "yyyy-MM-dd HH:mm:ss"，需加 +08:00 让 JS 正确解析为 UTC 时间
+  const ms = new Date(end.replace(' ', 'T') + '+08:00').getTime() - Date.now()
   if (ms <= 0) return { ms, label: '已截止', cls: 'countdown--urgent' }
   const hours = ms / 3600 / 1000
   let cls = 'countdown--safe'

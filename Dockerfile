@@ -59,9 +59,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONFAULTHANDLER=1
 
-# TZ 改由 docker-compose.yml 的 environment / env_file 注入（默认 Asia/Shanghai）
-# 不在镜像层 bake 死，避免与运行时 .env 冲突
-
 # 非 root 运行（§9.2 部署安全建议）
 RUN groupadd --system --gid 1000 seedhelper && \
     useradd  --system --uid 1000 --gid seedhelper --home-dir /srv/seedhelper --shell /sbin/nologin seedhelper

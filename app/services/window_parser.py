@@ -17,11 +17,11 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any, Final
 
 from app.adapters.sites.base import FeedItem
-from app.core.timeutils import utcnow
+from app.core.timeutils import bj_now_dt, format_bj
 from app.core.windows import FreeWindow
 from app.db.models import FreeSource, FreeType
 
@@ -86,8 +86,8 @@ _PROMO_CLASS_MAP: Final[dict[str, tuple[str, int | None]]] = {
 _TEXT_PCT_RE: Final = re.compile(r"(\d{1,3})\s*%")
 
 
-def _parse_iso_dt(value: object) -> datetime | None:
-    """Unix 秒 / ISO 8601 / 数字字符串 → naive UTC datetime。"""
+def _parse_iso_dt(value: object) -> str | None:
+    """Unix 秒 / ISO 8601 / 数字字符串 → 北京时间字符串。"""
     if value is None or value == "":
         return None
     if isinstance(value, bool):
@@ -95,7 +95,11 @@ def _parse_iso_dt(value: object) -> datetime | None:
     if isinstance(value, (int, float)):
         ts = float(value)
         if 1_000_000_000 < ts < 4_102_444_800:
-            return datetime.fromtimestamp(ts, UTC).replace(tzinfo=None)
+            from datetime import UTC
+
+            from app.core.timeutils import format_bj
+
+            return format_bj(datetime.fromtimestamp(ts, UTC))
         return None
     if isinstance(value, str):
         text = value.strip()
@@ -107,7 +111,17 @@ def _parse_iso_dt(value: object) -> datetime | None:
             dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
         except ValueError:
             return None
-        return dt.astimezone(UTC).replace(tzinfo=None) if dt.tzinfo else dt
+        from app.core.timeutils import format_bj
+
+        if dt.tzinfo is not None:
+            return format_bj(dt)
+        # 无时区标记：视为北京时间
+        if len(text) == 19 and text[4] == "-" and text[7] == "-" and text[10] == " ":
+            return text
+        from datetime import timedelta as _td
+        from datetime import timezone as _tz
+
+        return dt.replace(tzinfo=_tz(_td(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
     return None
 
 
@@ -129,18 +143,18 @@ def _parse_remaining_delta(text: str | None) -> timedelta | None:
     return delta
 
 
-def _parse_abs_datetime(text: str | None) -> datetime | None:
-    """从 "2026-10-11 11:27:07" 格式解析为 naive UTC datetime。"""
+def _parse_abs_datetime(text: str | None) -> str | None:
+    """从 "2026-10-11 11:27:07" 格式返回北京时间字符串（原样）。"""
     if not text:
         return None
     try:
-        dt = datetime.strptime(text.strip(), "%Y-%m-%d %H:%M:%S")
+        datetime.strptime(text.strip(), "%Y-%m-%d %H:%M:%S")
     except ValueError:
         try:
-            dt = datetime.fromisoformat(text.strip())
+            datetime.fromisoformat(text.strip())
         except ValueError:
             return None
-    return dt.replace(tzinfo=None)
+    return text.strip()
 
 
 def _classify_from_html(
@@ -198,7 +212,7 @@ def _classify_from_html(
     return FreeType.UNKNOWN, None, 0.0, None
 
 
-def _classify_from_status(status: dict[str, Any]) -> tuple[str, datetime | None, int | None]:
+def _classify_from_status(status: dict[str, Any]) -> tuple[str, str | None, int | None]:
     """从 m-team search API 的 status 块提取免费窗口。
 
     返回 ``(free_type, end_at, discount_pct)``。``discount_pct`` 仅
@@ -297,7 +311,9 @@ def _parse_nexushp_html(item: FeedItem) -> FreeWindow | None:
     payload = item.free_payload
     if not payload:
         return None
-    if "free_classes" not in payload and "remaining_text" not in payload and "remaining_abs" not in payload:
+    if ("free_classes" not in payload
+            and "remaining_text" not in payload
+            and "remaining_abs" not in payload):
         return None
     free_classes_raw = payload.get("free_classes", [])
     if isinstance(free_classes_raw, list):
@@ -318,7 +334,7 @@ def _parse_nexushp_html(item: FeedItem) -> FreeWindow | None:
 
     # 退还/返还种优先识别：class 含 refund 关键字 或 剩余时间文案含 refund
     if "refund" in free_classes or is_refund_marker(remaining_text):
-        refund_end_at: datetime | None = None
+        refund_end_at: str | None = None
         if remaining_abs:
             refund_end_at = _parse_abs_datetime(remaining_abs)
         return FreeWindow(
@@ -333,11 +349,11 @@ def _parse_nexushp_html(item: FeedItem) -> FreeWindow | None:
         free_classes, remaining_text, promo_texts=promo_texts
     )
 
-    end_at: datetime | None = None
+    end_at: str | None = None
     if remaining_abs:
         end_at = _parse_abs_datetime(remaining_abs)
     if end_at is None and remaining_delta is not None:
-        end_at = utcnow() + remaining_delta
+        end_at = format_bj(bj_now_dt() + remaining_delta)
 
     # R10 契约：NEUTRAL / TWOU_TIMED 必须 free_end_at=None（中性/2X 无时间窗口）。
     # 若 user 同时给了 remaining_abs，按 free_type 优先：
@@ -420,7 +436,7 @@ def _parse_str(item: FeedItem) -> FreeWindow:
         minutes = int(m.group("m") or 0)
         delta = timedelta(days=days, hours=hours, minutes=minutes)
         if delta.total_seconds() > 0:
-            end = utcnow() + delta
+            end = format_bj(bj_now_dt() + delta)
             return FreeWindow(
                 free_type=FreeType.TIMED,
                 free_end_at=end,

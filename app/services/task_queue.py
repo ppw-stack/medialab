@@ -14,14 +14,13 @@ claim/mark 系列方法即可。
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.timeutils import utcnow
+from app.core.timeutils import bj_now
 from app.db.models import TaskQueue
 
 
@@ -76,7 +75,7 @@ class TaskQueueService:
         payload: dict[str, object],
         *,
         idem_key: str,
-        run_at: datetime | None = None,
+        run_at: str | None = None,
     ) -> EnqueueResult:
         """入队。幂等键冲突时返回既有任务（不报错）。"""
         existing = (
@@ -93,7 +92,7 @@ class TaskQueueService:
             payload=payload,
             status=TaskStatus.PENDING,
             attempts=0,
-            run_at=run_at or utcnow(),
+            run_at=run_at or bj_now(),
         )
         self._session.add(task)
         try:

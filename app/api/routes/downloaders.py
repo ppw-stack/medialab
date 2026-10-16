@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -71,8 +70,8 @@ class DownloaderOut(BaseModel):
     is_default: bool
     enabled: bool
     verify_tls: bool
-    created_at: datetime
-    updated_at: datetime
+    created_at: str
+    updated_at: str
 
 
 def _to_out(row: DownloaderInstance) -> DownloaderOut:
@@ -87,8 +86,8 @@ def _to_out(row: DownloaderInstance) -> DownloaderOut:
         is_default=row.is_default,
         enabled=row.enabled,
         verify_tls=row.verify_tls,
-        created_at=row.created_at or datetime.min,
-        updated_at=row.updated_at or datetime.min,
+        created_at=row.created_at or "",
+        updated_at=row.updated_at or "",
     )
 
 

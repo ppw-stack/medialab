@@ -27,7 +27,6 @@ services:
     ports:
       - "8091:8080"           # 主机 8091 → 容器 8080（避开 8081 qB / 8080 immich）
     environment:
-      TZ: ${TZ:-Asia/Shanghai}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_JSON: ${LOG_JSON:-true}
       WEB_USERNAME: ${WEB_USERNAME:-admin}

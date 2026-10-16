@@ -59,7 +59,6 @@ python -c "import secrets; print('WEB_TOKEN=' + secrets.token_urlsafe(32))"
 WEB_USERNAME=admin                  # 默认
 WEB_PASSWORD=...                    # 必填
 WEB_TOKEN=...                       # 必填
-TZ=Asia/Shanghai                    # 或 UTC
 LOG_LEVEL=INFO
 LOG_JSON=true
 FETCH_ALL_SITES_CRON=*/10 * * * *
@@ -154,7 +153,6 @@ echo "TAG=0.1.1" >> .env.prod    # prod
 | 调度作业不执行 | `curl -H "Authorization: Bearer $WEB_TOKEN" http://localhost:8080/api/v1/scheduler` 看 jobs[].enabled；`docker logs seedhelper \| grep "已注册"` |
 | 推送失败 | UI 设置 → 调度作业 → 立即执行 push_free_torrents；查容器日志 |
 | 容器内存超限被 kill | `docker stats seedhelper`；`deploy.resources.limits.memory` 调到 1G |
-| 时区不对 | `docker exec seedhelper date`；改 `.env` 的 `TZ=`，`docker compose up -d` |
 
 ## 7. 数据备份（手工）
 
