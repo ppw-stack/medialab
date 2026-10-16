@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select
@@ -46,6 +46,7 @@ class MonitorResult:
     skipped_far_from_window: int = 0
     skipped_already_completed: int = 0
     skipped_already_paused: int = 0
+    skipped_permanent: int = 0
     pre_paused: int = 0
     failed: int = 0
     errors: tuple[str, ...] = ()
@@ -105,42 +106,45 @@ class MonitorFreeWindowService:
                 await session.execute(
                     select(
                         TorrentIndex.info_hash,
+                        TorrentIndex.free_type,
                         TorrentIndex.free_end_at,
                     ).where(
                         TorrentIndex.push_status == PushStatus.PUSHED,
-                        TorrentIndex.free_type == FreeType.TIMED,
+                        # 不按 free_type 过滤：monitor 看种子当前实际状态
+                        # - 当前是限时种（TIMED/TWOU_TIMED）→ 应用窗口规则
+                        # - 当前是永久种（PERMANENT）→ 永不暂停
+                        # - 当前是折扣/未知（neutral_leech/unknown）→ 立即暂停
+                        # 站点状态变化由 fetch_all_sites 正常更新 db，无需历史快照。
                         TorrentIndex.info_hash.is_not(None),
                     )
                 )
             ).all()
-        index_by_hash: dict[str, datetime] = {
-            (row[0] or "").lower(): row[1]
+        index_by_hash: dict[str, object] = {
+            (row.info_hash or "").lower(): row
             for row in rows
-            if row[0] and row[1] is not None
+            if row.info_hash
         }
 
-        # 4) 遍历下载器任务，按 hash 匹配决定行为
+        # 4) 遍历下载器任务，按 hash 匹配 + 按 db 当前 free_type 决定行为
         matched = 0
         skipped_unmatched = 0
         skipped_far = 0
         skipped_completed = 0
         skipped_paused = 0
+        skipped_permanent = 0
         pre_paused = 0
         failed = 0
         errors: list[str] = []
 
         for info in infos:
             hash_key = (info.hash or "").lower()
-            free_end_at = index_by_hash.get(hash_key)
-            if free_end_at is None:
-                # 不在 index 推送集合中（可能：手动推、永久免费、未推过等）
+            row = index_by_hash.get(hash_key)
+            if row is None:
+                # 不在 db 推送集合中（手动推、未推过等）
                 skipped_unmatched += 1
                 continue
             matched += 1
 
-            if free_end_at > threshold:
-                skipped_far += 1
-                continue
             if info.progress >= 1.0:
                 skipped_completed += 1
                 continue
@@ -148,14 +152,49 @@ class MonitorFreeWindowService:
                 skipped_paused += 1
                 continue
 
-            # 触发暂停
+            # 按 db 当前 free_type 决定（fetch_all_sites 已更新为最新值）
+            ft = row.free_type  # type: ignore[attr-defined]
+            fea = row.free_end_at  # type: ignore[attr-defined]
+
+            if ft == FreeType.PERMANENT:
+                # 永久免费：用户全程做种赚积分，永不暂停
+                skipped_permanent += 1
+                continue
+
+            if ft in (FreeType.TIMED, FreeType.TWOU_TIMED):
+                # 限时种（含 2X 限时）：窗口判断
+                if fea is None:
+                    # 异常：限时种无 end_at → 保守暂停
+                    try:
+                        await adapter.set_pause([info.hash], paused=True)
+                    except Exception as exc:
+                        failed += 1
+                        errors.append(f"hash={hash_key} set_pause: {exc}")
+                    else:
+                        pre_paused += 1
+                    continue
+                if fea > threshold:
+                    skipped_far += 1
+                    continue
+                # 即将到期 / 已过期 → 暂停
+                try:
+                    await adapter.set_pause([info.hash], paused=True)
+                except Exception as exc:
+                    failed += 1
+                    errors.append(f"hash={hash_key} set_pause: {exc}")
+                else:
+                    pre_paused += 1
+                continue
+
+            # 其他 free_type（neutral_leech / unknown / 任何非免费）→ 直接暂停
+            # 用户规则："当前不是免费种，直接暂停"
             try:
                 await adapter.set_pause([info.hash], paused=True)
             except Exception as exc:
                 failed += 1
                 errors.append(f"hash={hash_key} set_pause: {exc}")
-                continue
-            pre_paused += 1
+            else:
+                pre_paused += 1
 
         result = MonitorResult(
             scanned=scanned,
@@ -164,16 +203,18 @@ class MonitorFreeWindowService:
             skipped_far_from_window=skipped_far,
             skipped_already_completed=skipped_completed,
             skipped_already_paused=skipped_paused,
+            skipped_permanent=skipped_permanent,
             pre_paused=pre_paused,
             failed=failed,
             errors=tuple(errors[:10]),
         )
         logger.info(
             "monitor: 下载器 %d，命中 %d，触发暂停 %d，"
-            "跳过(无关/远/已完成/已暂停) %d/%d/%d/%d，失败 %d",
+            "跳过(无关/远/已完成/已暂停/永久) %d/%d/%d/%d/%d，失败 %d",
             result.scanned, result.matched, result.pre_paused,
             result.skipped_unmatched, result.skipped_far_from_window,
             result.skipped_already_completed, result.skipped_already_paused,
+            result.skipped_permanent,
             result.failed,
         )
         return result
