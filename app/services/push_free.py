@@ -242,8 +242,12 @@ class PushFreeService:
                 TorrentIndex.free_end_at,
             )
             .where(
-                TorrentIndex.free_type.in_(
-                    (FreeType.PERMANENT, FreeType.TIMED)
+                # 显式白名单：永久免费 + 限时免费 + 2X 限时
+                # 退还（REFUND）/折扣（NEUTRAL）/未知（UNKNOWN）均不自动推送
+                or_(
+                    TorrentIndex.free_type == FreeType.PERMANENT,
+                    TorrentIndex.free_type == FreeType.TIMED,
+                    TorrentIndex.free_type == FreeType.TWOU_TIMED,
                 ),
                 TorrentIndex.item_id.is_not(None),
                 or_(

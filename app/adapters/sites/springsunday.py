@@ -53,6 +53,7 @@ _MAX_ITEMS_PER_PULL = 500
 
 #: ``<span class="torrent-pro-icon torrent-pro-XXX">`` → 标准免费 class 映射
 #: SSD 自定义主题用 span 而非 img 标记促销，class 前缀为 ``torrent-pro-``。
+#: 退还种用 torrent-pro-refund-left/right 两个 span（"1d"+"返还"），需映射到同一 refund class
 _PRO_SPAN_MAP: dict[str, str] = {
     "free": "free",
     "free2up": "twoupfree",
@@ -61,6 +62,8 @@ _PRO_SPAN_MAP: dict[str, str] = {
     "50pctdown2up": "twouphalfdown",
     "thirtypercent": "thirtypercent",
     "refund": "refund",
+    "refund-left": "refund",
+    "refund-right": "refund",
 }
 
 #: ``<img class="pro_XXX">`` → 标准免费 class 映射（保留兼容，SSD 可能混用）

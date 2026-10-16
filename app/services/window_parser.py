@@ -47,6 +47,21 @@ _DURATION_RE: Final = re.compile(
     r"(?:(?P<m>\d+)\s*(?:分|分鐘|分钟))?",
 )
 
+#: 退还/返还/偿还 关键字（springsunday 等站用不同文字表示"上传者已撤种"）
+_REFUND_KEYWORDS: Final[frozenset[str]] = frozenset({"refund", "退还", "偿还", "返还"})
+
+
+def is_refund_marker(text: str | None) -> bool:
+    """检测文案/class 是否含"退还/返还"关键字。
+
+    用于 window_parser 主流程优先判断：refund 优先于 free/twoupfree 等
+    普通免费标记（退还种可能也含 free class）。
+    """
+    if not text:
+        return False
+    return any(kw in text.lower() for kw in _REFUND_KEYWORDS)
+
+
 #: NexusPHP 免费标记 class → (FreeType, default_discount_pct)
 _FREE_CLASS_MAP: Final[dict[str, tuple[str, int | None]]] = {
     "free": (FreeType.UNKNOWN, None),  # 需配合剩余时间判断
@@ -300,6 +315,19 @@ def _parse_nexushp_html(item: FeedItem) -> FreeWindow | None:
     promo_texts = (
         [str(t) for t in promo_texts_raw] if isinstance(promo_texts_raw, list) else []
     )
+
+    # 退还/返还种优先识别：class 含 refund 关键字 或 剩余时间文案含 refund
+    if "refund" in free_classes or is_refund_marker(remaining_text):
+        refund_end_at: datetime | None = None
+        if remaining_abs:
+            refund_end_at = _parse_abs_datetime(remaining_abs)
+        return FreeWindow(
+            free_type=FreeType.REFUND,
+            free_end_at=refund_end_at,
+            free_source="site_default",
+            confidence=0.95,
+            discount_pct=None,
+        )
 
     free_type, remaining_delta, confidence, discount_pct = _classify_from_html(
         free_classes, remaining_text, promo_texts=promo_texts

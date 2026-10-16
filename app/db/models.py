@@ -40,6 +40,9 @@ class FreeType:
     TWOU_TIMED = "twoup_timed"
     NEUTRAL = "neutral_leech"
     UNKNOWN = "unknown"
+    #: 退还/返还种（springsunday "1d 退还"）：上传者已撤种，窗口内仍可下载
+    #: 业务规则：不自动推送（push_free 排除）；monitor 视为"非免费"直接暂停
+    REFUND = "refund"
 
 
 class PushStatus:

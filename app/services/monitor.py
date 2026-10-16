@@ -48,6 +48,7 @@ class MonitorResult:
     skipped_already_completed: int = 0
     skipped_already_paused: int = 0
     skipped_permanent: int = 0
+    skipped_refund: int = 0
     pre_paused: int = 0
     failed: int = 0
     errors: tuple[str, ...] = ()
@@ -144,6 +145,7 @@ class MonitorFreeWindowService:
         skipped_completed = 0
         skipped_paused = 0
         skipped_permanent = 0
+        skipped_refund = 0
         pre_paused = 0
         failed = 0
         errors: list[str] = []
@@ -172,6 +174,19 @@ class MonitorFreeWindowService:
             if ft == FreeType.PERMANENT:
                 # 永久免费：用户全程做种赚积分，永不暂停
                 skipped_permanent += 1
+                continue
+
+            if ft == FreeType.REFUND:
+                # 退还种（springsunday "1d 退还"）：上传者已撤种
+                # 用户规则"当前非免费种直接暂停"——与 NEUTRAL/UNKNOWN 走相同路径
+                # 单独计数便于统计退还种规模
+                try:
+                    await adapter.set_pause([info.hash], paused=True)
+                except Exception as exc:
+                    failed += 1
+                    errors.append(f"hash={hash_key} set_pause: {exc}")
+                else:
+                    pre_paused += 1
                 continue
 
             if ft in (FreeType.TIMED, FreeType.TWOU_TIMED):
@@ -217,17 +232,18 @@ class MonitorFreeWindowService:
             skipped_already_completed=skipped_completed,
             skipped_already_paused=skipped_paused,
             skipped_permanent=skipped_permanent,
+            skipped_refund=skipped_refund,
             pre_paused=pre_paused,
             failed=failed,
             errors=tuple(errors[:10]),
         )
         logger.info(
             "monitor: 下载器 %d，命中 %d，触发暂停 %d，"
-            "跳过(无关/远/已完成/已暂停/永久) %d/%d/%d/%d/%d，失败 %d",
+            "跳过(无关/远/已完成/已暂停/永久/退还) %d/%d/%d/%d/%d/%d，失败 %d",
             result.scanned, result.matched, result.pre_paused,
             result.skipped_unmatched, result.skipped_far_from_window,
             result.skipped_already_completed, result.skipped_already_paused,
-            result.skipped_permanent,
+            result.skipped_permanent, result.skipped_refund,
             result.failed,
         )
         return result
