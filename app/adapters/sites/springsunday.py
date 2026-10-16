@@ -348,6 +348,17 @@ class SpringsundayAdapter(SiteAdapter):
                         if suffix in _PRO_SPAN_MAP:
                             free_classes.append(_PRO_SPAN_MAP[suffix])
                             break
+            # SSD 退还种（"1d 退还"）结构不同：外层是 class="nowrap"（无 torrent-pro-icon），
+            # 内层才是 torrent-pro-refund-left/right，需独立循环识别
+            _refund_re = re.compile(r"torrent-pro-(?:refund-left|refund-right)")
+            for span in tr.find_all("span", class_=_refund_re):
+                refund_classes: list[str] = list(span.get("class") or [])
+                for c in refund_classes:
+                    if c.startswith("torrent-pro-") and c != "torrent-pro-icon":
+                        suffix = c[len("torrent-pro-"):]
+                        if suffix in _PRO_SPAN_MAP:
+                            free_classes.append(_PRO_SPAN_MAP[suffix])
+                            break
             # 兼容标准 NexusPHP <img class="pro_XXX"> 标记
             for img in tr.find_all("img", class_=re.compile(r"^pro_")):
                 img_classes: list[str] = list(img.get("class") or [])
