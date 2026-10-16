@@ -269,16 +269,23 @@ async def _migrate_datetime_to_bj_str() -> None:
             )
             cols_info = pragma_result.all()
             needs_migration = False
+            # 推断主键列：PRAGMA 第 5 字段 pk > 0 即主键；多列主键取第一列
+            pk_col: str = "id"
             for col in cols_info:
                 col_name = col[1]
                 col_type = (col[2] or "").upper()
                 if col_name in columns and col_type in ("DATETIME", "TIMESTAMP", "DATE"):
                     needs_migration = True
-                    break
+                # col 索引: (cid, name, type, notnull, dflt_value, pk)
+                if len(col) >= 6 and col[5] and isinstance(col[5], int) and col[5] > 0:
+                    pk_col = col_name
             if not needs_migration:
                 continue
 
-            logger.info("开始迁移表 %s 的 DateTime 列 → 北京时间字符串", table_name)
+            logger.info(
+                "开始迁移表 %s 的 DateTime 列 → 北京时间字符串（PK=%s）",
+                table_name, pk_col,
+            )
 
             # SQLite datetime 存储格式：
             # 1) "YYYY-MM-DD HH:MM:SS" (naive UTC)
@@ -295,7 +302,7 @@ async def _migrate_datetime_to_bj_str() -> None:
                 rows = (
                     await session.execute(
                         text(
-                            f"SELECT id, {col_name} FROM {table_name} "
+                            f"SELECT {pk_col}, {col_name} FROM {table_name} "
                             f"WHERE {col_name} IS NOT NULL"
                         )
                     )
@@ -305,8 +312,8 @@ async def _migrate_datetime_to_bj_str() -> None:
 
                 from collections import defaultdict
 
-                by_new_val: dict[str, list[int]] = defaultdict(list)
-                for row_id, old_val in rows:
+                by_new_val: dict[str, list[object]] = defaultdict(list)
+                for row_pk, old_val in rows:
                     if old_val is None:
                         continue
                     try:
@@ -326,19 +333,19 @@ async def _migrate_datetime_to_bj_str() -> None:
 
                         aware_utc = old_dt.replace(tzinfo=UTC)
                         bj_str = (aware_utc + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
-                        by_new_val[bj_str].append(row_id)
+                        by_new_val[bj_str].append(row_pk)
                     except Exception:
                         continue
 
-                for new_val, ids in by_new_val.items():
-                    placeholders = ",".join(f":id{i}" for i in range(len(ids)))
+                for new_val, pks in by_new_val.items():
+                    placeholders = ",".join(f":pk{i}" for i in range(len(pks)))
                     params: dict[str, object] = {"new_val": new_val}
-                    for i, rid in enumerate(ids):
-                        params[f"id{i}"] = rid
+                    for i, rpk in enumerate(pks):
+                        params[f"pk{i}"] = rpk
                     await session.execute(
                         text(
                             f"UPDATE {table_name} SET {col_name} = :new_val "
-                            f"WHERE id IN ({placeholders})"
+                            f"WHERE {pk_col} IN ({placeholders})"
                         ),
                         params,
                     )
