@@ -11,14 +11,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 #: 北京时区
 BJ_TZ: ZoneInfo = ZoneInfo("Asia/Shanghai")
-
-#: 北京时间 UTC 偏移
-BJ_OFFSET = timezone(timedelta(hours=8))
 
 #: 时间字符串格式
 _TIME_FORMAT = "%Y-%m-%d %H:%M:%S"

@@ -247,13 +247,20 @@ async def _migrate_datetime_to_bj_str() -> None:
     SQLite 不支持 ALTER COLUMN TYPE，需用"新建临时表 → 复制（+8h）→ 删旧 →
     重命名"策略。列类型已是 TEXT/VARCHAR 则跳过。
 
-    幂等检测：PRAGMA table_info 检查列类型是否为 DATETIME/TIMESTAMP。
+    幂等检测：PRAGMA user_version 标记。注意：UPDATE 只改值不改列声明类型，
+    table_info 永远报 DATETIME，故列类型检查不能作为幂等依据，必须用
+    数据库级标记。标记在全部表迁移完成后写入；中途崩溃则重跑（已迁表
+    会被重复 +8h，属可接受的小概率，远好于每次启动都重复迁移）。
     """
     from datetime import UTC, timedelta
 
     factory = get_session_factory()
 
     async with factory() as session:
+        # 幂等标记：迁移完成后写入 user_version=1，避免每次启动重复 +8h。
+        ver = (await session.execute(text("PRAGMA user_version"))).scalar_one()
+        if ver and ver >= 1:
+            return
         for table_name, columns in _DATETIME_MIGRATION_SPECS.items():
             # 检查表是否存在
             result = await session.execute(
@@ -357,6 +364,8 @@ async def _migrate_datetime_to_bj_str() -> None:
 
             await session.commit()
             logger.info("表 %s DateTime 迁移完成", table_name)
+        # 全部表迁移完成，写入幂等标记（PRAGMA 赋值立即持久化，非事务性）
+        await session.execute(text("PRAGMA user_version = 1"))
 
 
 async def _backfill_published_at_bj() -> None:

@@ -115,13 +115,8 @@ def _parse_iso_dt(value: object) -> str | None:
 
         if dt.tzinfo is not None:
             return format_bj(dt)
-        # 无时区标记：视为北京时间
-        if len(text) == 19 and text[4] == "-" and text[7] == "-" and text[10] == " ":
-            return text
-        from datetime import timedelta as _td
-        from datetime import timezone as _tz
-
-        return dt.replace(tzinfo=_tz(_td(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+        # 无时区标记：视为北京时间（format_bj 把 naive 视为 BJ）
+        return format_bj(dt)
     return None
 
 

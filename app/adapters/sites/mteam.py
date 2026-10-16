@@ -186,8 +186,6 @@ class MteamAdapter(SiteAdapter):
         - ISO 字符串**无时区标记**：视为北京时间，格式化后返回
         """
         from datetime import UTC, datetime
-        from datetime import timedelta as _td
-        from datetime import timezone as _tz
 
         from app.core.timeutils import format_bj
 
@@ -213,13 +211,8 @@ class MteamAdapter(SiteAdapter):
                 return None
             if dt.tzinfo is not None:
                 return format_bj(dt)
-            # 无时区标记：视为北京时间，格式化后返回
-            # 如果格式已经是 "yyyy-MM-dd HH:mm:ss"，直接返回
-            if len(text) == 19 and text[4] == "-" and text[7] == "-" and text[10] == " ":
-                return text
-            # 否则 format 一下确保统一格式
-            bj_tz = _tz(_td(hours=8))
-            return dt.replace(tzinfo=bj_tz).strftime("%Y-%m-%d %H:%M:%S")
+            # 无时区标记：视为北京时间（format_bj 把 naive 视为 BJ）
+            return format_bj(dt)
         return None
 
     # ------------------------------------------------------------ 1. check_reachability
