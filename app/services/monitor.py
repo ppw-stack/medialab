@@ -1,12 +1,13 @@
 """免费窗口监测作业（FR-3.4 巡检 + 临近截止自动暂停）。
 
 流程：
-1. 拉默认下载器全量任务（``adapter.list_torrents()``）
-2. 查 ``torrent_index`` 上 ``push_status=pushed AND free_type=freeleech_timed
-   AND info_hash IS NOT NULL`` 的行
-3. 遍历下载器中的每个种子：若 hash 命中 index 的限时免费集合且距
-   ``free_end_at`` 不足 :data:`pre_pause_minutes` 且未完成 → 调
-   :meth:`DownloaderAdapter.set_pause` 暂停下载器中的任务。
+1. 拉默认下载器全量任务（``adapter.list_torrents()``）—— 拉下载器是权威
+2. 提取 qB 任务 hash 列表，按此列表查 ``torrent_index`` 当前状态
+3. 遍历下载器中的每个种子：若 db 命中 ``push_status=pushed`` → 按 db 当前
+   ``free_type`` 判断处理：
+   - 当前是限时种（TIMED/TWOU_TIMED）→ 应用窗口规则
+   - 当前是永久种（PERMANENT）→ 永不暂停
+   - 当前是非免费（neutral_leech / unknown / 其他）→ 立即暂停
 
 不写 DB。``torrent_index`` 中已推送但不在下载器中的种子不用管
 （可能 qB 自动删除 / 用户手动删，不强制标记）。
@@ -92,7 +93,9 @@ class MonitorFreeWindowService:
             logger.info("monitor: 下载器无任务")
             return MonitorResult(scanned=0)
 
-        # 3) 查 torrent_index 中已推送的限时免费种（构建 hash → free_end_at 映射）
+        # 3) 查 torrent_index 中由 qB 任务对应的 pushed 行
+        # 关键：先有 qB 任务（权威），再按 qB hash 查 db 状态。
+        # 这样 qB 已删/从未推的种不会被纳入统计；qB 中所有任务的当前状态都能查到。
         from app.services.runtime_params import get_runtime_params
 
         self._pre_pause = timedelta(
@@ -100,6 +103,15 @@ class MonitorFreeWindowService:
         )
         now = utcnow()
         threshold = now + self._pre_pause
+
+        qb_hashes: set[str] = {
+            (info.hash or "").lower()
+            for info in infos
+            if info.hash
+        }
+        if not qb_hashes:
+            logger.info("monitor: 下载器无任务 hash")
+            return MonitorResult(scanned=scanned)
 
         async with session_scope() as session:
             rows = (
@@ -109,13 +121,13 @@ class MonitorFreeWindowService:
                         TorrentIndex.free_type,
                         TorrentIndex.free_end_at,
                     ).where(
+                        TorrentIndex.info_hash.in_(qb_hashes),
                         TorrentIndex.push_status == PushStatus.PUSHED,
                         # 不按 free_type 过滤：monitor 看种子当前实际状态
                         # - 当前是限时种（TIMED/TWOU_TIMED）→ 应用窗口规则
                         # - 当前是永久种（PERMANENT）→ 永不暂停
                         # - 当前是折扣/未知（neutral_leech/unknown）→ 立即暂停
                         # 站点状态变化由 fetch_all_sites 正常更新 db，无需历史快照。
-                        TorrentIndex.info_hash.is_not(None),
                     )
                 )
             ).all()
@@ -140,7 +152,8 @@ class MonitorFreeWindowService:
             hash_key = (info.hash or "").lower()
             row = index_by_hash.get(hash_key)
             if row is None:
-                # 不在 db 推送集合中（手动推、未推过等）
+                # qB 任务但 db 没 tracked：可能是用户手动推、auto-push 之外的
+                # category、或 push_status 没成功写入（极少见）。
                 skipped_unmatched += 1
                 continue
             matched += 1
