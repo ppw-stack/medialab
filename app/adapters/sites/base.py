@@ -1,11 +1,16 @@
 """PT 站点适配层（FR-1.5）。
 
-每个站点一个文件（mteam.py、ourbits.py、...），实现 5 个契约方法：
+每个站点一个文件（mteam.py、ourbits.py、...），实现 5+4 个契约方法：
 - check_reachability: 校验域名可达与登录态
 - search_torrents: 种子搜索
 - download_torrent: 下载 .torrent 文件字节
 - check_status: 种子状态检查
 - get_torrent_detail: 种子详情查询
+- get_torrent_url: 实时返回 item 的可下载绝对 URL（push 时调用）
+- get_user_info: 用户身份/流量/分享率（FR-1.6）
+- get_seeding_stats: 做种/下载汇总（FR-1.6）
+- get_message_count: 未读消息数（FR-1.6）
+- get_hr_status: H&R 风险状态（FR-1.6）
 
 约束：适配层不写数据库、不操作下载器，保持可独立单测。
 窗口解析（FreeWindow）由业务层 :mod:`app.services.window_parser` 负责。
@@ -19,6 +24,13 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from bs4.element import Tag
+
+from app.adapters.sites.user_data import (
+    HrStatus,
+    MessageSummary,
+    SeedingStats,
+    UserInfo,
+)
 
 
 class TorrentBrief(StrEnum):
@@ -183,6 +195,39 @@ class SiteAdapter(ABC):
     @abstractmethod
     async def get_torrent_detail(self, item_id: str) -> TorrentDetail:
         """5. 种子详情查询。返回统一结构（含 download_url / free_payload / raw_html）。"""
+
+    # ----------------------- FR-1.6 站点用户数据契约 -----------------------
+
+    async def get_user_info(self) -> UserInfo | None:
+        """7. 用户身份/流量/分享率。
+
+        默认实现：返回 ``None``（未实现）。各适配器按需 override。
+        失败（鉴权失效/解析失败）也应返回 ``None``，由 service 层跳过本周期。
+        """
+        return None
+
+    async def get_seeding_stats(self) -> SeedingStats | None:
+        """8. 做种/下载汇总（仅 count + size，不取每条详情）。
+
+        默认实现：返回 ``None``。NexusPHP 类站点可复用
+        :func:`app.adapters.sites.parsers.nexus_php.parse_user_seeding_stats`。
+        """
+        return None
+
+    async def get_message_count(self) -> MessageSummary:
+        """9. 未读消息数。
+
+        默认实现：返回 0 未读。NexusPHP 站点的 navbar ``<span class='unread-count'>`` 可读出准确值。
+        """
+        return MessageSummary(unread_count=0)
+
+    async def get_hr_status(self) -> HrStatus:
+        """10. H&R 风险状态（是否被警告）。
+
+        默认实现：返回 ``False``（无风险）。NexusPHP 站点的 userdetails 页面
+        可读到 ``hit-and-run`` 警告标志。
+        """
+        return HrStatus(is_hr=False, warning_count=0)
 
     async def close(self) -> None:
         """释放 HTTP 连接池。子类按需覆盖。"""

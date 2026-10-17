@@ -199,6 +199,20 @@ def register_jobs(
         cfg.monitor_free_window_cron, cfg.monitor_pre_pause_minutes,
     )
 
+    async def _run_refresh_user_data() -> dict[str, object]:
+        from app.services.user_data import refresh_all_sites
+
+        return await refresh_all_sites(factory)
+
+    scheduler_center.register(
+        JobSpec(
+            name="refresh_user_data",
+            func=lambda: _run_and_return(_run_refresh_user_data()),
+            cron="*/30 * * * *",
+        )
+    )
+    logger.info("已注册站点用户数据作业：refresh_user_data cron='*/30 * * * *'")
+
 
 async def _run_push_free(factory: AdapterFactory, cfg: AppSettings) -> dict[str, object]:
     """执行推送并把结果序列化为 dict（供 API 返回）。"""
