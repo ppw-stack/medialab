@@ -2,6 +2,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import { api } from '../api'
 import { message } from 'ant-design-vue'
+import type { FormInstance } from 'ant-design-vue'
 
 interface Site {
   id: number; name: string; domain: string | null; adapter: string;
@@ -54,6 +55,7 @@ const creating = ref(false)
 const testingId = ref<number | null>(null)
 const testResults = ref<Record<number, { status: string; detail: string }>>({})
 const modalOpen = ref(false)
+const formRef = ref<FormInstance>()
 
 const formState = reactive<Record<string, unknown>>({})
 
@@ -112,6 +114,8 @@ async function onDelete(id: number) {
 
 async function onSave() {
   try {
+    // 前端先校验（name 必填 + 合法字符），再交后端 422 兜底
+    await formRef.value?.validate()
     if (creating.value) {
       await api.post('/sites', formState)
       message.success('已创建')
@@ -176,7 +180,7 @@ const columns = [
       <div>
         <div class="page-header__eyebrow">站点 · SITES</div>
         <h1 class="page-header__title">站点适配器</h1>
-        <div class="page-header__sub">凭据脱敏存储（AES-256-GCM）· 支持 4 类私有种子站点</div>
+        <div class="page-header__sub">凭据脱敏展示 · 支持 9 类私有种子站点</div>
       </div>
       <a-button type="primary" @click="onCreate">新增站点</a-button>
     </header>
@@ -253,7 +257,7 @@ const columns = [
       @cancel="() => { modalOpen = false; editing = null; creating = false }"
       @ok="onSave"
     >
-      <a-form layout="vertical">
+      <a-form ref="formRef" :model="formState" layout="vertical">
         <a-form-item label="适配器（自动带出域名）" name="adapter" :rules="[{ required: true }]">
           <a-select
             :value="formState.adapter"

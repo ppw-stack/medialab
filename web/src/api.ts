@@ -21,8 +21,18 @@ export async function apiFetch<T = unknown>(
   });
 
   if (resp.status === 401) {
-    // 不要 full-reload：保留 SPA 路由栈，由登录页组件处理跳转。
-    // 全量 reload 会丢失登录前发出的 in-flight fetch 与滚动状态。
+    // 会话失效：清登录态并回登录页。不整页 reload（保留 SPA 路由栈，
+    // 避免丢失滚动状态）；动态 import 避免与 router/pages 形成静态循环依赖。
+    const [{ useAuthStore }, { default: router }] = await Promise.all([
+      import("./stores/auth"),
+      import("./router"),
+    ]);
+    const auth = useAuthStore();
+    auth.authenticated = false;
+    auth.username = null;
+    if (router.currentRoute.value.path !== "/login") {
+      await router.push("/login");
+    }
     throw new ApiError(401, "未登录");
   }
 

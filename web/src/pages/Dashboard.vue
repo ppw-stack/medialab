@@ -150,7 +150,7 @@ const JOB_LABELS: Record<string, string> = {
       <a-table
         v-if="scheduler"
         :data-source="scheduler.jobs"
-        :columns="[]"
+        :columns="[{ title: '', key: 'job' }]"
         :show-header="false"
         :pagination="false"
         row-key="name"
