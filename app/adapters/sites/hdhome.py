@@ -200,7 +200,14 @@ class HdhomeAdapter(SiteAdapter):
         items: list[FeedItem] = []
         seen: set[str] = set()
 
-        for tr in table.find_all("tr"):
+        # HDHome 的 table.torrents 结构：
+        # table.torrents > tbody > tr (数据行)
+        # 外层 tr（mainouter/main）不含数据，需跳过
+        # 用 tbody.find_all('tr', recursive=False) 只取直接子 tr
+        tbody = table.find("tbody")
+        if tbody is None:
+            tbody = table
+        for tr in tbody.find_all("tr", recursive=False):
             # 找 details 锚点（必须带 title 属性，避免导航条干扰）
             a = tr.find("a", href=_DETAILS_ID_RE, attrs={"title": True})
             if a is None:
@@ -236,7 +243,8 @@ class HdhomeAdapter(SiteAdapter):
                     size_bytes = int(val * mult)
                     break
 
-            # published_at: 最后一个 span title 含绝对时刻（hdhome DOM 顺序：remaining_abs 在前，published_at 在后）
+            # published_at: 最后一个 span title 含绝对时刻
+            # (hdhome DOM 顺序：remaining_abs 在前，published_at 在后)
             published_at: str | None = None
             for span in reversed(tr.find_all("span", attrs={"title": True})):
                 tval = str(span.get("title") or "").strip()
