@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.adapters.sites.base import FeedItem
 from app.core.config import AppSettings, get_settings
 from app.core.logging import get_logger
 from app.core.metrics import feed_pulls, stage_duration
@@ -79,9 +80,16 @@ async def _pull_one_site(
         logger.warning("站点 %s 适配器创建失败：%s", row.name, exc)
         return (0, 0)
 
-    # 拉 RSS
+    # 拉 RSS（前 3 页：mteam 600 条 / 5 HTML 站各 300 条）
     try:
-        feed_items = await adapter.search_torrents({}, page_size=200, page_number=1)
+        feed_items: list[FeedItem] = []
+        for page in range(1, 4):  # 拉 1-3 页
+            page_items = await adapter.search_torrents(
+                {}, page_size=200, page_number=page,
+            )
+            feed_items.extend(page_items)
+            if not page_items:
+                break  # 后续页无数据就停，避免无效请求
     except Exception as exc:
         feed_pulls.labels(result="error", site=row.name).inc()
         logger.warning("站点 %s 拉取失败：%s", row.name, exc)
