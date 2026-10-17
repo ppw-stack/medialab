@@ -70,7 +70,7 @@ const inflightJobs = computed(() => scheduler.value?.inflight ?? 0)
 const accepting = computed(() => scheduler.value?.accepting_new_work ?? false)
 
 const JOB_LABELS: Record<string, string> = {
-  fetch_all_sites: 'RSS 拉取',
+  fetch_all_sites: '站点拉取',
   push_free_torrents: '免费种推送',
 }
 </script>
@@ -102,7 +102,7 @@ const JOB_LABELS: Record<string, string> = {
             <div class="stat-tile__value">
               {{ enabledSites }}<span style="color: var(--text-tertiary); font-size: var(--text-md); font-weight: 400"> / {{ totalSites }}</span>
             </div>
-            <div class="stat-tile__hint">RSS / API / Cookies</div>
+            <div class="stat-tile__hint">API / Cookies</div>
           </div>
         </a-col>
         <a-col :xs="12" :sm="6">

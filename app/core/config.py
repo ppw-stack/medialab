@@ -62,7 +62,7 @@ class AppSettings(BaseSettings):
 
     # -- 调度 --
     scheduler_enabled: bool = True
-    #: 统一 RSS 拉取 cron 表达式（5 字段：分 时 日 月 星期），默认每 10 分钟
+    #: 站点拉取 cron 表达式（5 字段：分 时 日 月 星期），默认每 10 分钟
     fetch_all_sites_cron: str = "*/10 * * * *"
     #: 自动推送免费种到默认下载器的 cron（默认 30 分钟一次，与 fetch 错开）
     push_free_cron: str = "*/30 * * * *"

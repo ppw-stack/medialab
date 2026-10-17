@@ -1,16 +1,16 @@
-"""RSS 拉取作业 API 与 RSS 连通性测试。
+"""调度作业 API 与站点连通性测试。
 
 历史背景：本文件原名 ``cross_seed.py``（辅种作业 API），现在仅保留
-三个端点：
+以下端点：
 
 - ``GET /scheduler``：查询调度作业状态（自动从注册的 JobSpec 列表生成）
 - ``POST /scheduler/{job_name}/toggle``：启停单个作业
 - ``POST /scheduler/{job_name}/cron``：运行时修改 cron 表达式
 - ``POST /scheduler/{job_name}/run``：手动触发作业（不等 cron）
-- ``GET /sites/{site_id}/feed-test``：测试站点 RSS 可达性，纯诊断
+- ``GET /sites/{site_id}/feed-test``：测试站点连通性（走 adapter.search_torrents），纯诊断
 
 辅种匹配（``pull`` / ``pull-all``）与 ``feeds`` 列表已删除——见 commit
-``refactor: 统一 RSS 拉取作业 + 删除辅种匹配 + 删除 free_candidates``。
+``refactor: 统一站点拉取作业 + 删除辅种匹配 + 删除 free_candidates``。
 """
 from __future__ import annotations
 
@@ -38,11 +38,11 @@ from app.services.runtime_params import (
 from app.services.scheduler import RunResult, scheduler_center
 
 logger = get_logger(__name__)
-router = APIRouter(dependencies=[Depends(require_session)], tags=["rss"])
+router = APIRouter(dependencies=[Depends(require_session)], tags=["site-fetch"])
 
 
 class FeedTestResult(BaseModel):
-    """RSS 连通性测试结果。"""
+    """站点连通性测试结果。"""
 
     ok: bool
     status: str
@@ -290,9 +290,9 @@ async def get_job_run(run_id: int) -> JobRunItem:
     return JobRunItem.from_row(r, parsed_result=parsed)
 
 
-@router.get("/sites/{site_id}/feed-test", summary="RSS 连通性测试")
+@router.get("/sites/{site_id}/feed-test", summary="站点连通性测试")
 async def test_feed(site_id: int) -> FeedTestResult:
-    """测试站点 RSS 可达性与解析结果。
+    """测试站点连通性与解析结果（走 adapter.search_torrents）。
 
     **不落库、不触发 cron**——纯诊断，避免用户"测试"操作意外添加任务。
     """
@@ -310,8 +310,8 @@ async def test_feed(site_id: int) -> FeedTestResult:
         logger.warning("站点 %s 凭据解析失败：%s", site.name, exc)
         return FeedTestResult(ok=False, status="credential_error", error=str(exc))
     except Exception:
-        logger.exception("站点 %s RSS 测试内部异常", site.name)
-        return FeedTestResult(ok=False, status="internal_error", error="RSS URL 生成失败")
+        logger.exception("站点 %s 站点测试内部异常", site.name)
+        return FeedTestResult(ok=False, status="internal_error", error="站点 URL 生成失败")
 
     adapter = factory.site(site)
     fetcher = FeedFetcher(site.name)

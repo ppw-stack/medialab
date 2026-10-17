@@ -200,7 +200,7 @@ const columns = [
           </template>
           <template v-else-if="column.key === 'credentials'">
             <a-space :size="4">
-              <a-tag v-if="record.rss_url_masked" color="cyan">RSS</a-tag>
+              <a-tag v-if="record.rss_url_masked" color="cyan">HTML</a-tag>
               <a-tag v-if="record.has_apikey" color="purple">API key</a-tag>
               <a-tag v-if="record.has_cookies" color="cyan">Cookies</a-tag>
               <a-tag v-if="!record.rss_url_masked && !record.has_apikey && !record.has_cookies">—</a-tag>
@@ -276,10 +276,10 @@ const columns = [
           </a-form-item>
         </a-space>
 
-        <a-form-item label="RSS URL（含 passkey，留空=不修改）" name="rss_url">
+        <a-form-item label="HTML URL（含 passkey，留空=不修改）" name="rss_url">
           <a-input-password
             v-model:value="formState.rss_url"
-            placeholder="https://example.com/rss.php?feedkey=..."
+            placeholder="https://example.com/torrents.php?inclbookmarked=0&..."
           />
         </a-form-item>
         <a-form-item label="API Key（m-team 等，留空=不修改）" name="apikey">
@@ -297,7 +297,7 @@ const columns = [
           />
         </a-form-item>
 
-        <a-form-item label="RSS 拉取最小间隔 (分钟)" name="min_interval_minutes">
+        <a-form-item label="站点拉取最小间隔 (分钟)" name="min_interval_minutes">
           <a-input-number v-model:value="formState.min_interval_minutes" :min="15" :max="1440" style="width: 100%" />
         </a-form-item>
 

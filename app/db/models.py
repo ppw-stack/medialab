@@ -150,14 +150,14 @@ class Site(Base):
 
 
 class TorrentIndex(Base):
-    """通用拉取索引：所有站点的 RSS feed 拉取结果。
+    """通用站点拉取索引：所有站点的种子列表（API/HTML）抓取结果。
 
     单个调度任务 ``fetch_all_sites``（cron ``*/10 * * * *``）按站遍历
     调用各 adapter 的 :meth:`SiteAdapter.search_torrents`，把返回的
     :class:`FeedItem` 全部 upsert 写到这里（唯一约束 ``(site_id, item_id)``）。
 
     历史背景：替代原 ``free_candidates``（手动推送候选池）+ ``Feed``
-    + ``FeedItemRecord``（RSS audit）。统一成一张"RSS 拉取快照"——
+    + ``FeedItemRecord``。统一成一张"站点拉取快照"——
     任何后续工作（外部工具、SQL 查询、辅种匹配、手动筛选）都从这里读。
     """
 

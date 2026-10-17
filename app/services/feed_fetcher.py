@@ -1,4 +1,4 @@
-"""RSS 拉取器（FR-2.2）。
+"""站点拉取器（FR-2.2 节奏控制 + 熔断保护）。
 
 PT 站对高频请求极其敏感（R2：被封 = 账号风险），因此本模块的三条约束都是
 **安全要求**而非性能优化：
@@ -10,6 +10,10 @@ PT 站对高频请求极其敏感（R2：被封 = 账号风险），因此本模
 
 熔断状态持久化在 ``feeds.breaker_until``，进程重启不会遗忘（避免重启即
 绕过熔断）。
+
+注：本模块是兼容层——实际拉取已统一走各 adapter 的
+:meth:`SiteAdapter.search_torrents`（API/HTML），不再独立发 HTTP 请求。
+本类保留用于：单站连通性测试（``/sites/{id}/feed-test``）+ 熔断节奏控制。
 """
 
 from __future__ import annotations
@@ -74,7 +78,7 @@ class BreakerState:
 
 
 class FeedFetcher:
-    """RSS 拉取器。
+    """站点拉取器（兼容层，节奏控制 + 熔断）。
 
     **退避 + 熔断**都在这里，站点适配层只负责解析（分层约束，§7.1）。
     """
@@ -114,7 +118,7 @@ class FeedFetcher:
     async def fetch(
         self, adapter: SiteAdapter, url: str, *, retry: bool = True
     ) -> PullResult:
-        """拉取并解析 RSS。"""
+        """拉取并解析（兼容层，调用 adapter.search_torrents）。"""
         started = time.monotonic()
         attempts = MAX_RETRIES if retry else 1
         last_error = ""
@@ -142,7 +146,7 @@ class FeedFetcher:
                     await asyncio.sleep(self.compute_backoff(attempt))
                 continue
             except Exception as exc:
-                # 解析类异常（XML ParseError 等）：重试无意义，直接标记
+                # 解析类异常（HTML BS4 / API JSON 等）：重试无意义，直接标记
                 logger.warning("站点 %s 解析失败：%s", self._site, exc)
                 return PullResult(
                     status=PullStatus.PARSE_ERROR,
@@ -152,7 +156,7 @@ class FeedFetcher:
             else:
                 duration = self._elapsed_ms(started)
                 if not items:
-                    logger.info("站点 %s RSS 无新条目（%dms）", self._site, duration)
+                    logger.info("站点 %s 无新条目（%dms）", self._site, duration)
                     return PullResult(
                         status=PullStatus.EMPTY, duration_ms=duration
                     )
@@ -170,8 +174,8 @@ class FeedFetcher:
         )
 
     async def _fetch_once(self, adapter: SiteAdapter, url: str) -> list[FeedItem]:
-        """单次拉取。返回任务列表（RSS 拉取路径已废弃）。"""
-        _ = url  # RSS 路径不再使用
+        """单次拉取。返回任务列表（站点拉取路径走 adapter.search_torrents）。"""
+        _ = url  # 兼容层保留参数，路径不再直接使用
         try:
             items = await adapter.search_torrents({})
         except BreakerTripped:
@@ -197,7 +201,7 @@ async def fetch_with_own_client(
 
     显式携带固定 UA（R2：仅常规浏览器标识，不做伪装对抗）。
     """
-    headers = {"User-Agent": USER_AGENT, "Accept": "application/rss+xml, */*"}
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json, text/html, */*"}
     async with httpx.AsyncClient(
         timeout=timeout, follow_redirects=True, headers=headers
     ) as client:

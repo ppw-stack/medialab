@@ -108,11 +108,12 @@ class AdapterFactory:
         return adapter
 
     def site_rss_url(self, row: Site) -> str | None:
-        """站点 RSS 地址（含 passkey，R6 高敏感）。
+        """站点拉取 URL（含 passkey，R6 高敏感）。
 
-        API 模式站点（如 m-team 有 apikey）可能未配置 RSS 地址——
-        此时返回 None，由 adapter 内部决定走 API 还是需要 URL。
-        调用方不应假定站点一定有 RSS URL（FR-1.5 适配层收拢差异）。
+        兼容层方法（方法名保留以避免 API 变更）。
+        API 模式站点（如 m-team 有 apikey）可能未配置此字段——
+        此时返回 None，由 adapter 内部决定走 API 还是 HTML。
+        调用方不应假定站点一定有此 URL（FR-1.5 适配层收拢差异）。
         """
         return row.rss_url or None
 

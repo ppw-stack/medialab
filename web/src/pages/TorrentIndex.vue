@@ -363,7 +363,7 @@ const columns = [
       <div>
         <div class="page-header__eyebrow">拉取索引 · INDEX</div>
         <h1 class="page-header__title">免费种信号池</h1>
-        <div class="page-header__sub">RSS 自动拉取的种子清单，按免费类型筛选</div>
+        <div class="page-header__sub">自动拉取的种子清单（API/HTML），按免费类型筛选</div>
       </div>
       <div class="mono" style="font-size: var(--text-xs); color: var(--text-tertiary); letter-spacing: 0.06em">
         <span class="live-dot" :class="{ 'live-dot--idle': !loading }" />

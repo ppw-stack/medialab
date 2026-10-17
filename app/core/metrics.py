@@ -13,7 +13,7 @@ REGISTRY = CollectorRegistry(auto_describe=True)
 #: 拉取次数（按站点/结果）
 feed_pulls = Counter(
     "seedhelper_feed_pulls_total",
-    "RSS 拉取次数",
+    "站点拉取次数（按站点/结果）",
     labelnames=("site", "result"),
     registry=REGISTRY,
 )

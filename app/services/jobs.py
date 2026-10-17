@@ -1,14 +1,14 @@
-"""调度作业注册——统一 RSS 拉取 + 自动推送 + 免费窗口监测。
+"""调度作业注册——统一站点拉取 + 自动推送 + 免费窗口监测。
 
 已注册作业：
 
 - :func:`fetch_all_sites` — 按站遍历所有启用站点，调用各 adapter 的
-  :meth:`SiteAdapter.search_torrents` 拉取最新 RSS，把 :class:`FeedItem`
+  :meth:`SiteAdapter.search_torrents` 拉取最新种子列表，把 :class:`FeedItem`
   upsert 到 :class:`TorrentIndex` 表。
 - :func:`push_free_torrents` — 选免费种自动推到默认下载器。
 - :func:`monitor_free_window` — 巡检已推免费种，临近窗口截止自动暂停。
 
-注：本模块不再做辅种匹配或限免过滤——全部 RSS 项目都写入索引表
+注：本模块不再做辅种匹配或限免过滤——全部站点拉取的种子都写入索引表
 供查询/筛选，外部系统按需使用。
 """
 from __future__ import annotations
@@ -35,7 +35,7 @@ logger = get_logger(__name__)
 
 
 async def fetch_all_sites(factory: AdapterFactory) -> int:
-    """按站遍历拉取 RSS，写入 :class:`TorrentIndex`。
+    """按站遍历拉取种子列表，写入 :class:`TorrentIndex`。
 
     返回成功 upsert 的条目数。失败站记 ERROR 但不阻塞其他站。
     """
@@ -55,11 +55,11 @@ async def fetch_all_sites(factory: AdapterFactory) -> int:
 
     if total_written:
         logger.info(
-            "RSS 拉取：共 %d 条种子写入 torrent_index（站数 %d）",
+            "站点拉取：共 %d 条种子写入 torrent_index（站数 %d）",
             total_written, len(rows),
         )
     else:
-        logger.info("RSS 拉取：无种子写入（站数 %d）", len(rows))
+        logger.info("站点拉取：无种子写入（站数 %d）", len(rows))
 
     stage_duration.labels(stage="fetch_all_sites").observe(
         asyncio.get_running_loop().time() - started
@@ -72,7 +72,7 @@ async def _pull_one_site(
     row: Site,
     session: AsyncSession,
 ) -> tuple[int, int]:
-    """拉取单站 RSS 并 upsert；返回 (ok_count, ko_count)。"""
+    """拉取单站种子列表并 upsert；返回 (ok_count, ko_count)。"""
     # 创建 adapter（含凭据解密）
     try:
         adapter = factory.site(row)
@@ -80,7 +80,7 @@ async def _pull_one_site(
         logger.warning("站点 %s 适配器创建失败：%s", row.name, exc)
         return (0, 0)
 
-    # 拉 RSS（前 3 页：mteam 600 条 / 5 HTML 站各 300 条）
+    # 拉种子列表（前 3 页：mteam 600 条 / 5 HTML 站各 300 条）
     try:
         feed_items: list[FeedItem] = []
         for page in range(1, 4):  # 拉 1-3 页
@@ -158,7 +158,7 @@ def register_jobs(
     *,
     settings: AppSettings | None = None,
 ) -> None:
-    """注册周期性作业：RSS 拉取 + 免费种自动推送。
+    """注册周期性作业：站点拉取 + 免费种自动推送。
 
     :meth:`register_jobs` 接收 :class:`AdapterFactory` 而不是具体
     adapter——作业函数本身负责按站/按下载器创建 adapter。这是与之前
@@ -173,7 +173,7 @@ def register_jobs(
         )
     )
     logger.info(
-        "已注册 RSS 拉取作业：fetch_all_sites cron=%r",
+        "已注册站点拉取作业：fetch_all_sites cron=%r",
         cfg.fetch_all_sites_cron,
     )
     scheduler_center.register(
