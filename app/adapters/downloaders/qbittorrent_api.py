@@ -23,9 +23,13 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 import httpx
+
+#: BTIH infohash：40 位 hex（_join_hashes 的防御校验）
+_HASH_RE: re.Pattern[str] = re.compile(r"^[a-fA-F0-9]{40}$")
 
 
 class Qb5ApiError(RuntimeError):
@@ -220,10 +224,21 @@ class Qb5ApiClient:
 
     @staticmethod
     def _join_hashes(hashes: list[str] | tuple[str, ...] | str) -> str:
-        """hash 列表 → qBittorrent 要求的 "|" 分隔字符串。"""
+        """hash 列表 → qBittorrent 要求的 "|" 分隔字符串。
+
+        防御性校验：qB 会把保留字 ``all`` 解析为"所有种子"，传入任意非
+        40 位 hex 值即抛错，杜绝批量误删/误操作（FR-5.2）。
+        """
         if isinstance(hashes, str):
-            return hashes
-        return "|".join(hashes)
+            items: list[str] = hashes.split("|")
+        else:
+            items = list(hashes)
+        invalid = [h for h in items if not _HASH_RE.fullmatch(h)]
+        if invalid:
+            raise ValueError(
+                f"非法 infohash：{invalid[:5]}（必须是 40 位 hex）"
+            )
+        return "|".join(items)
 
     # ============================================================ 生命周期
     async def close(self) -> None:

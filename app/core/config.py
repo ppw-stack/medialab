@@ -51,6 +51,10 @@ class AppSettings(BaseSettings):
     web_username: str = "admin"
     web_password: SecretStr | None = None
     web_token: SecretStr | None = None
+    #: session cookie 是否带 Secure 标记（反代提供 HTTPS 时建议开启）
+    web_cookie_secure: bool = False
+    #: 允许的 CORS origins（逗号分隔）；空 = 不启用 CORS 中间件（同源部署）
+    web_cors_origins: str = ""
     # -- 前端静态资源路径（FR-6.1 SPA 托管）--
     frontend_dist: Path = Path("/app/web/dist")
 

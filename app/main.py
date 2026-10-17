@@ -102,16 +102,23 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
-    # CORS：同源部署时无作用；分离部署（dev 前端 / 反代场景）显式允许 origin
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[
-            f"http://{get_settings().web_host}:{get_settings().web_port}",
-        ],
-        allow_credentials=True,
-        allow_methods=["GET", "POST", "PATCH", "DELETE"],
-        allow_headers=["Authorization", "Content-Type"],
-    )
+    # CORS：同源部署（SPA 由 FastAPI 托管）默认不启用；
+    # 分离部署时用 WEB_CORS_ORIGINS 逗号分隔显式声明。
+    # 旧默认（web_host:web_port）会把 0.0.0.0 拼进 allow_origins，浏览器
+    # 永远匹配不上，等于 CORS 全挂——废弃。
+    origins = [
+        o.strip()
+        for o in get_settings().web_cors_origins.split(",")
+        if o.strip()
+    ]
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+            allow_headers=["Authorization", "Content-Type"],
+        )
 
     from app.api.auth import install_static
     _mount_routes(app)

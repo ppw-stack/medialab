@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -31,6 +32,20 @@ router = APIRouter(
 #: 已实现的下载器类型（M1+M2 范围）。其他类型后续按 FR-1 补齐。
 SUPPORTED_TYPES: tuple[str, ...] = ("qbittorrent", "transmission")
 ALL_TYPES: tuple[str, ...] = ("qbittorrent", "transmission", "deluge", "aria2")
+
+#: BTIH infohash：40 位 hex。拒绝 ``all`` / ``|`` / 任意非 hash 值——
+#: qBittorrent 会把 ``all`` 解析为"应用到所有种子"，可一次删光全部任务及数据。
+_VALID_HASH_RE: re.Pattern[str] = re.compile(r"^[a-fA-F0-9]{40}$")
+
+
+def _reject_invalid_hashes(hashes: list[str]) -> None:
+    """校验批量操作的 hash 白名单（FR-5.2 路径三重校验同级约束）。"""
+    bad = [h for h in hashes if not _VALID_HASH_RE.fullmatch(h)]
+    if bad:
+        raise HTTPException(
+            status_code=400,
+            detail=f"非法 infohash：{bad[:5]}（必须是 40 位 hex，不支持 all/通配）",
+        )
 
 
 class DownloaderIn(BaseModel):
@@ -188,11 +203,14 @@ async def update_downloader(payload: DownloaderUpdate) -> DownloaderOut:
             if key == "save_path" and not value:
                 value = None
             setattr(row, key, value)
-        if payload.password:
-            row.password = payload.password
+        # 用 model_fields_set 区分"未提供"与"显式清空"：空串允许清掉密码
+        if "password" in payload.model_fields_set:
+            row.password = payload.password or None
         if payload.is_default:
             await _apply_default(session, row.id)
-        return _to_out(row)
+    # 更新后失效缓存：否则 cron/推送仍用旧凭据（旧 URL/密码继续生效）
+    get_factory().invalidate_downloader(payload.id)
+    return _to_out(row)
 
 
 class DownloaderDeleteIn(BaseModel):
@@ -227,6 +245,7 @@ async def delete_downloader(payload: DownloaderDeleteIn) -> dict[str, int]:
         await session.execute(
             delete(DownloaderInstance).where(DownloaderInstance.id == payload.id)
         )
+    get_factory().invalidate_downloader(payload.id)
     return {"id": payload.id}
 
 
@@ -357,6 +376,7 @@ async def pause_downloader_torrents(
 ) -> DownloaderBatchOpResult:
     if len(payload.hashes) > 200:
         raise HTTPException(status_code=400, detail="批量操作上限 200")
+    _reject_invalid_hashes(payload.hashes)
     _, adapter = await _resolve_downloader(downloader_id)
     try:
         ok = await adapter.set_pause(payload.hashes, payload.paused)
@@ -375,6 +395,7 @@ async def remove_downloader_torrents(
 ) -> DownloaderBatchOpResult:
     if len(payload.hashes) > 200:
         raise HTTPException(status_code=400, detail="批量操作上限 200")
+    _reject_invalid_hashes(payload.hashes)
     _, adapter = await _resolve_downloader(downloader_id)
     # 删数据为不可恢复操作：记审计日志（前端已弹窗二次确认）
     if payload.delete_data:

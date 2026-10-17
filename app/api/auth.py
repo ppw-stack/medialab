@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request
@@ -11,7 +12,7 @@ from fastapi.responses import (
     Response,
 )
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.auth import (
     SESSION_COOKIE,
@@ -29,8 +30,9 @@ router = APIRouter(tags=["auth"])
 
 
 class LoginIn(BaseModel):
-    username: str
-    password: str
+    #: 长度上限防超大请求体拖垮 PBKDF2 校验
+    username: str = Field(..., min_length=1, max_length=64)
+    password: str = Field(..., min_length=1, max_length=1024)
 
 
 class StatusOut(BaseModel):
@@ -62,16 +64,17 @@ async def login(
     payload: LoginIn, response: Response
 ) -> dict[str, str]:
     settings: AppSettings = get_settings()
-    if (
-        payload.username != settings.web_username
-        or not settings.web_password
-        or not verify_password(
-            payload.password, settings.web_password.get_secret_value()
+    ok = (
+        payload.username == settings.web_username
+        and settings.web_password is not None
+        and await asyncio.to_thread(
+            verify_password,
+            payload.password,
+            settings.web_password.get_secret_value(),
         )
-    ):
+    )
+    if not ok:
         # 显式延迟以防计时攻击（M1 验证 → M5 实践）
-        import asyncio
-
         await asyncio.sleep(0.5)
         raise HTTPException(status_code=401, detail="用户名或密码错误")
 
@@ -82,7 +85,8 @@ async def login(
         max_age=SESSION_MAX_AGE,
         httponly=True,
         samesite="lax",
-        # secure=True  # 生产由反向代理加 HTTPS，前端 dev 不需要
+        # 生产由反向代理加 HTTPS 时通过 WEB_COOKIE_SECURE=true 开启
+        secure=settings.web_cookie_secure,
         path="/",
     )
     return {"status": "ok", "username": settings.web_username}

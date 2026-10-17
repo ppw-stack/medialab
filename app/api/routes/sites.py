@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from app.adapters.sites import resolve as resolve_site_adapter
 from app.adapters.sites.base import SiteProfile
 from app.api.auth import require_session
 from app.core.logging import get_logger
-from app.db.models import Site, TorrentIndex
+from app.db.models import Site, SiteUserData, TorrentIndex
 from app.db.session import session_scope
+from app.services.factory import get_factory
 
 logger = get_logger(__name__)
 
@@ -31,16 +33,22 @@ class SiteCreate(BaseModel):
     apikey: str | None = Field(default=None, max_length=256)
     cookies: str | None = Field(default=None, max_length=4096)
     enabled: bool = True
+    min_interval_minutes: int | None = Field(default=None, ge=15, le=1440)
 
 
 class SiteUpdate(BaseModel):
     id: int
-    name: str | None = None
+    name: str | None = Field(
+        default=None, min_length=1, max_length=64,
+        pattern=r"^[a-zA-Z0-9_-]+$",
+        description="字母/数字/下划线/连字符",
+    )
     domain: str | None = None
     rss_url: str | None = None
     apikey: str | None = None
     cookies: str | None = None
     enabled: bool | None = None
+    min_interval_minutes: int | None = Field(default=None, ge=15, le=1440)
     adapter: (
         Literal[
             "mteam", "hhanclub", "hdsky", "ourbits", "audiences",
@@ -82,7 +90,7 @@ class SiteOut(BaseModel):
     domain: str | None
     adapter: str
     enabled: bool
-    rss_url: str
+    rss_url_masked: str
     has_apikey: bool
     has_cookies: bool
     min_interval_minutes: int
@@ -118,7 +126,13 @@ async def delete_site(payload: SiteDeleteIn) -> dict[str, int]:
                 status_code=409,
                 detail=f"站点下还有 {torrent_count} 条任务，请先清理",
             )
+        # 级联清理站点用户数据（site_user_data 引用 site_id，
+        # 不删会因 FK 约束抛 IntegrityError → 500）
+        await session.execute(
+            delete(SiteUserData).where(SiteUserData.site_id == payload.id)
+        )
         await session.delete(site)
+    get_factory().invalidate_site(payload.id)
     return {"id": payload.id}
 
 
@@ -139,6 +153,7 @@ async def create_site(payload: SiteCreate) -> SiteOut:
             rss_url=payload.rss_url,
             apikey=payload.apikey,
             cookies=payload.cookies,
+            min_interval_minutes=payload.min_interval_minutes or 60,
         )
         session.add(site)
         await session.flush()
@@ -148,12 +163,28 @@ async def create_site(payload: SiteCreate) -> SiteOut:
 
 @router.post("/update", summary="更新站点")
 async def update_site(payload: SiteUpdate) -> SiteOut:
-    """更新站点配置（id 在 body）。rss_url 留空字符串 = 不修改。"""
+    """更新站点配置（id 在 body）。
+
+    ``rss_url`` / ``apikey`` / ``cookies`` 留空字符串 = 清空该项；
+    未提供（None） = 不修改。
+    """
     site_id = payload.id
     async with session_scope() as session:
         site = (await session.execute(select(Site).where(Site.id == site_id))).scalar_one_or_none()
         if site is None:
             raise HTTPException(status_code=404, detail="站点不存在")
+
+        # 改名撞名预检（避免唯一约束冲突 → 500 + SQL 参数泄漏）
+        if payload.name is not None and payload.name != site.name:
+            dup = (
+                await session.execute(
+                    select(Site.id).where(
+                        Site.name == payload.name, Site.id != site_id
+                    )
+                )
+            ).first()
+            if dup:
+                raise HTTPException(status_code=409, detail=f"站点 {payload.name} 已存在")
 
         updates = payload.model_dump(
             exclude={"id", "rss_url", "apikey", "cookies"}, exclude_unset=True
@@ -161,13 +192,13 @@ async def update_site(payload: SiteUpdate) -> SiteOut:
         for key, value in updates.items():
             setattr(site, key, value)
 
-        if payload.rss_url:
-            site.rss_url = payload.rss_url
-        if payload.apikey:
-            site.apikey = payload.apikey
-        if payload.cookies:
-            site.cookies = payload.cookies
-        return _to_out(site)
+        # 凭据字段：model_fields_set 中显式传了才处理（空串 = 清空）
+        for key in ("rss_url", "apikey", "cookies"):
+            if key in payload.model_fields_set:
+                setattr(site, key, getattr(payload, key) or None)
+        out = _to_out(site)
+    get_factory().invalidate_site(site_id)
+    return out
 
 
 @router.get("/{site_id}", summary="站点详情")
@@ -220,6 +251,13 @@ async def test_site(site_id: int) -> dict[str, Any]:
         await adapter.close()
 
 
+def _mask_rss_url(url: str | None) -> str:
+    """掩码 RSS URL 中的凭据参数（passkey/apikey/key），防泄漏到前端。"""
+    if not url:
+        return ""
+    return re.sub(r"(?i)((?:passkey|apikey|key|auth)=)[^&]+", r"\1***", url)
+
+
 def _to_out(site: Site) -> SiteOut:
     return SiteOut(
         id=site.id,
@@ -227,7 +265,7 @@ def _to_out(site: Site) -> SiteOut:
         domain=site.domain or None,
         adapter=site.adapter,
         enabled=site.enabled,
-        rss_url=site.rss_url or "",
+        rss_url_masked=_mask_rss_url(site.rss_url),
         has_apikey=bool(site.apikey),
         has_cookies=bool(site.cookies),
         min_interval_minutes=site.min_interval_minutes,

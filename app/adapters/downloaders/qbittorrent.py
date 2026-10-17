@@ -174,6 +174,19 @@ class QbittorrentAdapter(DownloaderAdapter):
         except Qb5ApiError as exc:
             raise DownloaderError(str(exc), transient=exc.transient) from exc
 
+        # 失败识别：qB 5.x 失败时以 200 + failure_count 返回而非异常。
+        # 不在这里抛错，调用方会把失败当"已推送"写 push_status（游离种）。
+        failure_count = result.get("failure_count")
+        success_count = result.get("success_count")
+        if (
+            isinstance(failure_count, int)
+            and isinstance(success_count, int)
+            and failure_count > 0
+            and success_count == 0
+        ):
+            raw = str(result.get("raw") or "")[:200]
+            raise DownloaderError(f"qBittorrent 添加任务失败：{raw}")
+
         # 解析真 hash（5.1+ 返 added_torrent_ids[0]）
         info_hash = ""
         added_ids = result.get("added_torrent_ids")
