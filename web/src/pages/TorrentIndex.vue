@@ -58,6 +58,7 @@ const FREE_TYPE_LABELS: Record<string, { label: string; color: string }> = {
   freeleech_timed:     { label: '限时免费', color: 'gold' },
   neutral_leech:       { label: '折扣',     color: 'geekblue' },
   twoup_timed:         { label: '2X 限时',  color: 'orange' },
+  refund:              { label: '退还种',   color: 'red' },
   unknown:             { label: '收费',     color: 'default' },
 }
 
@@ -186,26 +187,13 @@ const STAT_TILES = computed<Tile[]>(() => {
       key: '__total__', label: '总条数', count: stats.value.total,
       hint: 'torrent_index', active: filterFreeType.value === null,
     },
-    {
-      key: 'freeleech_timed', label: '限时免费', count: bt.freeleech_timed || 0,
-      hint: '窗口到期', active: filterFreeType.value === 'freeleech_timed',
-    },
-    {
-      key: 'freeleech_permanent', label: '永久免费', count: bt.freeleech_permanent || 0,
-      hint: '可永久做种', active: filterFreeType.value === 'freeleech_permanent',
-    },
-    {
-      key: 'neutral_leech', label: '折扣', count: bt.neutral_leech || 0,
-      hint: '按比例减免', active: filterFreeType.value === 'neutral_leech',
-    },
-    {
-      key: 'twoup_timed', label: '2X 限时', count: bt.twoup_timed || 0,
-      hint: '双倍上传', active: filterFreeType.value === 'twoup_timed',
-    },
-    {
-      key: 'unknown', label: '收费', count: bt.unknown || 0,
-      hint: '按量计费', active: filterFreeType.value === 'unknown',
-    },
+    ...Object.entries(FREE_TYPE_LABELS).map(([key, meta]) => ({
+      key,
+      label: meta.label,
+      count: (bt as Record<string, number>)[key] || 0,
+      hint: key,
+      active: filterFreeType.value === key,
+    })),
   ]
 })
 
@@ -315,6 +303,7 @@ function countdownFor(end: string | null): Countdown {
 function freeEndChip(end: string | null, ft: string) {
   if (ft === 'unknown') return { label: '—', cls: 'countdown--none' }
   if (ft === 'freeleech_permanent') return { label: '永久', cls: 'countdown--perm' }
+  if (ft === 'refund') return { label: '退还', cls: 'countdown--refund' }
   return countdownFor(end)
 }
 

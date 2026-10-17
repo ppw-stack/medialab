@@ -597,6 +597,7 @@ code, kbd, pre, samp {
 .countdown--urgent { color: var(--status-red); }
 .countdown--perm   { color: var(--status-green); }
 .countdown--none   { color: var(--text-tertiary); }
+.countdown--refund { color: var(--status-red); font-weight: 600; }
 
 /* Stat tile — white card, red left bar when active */
 .stat-tile {
