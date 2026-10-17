@@ -64,6 +64,7 @@ jobs:
 
       - name: Set Docker Hub repo visibility to public
         if: github.event_name != 'pull_request'
+        continue-on-error: true
         env:
           DH_NAMESPACE: ppw111
           DH_REPO: seedhelper
