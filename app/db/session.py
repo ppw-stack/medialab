@@ -424,6 +424,9 @@ class SingleWriterQueue:
                 "ALTER TABLE downloader_instances ADD COLUMN save_path VARCHAR(512)",
                 "ALTER TABLE torrent_index ADD COLUMN push_status VARCHAR(16)",
                 "ALTER TABLE torrent_index ADD COLUMN pushed_at VARCHAR(32)",
+                # 站点用户数据契约 (FR-1.6)：补兼容历史库缺索引
+                "CREATE INDEX IF NOT EXISTS ix_site_user_data_site_seen "
+                "ON site_user_data(site_id, last_seen_at)",
             ):
                 with suppress(Exception):  # 列已存在 / 已是新名
                     await conn.execute(text(stmt))
