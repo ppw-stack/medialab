@@ -236,9 +236,9 @@ class HdhomeAdapter(SiteAdapter):
                     size_bytes = int(val * mult)
                     break
 
-            # published_at: 第一个 span title 含绝对时刻
+            # published_at: 最后一个 span title 含绝对时刻（hdhome DOM 顺序：remaining_abs 在前，published_at 在后）
             published_at: str | None = None
-            for span in tr.find_all("span", attrs={"title": True}):
+            for span in reversed(tr.find_all("span", attrs={"title": True})):
                 tval = str(span.get("title") or "").strip()
                 if _ABS_DATETIME_RE.match(tval):
                     published_at = parse_abs_datetime(tval)

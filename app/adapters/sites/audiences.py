@@ -306,16 +306,21 @@ class AudiencesAdapter(SiteAdapter):
 
             # ---------------- 免费标记：img class="pro_XXX" → 标准 class
             free_classes: list[str] = []
+            _free_seen: set[str] = set()
             for img in tr.find_all("img", class_=re.compile(r"^pro_")):
                 classes: list[str] = list(img.get("class") or [])
                 for c in classes:
                     if c.startswith("pro_") and c in _PRO_IMG_MAP:
-                        free_classes.append(_PRO_IMG_MAP[c])
+                        mapped = _PRO_IMG_MAP[c]
+                        if mapped not in _free_seen:
+                            free_classes.append(mapped)
+                            _free_seen.add(mapped)
                         break
             for font in tr.find_all("font", class_=True):
                 for c in font.get("class") or []:
-                    if c in _PROMO_FONT_CLASSES:
+                    if c in _PROMO_FONT_CLASSES and c not in _free_seen:
                         free_classes.append(c)
+                        _free_seen.add(c)
                         break
 
             # ---------------- 限时绝对时刻（排除发布时间单元格自身）

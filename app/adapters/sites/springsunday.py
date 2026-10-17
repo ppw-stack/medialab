@@ -338,13 +338,17 @@ class SpringsundayAdapter(SiteAdapter):
 
             # ---------------- 免费标记：span class="torrent-pro-icon torrent-pro-XXX"
             free_classes: list[str] = []
+            _ssd_seen: set[str] = set()
             for span in tr.find_all("span", class_=re.compile(r"torrent-pro-icon")):
                 classes: list[str] = list(span.get("class") or [])
                 for c in classes:
                     if c.startswith("torrent-pro-") and c != "torrent-pro-icon":
                         suffix = c[len("torrent-pro-"):]
                         if suffix in _PRO_SPAN_MAP:
-                            free_classes.append(_PRO_SPAN_MAP[suffix])
+                            mapped = _PRO_SPAN_MAP[suffix]
+                            if mapped not in _ssd_seen:
+                                free_classes.append(mapped)
+                                _ssd_seen.add(mapped)
                             break
             # SSD 退还种（"1d 退还"）结构不同：外层是 class="nowrap"（无 torrent-pro-icon），
             # 内层才是 torrent-pro-refund-left/right，需独立循环识别
@@ -355,20 +359,27 @@ class SpringsundayAdapter(SiteAdapter):
                     if c.startswith("torrent-pro-") and c != "torrent-pro-icon":
                         suffix = c[len("torrent-pro-"):]
                         if suffix in _PRO_SPAN_MAP:
-                            free_classes.append(_PRO_SPAN_MAP[suffix])
+                            mapped = _PRO_SPAN_MAP[suffix]
+                            if mapped not in _ssd_seen:
+                                free_classes.append(mapped)
+                                _ssd_seen.add(mapped)
                             break
             # 兼容标准 NexusPHP <img class="pro_XXX"> 标记
             for img in tr.find_all("img", class_=re.compile(r"^pro_")):
                 img_classes: list[str] = list(img.get("class") or [])
                 for c in img_classes:
                     if c.startswith("pro_") and c in _PRO_IMG_MAP:
-                        free_classes.append(_PRO_IMG_MAP[c])
+                        mapped = _PRO_IMG_MAP[c]
+                        if mapped not in _ssd_seen:
+                            free_classes.append(mapped)
+                            _ssd_seen.add(mapped)
                         break
             # font class="free|twoupfree|..." 标记
             for font in tr.find_all("font", class_=True):
                 for c in font.get("class") or []:
-                    if c in _PROMO_FONT_CLASSES:
+                    if c in _PROMO_FONT_CLASSES and c not in _ssd_seen:
                         free_classes.append(c)
+                        _ssd_seen.add(c)
                         break
 
             # ---------------- 限时绝对时刻（排除发布时间单元格自身）
