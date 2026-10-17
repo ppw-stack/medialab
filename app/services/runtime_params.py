@@ -115,11 +115,11 @@ class RuntimeParamManager:
         """仅更新内存（不写 DB）。DB 写入由 :func:`apply` 完成。"""
         self._values[key] = value
 
-    async def apply(self, session: AsyncSession, updates: dict[str, int]) -> dict[str, int]:
-        """更新参数：DB 写 + 内存更新，返回最新全量。
+    async def apply(self, session: AsyncSession, updates: dict[str, int]) -> None:
+        """持久化参数变更到 DB（**不**改内存）。
 
-        :param session: 由调用方提供的 session（用其事务保证原子性）
-        :param updates: 要改的 {key: value}，未列出则保持不变
+        内存更新由调用方在事务提交成功后执行（:meth:`set`），避免 commit
+        失败时内存已变、DB 未变的不一致（作业会用未持久化的值）。
         """
         validate(updates)
         for key, value in updates.items():
@@ -128,10 +128,6 @@ class RuntimeParamManager:
                 session.add(AppRuntimeParam(key=key, value_int=value))
             else:
                 row.value_int = value
-        # 内存更新（commit 前的乐观更新；commit 失败则内存不会持久化，OK）
-        for key, value in updates.items():
-            self._values[key] = value
-        return self.all()
 
 
 def _env_default(settings: AppSettings, key: str) -> int:

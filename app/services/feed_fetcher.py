@@ -42,6 +42,10 @@ REQUEST_TIMEOUT = 30.0
 USER_AGENT = "SeedHelper/0.1 (+https://github.com/seedhelper)"
 
 
+class FeedParseError(RuntimeError):
+    """解析/契约类错误：重试无意义，fetch() 直接标记 PARSE_ERROR。"""
+
+
 class PullStatus(StrEnum):
     OK = "ok"
     EMPTY = "empty"
@@ -116,7 +120,7 @@ class FeedFetcher:
         return base * (0.5 + random.random() * 0.5) if self._jitter else base
 
     async def fetch(
-        self, adapter: SiteAdapter, url: str, *, retry: bool = True
+        self, adapter: SiteAdapter, url: str | None = None, *, retry: bool = True
     ) -> PullResult:
         """拉取并解析（兼容层，调用 adapter.search_torrents）。"""
         started = time.monotonic()
@@ -173,17 +177,22 @@ class FeedFetcher:
             error=last_error,
         )
 
-    async def _fetch_once(self, adapter: SiteAdapter, url: str) -> list[FeedItem]:
-        """单次拉取。返回任务列表（站点拉取路径走 adapter.search_torrents）。"""
+    async def _fetch_once(self, adapter: SiteAdapter, url: str | None) -> list[FeedItem]:
+        """单次拉取。返回任务列表（站点拉取路径走 adapter.search_torrents）。
+
+        异常分类：网络类（httpx.HTTPError）原样上抛由 fetch() 重试；
+        解析/契约类包装为 :class:`FeedParseError` 不再重试（站点改版重试无意义，
+        且避免对限流站点每轮额外请求）。
+        """
         _ = url  # 兼容层保留参数，路径不再直接使用
         try:
             items = await adapter.search_torrents({})
-        except BreakerTripped:
-            raise  # 熔断信号透传，由 fetch() 捕获并写 breaker_until
+        except (BreakerTripped, httpx.HTTPError, FeedParseError):
+            raise  # 各自的语义已明确，透传
         except Exception as exc:
-            raise httpx.HTTPError(f"search_torrents 失败：{exc}") from exc
+            raise FeedParseError(f"search_torrents 解析失败：{exc}") from exc
         if items is None:
-            raise httpx.HTTPError("适配器返回 None")
+            raise FeedParseError("适配器返回 None")
         return items
 
     @staticmethod

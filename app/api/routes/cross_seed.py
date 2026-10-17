@@ -155,9 +155,12 @@ async def update_runtime_params(payload: RuntimeParamsUpdateIn) -> RuntimeParams
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     mgr = get_runtime_params()
     async with session_scope() as session:
-        result = await mgr.apply(session, updates)
+        await mgr.apply(session, updates)
+    # 事务已提交成功，再更新内存（顺序：DB 先、内存后）
+    for key, value in updates.items():
+        mgr.set_memory(key, value)
     return RuntimeParamsOut(
-        params=result,
+        params=mgr.all(),
         specs=[
             {
                 "key": spec.key,

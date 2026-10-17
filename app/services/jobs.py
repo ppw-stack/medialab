@@ -18,7 +18,6 @@ from collections.abc import Awaitable
 
 from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.sites.base import FeedItem
 from app.core.config import AppSettings, get_settings
@@ -38,6 +37,10 @@ async def fetch_all_sites(factory: AdapterFactory) -> int:
     """按站遍历拉取种子列表，写入 :class:`TorrentIndex`。
 
     返回成功 upsert 的条目数。失败站记 ERROR 但不阻塞其他站。
+
+    事务边界：网络拉取在**写事务外**进行，upsert 每站一个短事务——
+    原先一个 session 包住全部站点，首个 upsert 即开写锁并横跨后续站点的
+    网络 IO，与 push_free 等写作业并发时频繁 ``database is locked``。
     """
     started = asyncio.get_running_loop().time()
     total_written = 0
@@ -48,10 +51,11 @@ async def fetch_all_sites(factory: AdapterFactory) -> int:
         result = await session.execute(stmt)
         rows: list[Site] = list(result.scalars().all())
 
-        for row in rows:
-            ok, ko = await _pull_one_site(factory, row, session)
-            total_written += ok
-            summary.append((row.id, row.name, ok + ko, ok, ko))
+    for row in rows:
+        feed_items = await _pull_site_items(factory, row)
+        ok, ko = await _upsert_site_items(row, feed_items)
+        total_written += ok
+        summary.append((row.id, row.name, ok + ko, ok, ko))
 
     if total_written:
         logger.info(
@@ -67,20 +71,13 @@ async def fetch_all_sites(factory: AdapterFactory) -> int:
     return total_written
 
 
-async def _pull_one_site(
-    factory: AdapterFactory,
-    row: Site,
-    session: AsyncSession,
-) -> tuple[int, int]:
-    """拉取单站种子列表并 upsert；返回 (ok_count, ko_count)。"""
-    # 创建 adapter（含凭据解密）
+async def _pull_site_items(factory: AdapterFactory, row: Site) -> list[FeedItem]:
+    """仅拉取单站种子列表（网络 IO，不持写事务）。"""
     try:
         adapter = factory.site(row)
     except Exception as exc:
         logger.warning("站点 %s 适配器创建失败：%s", row.name, exc)
-        return (0, 0)
-
-    # 拉种子列表（前 3 页：mteam 600 条 / 5 HTML 站各 300 条）
+        return []
     try:
         feed_items: list[FeedItem] = []
         for page in range(1, 4):  # 拉 1-3 页
@@ -93,63 +90,67 @@ async def _pull_one_site(
     except Exception as exc:
         feed_pulls.labels(result="error", site=row.name).inc()
         logger.warning("站点 %s 拉取失败：%s", row.name, exc)
-        return (0, 0)
+        return []
+    if feed_items:
+        feed_pulls.labels(result="ok", site=row.name).inc(len(feed_items))
+    return feed_items
 
+
+async def _upsert_site_items(
+    row: Site, feed_items: list[FeedItem]
+) -> tuple[int, int]:
+    """批量 upsert 单站条目（每站一个短事务，避免写锁横跨网络 IO）。"""
     if not feed_items:
-        feed_pulls.labels(result="ok", site=row.name).inc()
         return (0, 0)
-
-    # upsert
     ok = 0
     now = bj_now()
-    for fi in feed_items:
-        item_id = (fi.item_id or "").strip() or None
-        window = WindowParser.parse(fi)
-        stmt = sqlite_insert(TorrentIndex).values(
-            site_id=row.id,
-            item_id=item_id,
-            # info_hash 不写：list 适配器硬编码 None，会污染 push_free 写的真 hash
-            name=fi.title[:1024],
-            size=fi.size,
-            category=fi.category,
-            description=fi.description or None,
-            free_type=window.free_type,
-            free_end_at=window.free_end_at,
-            free_source=window.free_source,
-            free_confidence=window.confidence,
-            discount_pct=window.discount_pct,
-            free_payload=fi.free_payload or {},
-            published_at=fi.published_at,
-            first_seen_at=now,
-            last_seen_at=now,
-        ).on_conflict_do_update(
-            index_elements=["site_id", "item_id"],
-            set_={
-                # info_hash 不覆盖：list 适配器 None 会清空 push_free 写的真 hash
-                "name": fi.title[:1024],
-                "size": fi.size,
-                "category": fi.category,
-                "description": fi.description or None,
-                "free_type": window.free_type,
-                "free_end_at": window.free_end_at,
-                "free_source": window.free_source,
-                "free_confidence": window.confidence,
-                "discount_pct": window.discount_pct,
-                "free_payload": fi.free_payload or {},
-                "published_at": fi.published_at,
-                "last_seen_at": now,
-            },
-        )
-        try:
-            await session.execute(stmt)
-            ok += 1
-        except Exception as exc:
-            logger.debug(
-                "站点 %s item_id=%s upsert 失败：%s", row.name, item_id, exc
+    async with session_scope() as session:
+        for fi in feed_items:
+            item_id = (fi.item_id or "").strip() or None
+            window = WindowParser.parse(fi)
+            stmt = sqlite_insert(TorrentIndex).values(
+                site_id=row.id,
+                item_id=item_id,
+                # info_hash 不写：list 适配器硬编码 None，会污染 push_free 写的真 hash
+                name=fi.title[:1024],
+                size=fi.size,
+                category=fi.category,
+                description=fi.description or None,
+                free_type=window.free_type,
+                free_end_at=window.free_end_at,
+                free_source=window.free_source,
+                free_confidence=window.confidence,
+                discount_pct=window.discount_pct,
+                free_payload=fi.free_payload or {},
+                published_at=fi.published_at,
+                first_seen_at=now,
+                last_seen_at=now,
+            ).on_conflict_do_update(
+                index_elements=["site_id", "item_id"],
+                set_={
+                    # info_hash 不覆盖：list 适配器 None 会清空 push_free 写的真 hash
+                    "name": fi.title[:1024],
+                    "size": fi.size,
+                    "category": fi.category,
+                    "description": fi.description or None,
+                    "free_type": window.free_type,
+                    "free_end_at": window.free_end_at,
+                    "free_source": window.free_source,
+                    "free_confidence": window.confidence,
+                    "discount_pct": window.discount_pct,
+                    "free_payload": fi.free_payload or {},
+                    "published_at": fi.published_at,
+                    "last_seen_at": now,
+                },
             )
-
-    if ok:
-        feed_pulls.labels(result="ok", site=row.name).inc(ok)
+            try:
+                await session.execute(stmt)
+                ok += 1
+            except Exception as exc:
+                await session.rollback()  # 失效事务回滚，避免 PendingRollbackError 连锁
+                logger.debug(
+                    "站点 %s item_id=%s upsert 失败：%s", row.name, item_id, exc
+                )
     return (ok, 0)
 
 

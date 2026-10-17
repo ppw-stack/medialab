@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 
@@ -113,25 +113,33 @@ class MonitorFreeWindowService:
             logger.info("monitor: 下载器无任务 hash")
             return MonitorResult(scanned=scanned)
 
-        async with session_scope() as session:
-            rows = (
-                await session.execute(
-                    select(
-                        TorrentIndex.info_hash,
-                        TorrentIndex.free_type,
-                        TorrentIndex.free_end_at,
-                    ).where(
-                        TorrentIndex.info_hash.in_(qb_hashes),
-                        TorrentIndex.push_status == PushStatus.PUSHED,
-                        # 不按 free_type 过滤：monitor 看种子当前实际状态
-                        # - 当前是限时种（TIMED/TWOU_TIMED）→ 应用窗口规则
-                        # - 当前是永久种（PERMANENT）→ 永不暂停
-                        # - 当前是折扣/未知（neutral_leech/unknown）→ 立即暂停
-                        # 站点状态变化由 fetch_all_sites 正常更新 db，无需历史快照。
-                    )
+        # 分批 in_：SQLite 变量上限约 999/32766，任务数一多整条 SQL 直接报
+        # "too many SQL variables"，monitor 会永久失败（窗口看护停摆）
+        hash_list = sorted(qb_hashes)
+        rows: list[Any] = []
+        for i in range(0, len(hash_list), 900):
+            batch = hash_list[i : i + 900]
+            async with session_scope() as session:
+                rows += list(
+                    (
+                        await session.execute(
+                            select(
+                                TorrentIndex.info_hash,
+                                TorrentIndex.free_type,
+                                TorrentIndex.free_end_at,
+                            ).where(
+                                TorrentIndex.info_hash.in_(batch),
+                                TorrentIndex.push_status == PushStatus.PUSHED,
+                                # 不按 free_type 过滤：monitor 看种子当前实际状态
+                                # - 当前是限时种（TIMED/TWOU_TIMED）→ 应用窗口规则
+                                # - 当前是永久种（PERMANENT）→ 永不暂停
+                                # - 当前是折扣/未知（neutral_leech/unknown）→ 立即暂停
+                                # 站点状态变化由 fetch_all_sites 正常更新 db，无需历史快照。
+                            )
+                        )
+                    ).all()
                 )
-            ).all()
-        index_by_hash: dict[str, object] = {
+        index_by_hash: dict[str, Any] = {
             (row.info_hash or "").lower(): row
             for row in rows
             if row.info_hash
@@ -167,8 +175,8 @@ class MonitorFreeWindowService:
                 continue
 
             # 按 db 当前 free_type 决定（fetch_all_sites 已更新为最新值）
-            ft = row.free_type  # type: ignore[attr-defined]
-            fea = row.free_end_at  # type: ignore[attr-defined]
+            ft = row.free_type
+            fea = row.free_end_at
 
             if ft == FreeType.PERMANENT:
                 # 永久免费：用户全程做种赚积分，永不暂停
@@ -179,6 +187,7 @@ class MonitorFreeWindowService:
                 # 退还种（springsunday "1d 退还"）：上传者已撤种
                 # 用户规则"当前非免费种直接暂停"——与 NEUTRAL/UNKNOWN 走相同路径
                 # 单独计数便于统计退还种规模
+                skipped_refund += 1
                 try:
                     await adapter.set_pause([info.hash], paused=True)
                 except Exception as exc:

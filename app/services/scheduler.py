@@ -74,6 +74,8 @@ class SchedulerCenter:
     def start(self) -> None:
         if self._scheduler is not None:
             return
+        # 同进程重启（测试/重建 app）后恢复接收新作业
+        self.accepting_new_work = True
         self._scheduler = AsyncIOScheduler(
             timezone=self._tz,
             executors={"default": AsyncIOExecutor()},
@@ -342,6 +344,14 @@ class SchedulerCenter:
 #: 全局调度中心
 scheduler_center = SchedulerCenter()
 
+#: 审计落库 task 引用集合：event loop 只弱引用 Task，不持引用会被 GC，
+#: 导致 job_runs 记录随机缺失。done 回调里移除。
+_record_tasks: set[asyncio.Task[None]] = set()
+
+
+def _keep_record_task(task: asyncio.Task[None]) -> None:
+    _record_tasks.discard(task)
+
 
 def _record_run(
     *,
@@ -394,7 +404,9 @@ def _record_run(
         except RuntimeError:
             loop = None
         if loop is not None:
-            loop.create_task(_persist())
+            task = loop.create_task(_persist())
+            _record_tasks.add(task)
+            task.add_done_callback(_keep_record_task)
         else:
             # 无运行 loop（同步上下文）— 直接 asyncio.run
             asyncio.run(_persist())
