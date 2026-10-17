@@ -22,7 +22,9 @@ router = APIRouter(prefix="/sites", dependencies=[Depends(require_session)], tag
 
 class SiteCreate(BaseModel):
     name: str = Field(..., pattern=r"^[a-zA-Z0-9_-]+$", description="字母/数字/下划线/连字符")
-    adapter: Literal["mteam", "hhanclub", "hdsky", "ourbits", "audiences", "springsunday"] = "mteam"
+    adapter: Literal[
+        "mteam", "hhanclub", "hdsky", "ourbits", "audiences", "springsunday", "hdhome",
+    ] = "mteam"
     domain: str | None = None
     rss_url: str | None = None
     apikey: str | None = Field(default=None, max_length=256)
@@ -39,7 +41,10 @@ class SiteUpdate(BaseModel):
     cookies: str | None = None
     enabled: bool | None = None
     adapter: (
-        Literal["mteam", "hhanclub", "hdsky", "ourbits", "audiences", "springsunday"]
+        Literal[
+            "mteam", "hhanclub", "hdsky", "ourbits", "audiences",
+            "springsunday", "hdhome",
+        ]
         | None
     ) = None
 
