@@ -159,7 +159,7 @@ class AudiencesAdapter(SiteAdapter):
         self,
         query: dict[str, object],
         *,
-        page_size: int = 100,
+        page_size: int = 200,
         page_number: int = 1,
     ) -> list[FeedItem]:
         """2. 抓取种子列表：GET /torrents.php?spstate=0，BS4 解析。
@@ -185,7 +185,7 @@ class AudiencesAdapter(SiteAdapter):
         if resp.status_code >= 400:
             logger.warning("Audiences 拉取 HTTP %d", resp.status_code)
             return []
-        items = AudiencesAdapter._parse_torrents_html(resp.text, limit=page_size)
+        items = AudiencesAdapter._parse_torrents_html(resp.text)
         return items
 
     # ------------------------------------------------------------ 2.5 get_torrent_url
@@ -199,7 +199,7 @@ class AudiencesAdapter(SiteAdapter):
         return self._download_url(item_id)
 
     @staticmethod
-    def _parse_torrents_html(html: str, *, limit: int = 100) -> list[FeedItem]:
+    def _parse_torrents_html(html: str) -> list[FeedItem]:
         """BS4 解析 audiences.me torrents.php 页面。
 
         audiences.me 自定义主题：每个种子占一个 ``<tr data-torrent-row="1">``,
@@ -231,8 +231,6 @@ class AudiencesAdapter(SiteAdapter):
         seen: set[str] = set()
 
         for tr in soup.find_all("tr", attrs={"data-torrent-row": "1"}):
-            if len(items) >= limit:
-                break
 
             # ---------------- item_id: 优先 data-torrent-id，兜底 details 锚点
             item_id: str | None = None
@@ -368,7 +366,7 @@ class AudiencesAdapter(SiteAdapter):
                 )
             )
 
-        return items[:limit]
+        return items
 
     # ------------------------------------------------------------ 3. download_torrent
     async def download_torrent(self, item_id: str) -> bytes:

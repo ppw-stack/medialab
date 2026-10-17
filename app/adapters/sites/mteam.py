@@ -245,7 +245,7 @@ class MteamAdapter(SiteAdapter):
         self,
         query: dict[str, object],
         *,
-        page_size: int = 100,
+        page_size: int = 200,
         page_number: int = 1,
     ) -> list[FeedItem]:
         """2. 种子搜索：调 ``/api/torrent/search``。

@@ -181,7 +181,7 @@ class SpringsundayAdapter(SiteAdapter):
         self,
         query: dict[str, object],
         *,
-        page_size: int = 100,
+        page_size: int = 200,
         page_number: int = 1,
     ) -> list[FeedItem]:
         """2. 抓取种子列表：GET /torrents.php?spstate=0，BS4 解析。
@@ -208,7 +208,7 @@ class SpringsundayAdapter(SiteAdapter):
         if resp.status_code >= 400:
             logger.warning("SpringSunday 拉取 HTTP %d", resp.status_code)
             return []
-        items = SpringsundayAdapter._parse_torrents_html(resp.text, limit=page_size)
+        items = SpringsundayAdapter._parse_torrents_html(resp.text)
         return items
 
     # ------------------------------------------------------------ 2.5 get_torrent_url
@@ -255,7 +255,7 @@ class SpringsundayAdapter(SiteAdapter):
         return pk, https_flag
 
     @staticmethod
-    def _parse_torrents_html(html: str, *, limit: int = 100) -> list[FeedItem]:
+    def _parse_torrents_html(html: str) -> list[FeedItem]:
         """BS4 解析 SSD torrents.php 页面（与 ourbits 同源 NexusPHP 表格主题）。
 
         SSD 使用标准 NexusPHP 表格：``<table class="torrents">``，
@@ -276,8 +276,6 @@ class SpringsundayAdapter(SiteAdapter):
         seen: set[str] = set()
 
         for tr in table.find_all("tr"):
-            if len(items) >= limit:
-                break
             # 找 details 锚点（带 title 属性）
             a = tr.find("a", href=_DETAILS_ID_RE, attrs={"title": True})
             if a is None:
@@ -405,7 +403,7 @@ class SpringsundayAdapter(SiteAdapter):
                 )
             )
 
-        return items[:limit]
+        return items
 
     # ------------------------------------------------------------ 3. download_torrent
     async def download_torrent(self, item_id: str) -> bytes:

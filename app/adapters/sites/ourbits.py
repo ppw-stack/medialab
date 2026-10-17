@@ -155,7 +155,7 @@ class OurbitsAdapter(SiteAdapter):
         self,
         query: dict[str, object],
         *,
-        page_size: int = 100,
+        page_size: int = 200,
         page_number: int = 1,
     ) -> list[FeedItem]:
         """2. 抓取种子列表：GET /torrents.php?spstate=0，parsel CSS 解析。
@@ -182,7 +182,7 @@ class OurbitsAdapter(SiteAdapter):
         if resp.status_code >= 400:
             logger.warning("OurBits 拉取 HTTP %d", resp.status_code)
             return []
-        items = OurbitsAdapter._parse_spstate7_html(resp.text, limit=page_size)
+        items = OurbitsAdapter._parse_spstate7_html(resp.text)
         return items
 
     # ------------------------------------------------------------ 2.5 get_torrent_url
@@ -211,7 +211,7 @@ class OurbitsAdapter(SiteAdapter):
         )
 
     @staticmethod
-    def _parse_spstate7_html(html: str, *, limit: int = 100) -> list[FeedItem]:
+    def _parse_spstate7_html(html: str) -> list[FeedItem]:
         """BS4 解析 Ourbits spstate=0 页面（与 hdsky 同源 NexusPHP 主题）。
 
         Ourbits 与 hdsky 共用标准 NexusPHP 表格主题：每个 torrent 占一个 ``<tr>``，
@@ -226,8 +226,6 @@ class OurbitsAdapter(SiteAdapter):
         seen: set[str] = set()
 
         for tr in table.find_all("tr"):
-            if len(items) >= limit:
-                break
             a = tr.find("a", href=_DETAILS_ID_RE, attrs={"title": True})
             if a is None:
                 continue
@@ -339,7 +337,7 @@ class OurbitsAdapter(SiteAdapter):
                 )
             )
 
-        return items[:limit]
+        return items
 
     # ------------------------------------------------------------ 3. download_torrent
     async def download_torrent(self, item_id: str) -> bytes:

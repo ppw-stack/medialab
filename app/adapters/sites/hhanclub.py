@@ -175,7 +175,7 @@ class HhanclubAdapter(SiteAdapter):
         self,
         query: dict[str, object],
         *,
-        page_size: int = 100,
+        page_size: int = 200,
         page_number: int = 1,
     ) -> list[FeedItem]:
         """2. 抓取活种列表：GET /torrents.php?spstate=0，BS4 解析。
@@ -207,7 +207,7 @@ class HhanclubAdapter(SiteAdapter):
         if resp.status_code >= 400:
             logger.warning("HHanClub 拉取 HTTP %d", resp.status_code)
             return []
-        items = HhanclubAdapter._parse_spstate0_html(resp.text, limit=page_size)
+        items = HhanclubAdapter._parse_spstate0_html(resp.text)
         # 同步刷新 download URL cache（供 get_torrent_url 0-HTTP 命中）
         self._download_url_cache = HhanclubAdapter._extract_download_urls(
             resp.text, self._base_url()
@@ -246,7 +246,7 @@ class HhanclubAdapter(SiteAdapter):
         )
 
     @staticmethod
-    def _parse_spstate0_html(html: str, *, limit: int = 100) -> list[FeedItem]:
+    def _parse_spstate0_html(html: str) -> list[FeedItem]:
         """BS4 解析 HHanClub spstate=0 页面（所有活种 SSR）。
 
         HHan 使用 Tailwind 自定义主题：
@@ -375,13 +375,12 @@ class HhanclubAdapter(SiteAdapter):
                     category=category,
                     description="",
                     published_at=published_at,
-                    free_payload=free_payload,
+                     free_payload=free_payload,
                 )
             )
-            if len(items) >= limit:
-                break
 
-        return items[:limit]
+
+        return items
 
     # ------------------------------------------------------------ 3. download_torrent
     async def download_torrent(self, item_id: str) -> bytes:

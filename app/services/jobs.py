@@ -81,7 +81,7 @@ async def _pull_one_site(
 
     # 拉 RSS
     try:
-        feed_items = await adapter.search_torrents({}, page_size=100, page_number=1)
+        feed_items = await adapter.search_torrents({}, page_size=200, page_number=1)
     except Exception as exc:
         feed_pulls.labels(result="error", site=row.name).inc()
         logger.warning("站点 %s 拉取失败：%s", row.name, exc)
