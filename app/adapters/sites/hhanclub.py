@@ -25,6 +25,7 @@ cookie 模式：用户手动从浏览器获取 session cookies（c_secure_uid / 
 from __future__ import annotations
 
 import re
+from typing import cast
 
 import httpx
 from bs4 import BeautifulSoup
@@ -494,7 +495,9 @@ class HhanclubAdapter(SiteAdapter):
             # 找带 title 属性的 a
             a = soup.find("a", attrs={"title": True})
             if a:
-                title_text = a.get("title")
+                title_attr = a.get("title")
+                if isinstance(title_attr, str):
+                    title_text = title_attr
 
         m = _SIGNED_DL_RE.search(html)
         download_url = None
@@ -579,13 +582,14 @@ class HhanclubAdapter(SiteAdapter):
 
 def _find_torrent_container(anchor: object) -> object | None:
     """向上查找 torrent 容器（最近的 <tr> 或最近的 <div>）。"""
+    node = cast(Tag, anchor)
     # 优先：最近 <tr>（标准 NexusPHP 表格行）
-    tr = anchor.find_parent("tr")  # type: ignore[attr-defined]
+    tr = node.find_parent("tr")
     if tr is not None:
         return tr
     # 兜底：最近的 <div>（HHan Tailwind 自定义主题，每个 torrent 卡片是一个 div）
     # 限制深度 8 层，避免把整个 body 当作 container
-    parent = anchor.parent  # type: ignore[attr-defined]
+    parent = node.parent
     seen: set[int] = set()
     depth = 0
     max_depth = 8
@@ -595,7 +599,7 @@ def _find_torrent_container(anchor: object) -> object | None:
         # 找到块级容器（div 或 article 或 section）
         if getattr(parent, "name", None) in {"div", "article", "section"}:
             return parent
-        parent = parent.parent  # type: ignore[attr-defined]
+        parent = parent.parent
     return None
 
 

@@ -23,6 +23,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import StrEnum
 
+import httpx
 from bs4.element import Tag
 
 from app.adapters.sites.user_data import (
@@ -118,6 +119,8 @@ class SiteAdapter(ABC):
 
     #: 适配器类型标识（站点配置 ``adapter`` 字段）
     adapter_type: str = "generic"
+    #: HTTP 客户端由子类 __init__ 按站点 headers/cookies 创建
+    _client: httpx.AsyncClient
 
     def __init__(
         self,

@@ -13,8 +13,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from typing import cast
 
-from sqlalchemy import event, text
+from sqlalchemy import CursorResult, event, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -132,7 +133,7 @@ async def migrate_adapter_values() -> None:
                 .where(Site.adapter == old_value)
                 .values(adapter=new_value)
             )
-            result = await session.execute(stmt)
+            result = cast(CursorResult[object], await session.execute(stmt))
             if result.rowcount:
                 logger.info(
                     "站点 adapter 迁移：%s → %s，影响 %d 行",
