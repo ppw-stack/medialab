@@ -24,7 +24,7 @@ class SiteCreate(BaseModel):
     name: str = Field(..., pattern=r"^[a-zA-Z0-9_-]+$", description="字母/数字/下划线/连字符")
     adapter: Literal[
         "mteam", "hhanclub", "hdsky", "ourbits", "audiences",
-        "springsunday", "hdhome", "hddolby",
+        "springsunday", "hdhome", "hddolby", "soulvoice",
     ] = "mteam"
     domain: str | None = None
     rss_url: str | None = None
@@ -44,7 +44,7 @@ class SiteUpdate(BaseModel):
     adapter: (
         Literal[
             "mteam", "hhanclub", "hdsky", "ourbits", "audiences",
-            "springsunday", "hdhome", "hddolby",
+            "springsunday", "hdhome", "hddolby", "soulvoice",
         ]
         | None
     ) = None

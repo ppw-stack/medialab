@@ -30,6 +30,7 @@ const ADAPTERS_FALLBACK: { value: string; label: string; domain: string }[] = [
   { value: 'springsunday', label: 'Springsunday', domain: 'springsunday.net' },
   { value: 'hdhome', label: 'HDHome', domain: 'hdhome.org' },
   { value: 'hddolby', label: 'HDDolby', domain: 'hddolby.com' },
+  { value: 'soulvoice', label: '聆音Club', domain: 'pt.soulvoice.club' },
 ]
 
 const ADAPTERS = ref<{ value: string; label: string; domain: string }[]>(ADAPTERS_FALLBACK)
