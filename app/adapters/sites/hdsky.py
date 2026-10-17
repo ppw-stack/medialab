@@ -298,17 +298,22 @@ class HdskyAdapter(SiteAdapter):
 
             # ---------------- 免费标记：img class="pro_XXX" → 标准 class
             free_classes: list[str] = []
+            _free_seen: set[str] = set()
             for img in tr.find_all("img", class_=re.compile(r"^pro_")):
                 classes: list[str] = list(img.get("class") or [])
                 for c in classes:
                     if c.startswith("pro_") and c in _PRO_IMG_MAP:
-                        free_classes.append(_PRO_IMG_MAP[c])
+                        mapped = _PRO_IMG_MAP[c]
+                        if mapped not in _free_seen:
+                            free_classes.append(mapped)
+                            _free_seen.add(mapped)
                         break
             # font class="free|twoupfree|..." 标记
             for font in tr.find_all("font", class_=True):
                 for c in font.get("class") or []:
-                    if c in _PROMO_FONT_CLASSES:
+                    if c in _PROMO_FONT_CLASSES and c not in _free_seen:
                         free_classes.append(c)
+                        _free_seen.add(c)
                         break
 
             # ---------------- 限时绝对时刻（排除发布时间单元格自身）
@@ -415,7 +420,8 @@ class HdskyAdapter(SiteAdapter):
         - 302/401/403 → UNKNOWN（cookie 过期重定向到 login.php，避免误判 EXISTS）
         - 其他 → UNKNOWN
 
-        注：用 follow_redirects=False 才能识别 302 重定向（默认会跟到 login.php 的 200 误判为 EXISTS）。
+        注：用 follow_redirects=False 才能识别 302 重定向
+        （默认会跟到 login.php 的 200 误判为 EXISTS）。
         """
         if not self._cookies:
             return TorrentBrief.UNKNOWN
@@ -440,7 +446,8 @@ class HdskyAdapter(SiteAdapter):
     async def get_torrent_detail(self, item_id: str) -> TorrentDetail:
         """5. 种子详情：GET /details.php?id=X。
 
-        解析：title（h1/title 锚点）+ size（保留在 raw_html 中）+ download_url（form action 中的 sign URL）。
+        解析：title（h1/title 锚点）+ size（保留在 raw_html 中）
+        + download_url（form action 中的 sign URL）。
         """
         if not self._cookies:
             return TorrentDetail(item_id=item_id, error="缺少 cookies")

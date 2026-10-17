@@ -322,6 +322,7 @@ class HhanclubAdapter(SiteAdapter):
             # ---------------- 免费标记：promotion-tag-*（HHan 主题）/ pro_* / free 等
             free_classes: list[str] = []
             promo_texts: list[str] = []
+            _hh_seen: set[str] = set()
             remaining_abs: str | None = None
             if container is not None:
                 for tag in container.find_all(class_=True):
@@ -329,19 +330,24 @@ class HhanclubAdapter(SiteAdapter):
                     for cls in classes:
                         if cls.startswith("promotion-tag-"):
                             # promotion-tag-free / -2xfree / -50 / -30 → free/2xfree/50/30
-                            free_classes.append(cls[len("promotion-tag-"):])
+                            tag_key = cls[len("promotion-tag-"):]
+                            if tag_key not in _hh_seen:
+                                free_classes.append(tag_key)
+                                _hh_seen.add(tag_key)
                             text = tag.get_text(strip=True)
                             if text and "%" in text:
                                 promo_texts.append(text)
-                        elif cls in _PROMO_CLASSES:
+                        elif cls in _PROMO_CLASSES and cls not in _hh_seen:
                             free_classes.append(cls)
+                            _hh_seen.add(cls)
                             text = tag.get_text(strip=True)
                             if text and "%" in text:
                                 promo_texts.append(text)
                         elif cls.startswith("pro_"):
                             mapped = cls[4:]
-                            if mapped in _PROMO_CLASSES:
+                            if mapped in _PROMO_CLASSES and mapped not in _hh_seen:
                                 free_classes.append(mapped)
+                                _hh_seen.add(mapped)
                                 text = tag.get_text(strip=True)
                                 if text and "%" in text:
                                     promo_texts.append(text)
@@ -453,7 +459,8 @@ class HhanclubAdapter(SiteAdapter):
     async def get_torrent_detail(self, item_id: str) -> TorrentDetail:
         """5. 种子详情：GET /details.php?id=X。
 
-        HHan Tailwind 主题用 BS4 解析：title（嵌套 div/span）+ download_url（anchor href 中的 passkey URL）。
+        HHan Tailwind 主题用 BS4 解析：title（嵌套 div/span）
+        + download_url（anchor href 中的 passkey URL）。
         """
         if not self._cookies:
             return TorrentDetail(item_id=item_id, error="缺少 cookies")
