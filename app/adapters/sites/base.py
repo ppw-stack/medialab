@@ -277,6 +277,9 @@ def parse_abs_datetime(text: str | None) -> str | None:
 #: 模式：``\d+`` + 单位字符 + 可重复 ``(\d+ + 单位字符)``
 _REL_TIME_RE = re.compile(r"^\d+[年月日周天时分秒钟]+(?:\d+[年月日周天时分秒钟]+)*$")
 
+#: 即时发布文案（无数字前缀）：``"刚刚"`` / ``"秒前"`` / ``"刚刚发布"``
+_JUST_NOW_RE = re.compile(r"^刚刚(?:发布)?$|^秒前$")
+
 #: 发布时间单元格文本（绝对日期）：``"2025-11-23"`` / ``"2025-11-23 12:39:58"``
 _ABS_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2}:\d{2})?$")
 
@@ -296,8 +299,8 @@ def parse_publish_time(row: Tag) -> str | None:
     for td in row.find_all("td"):
         text = td.get_text(" ", strip=True)
         norm = re.sub(r"\s+", "", text)
-        # 情况 A：相对时长（"5时14分" / "1月0天"）→ 从内层 span 的绝对 title 取值
-        if _REL_TIME_RE.match(norm) and len(norm) <= 10:
+        # 情况 A：相对时长（"5时14分" / "1月0天" / "刚刚"）→ 从内层 span 的绝对 title 取值
+        if (_REL_TIME_RE.match(norm) or _JUST_NOW_RE.match(norm)) and len(norm) <= 10:
             span = td.find("span", attrs={"title": True})
             if span is not None:
                 parsed = parse_abs_datetime(str(span.get("title") or ""))
