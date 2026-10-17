@@ -37,6 +37,7 @@ from app.adapters.sites.base import (
     FeedItem,
     SiteAdapter,
     SiteHealth,
+    SiteProfile,
     TorrentBrief,
     TorrentDetail,
 )
@@ -67,7 +68,7 @@ class MteamAdapter(SiteAdapter):
 
     def __init__(
         self,
-        profile,
+        profile: SiteProfile,
         *,
         cookies: str | None = None,
         apikey: str | None = None,
@@ -193,7 +194,7 @@ class MteamAdapter(SiteAdapter):
         """
         from datetime import UTC, datetime
 
-        from app.core.timeutils import format_bj
+        from app.core.timeutils import format_bj, to_bj
 
         if value is None or value == "":
             return None
@@ -217,8 +218,9 @@ class MteamAdapter(SiteAdapter):
                 return None
             if dt.tzinfo is not None:
                 return format_bj(dt)
-            # 无时区标记：视为北京时间（format_bj 把 naive 视为 BJ）
-            return format_bj(dt)
+            # 无时区标记：naive 视为北京时间（astimezone 会把 naive 当系统本地
+            # 时区，容器 TZ=UTC 时产生 ±8h 偏移，必须用 to_bj 显式按北京解释）
+            return to_bj(dt)
         return None
 
     # ------------------------------------------------------------ 1. check_reachability

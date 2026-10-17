@@ -57,12 +57,12 @@ logger = get_logger(__name__)
 #: HDHome 用 ``pro_50pctdown`` 替代标准 ``pro_halfdown``
 _PRO_IMG_MAP: dict[str, str] = {
     "pro_free": "free",
-    "pro_free2up": "free2up",
-    "pro_2upfree": "2upfree",
+    "pro_free2up": "twoupfree",   # 免费+2X 上传
+    "pro_2upfree": "twoupfree",   # 2X 上传+免费
     "pro_2up": "2up",
     "pro_halfdown": "halfdown",
     "pro_50pctdown": "halfdown",  # HDHome 自定义别名
-    "pro_2uphalfdown": "2uphalfdown",
+    "pro_2uphalfdown": "twouphalfdown",  # 2X 上传 + 半下载
     "pro_30pctdown": "thirtypercent",
 }
 

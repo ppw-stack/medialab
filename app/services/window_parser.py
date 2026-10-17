@@ -111,12 +111,13 @@ def _parse_iso_dt(value: object) -> str | None:
             dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
         except ValueError:
             return None
-        from app.core.timeutils import format_bj
+        from app.core.timeutils import format_bj, to_bj
 
         if dt.tzinfo is not None:
             return format_bj(dt)
-        # 无时区标记：视为北京时间（format_bj 把 naive 视为 BJ）
-        return format_bj(dt)
+        # 无时区标记：naive 视为北京时间（astimezone 会把 naive 当系统本地时区，
+        # 容器 TZ=UTC 时产生 ±8h 偏移，必须用 to_bj 显式按北京时区解释）
+        return to_bj(dt)
     return None
 
 
@@ -223,6 +224,10 @@ def _classify_from_status(status: dict[str, Any]) -> tuple[str, str | None, int 
     if isinstance(promo, dict):
         disc = promo.get("discount", "NORMAL")
         end = _parse_iso_dt(promo.get("endTime"))
+        free_disc = disc == "FREE" or disc == 100 or disc == "100" or disc == 0
+        if free_disc and end is not None:
+            # 全站限时免费：有结束时间必须判 TIMED，不能当永久
+            return FreeType.TIMED, end, None
         if disc == "FREE" or disc == 100 or disc == "100":
             return FreeType.PERMANENT, None, 100
         if end is not None:
@@ -232,6 +237,9 @@ def _classify_from_status(status: dict[str, Any]) -> tuple[str, str | None, int 
     disc_raw = status.get("discount")
     if isinstance(disc_raw, str):
         if disc_raw == "FREE":
+            end = _parse_iso_dt(status.get("discountEndTime"))
+            if end is not None:
+                return FreeType.TIMED, end, None
             return FreeType.PERMANENT, None, 100
         if disc_raw.upper().startswith("PERCENT_"):
             try:
