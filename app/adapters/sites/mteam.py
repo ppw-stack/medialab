@@ -40,6 +40,12 @@ from app.adapters.sites.base import (
     TorrentBrief,
     TorrentDetail,
 )
+from app.adapters.sites.user_data import (
+    HrStatus,
+    MessageSummary,
+    SeedingStats,
+    UserInfo,
+)
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -490,6 +496,103 @@ class MteamAdapter(SiteAdapter):
 
     async def close(self) -> None:
         await self._client.aclose()
+
+    # ----------------------- FR-1.6 站点用户数据 -----------------------
+
+    async def get_user_info(self) -> UserInfo | None:
+        """m-team 走 ``/api/member/profile`` 拉取用户信息。
+
+        已知字段：``id / username / uploaded / downloaded / bonus / level /
+        seeding / leeching / shareRatio / createdDate``。
+        """
+        if not self._apikey or not self._api_base():
+            return None
+        try:
+            resp = await self._client.post(
+                f"{self._api_base()}/api/member/profile",
+                headers=self._auth_headers(),
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("mteam get_user_info HTTP 失败：%s", exc)
+            return None
+        if resp.status_code >= 400:
+            logger.warning("mteam get_user_info HTTP %d", resp.status_code)
+            return None
+        try:
+            data = resp.json()
+        except (TypeError, ValueError):
+            return None
+        if str(data.get("code")) != "0" or not data.get("data"):
+            return None
+        d = data["data"]
+        if not isinstance(d, dict):
+            return None
+        # m-team 字段命名通常是 camelCase
+        username = d.get("username") or d.get("name")
+        userid = str(d.get("id") or d.get("memberId") or "") or None
+        user_level = d.get("level") or d.get("class") or d.get("rank")
+        join_at = d.get("createdDate") or d.get("joinDate")
+        # 转 ISO → "YYYY-MM-DD HH:MM:SS"
+        if join_at and "T" in str(join_at):
+            join_at = str(join_at).replace("T", " ")[:19]
+        bonus = float(d.get("bonus") or 0)
+        upload = int(d.get("uploaded") or 0)
+        download = int(d.get("downloaded") or 0)
+        ratio = float(d.get("shareRatio") or d.get("ratio") or 0)
+        return UserInfo(
+            username=str(username) if username else None,
+            userid=userid,
+            user_level=str(user_level) if user_level else None,
+            join_at=str(join_at) if join_at else None,
+            bonus=bonus,
+            upload=upload,
+            download=download,
+            ratio=ratio,
+        )
+
+    async def get_seeding_stats(self) -> SeedingStats | None:
+        """m-team 走 ``/api/member/profile`` 拉取 seeding/leeching 汇总。
+
+        注意：仅汇总数（profile 没暴露总 size），size 字段留 0。
+        """
+        if not self._apikey or not self._api_base():
+            return None
+        try:
+            resp = await self._client.post(
+                f"{self._api_base()}/api/member/profile",
+                headers=self._auth_headers(),
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError:
+            return None
+        if resp.status_code >= 400:
+            return None
+        try:
+            data = resp.json()
+        except (TypeError, ValueError):
+            return None
+        if str(data.get("code")) != "0" or not data.get("data"):
+            return None
+        d = data["data"]
+        if not isinstance(d, dict):
+            return None
+        seeding_count = int(d.get("seeding") or 0)
+        leeching_count = int(d.get("leeching") or 0)
+        return SeedingStats(
+            seeding_count=seeding_count,
+            leeching_count=leeching_count,
+            seeding_size=0,
+            leeching_size=0,
+        )
+
+    async def get_message_count(self) -> MessageSummary:
+        """m-team 公开 API 不暴露消息数 → 始终 0（已知限制）。"""
+        return MessageSummary(unread_count=0)
+
+    async def get_hr_status(self) -> HrStatus:
+        """m-team 公开 API 不暴露 H&R → 始终无风险（已知限制）。"""
+        return HrStatus(is_hr=False, warning_count=0)
 
 
 class _TorrentDownloadError(RuntimeError):
