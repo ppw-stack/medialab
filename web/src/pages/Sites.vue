@@ -176,14 +176,10 @@ const columns = [
 
 interface UserDataSummary {
   has_data: boolean
-  username?: string | null
-  user_level?: string | null
-  ratio?: number
   upload?: number
   download?: number
   seeding_count?: number
-  hr_status?: boolean
-  message_unread?: number
+  leeching_count?: number
   last_seen_at?: string
 }
 
@@ -298,23 +294,16 @@ function fmtBytes(b: number): string {
     <a-drawer
       :open="drawerOpen"
       :title="drawerSite ? `用户数据 · ${drawerSite.name}` : '用户数据'"
-      :width="420"
+      :width="380"
       @close="drawerOpen = false"
     >
       <a-spin :spinning="drawerLoading">
         <template v-if="drawerData && drawerData.has_data">
           <a-descriptions :column="1" bordered size="small">
-            <a-descriptions-item label="用户名">{{ drawerData.username || '—' }}</a-descriptions-item>
-            <a-descriptions-item label="等级">{{ drawerData.user_level || '—' }}</a-descriptions-item>
             <a-descriptions-item label="上传">{{ fmtBytes(drawerData.upload || 0) }}</a-descriptions-item>
             <a-descriptions-item label="下载">{{ fmtBytes(drawerData.download || 0) }}</a-descriptions-item>
-            <a-descriptions-item label="分享率">{{ (drawerData.ratio || 0).toFixed(2) }}</a-descriptions-item>
             <a-descriptions-item label="做种">{{ drawerData.seeding_count }}</a-descriptions-item>
-            <a-descriptions-item label="H&R">
-              <a-tag v-if="drawerData.hr_status" color="red">⚠ 有警告</a-tag>
-              <span v-else>无</span>
-            </a-descriptions-item>
-            <a-descriptions-item label="未读消息">{{ drawerData.message_unread || 0 }}</a-descriptions-item>
+            <a-descriptions-item label="下载中">{{ drawerData.leeching_count }}</a-descriptions-item>
             <a-descriptions-item label="刷新于">{{ drawerData.last_seen_at }}</a-descriptions-item>
           </a-descriptions>
           <div style="margin-top: 16px">

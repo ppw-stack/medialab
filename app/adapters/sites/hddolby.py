@@ -41,12 +41,7 @@ from app.adapters.sites.base import (
     parse_publish_time,
 )
 from app.adapters.sites.parsers import nexus_php
-from app.adapters.sites.user_data import (
-    HrStatus,
-    MessageSummary,
-    SeedingStats,
-    UserInfo,
-)
+from app.adapters.sites.user_data import SiteUserSnapshot
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -486,13 +481,11 @@ class HddolbyAdapter(SiteAdapter):
             raw_html=html,
         )
 
-    async def close(self) -> None:
-        await self._client.aclose()
 
-    # ----------------------- FR-1.6 站点用户数据 -----------------------
+    # ----------------------- FR-1.6 站点用户数据（精简版） -----------------------
 
-    async def get_user_info(self) -> UserInfo | None:
-        """HddolbyAdapter 走 ``/userdetails.php``（NexusPHP 模板）。"""
+    async def get_user_snapshot(self) -> SiteUserSnapshot | None:
+        """hddolby 走 ``/userdetails.php``（NexusPHP 模板）。"""
         if not self._cookies:
             return None
         try:
@@ -501,53 +494,16 @@ class HddolbyAdapter(SiteAdapter):
                 timeout=self._timeout,
             )
         except httpx.HTTPError as exc:
-            logger.warning("hddolby get_user_info HTTP 失败：%s", exc)
+            logger.warning("hddolby get_user_snapshot HTTP 失败：%s", exc)
             return None
         if resp.status_code >= 400:
             return None
-        return nexus_php.parse_user_info(resp.text)
+        return nexus_php.parse_user_snapshot(resp.text)
 
-    async def get_seeding_stats(self) -> SeedingStats | None:
-        if not self._cookies:
-            return None
-        try:
-            resp = await self._client.get(
-                f"{self._base_url()}/userdetails.php",
-                timeout=self._timeout,
-            )
-        except httpx.HTTPError:
-            return None
-        if resp.status_code >= 400:
-            return None
-        return nexus_php.parse_user_seeding_stats(resp.text)
 
-    async def get_message_count(self) -> MessageSummary:
-        if not self._cookies:
-            return MessageSummary(unread_count=0)
-        try:
-            resp = await self._client.get(
-                f"{self._base_url()}/index.php",
-                timeout=self._timeout,
-            )
-        except httpx.HTTPError:
-            return MessageSummary(unread_count=0)
-        if resp.status_code >= 400:
-            return MessageSummary(unread_count=0)
-        return nexus_php.parse_message_unread(resp.text)
 
-    async def get_hr_status(self) -> HrStatus:
-        if not self._cookies:
-            return HrStatus(is_hr=False, warning_count=0)
-        try:
-            resp = await self._client.get(
-                f"{self._base_url()}/userdetails.php",
-                timeout=self._timeout,
-            )
-        except httpx.HTTPError:
-            return HrStatus(is_hr=False, warning_count=0)
-        if resp.status_code >= 400:
-            return HrStatus(is_hr=False, warning_count=0)
-        return nexus_php.parse_hr_status(resp.text)
+    async def close(self) -> None:
+        await self._client.aclose()
 
 
 

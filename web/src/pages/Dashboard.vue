@@ -73,7 +73,7 @@ const JOB_LABELS: Record<string, string> = {
   fetch_all_sites: '站点拉取',
   push_free_torrents: '免费种推送',
   monitor_free_window: '免费窗口监测',
-  refresh_user_data: '用户数据刷新',
+  refresh_user_data: '做种用量',
 }
 </script>
 

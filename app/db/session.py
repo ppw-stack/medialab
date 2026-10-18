@@ -425,6 +425,18 @@ class SingleWriterQueue:
                 "ALTER TABLE downloader_instances ADD COLUMN save_path VARCHAR(512)",
                 "ALTER TABLE torrent_index ADD COLUMN push_status VARCHAR(16)",
                 "ALTER TABLE torrent_index ADD COLUMN pushed_at VARCHAR(32)",
+                # 站点用户数据契约精简 (FR-1.6 v2)：移除 username/userid/level/join_at/
+                # bonus/ratio/seeding_size/leeching_size/message_unread/hr_status
+                "ALTER TABLE site_user_data DROP COLUMN username",
+                "ALTER TABLE site_user_data DROP COLUMN userid",
+                "ALTER TABLE site_user_data DROP COLUMN user_level",
+                "ALTER TABLE site_user_data DROP COLUMN join_at",
+                "ALTER TABLE site_user_data DROP COLUMN bonus",
+                "ALTER TABLE site_user_data DROP COLUMN ratio",
+                "ALTER TABLE site_user_data DROP COLUMN seeding_size",
+                "ALTER TABLE site_user_data DROP COLUMN leeching_size",
+                "ALTER TABLE site_user_data DROP COLUMN message_unread",
+                "ALTER TABLE site_user_data DROP COLUMN hr_status",
                 # 站点用户数据契约 (FR-1.6)：补兼容历史库缺索引
                 "CREATE INDEX IF NOT EXISTS ix_site_user_data_site_seen "
                 "ON site_user_data(site_id, last_seen_at)",

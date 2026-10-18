@@ -268,12 +268,12 @@ class JobRun(Base):
 
 
 class SiteUserData(Base):
-    """站点用户数据历史快照（FR-1.6 站点用户数据契约）。
+    """站点用户数据快照（FR-1.6 站点用户数据契约·精简版）。
 
     ``refresh_user_data`` 作业每 30 分钟调一次各适配器的
-    :meth:`SiteAdapter.get_user_info` / :meth:`get_seeding_stats`
-    / :meth:`get_message_count` / :meth:`get_hr_status`，
-    把结果 upsert 到本表（``site_id`` UNIQUE）。
+    :meth:`SiteAdapter.get_user_snapshot`，把 4 业务字段
+    upload / download / seeding_count / leeching_count
+    upsert 到本表（``site_id`` UNIQUE）。
 
     字段语义详见 :mod:`app.adapters.sites.user_data`。
     """
@@ -288,30 +288,14 @@ class SiteUserData(Base):
     site_id: Mapped[int] = mapped_column(
         ForeignKey("sites.id"), unique=True, index=True
     )
-    #: 用户名（站点显示名）
-    username: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    #: 站内数字或 UUID ID
-    userid: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    #: 等级文案（e.g. "Power User" / "Elite"）
-    user_level: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    #: 注册时间（北京时间）
-    join_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    #: 魔力值/积分
-    bonus: Mapped[float] = mapped_column(Float, default=0)
-    #: 上传/下载量（字节）
+    #: 上传量（字节）
     upload: Mapped[int] = mapped_column(BigInteger, default=0)
+    #: 下载量（字节）
     download: Mapped[int] = mapped_column(BigInteger, default=0)
-    #: 分享率
-    ratio: Mapped[float] = mapped_column(Float, default=0)
-    #: 做种/下载统计（仅汇总，不取每条详情）
+    #: 当前做种数
     seeding_count: Mapped[int] = mapped_column(Integer, default=0)
+    #: 当前下载/未完成数
     leeching_count: Mapped[int] = mapped_column(Integer, default=0)
-    seeding_size: Mapped[int] = mapped_column(BigInteger, default=0)
-    leeching_size: Mapped[int] = mapped_column(BigInteger, default=0)
-    #: 未读消息数
-    message_unread: Mapped[int] = mapped_column(Integer, default=0)
-    #: H&R 风险状态
-    hr_status: Mapped[bool] = mapped_column(Boolean, default=False)
     #: 最近一次刷新时间（北京时间）
     last_seen_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
     created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
