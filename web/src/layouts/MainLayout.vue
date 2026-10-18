@@ -24,6 +24,7 @@ const menuItems = [
   { key: '/downloaders', icon: ApiOutlined, label: '下载器', sub: 'qB · Transmission', iconColor: 'green' },
   { key: '/torrents', icon: DownloadOutlined, label: '任务', sub: '辅种运行中', iconColor: 'blue' },
   { key: '/torrent-index', icon: DatabaseOutlined, label: '拉取索引', sub: '免费种源', iconColor: 'amber' },
+  { key: '/user-data', icon: UserOutlined, label: '用户数据', sub: '9 站用量/HR/消息', iconColor: 'cyan' },
   { key: '/settings', icon: SettingOutlined, label: '设置', sub: '系统配置', iconColor: 'pink' },
 ]
 

@@ -134,6 +134,7 @@ def _mount_routes(app: FastAPI) -> None:
         downloaders,
         sites,
         torrent_index,
+        user_data,
     )
 
     for router in (
@@ -142,6 +143,7 @@ def _mount_routes(app: FastAPI) -> None:
         downloaders.router,
         cross_seed.router,
         torrent_index.router,
+        user_data.router,
     ):
         app.include_router(router, prefix="/api/v1")
     app.include_router(auth_router)  # 自身已含 /api/v1 前缀

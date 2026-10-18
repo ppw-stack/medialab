@@ -212,6 +212,68 @@ async def get_site(site_id: int) -> SiteOut:
         return _to_out(site)
 
 
+# ----------------------- FR-1.6 站点用户数据 API -----------------------
+
+
+@router.get("/{site_id}/user-data", summary="站点最近用户数据")
+async def get_site_user_data(site_id: int) -> dict[str, Any]:
+    """取一站最近一次 :class:`SiteUserData` 行（FR-1.6 契约）。"""
+    async with session_scope() as session:
+        site = (
+            await session.execute(select(Site).where(Site.id == site_id))
+        ).scalar_one_or_none()
+        if site is None:
+            raise HTTPException(status_code=404, detail="站点不存在")
+        ud = (
+            await session.execute(
+                select(SiteUserData).where(SiteUserData.site_id == site_id)
+            )
+        ).scalar_one_or_none()
+        if ud is None:
+            return {
+                "site_id": site_id,
+                "site_name": site.name,
+                "has_data": False,
+            }
+        return {
+            "site_id": site_id,
+            "site_name": site.name,
+            "has_data": True,
+            "username": ud.username,
+            "userid": ud.userid,
+            "user_level": ud.user_level,
+            "join_at": ud.join_at,
+            "bonus": ud.bonus,
+            "upload": ud.upload,
+            "download": ud.download,
+            "ratio": ud.ratio,
+            "seeding_count": ud.seeding_count,
+            "leeching_count": ud.leeching_count,
+            "seeding_size": ud.seeding_size,
+            "leeching_size": ud.leeching_size,
+            "message_unread": ud.message_unread,
+            "hr_status": ud.hr_status,
+            "last_seen_at": ud.last_seen_at,
+        }
+
+
+@router.post("/{site_id}/user-data/refresh", summary="手动刷新站点用户数据")
+async def refresh_site_user_data(site_id: int) -> dict[str, Any]:
+    """立即调一次 4 方法 → 写 site_user_data（FR-1.6）。"""
+    async with session_scope() as session:
+        site = (
+            await session.execute(select(Site).where(Site.id == site_id))
+        ).scalar_one_or_none()
+        if site is None:
+            raise HTTPException(status_code=404, detail="站点不存在")
+        from app.services.factory import get_factory
+        from app.services.user_data import refresh_one_site
+
+        factory = get_factory()
+        ok = await refresh_one_site(session, factory, site)
+    return {"ok": ok, "site_id": site_id}
+
+
 @router.post("/{site_id}/test", summary="连通性与窗口解析自检")
 async def test_site(site_id: int) -> dict[str, Any]:
     async with session_scope() as session:

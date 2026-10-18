@@ -168,10 +168,50 @@ const columns = [
   { title: '适配器', key: 'adapter' },
   { title: '域名', key: 'domain' },
   { title: '凭据', key: 'credentials' },
+  { title: '用户数据', key: 'userdata', width: 100 },
   { title: '间隔', key: 'interval', width: 90 },
   { title: '启用', key: 'enabled', width: 80 },
   { title: '', key: 'action', width: 280 },
 ]
+
+interface UserDataSummary {
+  has_data: boolean
+  username?: string | null
+  user_level?: string | null
+  ratio?: number
+  upload?: number
+  download?: number
+  seeding_count?: number
+  hr_status?: boolean
+  message_unread?: number
+  last_seen_at?: string
+}
+
+const drawerOpen = ref(false)
+const drawerSite = ref<Site | null>(null)
+const drawerData = ref<UserDataSummary | null>(null)
+const drawerLoading = ref(false)
+
+async function openUserDataDrawer(s: Site) {
+  drawerSite.value = s
+  drawerData.value = null
+  drawerOpen.value = true
+  drawerLoading.value = true
+  try {
+    drawerData.value = await api.get<UserDataSummary>(`/sites/${s.id}/user-data`)
+  } catch (e) {
+    message.error('加载用户数据失败：' + (e as Error).message)
+  } finally {
+    drawerLoading.value = false
+  }
+}
+
+function fmtBytes(b: number): string {
+  if (!b) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+  const i = Math.floor(Math.log(b) / Math.log(1024))
+  return (b / Math.pow(1024, i)).toFixed(2) + ' ' + units[i]
+}
 </script>
 
 <template>
@@ -213,6 +253,11 @@ const columns = [
               <a-tag v-if="!record.rss_url_masked && !record.has_apikey && !record.has_cookies">—</a-tag>
             </a-space>
           </template>
+          <template v-else-if="column.key === 'userdata'">
+            <a-button size="small" type="link" @click="openUserDataDrawer(record)">
+              查看
+            </a-button>
+          </template>
           <template v-else-if="column.key === 'interval'">
             <span class="mono">{{ record.min_interval_minutes }}m</span>
           </template>
@@ -249,6 +294,41 @@ const columns = [
       </a-table>
       </div>
     </section>
+
+    <a-drawer
+      :open="drawerOpen"
+      :title="drawerSite ? `用户数据 · ${drawerSite.name}` : '用户数据'"
+      :width="420"
+      @close="drawerOpen = false"
+    >
+      <a-spin :spinning="drawerLoading">
+        <template v-if="drawerData && drawerData.has_data">
+          <a-descriptions :column="1" bordered size="small">
+            <a-descriptions-item label="用户名">{{ drawerData.username || '—' }}</a-descriptions-item>
+            <a-descriptions-item label="等级">{{ drawerData.user_level || '—' }}</a-descriptions-item>
+            <a-descriptions-item label="上传">{{ fmtBytes(drawerData.upload || 0) }}</a-descriptions-item>
+            <a-descriptions-item label="下载">{{ fmtBytes(drawerData.download || 0) }}</a-descriptions-item>
+            <a-descriptions-item label="分享率">{{ (drawerData.ratio || 0).toFixed(2) }}</a-descriptions-item>
+            <a-descriptions-item label="做种">{{ drawerData.seeding_count }}</a-descriptions-item>
+            <a-descriptions-item label="H&R">
+              <a-tag v-if="drawerData.hr_status" color="red">⚠ 有警告</a-tag>
+              <span v-else>无</span>
+            </a-descriptions-item>
+            <a-descriptions-item label="未读消息">{{ drawerData.message_unread || 0 }}</a-descriptions-item>
+            <a-descriptions-item label="刷新于">{{ drawerData.last_seen_at }}</a-descriptions-item>
+          </a-descriptions>
+          <div style="margin-top: 16px">
+            <a-button
+              block
+              type="primary"
+              :loading="drawerLoading"
+              @click="openUserDataDrawer(drawerSite!)"
+            >刷新</a-button>
+          </div>
+        </template>
+        <a-empty v-else-if="!drawerLoading" description="尚无数据" />
+      </a-spin>
+    </a-drawer>
 
     <a-modal
       :open="modalOpen"
