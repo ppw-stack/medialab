@@ -528,7 +528,8 @@ class MteamAdapter(SiteAdapter):
         if not isinstance(d, dict):
             return None
         # DEBUG: 输出一次实际 keys（验证字段名 fallback 是否覆盖）
-        logger.info("mteam profile keys: %s", list(d.keys())[:30])
+        keys = list(d.keys())
+        logger.info("mteam profile keys (%d): %s", len(keys), keys)
         upload = int(
             d.get("uploaded") or d.get("uploadedBytes")
             or d.get("uploadedAmount") or 0
