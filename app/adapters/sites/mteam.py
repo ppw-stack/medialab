@@ -499,11 +499,14 @@ class MteamAdapter(SiteAdapter):
     async def get_user_snapshot(self) -> SiteUserSnapshot | None:
         """m-team 走 ``/api/member/profile`` 拉取 4 业务字段。
 
-        字段名兼容（按 m-team 公开 API 历史版本）：
-        - uploaded / uploadedBytes / uploadedAmount
-        - downloaded / downloadedBytes
-        - seeding / seedingCount
-        - leeching / leechingCount
+        **已知限制**（实测 2026-10-18）：m-team 公开 ``/api/member/profile``
+        端点返回 31 个 keys（id/username/email/role/memberStatus 等），
+        **不暴露** upload/download/seeding/leeching 流量字段。
+        拿 4 业务字段需调 m-team 内部其他端点（cookie 模式 + 私有 API），
+        单 apikey 模式不支持。
+
+        行为：调通即返回 SiteUserSnapshot（4 字段 0），让 service 写
+        ``last_seen_at`` 标记已访问。UI 可识别为"m-team 公开 API 限制"。
         """
         if not self._apikey or not self._api_base():
             return None
@@ -527,9 +530,10 @@ class MteamAdapter(SiteAdapter):
         d = data["data"]
         if not isinstance(d, dict):
             return None
-        # DEBUG: 输出一次实际 keys（验证字段名 fallback 是否覆盖）
-        keys = list(d.keys())
-        logger.info("mteam profile keys (%d): %s", len(keys), keys)
+        # 公开 /api/member/profile 端点不暴露 upload/download/seeding/leeching
+        # 字段（实测 31 个 keys 全是 profile 元信息，无流量/做种）。
+        # 已知 m-team 限制：4 业务字段无法从单端点拿 → 写 0 + last_seen_at。
+        # 兜底返回非 None 写时间戳，让 service 标"已访问"（区别于 cookie 失效）。
         upload = int(
             d.get("uploaded") or d.get("uploadedBytes")
             or d.get("uploadedAmount") or 0
@@ -543,8 +547,6 @@ class MteamAdapter(SiteAdapter):
         leeching_count = int(
             d.get("leeching") or d.get("leechingCount") or 0
         )
-        if not (upload or download or seeding_count or leeching_count):
-            return None
         return SiteUserSnapshot(
             upload=upload,
             download=download,
