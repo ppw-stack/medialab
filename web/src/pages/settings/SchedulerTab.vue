@@ -60,6 +60,7 @@ const JOB_LABELS: Record<string, { name: string; desc: string }> = {
   fetch_all_sites:     { name: '站点拉取',     desc: '遍历所有启用站点拉取种子列表（API/HTML），写入 torrent_index 表' },
   push_free_torrents:  { name: '免费种推送',   desc: '从 torrent_index 选免费种 → 默认下载器（每 30 分钟）' },
   monitor_free_window: { name: '免费窗口监测', desc: '巡检已推免费种，临近 free_end_at 自动暂停下载器（pre_pause=10 min）' },
+  refresh_user_data:   { name: '用户数据刷新', desc: '拉取 9 站用户身份/做种/消息/H&R → 写入 site_user_data 表（FR-1.6 站点用户数据契约）' },
 }
 
 const data = ref<SchedulerInfo | null>(null)
