@@ -118,13 +118,38 @@ def _extract_labeled_values(html: str) -> dict[str, str]:
     return out
 
 
-def _find_active_count(text: str) -> tuple[int, int]:
-    """从 "当前活动：181 0" / "Seeding 152 Leeching 23" / "做种 237 下载 2" 提取。"""
+def _find_active_count(text: str, html: str = "") -> tuple[int, int]:
+    """从多种模板提取做种/下载中数。
+
+    支持的 pattern:
+    - "当前活动：181 0"（NexusPHP navbar 主流）
+    - "Seeding 152 / Leeching 23"（独立标签）
+    - "做种 237 / 下载 2"（中文）
+    - "活跃 ↑ 709 / ↓ 1"（audiences 等 SPA 文本模式）
+    - JSON "活跃","value":"↑ 709 / ↓ 1"（audiences React SSR）
+    """
     seeding_count = 0
     leeching_count = 0
 
+    # 模式 0（audiences 专用）: JSON 风格 "label":"活跃","value":"↑ N / ↓ M"
+    if html:
+        m = re.search(
+            r'(?:&quot;|")label(?:&quot;|")\s*:\s*'
+            r'(?:&quot;|")活跃(?:&quot;|")\s*,\s*'
+            r'(?:&quot;|")value(?:&quot;|")\s*:\s*'
+            r'(?:&quot;|")↑\s*(\d+)\s*/\s*↓\s*(\d+)',
+            html,
+        )
+        if m:
+            return _parse_int(m.group(1)), _parse_int(m.group(2))
+
     # 模式 1: 当前活动 X Y
     m = re.search(r"当前活动[:：]\s*([\d,]+)\s+([\d,]+)", text)
+    if m:
+        return _parse_int(m.group(1)), _parse_int(m.group(2))
+
+    # 模式 1b: 活跃 ↑ N / ↓ M（audiences 文本）
+    m = re.search(r"活跃\s*↑\s*(\d+)\s*/\s*↓\s*(\d+)", text)
     if m:
         return _parse_int(m.group(1)), _parse_int(m.group(2))
 
@@ -176,7 +201,7 @@ def parse_user_snapshot(html: str | bytes) -> SiteUserSnapshot | None:
         download = parse_size_text(f"{m.group(1)} {m.group(2)}")
 
     # 2. seeding / leeching 数量
-    seeding_count, leeching_count = _find_active_count(text)
+    seeding_count, leeching_count = _find_active_count(text, html)
 
     # 全部空 → 解析失败
     if not (upload or download or seeding_count or leeching_count):
