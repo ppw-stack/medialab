@@ -25,6 +25,7 @@ cookie 模式：用户手动从浏览器获取 session cookies（c_secure_uid / 
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from typing import cast
 
 import httpx
@@ -41,7 +42,6 @@ from app.adapters.sites.base import (
     parse_abs_datetime,
     parse_size_text,
 )
-from app.adapters.sites.parsers import nexus_php
 from app.adapters.sites.user_data import SiteUserSnapshot
 from app.core.logging import get_logger
 
@@ -76,6 +76,56 @@ _LOGIN_REDIRECT_RE = re.compile(r"login\.php", re.IGNORECASE)
 _PROMO_CLASSES: frozenset[str] = frozenset(
     {"free", "twoupfree", "twoup", "halfdown", "twouphalfdown", "thirtypercent"}
 )
+
+
+def _parse_hhanclub_snapshot(html: str) -> SiteUserSnapshot | None:
+    """hhanclub HH v2 fork navbar 解析（专用）。
+
+    模板示例::
+
+        <img ... alt="上传">&nbsp;89.307 TB
+        <img ... alt="下载">&nbsp;15.200 TB
+        <a href="userdetails.php?id=N&action=2"><img ... alt="做种数">&nbsp;150
+        <a href="userdetails.php?id=N&action=3"><img ... alt="下载数">&nbsp;0
+
+    其他字段（分享率/认领/H&R/勋章）不影响 4 业务字段，无需提取。
+    """
+    from app.adapters.sites.base import parse_size_text
+
+    def _grab(icon_alt: str, parser: Callable[[str], int]) -> int:
+        """抓 ``<img alt=ICON>&nbsp;VALUE`` 中 VALUE，parser 转 int。"""
+        m = re.search(
+            r'alt=["\']' + re.escape(icon_alt) + r'["\'][^>]*>'
+            r'\s*(?:&nbsp;|\xa0)?\s*([^<\n]+?)(?=<)',
+            html,
+        )
+        if not m:
+            return 0
+        try:
+            return int(parser(m.group(1).strip()))
+        except (TypeError, ValueError):
+            return 0
+
+    def _size(s: str) -> int:
+        v = parse_size_text(s)
+        return v if v else parse_size_text(s + " B")
+
+    def _num(s: str) -> int:
+        return int(float(s.replace(",", "")) or 0)
+
+    upload = _grab("上传", _size)
+    download = _grab("下载", _size)
+    seeding_count = _grab("做种数", _num)
+    leeching_count = _grab("下载数", _num)
+
+    if not (upload or download or seeding_count or leeching_count):
+        return None
+    return SiteUserSnapshot(
+        upload=upload,
+        download=download,
+        seeding_count=seeding_count,
+        leeching_count=leeching_count,
+    )
 
 
 class HhanclubAdapter(SiteAdapter):
@@ -512,7 +562,15 @@ class HhanclubAdapter(SiteAdapter):
     # ----------------------- FR-1.6 站点用户数据（精简版） -----------------------
 
     async def get_user_snapshot(self) -> SiteUserSnapshot | None:
-        """hhanclub 走 ``/userdetails.php``（NexusPHP 模板）。"""
+        """hhanclub 走 ``/userdetails.php``。
+
+        hhanclub (HH v2 fork) navbar 模板跟标准 NexusPHP 1.5 不同：
+        用 ``<img alt="上传">`` / ``<img alt="下载">`` / ``<img alt="做种数">``
+        / ``<img alt="下载数">`` 紧跟数值；做种/下载中数字在 anchor 链接里。
+
+        不用 nexus_php.parse_user_snapshot（标准 NexusPHP 模板匹配不上），
+        这里用 :func:`_parse_hhanclub_snapshot` 单点适配。
+        """
         if not self._cookies:
             return None
         try:
@@ -525,7 +583,7 @@ class HhanclubAdapter(SiteAdapter):
             return None
         if resp.status_code >= 400:
             return None
-        return nexus_php.parse_user_snapshot(resp.text)
+        return _parse_hhanclub_snapshot(resp.text)
 
 
 
