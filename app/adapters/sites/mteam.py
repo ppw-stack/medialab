@@ -504,8 +504,15 @@ class MteamAdapter(SiteAdapter):
     async def get_user_info(self) -> UserInfo | None:
         """m-team 走 ``/api/member/profile`` 拉取用户信息。
 
-        已知字段：``id / username / uploaded / downloaded / bonus / level /
-        seeding / leeching / shareRatio / createdDate``。
+        字段名兼容（按 m-team 公开 API 历史版本）：
+        - id / memberId / uid
+        - username / name
+        - level / className / memberClass
+        - createdDate / joinDate
+        - uploaded / uploadedBytes / uploadedAmount
+        - downloaded / downloadedBytes
+        - bonus / bonusPoint / seedBonus
+        - shareRatio / ratio
         """
         if not self._apikey or not self._api_base():
             return None
@@ -530,17 +537,26 @@ class MteamAdapter(SiteAdapter):
         d = data["data"]
         if not isinstance(d, dict):
             return None
-        # m-team 字段命名通常是 camelCase
+        # 字段名 fallback
         username = d.get("username") or d.get("name")
-        userid = str(d.get("id") or d.get("memberId") or "") or None
-        user_level = d.get("level") or d.get("class") or d.get("rank")
+        userid = str(d.get("id") or d.get("memberId") or d.get("uid") or "") or None
+        user_level = (
+            d.get("level") or d.get("className")
+            or d.get("memberClass") or d.get("class") or d.get("rank")
+        )
         join_at = d.get("createdDate") or d.get("joinDate")
-        # 转 ISO → "YYYY-MM-DD HH:MM:SS"
         if join_at and "T" in str(join_at):
             join_at = str(join_at).replace("T", " ")[:19]
-        bonus = float(d.get("bonus") or 0)
-        upload = int(d.get("uploaded") or 0)
-        download = int(d.get("downloaded") or 0)
+        upload = int(
+            d.get("uploaded") or d.get("uploadedBytes")
+            or d.get("uploadedAmount") or 0
+        )
+        download = int(
+            d.get("downloaded") or d.get("downloadedBytes") or 0
+        )
+        bonus = float(
+            d.get("bonus") or d.get("bonusPoint") or d.get("seedBonus") or 0
+        )
         ratio = float(d.get("shareRatio") or d.get("ratio") or 0)
         return UserInfo(
             username=str(username) if username else None,
@@ -556,7 +572,7 @@ class MteamAdapter(SiteAdapter):
     async def get_seeding_stats(self) -> SeedingStats | None:
         """m-team 走 ``/api/member/profile`` 拉取 seeding/leeching 汇总。
 
-        注意：仅汇总数（profile 没暴露总 size），size 字段留 0。
+        字段名兼容：``seeding / leeching / seedingCount / leechingCount``。
         """
         if not self._apikey or not self._api_base():
             return None
@@ -579,8 +595,12 @@ class MteamAdapter(SiteAdapter):
         d = data["data"]
         if not isinstance(d, dict):
             return None
-        seeding_count = int(d.get("seeding") or 0)
-        leeching_count = int(d.get("leeching") or 0)
+        seeding_count = int(
+            d.get("seeding") or d.get("seedingCount") or 0
+        )
+        leeching_count = int(
+            d.get("leeching") or d.get("leechingCount") or 0
+        )
         return SeedingStats(
             seeding_count=seeding_count,
             leeching_count=leeching_count,
