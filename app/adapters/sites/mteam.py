@@ -497,18 +497,24 @@ class MteamAdapter(SiteAdapter):
     # ----------------------- FR-1.6 站点用户数据（精简版） -----------------------
 
     async def get_user_snapshot(self) -> SiteUserSnapshot | None:
-        """m-team 走 ``/api/member/profile`` 拉取 4 业务字段。
+        """m-team 拉取 4 业务字段，调 2 个端点：
 
-        路径对齐 PT-depiler mteam.ts:
-        - uploaded/downloaded  →  ``data.memberCount.{uploaded,downloaded}``
-        - bonus                →  ``data.memberCount.bonus`` (此版本未使用)
-        - seeding/leeching     →  需第二端点 ``/api/tracker/myPeerStatistics`` (不抓, 写 0)
+        端点 1: ``POST /api/member/profile`` (拿 upload/download)
+          - ``data.memberCount.uploaded`` / ``data.memberCount.downloaded``
+        端点 2: ``POST /api/tracker/myPeerStatistics`` (拿 seeding/leeching)
+          - ``data.seederCount`` / ``data.leecherCount``
 
-        已知限制 (实测 2026-10-18 128 prod):
-        - 流量/分享率在 ``data.memberCount`` 子对象，不在 ``data`` 根下
-        - seeding/leeching 需 myPeerStatistics 端点，单端点无
-        - m-team 公开 API 端点结构可能再变（PT-depiler 配置 2025-10 加 Origin 验证）
+        路径对齐 PT-depiler mteam.ts 的 userInfo.process 段 (line 369-411)。
+
+        异常处理: 端点 2 失败不阻塞端点 1 数据 (seeding/leeching 写 0)。
+
+        实测结构 (2026-10-18 128 prod):
+        - data 根下 49 keys (id/username/email/role/memberStatus/...)
+        - data.memberCount 子对象 9 keys (uploaded/downloaded/bonus/shareRate/...)
+        - 端点 2 返回 6 keys (seederCount/leecherCount/seederSize/leecherSize/...)
         """
+        if not self._apikey or not self._api_base():
+            return None
         if not self._apikey or not self._api_base():
             return None
         try:
@@ -531,20 +537,32 @@ class MteamAdapter(SiteAdapter):
         d = data["data"]
         if not isinstance(d, dict):
             return None
-        # m-team /api/member/profile 实际结构（实测 2026-10-18 128 prod）:
-        # - data 根下 49 个 keys（id/username/email/role/memberStatus...）
-        # - data.memberCount 子对象含 uploaded/downloaded/bonus/shareRate/...
-        # - **没有** top-level uploaded/downloaded/seeding/leeching 字段
-        # 路径对齐 PT-depiler mteam.ts userInfo.selectors
+        # 端点 1: /api/member/profile 拿 upload/download（路径对齐 PT-depiler）
         mc = d.get("memberCount")
         if not isinstance(mc, dict):
             mc = {}
         upload = int(mc.get("uploaded") or 0)
         download = int(mc.get("downloaded") or 0)
-        # seeding / leeching 需调第二端点 /api/tracker/myPeerStatistics
-        # (PT-depiler mteam.ts 端点 2)，单端点不暴露。已知限制: 写 0。
+
+        # 端点 2: /api/tracker/myPeerStatistics 拿 seeding/leeching
+        # (PT-depiler mteam.ts 端点 2)
         seeding_count = 0
         leeching_count = 0
+        try:
+            stat_resp = await self._client.post(
+                f"{self._api_base()}/api/tracker/myPeerStatistics",
+                headers=self._auth_headers(),
+                timeout=self._timeout,
+            )
+            if stat_resp.status_code < 400:
+                stat_data = stat_resp.json()
+                stat = stat_data.get("data") or {}
+                seeding_count = int(stat.get("seederCount") or 0)
+                leeching_count = int(stat.get("leecherCount") or 0)
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            # 端点 2 失败不阻塞端点 1 数据
+            logger.warning("mteam get_user_snapshot myPeerStatistics 失败：%s", exc)
+
         return SiteUserSnapshot(
             upload=upload,
             download=download,
