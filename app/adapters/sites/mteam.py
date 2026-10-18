@@ -530,6 +530,19 @@ class MteamAdapter(SiteAdapter):
         d = data["data"]
         if not isinstance(d, dict):
             return None
+        # DEBUG: 一次性 dump data 完整结构，验证 PT-depiler 的 memberCount 路径
+        logger.warning("mteam profile data keys (%d): %s", len(d), list(d.keys()))
+        # dump 顶层每个 key 的 value 类型（避免巨大数值日志）
+        sample = {k: type(v).__name__ for k, v in d.items()}
+        logger.warning("mteam profile value types: %s", sample)
+        # 特别检查 PT-depiler 文档里的 memberCount 子对象
+        mc = d.get("memberCount")
+        if isinstance(mc, dict):
+            logger.warning("mteam memberCount keys (%d): %s", len(mc), list(mc.keys()))
+            logger.warning("mteam memberCount sample: %s",
+                           {k: type(v).__name__ for k, v in mc.items()})
+        else:
+            logger.warning("mteam memberCount NOT a dict: %r", mc)
         # 公开 /api/member/profile 端点不暴露 upload/download/seeding/leeching
         # 字段（实测 31 个 keys 全是 profile 元信息，无流量/做种）。
         # 已知 m-team 限制：4 业务字段无法从单端点拿 → 写 0 + last_seen_at。
