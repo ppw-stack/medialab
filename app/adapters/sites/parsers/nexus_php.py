@@ -210,27 +210,49 @@ def _extract_labeled_values(html: str) -> dict[str, str]:
     out: dict[str, str] = {}
 
     # 模式 1: <font class="color_XXX">Label：</font> Value
+    # value 部分用 BeautifulSoup 解析（容忍中间 <a> 等子元素）
     for m in re.finditer(
-        r'<font[^>]*class="[^"]*color_(\w+)[^"]*"[^>]*>([^<]*)</font>\s*([^<\n]+?)(?=<|$)',
+        r'<font[^>]*class="[^"]*color_(\w+)[^"]*"[^>]*>(.*?)</font>',
         html,
-        re.IGNORECASE,
+        re.IGNORECASE | re.DOTALL,
     ):
         field = m.group(1).lower()
-        label = m.group(2).strip().rstrip("：:")
-        value = m.group(3).strip()
-        # 跳过"color_active"等 UI 标签
-        if field in ("uploaded", "downloaded", "ratio", "bonus", "active", "seeding", "leeching"):
-            # 优先用 label 内容（"上传量"）映射
-            mapped = _LABEL_FIELD_MAP.get(label.lower())
-            if mapped and mapped not in out:
-                out[mapped] = value
+        useful = (
+            "uploaded", "downloaded", "ratio", "bonus",
+            "active", "seeding", "leeching",
+        )
+        if field not in useful:
+            continue
+        # 解析 font 后的兄弟节点（font 在 navbar 里通常是单独一个 span，
+        # 数字跟在后面，可能被 <a> 包裹或被 <br> 分隔）
+        font_end = m.end()
+        # 找 font 后面 200 字符内的纯文本（去掉 HTML 标签）
+        tail = html[font_end:font_end + 500]
+        # 先去掉 HTML 标签
+        tail_text = re.sub(r"<[^>]+>", " ", tail)
+        tail_text = re.sub(r"\s+", " ", tail_text).strip()
+        # 提取数字（含单位）+ 标点
+        # 模式: "833,314.2" / "108.815 TB" / "14.904"
+        vm = re.match(
+            r"([\d,.]+\s*(?:TB|GB|MB|KB|%|积分|点|乐)?)",
+            tail_text,
+        )
+        if vm is None:
+            continue
+        value = vm.group(1).strip()
+        # 标签去除前后
+        label_text = re.sub(r"<[^>]+>", "", m.group(2)).strip()
+        label = label_text.rstrip("：:")
+        mapped = _LABEL_FIELD_MAP.get(label.lower())
+        if mapped and mapped not in out:
+            out[mapped] = value
 
-    # 模式 2: JSON 风格 "Label：","value":"X Y"
-    for m in re.finditer(
-        r'"([^"]+[：:])"\s*,\s*"value"\s*:\s*"([^"]+)"',
-        html,
-    ):
-        label = m.group(1).strip().rstrip("：:")
+    # 模式 2: JSON 风格 "Label：","value":"X Y"（含 HTML 实体 &quot;）
+    json_label_re = re.compile(
+        r'(?:&quot;|")([^&"]+?[：:])(?:&quot;|")\s*,\s*(?:&quot;|")value(?:&quot;|")\s*:\s*(?:&quot;|")([^&"]+?)(?:&quot;|")',
+    )
+    for m in json_label_re.finditer(html):
+        label = m.group(1).strip().rstrip("：:").replace("&amp;", "&")
         value = m.group(2).strip()
         mapped = _LABEL_FIELD_MAP.get(label.lower())
         if mapped and mapped not in out and mapped != "ignored":
@@ -303,31 +325,91 @@ def _find_join_at_in_text(text: str) -> str | None:
 
 
 def _find_username_in_html(soup: BeautifulSoup, html: str) -> str | None:
-    """从 userdetails 找 username（多模式）。"""
-    # 模式 1: <h1>username</h1>
+    """从 userdetails 找 username（多模式）。
+
+    NexusPHP 1.5 主流模式::
+
+        <a href="userdetails.php?id=N" class='PowerUser_Name'><b>username</b></a>
+
+    不同站 class 前缀（PowerUser/ExtremeUser/VeteranUser/User/Rainbow）
+    表示用户等级，但 ``<b>`` 内的文本才是 username。
+    """
+    # 模式 1: <a href="userdetails.php?id=N" class="*Name*"><b>name</b></a>（NexusPHP navbar）
+    a = soup.find("a", href=re.compile(r"userdetails\.php\?id=\d+"))
+    if a is not None:
+        b = a.find("b")
+        if b is not None:
+            t = b.get_text(strip=True)
+            if t and len(t) < 32:
+                return t
+        # 退化：直接 text
+        t = a.get_text(strip=True)
+        if t and len(t) < 32:
+            return t
+    # 模式 2: <h1>username</h1>
     h1 = soup.find("h1")
     if h1 is not None:
         t = h1.get_text(strip=True)
-        if t:
+        if t and len(t) < 32:
             return t
-    # 模式 2: <title>:: username ::</title>
+    # 模式 3: <title>:: username ::</title>
     title = soup.find("title")
     if title is not None:
         t = title.get_text(" ", strip=True)
         m = re.search(r"::\s*([^\s│|].+?)\s*(?:│|\||$)", t)
         if m:
             return m.group(1).strip()
-    # 模式 3: navbar 里 class="USER-NAME" 或 [USER]<a>
-    for el in soup.find_all(True, {"class": re.compile(r"username|user-name", re.IGNORECASE)}):
+    # 模式 4: navbar class 含 user-name
+    for el in soup.find_all(True, {"class": re.compile(r"user[-_]?name", re.IGNORECASE)}):
         t = el.get_text(strip=True)
         if t and len(t) < 32:
             return t
     return None
 
 
+#: NexusPHP 1.5 class 前缀 → 显示等级（"PowerUser" → "Power User"）
+_LEVEL_CLASS_PREFIXES = (
+    "User",
+    "PowerUser",
+    "ExtremeUser",
+    "VeteranUser",
+    "EliteUser",
+    "UltraUser",
+    "InsaneUser",
+    "GodUser",
+    "Sysop",
+    "Admin",
+    "Manager",
+    "Uploader",
+    "VIP",
+    "贵宾",
+    "精英",
+    "管理员",
+    "上传员",
+)
+
+
 def _find_user_level_in_html(soup: BeautifulSoup) -> str | None:
-    """从 userdetails 找 user_level（多模式）。"""
-    # 模式 1: <img alt="Power User" class="...">
+    """从 userdetails 找 user_level（多模式）。
+
+    NexusPHP 1.5 模式::
+
+        <a class="PowerUser_Name"><b>name</b></a>  → level = "Power User"
+    """
+    # 模式 1: <a class="*User_Name">（navbar username 锚的 class 前缀）
+    a = soup.find("a", href=re.compile(r"userdetails\.php\?id=\d+"))
+    if a is not None:
+        cls: object = a.get("class") or []
+        cls_text = (
+            " ".join(str(c) for c in cls) if isinstance(cls, list) else str(cls)
+        )
+        # 按从长到短匹配（先 ExtremeUser 再 User，避免 User 误匹配）
+        for prefix in sorted(_LEVEL_CLASS_PREFIXES, key=len, reverse=True):
+            if prefix in cls_text:
+                # 转 CamelCase → "Power User"
+                spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", prefix).strip()
+                return spaced
+    # 模式 2: <img alt="Power User" class="...">
     img = soup.find(
         "img",
         attrs={
@@ -339,18 +421,11 @@ def _find_user_level_in_html(soup: BeautifulSoup) -> str | None:
     )
     if img is not None:
         return str(img.get("alt") or "").strip() or None
-    # 模式 2: <font class="...">Power User</font>
+    # 模式 3: <font class="...">Power User</font>
     for cls in ("class", "role", "rank", "user-class"):
         font = soup.find("font", class_=re.compile(cls, re.IGNORECASE))
         if font is not None and font.find("img") is None:
             t = font.get_text(strip=True)
-            if t and len(t) < 32:
-                return t
-    # 模式 3: <a href="userdetails.php?id=X"><b>Power User</b></a>
-    a = soup.find("a", href=re.compile(r"userdetails\.php", re.IGNORECASE))
-    if a is not None:
-        for child in a.find_all(["b", "strong", "font"]):
-            t = child.get_text(strip=True)
             if t and len(t) < 32:
                 return t
     return None
