@@ -58,6 +58,7 @@ class DownloaderIn(BaseModel):
     is_default: bool = False
     enabled: bool = True
     verify_tls: bool = True
+    is_cross_seed: bool = False
 
 
 class DownloaderUpdate(BaseModel):
@@ -72,6 +73,7 @@ class DownloaderUpdate(BaseModel):
     is_default: bool | None = None
     enabled: bool | None = None
     verify_tls: bool | None = None
+    is_cross_seed: bool | None = None
 
 
 class DownloaderOut(BaseModel):
@@ -85,6 +87,7 @@ class DownloaderOut(BaseModel):
     is_default: bool
     enabled: bool
     verify_tls: bool
+    is_cross_seed: bool
     created_at: str
     updated_at: str
 
@@ -101,6 +104,7 @@ def _to_out(row: DownloaderInstance) -> DownloaderOut:
         is_default=row.is_default,
         enabled=row.enabled,
         verify_tls=row.verify_tls,
+        is_cross_seed=bool(getattr(row, "is_cross_seed", False)),
         created_at=row.created_at or "",
         updated_at=row.updated_at or "",
     )

@@ -119,6 +119,10 @@ class DownloaderInstance(Base):
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     verify_tls: Mapped[bool] = mapped_column(Boolean, default=True)
+    #: 标记此下载器用于跨种（FR 跨种/辅种监测，当前只记录不强制行为）。
+    #: 后续扩展：push_free_torrents 选下载器时排除本字段=True 的实例；
+    #: monitor_cross_seed 作业扫描这些实例做跨站 infohash 匹配。
+    is_cross_seed: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
     updated_at: Mapped[str] = mapped_column(
         String(32), default=_bj_now, onupdate=_bj_now

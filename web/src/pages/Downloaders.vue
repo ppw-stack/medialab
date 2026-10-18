@@ -14,6 +14,7 @@ interface Downloader {
   is_default: boolean
   enabled: boolean
   verify_tls: boolean
+  is_cross_seed: boolean
   created_at: string
   updated_at: string
 }
@@ -52,6 +53,7 @@ const formState = reactive<Record<string, unknown>>({
   is_default: false,
   enabled: true,
   verify_tls: true,
+  is_cross_seed: false,
 })
 
 async function load() {
@@ -97,6 +99,7 @@ function onEdit(d: Downloader) {
     is_default: d.is_default,
     enabled: d.enabled,
     verify_tls: d.verify_tls,
+    is_cross_seed: d.is_cross_seed,
   })
 }
 
@@ -189,7 +192,8 @@ const columns = [
   { title: 'URL', key: 'url' },
   { title: '保存路径', key: 'save_path', width: 200 },
   { title: '凭据', key: 'password', width: 100 },
-  { title: '默认', key: 'default', width: 80 },
+  { title: '默认', key: 'default', width: 60 },
+  { title: '辅种', key: 'cross_seed', width: 60 },
   { title: '启用', key: 'enabled', width: 60 },
   { title: '', key: 'action', width: 180 },
 ]
@@ -236,6 +240,12 @@ const columns = [
           </template>
           <template v-else-if="column.key === 'default'">
             <a-tag v-if="record.is_default" color="purple">★ 默认</a-tag>
+            <span v-else class="dim">—</span>
+          </template>
+          <template v-else-if="column.key === 'cross_seed'">
+            <a-tooltip v-if="record.is_cross_seed" title="标记为辅种下载器（仅记录，后续监控启用）">
+              <a-tag color="cyan">辅种</a-tag>
+            </a-tooltip>
             <span v-else class="dim">—</span>
           </template>
           <template v-else-if="column.key === 'enabled'">
@@ -318,6 +328,9 @@ const columns = [
         </a-form-item>
         <a-form-item label="校验 TLS 证书" name="verify_tls" tooltip="自签名证书场景下关闭">
           <a-switch v-model:checked="formState.verify_tls" />
+        </a-form-item>
+        <a-form-item label="辅种下载器" name="is_cross_seed" tooltip="标记此下载器用于辅种监测（当前只记录，后续启用监控）">
+          <a-switch v-model:checked="formState.is_cross_seed" />
         </a-form-item>
         <a-form-item name="enabled" label="启用">
           <a-switch v-model:checked="formState.enabled" />
