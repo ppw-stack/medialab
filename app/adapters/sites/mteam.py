@@ -499,14 +499,15 @@ class MteamAdapter(SiteAdapter):
     async def get_user_snapshot(self) -> SiteUserSnapshot | None:
         """m-team 走 ``/api/member/profile`` 拉取 4 业务字段。
 
-        **已知限制**（实测 2026-10-18）：m-team 公开 ``/api/member/profile``
-        端点返回 31 个 keys（id/username/email/role/memberStatus 等），
-        **不暴露** upload/download/seeding/leeching 流量字段。
-        拿 4 业务字段需调 m-team 内部其他端点（cookie 模式 + 私有 API），
-        单 apikey 模式不支持。
+        路径对齐 PT-depiler mteam.ts:
+        - uploaded/downloaded  →  ``data.memberCount.{uploaded,downloaded}``
+        - bonus                →  ``data.memberCount.bonus`` (此版本未使用)
+        - seeding/leeching     →  需第二端点 ``/api/tracker/myPeerStatistics`` (不抓, 写 0)
 
-        行为：调通即返回 SiteUserSnapshot（4 字段 0），让 service 写
-        ``last_seen_at`` 标记已访问。UI 可识别为"m-team 公开 API 限制"。
+        已知限制 (实测 2026-10-18 128 prod):
+        - 流量/分享率在 ``data.memberCount`` 子对象，不在 ``data`` 根下
+        - seeding/leeching 需 myPeerStatistics 端点，单端点无
+        - m-team 公开 API 端点结构可能再变（PT-depiler 配置 2025-10 加 Origin 验证）
         """
         if not self._apikey or not self._api_base():
             return None
@@ -530,36 +531,20 @@ class MteamAdapter(SiteAdapter):
         d = data["data"]
         if not isinstance(d, dict):
             return None
-        # DEBUG: 一次性 dump data 完整结构，验证 PT-depiler 的 memberCount 路径
-        logger.warning("mteam profile data keys (%d): %s", len(d), list(d.keys()))
-        # dump 顶层每个 key 的 value 类型（避免巨大数值日志）
-        sample = {k: type(v).__name__ for k, v in d.items()}
-        logger.warning("mteam profile value types: %s", sample)
-        # 特别检查 PT-depiler 文档里的 memberCount 子对象
+        # m-team /api/member/profile 实际结构（实测 2026-10-18 128 prod）:
+        # - data 根下 49 个 keys（id/username/email/role/memberStatus...）
+        # - data.memberCount 子对象含 uploaded/downloaded/bonus/shareRate/...
+        # - **没有** top-level uploaded/downloaded/seeding/leeching 字段
+        # 路径对齐 PT-depiler mteam.ts userInfo.selectors
         mc = d.get("memberCount")
-        if isinstance(mc, dict):
-            logger.warning("mteam memberCount keys (%d): %s", len(mc), list(mc.keys()))
-            logger.warning("mteam memberCount sample: %s",
-                           {k: type(v).__name__ for k, v in mc.items()})
-        else:
-            logger.warning("mteam memberCount NOT a dict: %r", mc)
-        # 公开 /api/member/profile 端点不暴露 upload/download/seeding/leeching
-        # 字段（实测 31 个 keys 全是 profile 元信息，无流量/做种）。
-        # 已知 m-team 限制：4 业务字段无法从单端点拿 → 写 0 + last_seen_at。
-        # 兜底返回非 None 写时间戳，让 service 标"已访问"（区别于 cookie 失效）。
-        upload = int(
-            d.get("uploaded") or d.get("uploadedBytes")
-            or d.get("uploadedAmount") or 0
-        )
-        download = int(
-            d.get("downloaded") or d.get("downloadedBytes") or 0
-        )
-        seeding_count = int(
-            d.get("seeding") or d.get("seedingCount") or 0
-        )
-        leeching_count = int(
-            d.get("leeching") or d.get("leechingCount") or 0
-        )
+        if not isinstance(mc, dict):
+            mc = {}
+        upload = int(mc.get("uploaded") or 0)
+        download = int(mc.get("downloaded") or 0)
+        # seeding / leeching 需调第二端点 /api/tracker/myPeerStatistics
+        # (PT-depiler mteam.ts 端点 2)，单端点不暴露。已知限制: 写 0。
+        seeding_count = 0
+        leeching_count = 0
         return SiteUserSnapshot(
             upload=upload,
             download=download,
