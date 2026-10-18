@@ -4,9 +4,14 @@
 
 ## 现状
 
-**M1 基础设施**已落地：项目骨架、配置中心、SQLite WAL 单写者队列、下载器/站点双适配层骨架（qBittorrent 完整实现 + 配置驱动的通用站点适配器）、日志与审计、FastAPI 应用 + `/healthz` + `/metrics` + 完整 REST 骨架。
+**M1 基础设施 + 核心功能**已落地：
 
-`F2 辅种引擎` / `F3 免费种` / `F4 巡检` / `F5 清理` 自 **M2** 起按文档 v1.2 实施。
+- **M1**：项目骨架、配置中心、SQLite WAL 单写者队列、下载器/站点双适配层、日志与审计、FastAPI 应用 + `/healthz` + `/metrics` + 完整 REST 骨架
+- **F1 站点拉取**：9 站适配器（mteam / hdsky / hhanclub / audiences / hdhome / hddolby / ourbits / soulvoice / springsunday）拉取免费种 + RSS 清理
+- **F2 免费种窗口**：推送 + 监测 + 中止（push_free_torrents / monitor_free_window / FR-3.5 链路）
+- **FR-1.6 站点用户数据契约**（2026-10-18）：9 站 user_info / seeding_stats / message_count / hr_status 4 方法，刷新作业 `*/30 * * * *`，Vue UI（`/user-data` 列表 + Sites drawer），API 端点 `/api/v1/user-data` 与 `/api/v1/sites/{id}/user-data`
+
+`F2 辅种引擎` / `F4 巡检` / `F5 清理` 自 **M2** 起按文档 v1.2 实施。
 
 详细需求见 `.orca/drops/PT辅种与自动监测系统-项目需求文档.md`（v1.2，已评审通过）。
 
