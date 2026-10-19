@@ -25,9 +25,9 @@ test('辅种下载器统计页面 (a5444dd @ dev)', async ({ page }) => {
   // 6) 切到 tr-172 tab (192.168.0.172:9091, 真实可达)
   await page.locator('.ant-tabs-tab:has-text("tr-172")').click()
 
-  // 7) 等表格表头渲染 (scan 异步)
-  await expect(page.locator('th:has-text("原始名称")').first()).toBeVisible({ timeout: 15000 })
-  await expect(page.locator('th:has-text("大小 (GB)")').first()).toBeVisible()
+  // 7) 等表格表头渲染 (scan 异步 — tr 拉 3000+ 种子可能 20s+)
+  await expect(page.locator('th:has-text("原始名称")').first()).toBeVisible({ timeout: 45000 })
+  await expect(page.locator('th').filter({ hasText: '大小' }).first()).toBeVisible()
   await expect(page.locator('th:has-text("出现次数")').first()).toBeVisible()
   // 样本 hash 列已移除
   await expect(page.locator('th:has-text("样本 hash")')).toHaveCount(0)

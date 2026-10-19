@@ -26,6 +26,7 @@ from app.core.logging import get_logger
 from app.db.models import DownloaderInstance
 from app.db.session import session_scope
 from app.services.factory import get_factory
+from app.services.scheduler import JobStep
 
 logger = get_logger(__name__)
 
@@ -275,29 +276,67 @@ class CrossSeedMonitorService:
         """作业入口: 扫描所有辅种下载器, 暂停异常 (与 cron 调用方对齐)."""
         results = await self.scan_all()
         total_anomalies = sum(r.anomaly_count for r in results)
+        total_torrents = sum(r.total_torrents for r in results)
+        anomaly_types: dict[str, int] = {}
+        for r in results:
+            for a in r.anomalies:
+                anomaly_types[a.anomaly_type] = anomaly_types.get(a.anomaly_type, 0) + 1
 
         # 自动暂停 (后台作业, 无二次确认, 走白名单逻辑)
+        stopped = 0
+        stop_failed = 0
         for r in results:
             for a in r.anomalies:
                 try:
                     row = await self._resolve_downloader(r.downloader_id)
                     adapter = self._factory.downloader(row)
                     await adapter.set_pause([a.hash], paused=True)
+                    stopped += 1
                     logger.info(
                         "已暂停辅种异常 downloader=%d hash=%s type=%s",
                         r.downloader_id, a.hash, a.anomaly_type,
                     )
                 except Exception as exc:
+                    stop_failed += 1
                     logger.warning(
                         "自动暂停失败 downloader=%d hash=%s: %s",
                         r.downloader_id, a.hash, exc,
                     )
 
+        tracker_count = anomaly_types.get(ANOMALY_TRACKER_NOT_REGISTERED, 0)
+        no_data_count = anomaly_types.get(ANOMALY_NO_DATA_FOUND, 0)
         return {
             "scanned_downloaders": len(results),
-            "total_torrents": sum(r.total_torrents for r in results),
+            "total_torrents": total_torrents,
             "total_anomalies": total_anomalies,
+            "stopped": stopped,
             "results": [r.to_dict() for r in results],
+            "steps": [
+                JobStep(
+                    "扫描辅种下载器",
+                    "ok" if results else "skip",
+                    len(results),
+                    f"{len(results)} 个 is_cross_seed=True 实例",
+                ),
+                JobStep(
+                    "统计种子总数",
+                    "ok",
+                    total_torrents,
+                    f"{total_torrents} 个种子",
+                ),
+                JobStep(
+                    "检测异常",
+                    "warn" if total_anomalies else "ok",
+                    total_anomalies,
+                    f"tracker 未注册 {tracker_count} / 数据丢失 {no_data_count}",
+                ),
+                JobStep(
+                    "自动暂停",
+                    "warn" if stop_failed else ("ok" if stopped else "skip"),
+                    stopped,
+                    f"已暂停 {stopped} 个，{stop_failed} 失败",
+                ),
+            ],
         }
 
     # ---------------------------------------------------------- 内部

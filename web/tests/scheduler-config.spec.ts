@@ -116,6 +116,58 @@ test('调度作业 - 历史 modal 打开并展示结果', async ({ page }) => {
   await modal.locator('.ant-modal-close').click()
 })
 
+test('调度作业 - 历史 modal 展示任务步骤', async ({ page }) => {
+  await login(page)
+  await page.goto('/settings')
+  await page.waitForLoadState('networkidle')
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(200)
+
+  const row = page.locator('.job-item').filter({ hasText: 'scan_cross_seed' })
+  await row.getByRole('button', { name: /历\s*史/ }).click({ force: true })
+
+  const modal = page.locator('.ant-modal-content').filter({ hasText: '运行历史' })
+  await expect(modal).toBeVisible()
+  await page.waitForTimeout(1500)
+
+  // 顶部统计条
+  const statPills = modal.locator('.stat-pill')
+  await expect(statPills.first()).toBeVisible()
+  const statCount = await statPills.count()
+  expect(statCount).toBeGreaterThanOrEqual(3)
+  console.log(`  ✓ 顶部统计 ${statCount} 个 pill`)
+
+  // 点第一行看步骤
+  const tableRows = modal.locator('.ant-table-tbody > tr.ant-table-row')
+  const cnt = await tableRows.count()
+  expect(cnt).toBeGreaterThan(0)
+  await tableRows.first().click()
+  await page.waitForTimeout(500)
+
+  // 步骤卡片
+  const stepCards = modal.locator('.step-card')
+  const stepCount = await stepCards.count()
+  expect(stepCount).toBeGreaterThan(0)
+  console.log(`  ✓ 步骤卡片 ${stepCount} 个`)
+
+  // 步骤状态色 (ok/warn/skip/fail)
+  const withStatus = modal.locator('.step-card[class*="step--"]')
+  expect(await withStatus.count()).toBe(stepCount)
+  console.log('  ✓ 步骤卡片带状态类 (step--ok/warn/skip/fail)')
+
+  // 步骤图标
+  const icons = modal.locator('.step-icon')
+  expect(await icons.count()).toBe(stepCount)
+
+  // 列表里的步骤小圆点
+  const dots = modal.locator('.step-dot')
+  const dotCount = await dots.count()
+  expect(dotCount).toBeGreaterThan(0)
+  console.log(`  ✓ 列表步骤小圆点 ${dotCount} 个`)
+
+  await modal.locator('.ant-modal-close').click()
+})
+
 test('调度作业 - 截图', async ({ page }) => {
   await login(page)
   await page.goto('/settings')

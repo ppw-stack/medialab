@@ -24,6 +24,7 @@ from app.core.timeutils import bj_now
 from app.db.models import Site, SiteUserData
 from app.db.session import get_session_factory
 from app.services.factory import AdapterFactory
+from app.services.scheduler import JobStep
 
 logger = get_logger(__name__)
 
@@ -74,7 +75,7 @@ async def refresh_one_site(
 async def refresh_all_sites(factory: AdapterFactory) -> dict[str, object]:
     """刷新所有启用站点的 user_data。
 
-    Returns: ``{"ok": N, "failed": M, "skipped": K, "total": T}``。
+    Returns: ``{"ok": N, "failed": M, "skipped": K, "total": T, "steps": [...]}``。
     """
     factory_obj = get_session_factory()
     async with factory_obj() as session:
@@ -104,6 +105,20 @@ async def refresh_all_sites(factory: AdapterFactory) -> dict[str, object]:
         "failed": failed,
         "skipped": skipped,
         "total": len(site_rows),
+        "steps": [
+            JobStep(
+                "查询启用站点", "ok", len(site_rows), f"{len(site_rows)} 站"
+            ),
+            JobStep(
+                "拉取 user_data",
+                "warn" if failed else ("ok" if ok else "skip"),
+                ok,
+                f"{ok} 成功，{failed} 失败，{skipped} 跳过",
+            ),
+            JobStep(
+                "写入 site_user_data", "ok" if ok else "skip", ok, f"{ok} 行 upsert"
+            ),
+        ],
     }
 
 

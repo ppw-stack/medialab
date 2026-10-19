@@ -1,7 +1,14 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 import { api } from '../api'
 import { message } from 'ant-design-vue'
+
+interface JobStep {
+  name: string
+  status: 'ok' | 'warn' | 'skip' | 'fail'
+  count: number | null
+  detail: string | null
+}
 
 interface RunItem {
   id: number
@@ -53,11 +60,77 @@ async function load() {
   }
 }
 
+// ---------------------------------------------------------- 步骤提取
+function getSteps(r: RunItem | null): JobStep[] {
+  if (!r?.result) return []
+  const steps = (r.result as Record<string, unknown>).steps
+  if (!Array.isArray(steps)) return []
+  return steps.filter(
+    (s): s is JobStep =>
+      !!s && typeof s === 'object' && typeof (s as JobStep).name === 'string'
+  )
+}
+
+function statusIcon(s: string): string {
+  switch (s) {
+    case 'ok': return '✓'
+    case 'warn': return '⚠'
+    case 'fail': return '✕'
+    default: return '○'
+  }
+}
+
+function stepClass(s: string): string {
+  return `step--${s}`
+}
+
 function formatResult(r: unknown): string {
   if (!r || typeof r !== 'object') return ''
-  return Object.entries(r as Record<string, unknown>)
-    .map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`)
-    .join('\n')
+  const out: string[] = []
+  for (const [k, v] of Object.entries(r as Record<string, unknown>)) {
+    if (k === 'steps') continue
+    out.push(`${k}: ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`)
+  }
+  return out.join('\n')
+}
+
+// ---------------------------------------------------------- 顶部统计
+const stats = computed(() => {
+  const list = runs.value
+  if (!list.length) return null
+  const okCount = list.filter((r) => r.ok).length
+  const failCount = list.length - okCount
+  const durations = list
+    .map((r) => r.duration_ms)
+    .filter((d): d is number => typeof d === 'number')
+  const avgMs = durations.length
+    ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length)
+    : 0
+  const maxMs = durations.length ? Math.max(...durations) : 0
+  // 最近一次的结果摘要
+  const latest = list[0]
+  const latestSteps = getSteps(latest)
+  const summary = latestSteps.length
+    ? latestSteps[latestSteps.length - 1].detail || latestSteps[latestSteps.length - 1].name
+    : latest?.error
+      ? '失败'
+      : '—'
+  return {
+    total: list.length,
+    okCount,
+    failCount,
+    okPct: Math.round((okCount / list.length) * 100),
+    avgMs,
+    maxMs,
+    summary,
+    stepCount: latestSteps.length,
+  }
+})
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
+  return `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`
 }
 
 const columns = [
@@ -65,11 +138,17 @@ const columns = [
   { title: '触发', dataIndex: 'trigger', key: 'trigger', width: 70 },
   { title: '耗时', dataIndex: 'duration_ms', key: 'duration_ms', width: 95 },
   { title: '状态', dataIndex: 'ok', key: 'ok', width: 80 },
+  { title: '步骤', key: 'steps', width: 90 },
   { title: '错误', dataIndex: 'error', key: 'error', ellipsis: true },
 ]
 
-function onRowClick(record: RunItem) {
-  selectedRun.value = record
+/** Antd Table custom-row: 给 <tr> 绑 click 事件（比 @rowClick 可靠）。 */
+function customRow(record: RunItem) {
+  return {
+    onClick: () => {
+      selectedRun.value = record
+    },
+  }
 }
 </script>
 
@@ -78,13 +157,30 @@ function onRowClick(record: RunItem) {
     :open="open"
     :title="`运行历史 · ${jobLabel} (${jobName})`"
     :footer="null"
-    width="900px"
+    width="960px"
     @cancel="emit('update:open', false)"
   >
+    <!-- 顶部统计 -->
+    <div v-if="stats" class="history-stats">
+      <span class="stat-pill" :class="stats.failCount > 0 ? 'stat-pill--warn' : 'stat-pill--ok'">
+        {{ stats.okPct }}% ({{ stats.okCount }}/{{ stats.total }})
+      </span>
+      <span class="stat-pill">
+        平均 {{ formatDuration(stats.avgMs) }}
+      </span>
+      <span class="stat-pill">
+        最长 {{ formatDuration(stats.maxMs) }}
+      </span>
+      <span class="stat-pill stat-pill--muted">
+        最近 {{ stats.summary }}
+      </span>
+    </div>
+
     <div class="history-toolbar">
-      <span class="dim mono">最近 100 条 · 点击行查看详情</span>
+      <span class="dim mono">最近 100 条 · 点击行查看步骤</span>
       <a-button size="small" :loading="loading" @click="load">刷新</a-button>
     </div>
+
     <div class="history-grid">
       <div class="history-list">
         <a-table
@@ -95,7 +191,7 @@ function onRowClick(record: RunItem) {
           :loading="loading"
           :pagination="{ pageSize: 15, showSizeChanger: false }"
           :row-class-name="(r: RunItem) => selectedRun?.id === r.id ? 'row-selected' : ''"
-          @row-click="onRowClick"
+          :custom-row="customRow"
         >
           <template #bodyCell="{ column, record }">
             <template v-if="column.key === 'started_at'">
@@ -109,6 +205,18 @@ function onRowClick(record: RunItem) {
                 {{ record.ok ? 'OK' : 'FAIL' }}
               </a-tag>
             </template>
+            <template v-else-if="column.key === 'steps'">
+              <span v-if="getSteps(record).length" class="step-dots">
+                <span
+                  v-for="(s, i) in getSteps(record)"
+                  :key="i"
+                  class="step-dot"
+                  :class="stepClass(s.status)"
+                  :title="`${s.name} — ${s.detail ?? ''}`"
+                />
+              </span>
+              <span v-else class="dim">—</span>
+            </template>
             <template v-else-if="column.key === 'error'">
               <span v-if="record.error" class="error-text">{{ record.error }}</span>
               <span v-else class="dim">—</span>
@@ -116,6 +224,7 @@ function onRowClick(record: RunItem) {
           </template>
         </a-table>
       </div>
+
       <div class="history-detail">
         <div v-if="!selectedRun" class="empty-detail">
           <span class="dim">点击左侧行查看详情</span>
@@ -137,13 +246,32 @@ function onRowClick(record: RunItem) {
             <span class="detail-label">触发</span>
             <span class="mono">{{ selectedRun.trigger }}</span>
           </div>
+
+          <!-- 步骤卡片 -->
+          <div v-if="getSteps(selectedRun).length" class="detail-section">
+            <div class="detail-label">任务步骤</div>
+            <div class="steps-list">
+              <div
+                v-for="(s, i) in getSteps(selectedRun)"
+                :key="i"
+                class="step-card"
+                :class="stepClass(s.status)"
+              >
+                <span class="step-icon">{{ statusIcon(s.status) }}</span>
+                <span class="step-name">{{ s.name }}</span>
+                <span v-if="s.count != null" class="step-count mono">{{ s.count }}</span>
+                <span v-if="s.detail" class="step-detail">{{ s.detail }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-else-if="selectedRun.result" class="detail-section">
+            <div class="detail-label">结果</div>
+            <pre class="result-pre">{{ formatResult(selectedRun.result) }}</pre>
+          </div>
+
           <div v-if="selectedRun.error" class="detail-row detail-row--error">
             <span class="detail-label">错误</span>
             <span class="error-text">{{ selectedRun.error }}</span>
-          </div>
-          <div v-if="selectedRun.result" class="detail-section">
-            <div class="detail-label">结果</div>
-            <pre class="result-pre">{{ formatResult(selectedRun.result) }}</pre>
           </div>
         </div>
       </div>
@@ -155,17 +283,46 @@ function onRowClick(record: RunItem) {
 .dim { color: var(--text-tertiary); }
 .mono { font-family: var(--font-mono, monospace); }
 
+.history-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+.stat-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: var(--text-xs);
+  font-family: var(--font-mono, monospace);
+  border: 1px solid var(--border-hairline);
+  background: var(--bg-inset);
+  color: var(--text-secondary);
+}
+.stat-pill--ok {
+  border-color: var(--success-border, rgba(82, 196, 26, 0.5));
+  color: var(--success-text, #52c41a);
+}
+.stat-pill--warn {
+  border-color: var(--error-border, rgba(245, 34, 45, 0.5));
+  color: var(--error-text, #f5222d);
+}
+.stat-pill--muted {
+  color: var(--text-tertiary);
+}
+
 .history-toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: var(--sp-3);
+  margin-bottom: var(--sp-2);
   font-size: var(--text-xs);
 }
 
 .history-grid {
   display: grid;
-  grid-template-columns: 1.3fr 1fr;
+  grid-template-columns: 1.25fr 1fr;
   gap: var(--sp-3);
   min-height: 420px;
 }
@@ -183,7 +340,7 @@ function onRowClick(record: RunItem) {
   padding: var(--sp-3);
   font-size: var(--text-sm);
   overflow: auto;
-  max-height: 500px;
+  max-height: 520px;
 }
 .empty-detail {
   display: flex;
@@ -203,6 +360,7 @@ function onRowClick(record: RunItem) {
   padding: var(--sp-2);
   background: var(--error-bg-subtle, rgba(245, 34, 45, 0.04));
   border-radius: var(--r-sm);
+  margin-top: var(--sp-2);
 }
 .detail-label {
   font-weight: 500;
@@ -217,16 +375,87 @@ function onRowClick(record: RunItem) {
   padding-top: var(--sp-3);
   border-top: 1px solid var(--border-hairline);
 }
+
+/* 步骤卡片 */
+.steps-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin-top: var(--sp-2);
+}
+.step-card {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  border-left: 3px solid var(--text-tertiary);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  background: var(--bg-surface);
+  font-size: var(--text-xs);
+}
+.step--ok { border-left-color: var(--success-text, #52c41a); }
+.step--warn { border-left-color: var(--warning-text, #d97706); }
+.step--skip { border-left-color: var(--text-tertiary); opacity: 0.7; }
+.step--fail { border-left-color: var(--error-text, #f5222d); }
+
+.step-icon {
+  font-weight: 700;
+  width: 14px;
+  flex: 0 0 14px;
+  text-align: center;
+}
+.step--ok .step-icon { color: var(--success-text, #52c41a); }
+.step--warn .step-icon { color: var(--warning-text, #d97706); }
+.step--skip .step-icon { color: var(--text-tertiary); }
+.step--fail .step-icon { color: var(--error-text, #f5222d); }
+
+.step-name {
+  font-weight: 500;
+  color: var(--text);
+  flex: 0 0 auto;
+}
+.step-count {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+.step-detail {
+  color: var(--text-tertiary);
+  margin-left: auto;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 50%;
+}
+
+/* 列表里的步骤小圆点 */
+.step-dots {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+}
+.step-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  background: var(--text-tertiary);
+}
+.step-dot.step--ok { background: var(--success-text, #52c41a); }
+.step-dot.step--warn { background: var(--warning-text, #d97706); }
+.step-dot.step--skip { background: var(--border-hairline); }
+.step-dot.step--fail { background: var(--error-text, #f5222d); }
+
 .result-pre {
   font-family: var(--font-mono, monospace);
   font-size: var(--text-xs);
   white-space: pre-wrap;
   word-break: break-all;
-  margin: 0;
+  margin: var(--sp-2) 0 0;
   padding: var(--sp-2);
   background: var(--bg-surface);
   border-radius: var(--r-sm);
-  max-height: 280px;
+  max-height: 200px;
   overflow: auto;
 }
 .error-text {

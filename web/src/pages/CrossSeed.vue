@@ -51,17 +51,24 @@ async function loadDownloaders() {
   }
 }
 
+//: 请求序列号 — 防止慢响应覆盖新响应（切 tab 时旧请求可能后到）
+let scanSeq = 0
+
 async function loadScan(id: number) {
+  const seq = ++scanSeq
   loading.value = true
   try {
-    scanResult.value = await api.get<ScanResult>(
+    const result = await api.get<ScanResult>(
       `/cross-seed-monitor/downloaders/${id}/scan`
     )
+    if (seq !== scanSeq) return  // 已有更新的请求，丢弃
+    scanResult.value = result
   } catch (e) {
+    if (seq !== scanSeq) return
     message.error('扫描失败：' + (e as Error).message)
     scanResult.value = null
   } finally {
-    loading.value = false
+    if (seq === scanSeq) loading.value = false
   }
 }
 

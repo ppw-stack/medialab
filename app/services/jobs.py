@@ -27,16 +27,17 @@ from app.core.timeutils import bj_now
 from app.db.models import Site, TorrentIndex
 from app.db.session import session_scope
 from app.services.factory import AdapterFactory
-from app.services.scheduler import JobSpec, scheduler_center
+from app.services.scheduler import JobSpec, JobStep, scheduler_center
 from app.services.window_parser import WindowParser
 
 logger = get_logger(__name__)
 
 
-async def fetch_all_sites(factory: AdapterFactory) -> int:
+async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
     """按站遍历拉取种子列表，写入 :class:`TorrentIndex`。
 
-    返回成功 upsert 的条目数。失败站记 ERROR 但不阻塞其他站。
+    Returns: ``{"total_written": N, "scanned_sites": M, "steps": [...]}``。
+    失败站记 ERROR 但不阻塞其他站。
 
     事务边界：网络拉取在**写事务外**进行，upsert 每站一个短事务——
     原先一个 session 包住全部站点，首个 upsert 即开写锁并横跨后续站点的
@@ -68,7 +69,30 @@ async def fetch_all_sites(factory: AdapterFactory) -> int:
     stage_duration.labels(stage="fetch_all_sites").observe(
         asyncio.get_running_loop().time() - started
     )
-    return total_written
+    failed_sites = sum(1 for _, _, _, _, ko in summary if ko > 0)
+    return {
+        "total_written": total_written,
+        "scanned_sites": len(rows),
+        "steps": [
+            JobStep(
+                "查询启用站点", "ok", len(rows), f"{len(rows)} 站"
+            ),
+            JobStep(
+                "拉取种子列表",
+                "warn" if failed_sites else "ok",
+                len(rows),
+                f"逐站拉取（上限 3 页），{failed_sites} 站失败"
+                if failed_sites
+                else "逐站拉取（上限 3 页）",
+            ),
+            JobStep(
+                "写入 torrent_index",
+                "ok" if total_written else "skip",
+                total_written,
+                f"{total_written} 条种子 upsert",
+            ),
+        ],
+    }
 
 
 async def _pull_site_items(factory: AdapterFactory, row: Site) -> list[FeedItem]:

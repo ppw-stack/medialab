@@ -33,6 +33,7 @@ from app.db.models import (
 )
 from app.db.session import session_scope
 from app.services.factory import AdapterFactory
+from app.services.scheduler import JobStep
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,6 +55,8 @@ class PushResult:
     skipped_parse_failed: int = 0
     failed: int = 0
     errors: tuple[str, ...] = ()
+    #: 子步骤明细（前端「步骤卡片」数据源）
+    steps: tuple[JobStep, ...] = ()
 
 
 class PushFreeService:
@@ -82,7 +85,11 @@ class PushFreeService:
             ).scalar_one_or_none()
             if default_dl is None:
                 logger.warning("push_free: 未配置默认下载器，跳过本次作业")
-                return PushResult()
+                return PushResult(
+                    steps=(
+                        JobStep("查询默认下载器", "fail", 0, "未配置默认下载器"),
+                    ),
+                )
             downloader_id = default_dl.id
 
         # 2) 选候选
@@ -91,7 +98,12 @@ class PushFreeService:
 
         if not candidates:
             logger.info("push_free: 无新候选")
-            return PushResult()
+            return PushResult(
+                steps=(
+                    JobStep("查询默认下载器", "ok", 1, default_dl.name),
+                    JobStep("查询候选免费种", "skip", 0, "无新候选"),
+                ),
+            )
 
         # 2.5) 按 site_id 预建 adapter 映射——download_torrent 实时拉 bytes
         async with session_scope() as session:
@@ -196,6 +208,10 @@ class PushFreeService:
                 )
             pushed += 1
 
+        from app.services.runtime_params import get_runtime_params
+
+        rp = get_runtime_params()
+        min_remaining_h = rp.get_int("push_min_remaining_hours")
         result = PushResult(
             selected=len(candidates),
             pushed=pushed,
@@ -204,6 +220,27 @@ class PushFreeService:
             skipped_parse_failed=skipped_parse,
             failed=failed,
             errors=tuple(errors[:10]),
+            steps=(
+                JobStep("查询默认下载器", "ok", 1, default_dl.name),
+                JobStep(
+                    "查询候选免费种",
+                    "ok",
+                    len(candidates),
+                    f"{len(candidates)} 个候选，限时剩余 ≥ {min_remaining_h}h",
+                ),
+                JobStep(
+                    "下载 .torrent",
+                    "warn" if skipped_dl_failed or skipped_parse else "ok",
+                    pushed + skipped_dl_failed + skipped_parse,
+                    f"{pushed} 成功，{skipped_dl_failed} 限频失败，{skipped_parse} 解析失败",
+                ),
+                JobStep(
+                    "推送到下载器",
+                    "warn" if failed else "ok",
+                    pushed,
+                    f"{pushed} 成功，{failed} 失败",
+                ),
+            ),
         )
         logger.info(
             "push_free: 选中 %d，推送 %d，跳过重复 %d，下载失败 %d，"

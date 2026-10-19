@@ -30,6 +30,7 @@ from app.db.models import (
 )
 from app.db.session import session_scope
 from app.services.factory import AdapterFactory
+from app.services.scheduler import JobStep
 
 if TYPE_CHECKING:
     from app.adapters.downloaders.base import TorrentInfo
@@ -52,6 +53,8 @@ class MonitorResult:
     pre_paused: int = 0
     failed: int = 0
     errors: tuple[str, ...] = ()
+    #: 子步骤明细（前端「步骤卡片」数据源）
+    steps: tuple[JobStep, ...] = ()
 
 
 class MonitorFreeWindowService:
@@ -79,7 +82,9 @@ class MonitorFreeWindowService:
             ).scalar_one_or_none()
         if default_dl is None:
             logger.warning("monitor: 未配置默认下载器，跳过本次作业")
-            return MonitorResult()
+            return MonitorResult(
+                steps=(JobStep("查询默认下载器", "fail", 0, "未配置默认下载器"),),
+            )
 
         # 2) 拉下载器全量任务
         try:
@@ -87,12 +92,25 @@ class MonitorFreeWindowService:
             infos: list[TorrentInfo] = await adapter.list_torrents()
         except Exception as exc:
             logger.warning("monitor: 下载器 list_torrents 失败：%s", exc)
-            return MonitorResult(failed=1, errors=(f"list_torrents: {exc}",))
+            return MonitorResult(
+                failed=1,
+                errors=(f"list_torrents: {exc}",),
+                steps=(
+                    JobStep("查询默认下载器", "ok", 1, default_dl.name),
+                    JobStep("拉取下载器任务", "fail", 0, str(exc)),
+                ),
+            )
 
         scanned = len(infos)
         if scanned == 0:
             logger.info("monitor: 下载器无任务")
-            return MonitorResult(scanned=0)
+            return MonitorResult(
+                scanned=0,
+                steps=(
+                    JobStep("查询默认下载器", "ok", 1, default_dl.name),
+                    JobStep("拉取下载器任务", "skip", 0, "下载器无任务"),
+                ),
+            )
 
         # 3) 查 torrent_index 中由 qB 任务对应的 pushed 行
         # 关键：先有 qB 任务（权威），再按 qB hash 查 db 状态。
@@ -111,7 +129,14 @@ class MonitorFreeWindowService:
         }
         if not qb_hashes:
             logger.info("monitor: 下载器无任务 hash")
-            return MonitorResult(scanned=scanned)
+            return MonitorResult(
+                scanned=scanned,
+                steps=(
+                    JobStep("查询默认下载器", "ok", 1, default_dl.name),
+                    JobStep("拉取下载器任务", "ok", scanned, f"{scanned} 个"),
+                    JobStep("匹配 torrent_index", "skip", 0, "下载器任务无 hash"),
+                ),
+            )
 
         # 分批 in_：SQLite 变量上限约 999/32766，任务数一多整条 SQL 直接报
         # "too many SQL variables"，monitor 会永久失败（窗口看护停摆）
@@ -244,6 +269,28 @@ class MonitorFreeWindowService:
             pre_paused=pre_paused,
             failed=failed,
             errors=tuple(errors[:10]),
+            steps=(
+                JobStep("查询默认下载器", "ok", 1, default_dl.name),
+                JobStep("拉取下载器任务", "ok", scanned, f"{scanned} 个"),
+                JobStep(
+                    "匹配 torrent_index",
+                    "ok",
+                    matched,
+                    f"{matched} 命中，{skipped_unmatched} 无关",
+                ),
+                JobStep(
+                    "判断免费窗口",
+                    "ok",
+                    pre_paused,
+                    f"距截止 < {int(self._pre_pause.total_seconds() // 60)}min 需暂停",
+                ),
+                JobStep(
+                    "自动暂停",
+                    "warn" if failed else "ok",
+                    pre_paused,
+                    f"已暂停 {pre_paused} 个，{failed} 失败",
+                ),
+            ),
         )
         logger.info(
             "monitor: 下载器 %d，命中 %d，触发暂停 %d，"

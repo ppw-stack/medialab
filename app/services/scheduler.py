@@ -60,6 +60,24 @@ JOB_PARAM_KEYS: dict[str, tuple[str, ...]] = {
 
 
 @dataclass(slots=True)
+class JobStep:
+    """作业单次执行的子步骤（前端「步骤卡片」数据源）。
+
+    存进 :class:`JobRun` 的 ``result_json.steps``，前端按
+    ``ok / warn / skip / fail`` 渲染状态色。
+    """
+
+    #: 步骤名（如「查询下载器」「推送到下载器」）
+    name: str
+    #: 状态：ok / warn / skip / fail
+    status: str
+    #: 涉及数量；None 表示不适用
+    count: int | None = None
+    #: 简要描述（如「5 成功 / 0 失败」）
+    detail: str | None = None
+
+
+@dataclass(slots=True)
 class RunResult:
     """手动触发作业的执行结果。"""
 
@@ -372,6 +390,27 @@ def _keep_record_task(task: asyncio.Task[None]) -> None:
     _record_tasks.discard(task)
 
 
+def _jsonable(obj: object) -> object:
+    """把作业返回值转成可 JSON 序列化的结构。
+
+    - dataclass（含 :class:`JobStep` 嵌套）→ dict
+    - tuple / list → list
+    - dict → 逐值递归
+
+    必须在 ``json.dumps(default=str)`` **之前**调用——否则 dataclass 会被
+    ``default=str`` 退化成 repr 字符串，前端就拿不到 ``steps`` 的字段。
+    """
+    from dataclasses import asdict, is_dataclass
+
+    if is_dataclass(obj) and not isinstance(obj, type):
+        return _jsonable(asdict(obj))
+    if isinstance(obj, dict):
+        return {k: _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(v) for v in obj]
+    return obj
+
+
 def _record_run(
     *,
     job_name: str,
@@ -398,7 +437,12 @@ def _record_run(
     result_json: str | None = None
     try:
         if result is not None:
-            result_json = json.dumps(result, default=str, ensure_ascii=False)
+            # dataclass（含嵌套 JobStep）→ dict，再 JSON 序列化。
+            # 不能只靠 default=str：dataclass 会被转成 repr 字符串，
+            # 前端拿不到 steps 的 name/status/count 字段。
+            result_json = json.dumps(
+                _jsonable(result), default=str, ensure_ascii=False
+            )
     except Exception:
         result_json = None
 
