@@ -35,7 +35,7 @@ from app.services.runtime_params import (
     get_runtime_params,
     validate,
 )
-from app.services.scheduler import RunResult, scheduler_center
+from app.services.scheduler import JOB_PARAM_KEYS, RunResult, scheduler_center
 
 logger = get_logger(__name__)
 router = APIRouter(dependencies=[Depends(require_session)], tags=["site-fetch"])
@@ -327,3 +327,36 @@ async def test_feed(site_id: int) -> FeedTestResult:
         sample_titles=[item.title for item in result.items[:5]],
         error=result.error,
     )
+
+
+@router.get(
+    "/scheduler/{job_name}/config",
+    summary="作业专属配置 (cron + 该作业的 runtime params)",
+)
+async def get_job_config(job_name: str) -> dict[str, Any]:
+    """按 job 查 cron + 该 job 专属的 runtime param spec + 当前值.
+
+    前端 ConfigModal 一次拿到所有需要编辑的字段, 不必额外调 /scheduler
+    或 /runtime-params.
+    """
+    spec = scheduler_center._specs.get(job_name)
+    if spec is None:
+        raise HTTPException(status_code=404, detail=f"作业不存在：{job_name}")
+    keys = JOB_PARAM_KEYS.get(job_name, ())
+    rp = get_runtime_params()
+    return {
+        "job_name": spec.name,
+        "cron": spec.cron,
+        "enabled": spec.enabled,
+        "params": {k: rp.get_int(k) for k in keys},
+        "specs": [
+            {
+                "key": s.key,
+                "label": s.label,
+                "min": s.min,
+                "max": s.max,
+                "default": s.default,
+            }
+            for s in PARAM_SPECS if s.key in keys
+        ],
+    }
