@@ -55,6 +55,8 @@ class PushResult:
     skipped_parse_failed: int = 0
     failed: int = 0
     errors: tuple[str, ...] = ()
+    #: 人话摘要（前端直接展示，避免前端硬编码字段名）
+    summary: str = ""
     #: 子步骤明细（前端「步骤卡片」数据源）
     steps: tuple[JobStep, ...] = ()
 
@@ -86,6 +88,7 @@ class PushFreeService:
             if default_dl is None:
                 logger.warning("push_free: 未配置默认下载器，跳过本次作业")
                 return PushResult(
+                    summary="未配置默认下载器",
                     steps=(
                         JobStep("查询默认下载器", "fail", 0, "未配置默认下载器"),
                     ),
@@ -99,6 +102,7 @@ class PushFreeService:
         if not candidates:
             logger.info("push_free: 无新候选")
             return PushResult(
+                summary="无新候选",
                 steps=(
                     JobStep("查询默认下载器", "ok", 1, default_dl.name),
                     JobStep("查询候选免费种", "skip", 0, "无新候选"),
@@ -220,6 +224,10 @@ class PushFreeService:
             skipped_parse_failed=skipped_parse,
             failed=failed,
             errors=tuple(errors[:10]),
+            summary=(
+                f"选中 {len(candidates)}，推送 {pushed} 成功"
+                + (f"，{failed} 失败" if failed else "")
+            ),
             steps=(
                 JobStep("查询默认下载器", "ok", 1, default_dl.name),
                 JobStep(

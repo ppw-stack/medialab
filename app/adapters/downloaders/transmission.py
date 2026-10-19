@@ -60,6 +60,17 @@ _FIELDS_ALL: tuple[str, ...] = (
     "isFinished",            # 用于 completed_at 兜底
 )
 
+#: list_torrents_with_errors 一次拉取的字段（含 error/errorString）
+_FIELDS_WITH_ERRORS: tuple[str, ...] = (
+    "id",
+    "hashString",
+    "name",
+    "status",
+    "sizeWhenDone",
+    "error",           # 0=OK 1=tracker警告 2=tracker错误 3=本地数据丢失
+    "errorString",     # 人类可读错误描述
+)
+
 
 class TransmissionAdapter(DownloaderAdapter):
     """Transmission RPC 适配器。"""
@@ -373,6 +384,24 @@ class TransmissionAdapter(DownloaderAdapter):
             for f in files
             if f.get("name")
         ]
+
+    async def list_torrents_with_errors(self) -> list[dict[str, Any]]:
+        """拉取全量种子，保留 TR 原生 error / errorString（巡查用）。"""
+        resp = await self._rpc(
+            "torrent-get", {"fields": list(_FIELDS_WITH_ERRORS)}
+        )
+        out: list[dict[str, Any]] = []
+        for row in resp.get("torrents") or []:
+            out.append({
+                "id": int(row.get("id") or 0),
+                "hash": str(row.get("hashString") or ""),
+                "name": str(row.get("name") or ""),
+                "size": int(row.get("sizeWhenDone") or row.get("totalSize") or 0),
+                "status": int(row.get("status") if row.get("status") is not None else -1),
+                "error_code": int(row.get("error") or 0),
+                "error_string": str(row.get("errorString") or ""),
+            })
+        return out
 
     async def close(self) -> None:
         await self._client.aclose()

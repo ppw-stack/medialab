@@ -30,13 +30,16 @@ logger = get_logger(__name__)
 #: 已注册的参数（key → 默认值 / 校验范围）
 @dataclass(frozen=True, slots=True)
 class ParamSpec:
-    """参数元数据：键名 + 默认值 + 合法范围。"""
+    """参数元数据：键名 + 默认值 + 合法范围 + 归属作业。"""
 
     key: str
     label: str
     default: int
     min: int
     max: int
+    #: 归属作业名（None = 未归属/全局）。决定该参数出现在哪个作业的
+    #: 「配置」弹框里（见 :func:`specs_for_job`）。
+    job: str | None = None
 
 
 PARAM_SPECS: tuple[ParamSpec, ...] = (
@@ -46,6 +49,7 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         default=6,
         min=0,
         max=72,
+        job="push_free_torrents",
     ),
     ParamSpec(
         key="push_max_per_run",
@@ -53,6 +57,7 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         default=20,
         min=1,
         max=200,
+        job="push_free_torrents",
     ),
     ParamSpec(
         key="monitor_pre_pause_minutes",
@@ -60,6 +65,7 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         default=10,
         min=1,
         max=120,
+        job="monitor_free_window",
     ),
     ParamSpec(
         key="push_download_interval_ms",
@@ -67,8 +73,17 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         default=2000,
         min=0,
         max=30000,
+        job="push_free_torrents",
     ),
 )
+
+
+def specs_for_job(job_name: str) -> tuple[ParamSpec, ...]:
+    """取某作业专属的参数 spec（按注册顺序）。
+
+    无专属参数的作业返回空元组——前端据此隐藏参数区块。
+    """
+    return tuple(s for s in PARAM_SPECS if s.job == job_name)
 
 
 def lookup_spec(key: str) -> ParamSpec | None:

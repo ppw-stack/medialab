@@ -48,6 +48,32 @@ _STATE_MAP: dict[str, TorrentState] = {
     "forcedDL": TorrentState.DOWNLOADING,
 }
 
+#: qB 原生 state → TR 语义 status 码（仅供巡查展示，不做业务判定）。
+#: 0=stopped 1=check_pending 2=checking 3=download_pending 4=downloading
+#: 5=seed_pending 6=seeding
+_QB_STATUS_CODE: dict[str, int] = {
+    "pausedUP": 0,
+    "stoppedUP": 0,
+    "pausedDL": 0,
+    "stoppedDL": 0,
+    "error": 0,
+    "missingFiles": 0,
+    "queuedUP": 5,
+    "forcedUP": 6,
+    "stalledUP": 6,
+    "uploading": 6,
+    "queuedDL": 3,
+    "forcedDL": 4,
+    "stalledDL": 4,
+    "downloading": 4,
+    "metaDL": 2,
+    "allocating": 2,
+    "checkingDL": 2,
+    "checkingUP": 2,
+    "checkingResumeData": 2,
+    "moving": 2,
+}
+
 
 class QbittorrentAdapter(DownloaderAdapter):
     """qBittorrent WebUI 适配器。"""
@@ -131,6 +157,48 @@ class QbittorrentAdapter(DownloaderAdapter):
             if filt is not None and not self._matches(info, filt):
                 continue
             out.append(info)
+        return out
+
+    async def list_torrents_with_errors(self) -> list[dict[str, Any]]:
+        """拉取全量种子，规范化错误信息（巡查用）。
+
+        qBittorrent 没有 TR 那种 tracker 错误码——它的错误体现在
+        ``state`` 上（``error`` / ``missingFiles``）以及可选的
+        ``tracker`` 字段（如 ``[DHT]`` / ``[PeX]`` 前缀含错误字样）。
+
+        映射到统一契约：
+        - ``error_code`` 0 = 无错；1 = tracker 警告；2 = tracker 错误；3 = 数据丢失
+        - ``error_string`` 人类可读描述
+        """
+        try:
+            rows: list[dict[str, Any]] = await self._qb.list_torrents()
+        except Qb5ApiError as exc:
+            raise DownloaderError(str(exc), transient=exc.transient) from exc
+
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            state = str(row.get("state", ""))
+            error_code = 0
+            error_string = ""
+            if state == "missingFiles":
+                error_code = 3
+                error_string = str(row.get("tracker") or "") or "本地数据丢失"
+            elif state == "error":
+                error_code = 2
+                error_string = str(row.get("tracker") or "") or "做种错误"
+            elif "error" in str(row.get("tracker") or "").lower():
+                error_code = 2
+                error_string = str(row.get("tracker") or "")
+            out.append({
+                "id": int(row.get("id") or 0),
+                "hash": str(row.get("hash", "")),
+                "name": str(row.get("name", "")),
+                "size": int(row.get("size") or 0),
+                # qB 无原生 status 码，用 state 字符串映射到 TR 语义（仅供展示）
+                "status": _QB_STATUS_CODE.get(state, -1),
+                "error_code": error_code,
+                "error_string": error_string,
+            })
         return out
 
     async def add_torrent(self, payload: AddTorrentPayload) -> TorrentHandle:

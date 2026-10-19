@@ -53,6 +53,8 @@ class MonitorResult:
     pre_paused: int = 0
     failed: int = 0
     errors: tuple[str, ...] = ()
+    #: 人话摘要（前端直接展示，避免前端硬编码字段名）
+    summary: str = ""
     #: 子步骤明细（前端「步骤卡片」数据源）
     steps: tuple[JobStep, ...] = ()
 
@@ -83,6 +85,7 @@ class MonitorFreeWindowService:
         if default_dl is None:
             logger.warning("monitor: 未配置默认下载器，跳过本次作业")
             return MonitorResult(
+                summary="未配置默认下载器",
                 steps=(JobStep("查询默认下载器", "fail", 0, "未配置默认下载器"),),
             )
 
@@ -95,6 +98,7 @@ class MonitorFreeWindowService:
             return MonitorResult(
                 failed=1,
                 errors=(f"list_torrents: {exc}",),
+                summary=f"拉取下载器任务失败：{exc}",
                 steps=(
                     JobStep("查询默认下载器", "ok", 1, default_dl.name),
                     JobStep("拉取下载器任务", "fail", 0, str(exc)),
@@ -106,6 +110,7 @@ class MonitorFreeWindowService:
             logger.info("monitor: 下载器无任务")
             return MonitorResult(
                 scanned=0,
+                summary="下载器无任务",
                 steps=(
                     JobStep("查询默认下载器", "ok", 1, default_dl.name),
                     JobStep("拉取下载器任务", "skip", 0, "下载器无任务"),
@@ -131,6 +136,7 @@ class MonitorFreeWindowService:
             logger.info("monitor: 下载器无任务 hash")
             return MonitorResult(
                 scanned=scanned,
+                summary="下载器任务无 hash",
                 steps=(
                     JobStep("查询默认下载器", "ok", 1, default_dl.name),
                     JobStep("拉取下载器任务", "ok", scanned, f"{scanned} 个"),
@@ -269,6 +275,10 @@ class MonitorFreeWindowService:
             pre_paused=pre_paused,
             failed=failed,
             errors=tuple(errors[:10]),
+            summary=(
+                f"扫描 {scanned}，命中 {matched}，暂停 {pre_paused}"
+                + (f"，{failed} 失败" if failed else "")
+            ),
             steps=(
                 JobStep("查询默认下载器", "ok", 1, default_dl.name),
                 JobStep("拉取下载器任务", "ok", scanned, f"{scanned} 个"),

@@ -122,41 +122,17 @@ async function runNow(name: string) {
   }
 }
 
+/** 结果摘要优先用后端给的 summary（后端是人话来源，前端不硬编码字段名）。 */
 function formatResult(r: RunResult): string {
   const v = r.result
   if (!v || typeof v !== 'object') return ''
-  if ('selected' in v && 'pushed' in v) {
-    const pushed = Number(v.pushed) || 0
-    const failed = Number(v.failed) || 0
-    const skippedDup = Number(v.skipped_already_pushed) || 0
-    const skippedDl = Number(v.skipped_download_failed) || 0
-    const skippedParse = Number(v.skipped_parse_failed) || 0
-    const selected = Number(v.selected) || 0
-    const parts: string[] = [`选中 ${selected}`, `推送 ${pushed}`]
-    if (skippedDup > 0) parts.push(`重复 ${skippedDup}`)
-    if (skippedDl > 0) parts.push(`下载失败 ${skippedDl}`)
-    if (skippedParse > 0) parts.push(`解析失败 ${skippedParse}`)
-    if (failed > 0) parts.push(`推送失败 ${failed}`)
-    return parts.join('，')
-  }
-  if ('scanned' in v && 'pre_paused' in v) {
-    const scanned = Number(v.scanned) || 0
-    const prePaused = Number(v.pre_paused) || 0
-    const matched = Number(v.matched) || 0
-    const skippedUnmatched = Number(v.skipped_unmatched) || 0
-    const skippedFar = Number(v.skipped_far_from_window) || 0
-    const skippedCompleted = Number(v.skipped_already_completed) || 0
-    const skippedPaused = Number(v.skipped_already_paused) || 0
-    const failed = Number(v.failed) || 0
-    const parts: string[] = [`扫描 ${scanned}`, `命中 ${matched}`, `暂停 ${prePaused}`]
-    if (skippedUnmatched > 0) parts.push(`无关 ${skippedUnmatched}`)
-    if (skippedFar > 0) parts.push(`窗口远 ${skippedFar}`)
-    if (skippedCompleted > 0) parts.push(`已完成 ${skippedCompleted}`)
-    if (skippedPaused > 0) parts.push(`已暂停 ${skippedPaused}`)
-    if (failed > 0) parts.push(`失败 ${failed}`)
-    return parts.join('，')
-  }
-  return ''
+  const summary = v.summary
+  if (typeof summary === 'string' && summary) return summary
+  // 兜底：老数据（无 summary）时拍平其余字段
+  return Object.entries(v)
+    .filter(([k]) => k !== 'steps' && k !== 'summary')
+    .map(([key, val]) => `${key}: ${typeof val === 'object' ? JSON.stringify(val) : String(val)}`)
+    .join('，')
 }
 
 function openConfig(name: string) {

@@ -29,5 +29,11 @@ cd web && npx vite build    # 前端构建
 静态检查不通过禁止合并。
 
 ## 提交信息格式
-Conventional Commits，作用域示例：`feat(crypto)` / `fix(free-seed)` / `docs(req)` / `refactor(sites)` / `feat(sites)` (FR-1.6 站点 userdata) / `feat(db)` (SiteUserData 表) / `feat(api)` (user_data 端点) / `feat(web)` (UserData.vue)。
+Conventional Commits，作用域示例：`feat(crypto)` / `fix(free-seed)` / `docs(req)` / `refactor(sites)` / `feat(sites)` (FR-1.6 站点 userdata) / `feat(db)` (SiteUserData 表) / `feat(api)` (user_data 端点) / `feat(web)` (UserData.vue) / `feat(scheduler)` (调度作业/配置/历史) / `feat(cross-seed)` (辅种下载器巡查)。
+
+## 前端测试
+```bash
+cd web && npx playwright test    # 需先起 dev 容器 (localhost:8080)
+```
+新增页面/交互改动必须补 `web/tests/*.spec.ts` 用例。
 

@@ -73,6 +73,8 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
     return {
         "total_written": total_written,
         "scanned_sites": len(rows),
+        "summary": f"拉取 {len(rows)} 站，写入 {total_written} 条种子"
+        + (f"，{failed_sites} 站失败" if failed_sites else ""),
         "steps": [
             JobStep(
                 "查询启用站点", "ok", len(rows), f"{len(rows)} 站"

@@ -130,9 +130,9 @@ def _mount_routes(app: FastAPI) -> None:
     from app.api.auth import router as auth_router
     from app.api.routes import (
         cross_seed,
-        cross_seed_monitor,
         dashboard,
         downloaders,
+        scheduler,
         sites,
         torrent_index,
         user_data,
@@ -142,8 +142,8 @@ def _mount_routes(app: FastAPI) -> None:
         dashboard.router,
         sites.router,
         downloaders.router,
+        scheduler.router,
         cross_seed.router,
-        cross_seed_monitor.router,
         torrent_index.router,
         user_data.router,
     ):

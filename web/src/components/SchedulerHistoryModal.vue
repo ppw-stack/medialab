@@ -86,9 +86,15 @@ function stepClass(s: string): string {
 
 function formatResult(r: unknown): string {
   if (!r || typeof r !== 'object') return ''
+  const obj = r as Record<string, unknown>
   const out: string[] = []
-  for (const [k, v] of Object.entries(r as Record<string, unknown>)) {
-    if (k === 'steps') continue
+  // 人话摘要优先（后端是人话来源）
+  const summary = obj.summary
+  if (typeof summary === 'string' && summary) {
+    out.push(`摘要: ${summary}`)
+  }
+  for (const [k, v] of Object.entries(obj)) {
+    if (k === 'steps' || k === 'summary') continue
     out.push(`${k}: ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`)
   }
   return out.join('\n')
@@ -107,14 +113,18 @@ const stats = computed(() => {
     ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length)
     : 0
   const maxMs = durations.length ? Math.max(...durations) : 0
-  // 最近一次的结果摘要
+  // 最近一次的结果摘要：优先后端 summary，兜底取最后一步 detail
   const latest = list[0]
   const latestSteps = getSteps(latest)
-  const summary = latestSteps.length
-    ? latestSteps[latestSteps.length - 1].detail || latestSteps[latestSteps.length - 1].name
-    : latest?.error
-      ? '失败'
-      : '—'
+  const rawSummary = latest?.result?.summary
+  const summary =
+    typeof rawSummary === 'string' && rawSummary
+      ? rawSummary
+      : latestSteps.length
+        ? latestSteps[latestSteps.length - 1].detail || latestSteps[latestSteps.length - 1].name
+        : latest?.error
+          ? '失败'
+          : '—'
   return {
     total: list.length,
     okCount,

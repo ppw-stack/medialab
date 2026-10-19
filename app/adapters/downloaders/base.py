@@ -19,6 +19,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
 
 class TorrentState(StrEnum):
@@ -168,6 +169,29 @@ class DownloaderAdapter(ABC):
         不支持时返回空列表，由调用方决定是否启用数据删除。
         """
         return []
+
+    async def list_torrents_with_errors(self) -> list[dict[str, Any]]:
+        """7. 拉取全量种子，附带**规范化**的错误信息（辅种巡查用）。
+
+        返回的每项至少含：
+
+        - ``id``: int
+        - ``hash``: str（infohash）
+        - ``name``: str
+        - ``size``: int（字节）
+        - ``status``: int（下载器原生 status 码）
+        - ``error_code``: int（0 = 无错；非 0 见下载器语义）
+        - ``error_string``: str（人类可读错误描述，空串表示无错）
+
+        与 :meth:`list_torrents` 的区别：本方法**不做状态归一**，
+        保留下载器原生的错误码/错误描述，供巡查逻辑按具体错误类型
+        （tracker 未注册 / 数据丢失等）判定。
+
+        不支持时抛 :class:`NotImplementedError`。
+        """
+        raise NotImplementedError(
+            f"{self.client_type} 适配器暂不支持 list_torrents_with_errors"
+        )
 
     async def close(self) -> None:
         """释放连接池。子类按需覆盖。"""

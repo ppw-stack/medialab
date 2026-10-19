@@ -40,25 +40,6 @@ class JobSpec:
     enabled: bool = True
 
 
-#: 作业 → 该作业专属的 RuntimeParam key 列表.
-#: 决定 :func:`get_job_config` 返回哪些 param 给前端展示.
-#: 当前映射来自 grep `get_int(` 调用:
-#:   - push_free_torrents 用 push_min_remaining_hours / push_max_per_run / push_download_interval_ms
-#:   - monitor_free_window 用 monitor_pre_pause_minutes
-#:   - fetch_all_sites / refresh_user_data / scan_cross_seed 无专属 param
-JOB_PARAM_KEYS: dict[str, tuple[str, ...]] = {
-    "fetch_all_sites": (),
-    "push_free_torrents": (
-        "push_min_remaining_hours",
-        "push_max_per_run",
-        "push_download_interval_ms",
-    ),
-    "monitor_free_window": ("monitor_pre_pause_minutes",),
-    "refresh_user_data": (),
-    "scan_cross_seed": (),
-}
-
-
 @dataclass(slots=True)
 class JobStep:
     """作业单次执行的子步骤（前端「步骤卡片」数据源）。

@@ -105,6 +105,11 @@ async def refresh_all_sites(factory: AdapterFactory) -> dict[str, object]:
         "failed": failed,
         "skipped": skipped,
         "total": len(site_rows),
+        "summary": (
+            f"{len(site_rows)} 站，{ok} 成功"
+            + (f"，{failed} 失败" if failed else "")
+            + (f"，{skipped} 跳过" if skipped else "")
+        ),
         "steps": [
             JobStep(
                 "查询启用站点", "ok", len(site_rows), f"{len(site_rows)} 站"
