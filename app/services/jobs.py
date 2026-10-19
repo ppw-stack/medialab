@@ -214,6 +214,24 @@ def register_jobs(
     )
     logger.info("已注册站点用户数据作业：refresh_user_data cron='*/30 * * * *'")
 
+    async def _run_scan_cross_seed() -> dict[str, object]:
+        from app.services.cross_seed_monitor import CrossSeedMonitorService
+
+        svc = CrossSeedMonitorService()
+        return await svc.run_scan_job()
+
+    scheduler_center.register(
+        JobSpec(
+            name="scan_cross_seed",
+            func=lambda: _run_and_return(_run_scan_cross_seed()),
+            cron=cfg.scan_cross_seed_cron,
+        )
+    )
+    logger.info(
+        "已注册辅种巡查作业：scan_cross_seed cron=%r",
+        cfg.scan_cross_seed_cron,
+    )
+
 
 async def _run_push_free(factory: AdapterFactory, cfg: AppSettings) -> dict[str, object]:
     """执行推送并把结果序列化为 dict（供 API 返回）。"""

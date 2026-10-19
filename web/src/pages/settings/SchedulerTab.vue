@@ -61,6 +61,7 @@ const JOB_LABELS: Record<string, { name: string; desc: string }> = {
   push_free_torrents:  { name: '免费种推送',   desc: '从 torrent_index 选免费种 → 默认下载器（每 30 分钟）' },
   monitor_free_window: { name: '免费窗口监测', desc: '巡检已推免费种，临近 free_end_at 自动暂停下载器（pre_pause=10 min）' },
   refresh_user_data:   { name: '做种用量',     desc: '拉取 9 站上传/下载/做种数/下载中数 → 写入 site_user_data 表（FR-1.6 站点用户数据契约）' },
+  scan_cross_seed:     { name: '辅种巡查',     desc: '扫描 is_cross_seed 下载器, 检测 tracker 未注册/数据丢失 → 自动暂停 (每 6 小时)' },
 }
 
 const data = ref<SchedulerInfo | null>(null)

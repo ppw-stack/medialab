@@ -10,6 +10,7 @@ import {
   LogoutOutlined,
   UserOutlined,
   DatabaseOutlined,
+  SafetyOutlined,
 } from '@ant-design/icons-vue'
 import { useAuthStore } from '../stores/auth'
 
@@ -25,6 +26,7 @@ const menuItems = [
   { key: '/torrents', icon: DownloadOutlined, label: '任务', sub: '辅种运行中', iconColor: 'blue' },
   { key: '/torrent-index', icon: DatabaseOutlined, label: '拉取索引', sub: '免费种源', iconColor: 'amber' },
   { key: '/user-data', icon: UserOutlined, label: '用户数据', sub: '9 站用量/HR/消息', iconColor: 'cyan' },
+  { key: '/cross-seed', icon: SafetyOutlined, label: '辅种巡查', sub: 'tracker/数据丢失自动暂停', iconColor: 'gold' },
   { key: '/settings', icon: SettingOutlined, label: '设置', sub: '系统配置', iconColor: 'pink' },
 ]
 

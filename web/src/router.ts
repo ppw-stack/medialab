@@ -18,6 +18,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'downloaders', name: 'downloaders', component: () => import('./pages/Downloaders.vue') },
       { path: 'torrent-index', name: 'torrent-index', component: () => import('./pages/TorrentIndex.vue') },
       { path: 'user-data', name: 'user-data', component: () => import('./pages/UserData.vue') },
+      { path: 'cross-seed', name: 'cross-seed', component: () => import('./pages/CrossSeed.vue') },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/' },
