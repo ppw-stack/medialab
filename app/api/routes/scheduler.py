@@ -1,4 +1,4 @@
-"""调度作业 API 与站点连通性测试。
+"""调度作业 API.
 
 端点（prefix 挂在 ``/api/v1`` 下，路径无独立前缀）：
 
@@ -10,7 +10,8 @@
 - ``GET /scheduler/runs``：作业执行历史分页
 - ``GET /scheduler/runs/{run_id}``：单次执行详情
 - ``GET/PUT /scheduler/runtime-params``：运行时参数查询/修改
-- ``GET /sites/{site_id}/feed-test``：测试站点连通性（走 adapter.search_torrents），纯诊断
+
+站点相关端点在 :mod:`app.api.routes.sites`（含 ``/sites/{id}/feed-test``）。
 
 历史背景：本文件曾名 ``cross_seed.py``（辅种作业 API），辅种匹配（``pull`` /
 ``pull-all``）与 ``feeds`` 列表已删除——见 commit
@@ -31,10 +32,8 @@ from sqlalchemy import func, select
 from app.api.auth import require_session
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.db.models import JobRun, Site
+from app.db.models import JobRun
 from app.db.session import session_scope
-from app.services.factory import AdapterFactory, get_factory
-from app.services.feed_fetcher import FeedFetcher
 from app.services.runtime_params import (
     PARAM_SPECS,
     get_runtime_params,
@@ -45,17 +44,6 @@ from app.services.scheduler import RunResult, scheduler_center
 
 logger = get_logger(__name__)
 router = APIRouter(dependencies=[Depends(require_session)], tags=["scheduler"])
-
-
-class FeedTestResult(BaseModel):
-    """站点连通性测试结果。"""
-
-    ok: bool
-    status: str
-    item_count: int = 0
-    duration_ms: int = 0
-    sample_titles: list[str] = []
-    error: str = ""
 
 
 class RunJobResult(BaseModel):
@@ -297,42 +285,6 @@ async def get_job_run(run_id: int) -> JobRunItem:
         with suppress(Exception):
             parsed = json.loads(r.result_json)
     return JobRunItem.from_row(r, parsed_result=parsed)
-
-
-@router.get("/sites/{site_id}/feed-test", summary="站点连通性测试")
-async def test_feed(site_id: int) -> FeedTestResult:
-    """测试站点连通性与解析结果（走 adapter.search_torrents）。
-
-    **不落库、不触发 cron**——纯诊断，避免用户"测试"操作意外添加任务。
-    """
-    async with session_scope() as session:
-        site = (
-            await session.execute(select(Site).where(Site.id == site_id))
-        ).scalar_one_or_none()
-        if site is None:
-            raise HTTPException(status_code=404, detail="站点不存在")
-
-    factory: AdapterFactory = get_factory()
-    try:
-        url = factory.site_rss_url(site)
-    except (ValueError, AttributeError, KeyError, TypeError) as exc:
-        logger.warning("站点 %s 凭据解析失败：%s", site.name, exc)
-        return FeedTestResult(ok=False, status="credential_error", error=str(exc))
-    except Exception:
-        logger.exception("站点 %s 站点测试内部异常", site.name)
-        return FeedTestResult(ok=False, status="internal_error", error="站点 URL 生成失败")
-
-    adapter = factory.site(site)
-    fetcher = FeedFetcher(site.name)
-    result = await fetcher.fetch(adapter, url)
-    return FeedTestResult(
-        ok=result.ok,
-        status=str(result.status),
-        item_count=len(result.items),
-        duration_ms=result.duration_ms,
-        sample_titles=[item.title for item in result.items[:5]],
-        error=result.error,
-    )
 
 
 @router.get(

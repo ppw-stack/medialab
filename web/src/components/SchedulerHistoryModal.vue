@@ -2,13 +2,8 @@
 import { ref, watch, computed } from 'vue'
 import { api } from '../api'
 import { message } from 'ant-design-vue'
-
-interface JobStep {
-  name: string
-  status: 'ok' | 'warn' | 'skip' | 'fail'
-  count: number | null
-  detail: string | null
-}
+import HistoryStats from './HistoryStats.vue'
+import JobStepList, { type JobStep } from './JobStepList.vue'
 
 interface RunItem {
   id: number
@@ -71,19 +66,6 @@ function getSteps(r: RunItem | null): JobStep[] {
   )
 }
 
-function statusIcon(s: string): string {
-  switch (s) {
-    case 'ok': return '✓'
-    case 'warn': return '⚠'
-    case 'fail': return '✕'
-    default: return '○'
-  }
-}
-
-function stepClass(s: string): string {
-  return `step--${s}`
-}
-
 function formatResult(r: unknown): string {
   if (!r || typeof r !== 'object') return ''
   const obj = r as Record<string, unknown>
@@ -105,7 +87,6 @@ const stats = computed(() => {
   const list = runs.value
   if (!list.length) return null
   const okCount = list.filter((r) => r.ok).length
-  const failCount = list.length - okCount
   const durations = list
     .map((r) => r.duration_ms)
     .filter((d): d is number => typeof d === 'number')
@@ -128,20 +109,12 @@ const stats = computed(() => {
   return {
     total: list.length,
     okCount,
-    failCount,
     okPct: Math.round((okCount / list.length) * 100),
     avgMs,
     maxMs,
     summary,
-    stepCount: latestSteps.length,
   }
 })
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
-  return `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`
-}
 
 const columns = [
   { title: '开始时间', dataIndex: 'started_at', key: 'started_at', width: 175 },
@@ -171,20 +144,15 @@ function customRow(record: RunItem) {
     @cancel="emit('update:open', false)"
   >
     <!-- 顶部统计 -->
-    <div v-if="stats" class="history-stats">
-      <span class="stat-pill" :class="stats.failCount > 0 ? 'stat-pill--warn' : 'stat-pill--ok'">
-        {{ stats.okPct }}% ({{ stats.okCount }}/{{ stats.total }})
-      </span>
-      <span class="stat-pill">
-        平均 {{ formatDuration(stats.avgMs) }}
-      </span>
-      <span class="stat-pill">
-        最长 {{ formatDuration(stats.maxMs) }}
-      </span>
-      <span class="stat-pill stat-pill--muted">
-        最近 {{ stats.summary }}
-      </span>
-    </div>
+    <HistoryStats
+      v-if="stats"
+      :ok-pct="stats.okPct"
+      :ok-count="stats.okCount"
+      :total="stats.total"
+      :avg-ms="stats.avgMs"
+      :max-ms="stats.maxMs"
+      :summary="stats.summary"
+    />
 
     <div class="history-toolbar">
       <span class="dim mono">最近 100 条 · 点击行查看步骤</span>
@@ -216,15 +184,11 @@ function customRow(record: RunItem) {
               </a-tag>
             </template>
             <template v-else-if="column.key === 'steps'">
-              <span v-if="getSteps(record).length" class="step-dots">
-                <span
-                  v-for="(s, i) in getSteps(record)"
-                  :key="i"
-                  class="step-dot"
-                  :class="stepClass(s.status)"
-                  :title="`${s.name} — ${s.detail ?? ''}`"
-                />
-              </span>
+              <JobStepList
+                v-if="getSteps(record).length"
+                :steps="getSteps(record)"
+                compact
+              />
               <span v-else class="dim">—</span>
             </template>
             <template v-else-if="column.key === 'error'">
@@ -260,19 +224,7 @@ function customRow(record: RunItem) {
           <!-- 步骤卡片 -->
           <div v-if="getSteps(selectedRun).length" class="detail-section">
             <div class="detail-label">任务步骤</div>
-            <div class="steps-list">
-              <div
-                v-for="(s, i) in getSteps(selectedRun)"
-                :key="i"
-                class="step-card"
-                :class="stepClass(s.status)"
-              >
-                <span class="step-icon">{{ statusIcon(s.status) }}</span>
-                <span class="step-name">{{ s.name }}</span>
-                <span v-if="s.count != null" class="step-count mono">{{ s.count }}</span>
-                <span v-if="s.detail" class="step-detail">{{ s.detail }}</span>
-              </div>
-            </div>
+            <JobStepList :steps="getSteps(selectedRun)" />
           </div>
           <div v-else-if="selectedRun.result" class="detail-section">
             <div class="detail-label">结果</div>
@@ -292,35 +244,6 @@ function customRow(record: RunItem) {
 <style scoped>
 .dim { color: var(--text-tertiary); }
 .mono { font-family: var(--font-mono, monospace); }
-
-.history-stats {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-2);
-  margin-bottom: var(--sp-3);
-}
-.stat-pill {
-  display: inline-flex;
-  align-items: center;
-  padding: 3px 10px;
-  border-radius: 999px;
-  font-size: var(--text-xs);
-  font-family: var(--font-mono, monospace);
-  border: 1px solid var(--border-hairline);
-  background: var(--bg-inset);
-  color: var(--text-secondary);
-}
-.stat-pill--ok {
-  border-color: var(--success-border, rgba(82, 196, 26, 0.5));
-  color: var(--success-text, #52c41a);
-}
-.stat-pill--warn {
-  border-color: var(--error-border, rgba(245, 34, 45, 0.5));
-  color: var(--error-text, #f5222d);
-}
-.stat-pill--muted {
-  color: var(--text-tertiary);
-}
 
 .history-toolbar {
   display: flex;
@@ -385,76 +308,6 @@ function customRow(record: RunItem) {
   padding-top: var(--sp-3);
   border-top: 1px solid var(--border-hairline);
 }
-
-/* 步骤卡片 */
-.steps-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
-  margin-top: var(--sp-2);
-}
-.step-card {
-  display: flex;
-  align-items: baseline;
-  gap: var(--sp-2);
-  padding: var(--sp-2);
-  border-left: 3px solid var(--text-tertiary);
-  border-radius: 0 var(--r-sm) var(--r-sm) 0;
-  background: var(--bg-surface);
-  font-size: var(--text-xs);
-}
-.step--ok { border-left-color: var(--success-text, #52c41a); }
-.step--warn { border-left-color: var(--warning-text, #d97706); }
-.step--skip { border-left-color: var(--text-tertiary); opacity: 0.7; }
-.step--fail { border-left-color: var(--error-text, #f5222d); }
-
-.step-icon {
-  font-weight: 700;
-  width: 14px;
-  flex: 0 0 14px;
-  text-align: center;
-}
-.step--ok .step-icon { color: var(--success-text, #52c41a); }
-.step--warn .step-icon { color: var(--warning-text, #d97706); }
-.step--skip .step-icon { color: var(--text-tertiary); }
-.step--fail .step-icon { color: var(--error-text, #f5222d); }
-
-.step-name {
-  font-weight: 500;
-  color: var(--text);
-  flex: 0 0 auto;
-}
-.step-count {
-  color: var(--text-secondary);
-  font-weight: 600;
-}
-.step-detail {
-  color: var(--text-tertiary);
-  margin-left: auto;
-  text-align: right;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 50%;
-}
-
-/* 列表里的步骤小圆点 */
-.step-dots {
-  display: inline-flex;
-  gap: 3px;
-  align-items: center;
-}
-.step-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  display: inline-block;
-  background: var(--text-tertiary);
-}
-.step-dot.step--ok { background: var(--success-text, #52c41a); }
-.step-dot.step--warn { background: var(--warning-text, #d97706); }
-.step-dot.step--skip { background: var(--border-hairline); }
-.step-dot.step--fail { background: var(--error-text, #f5222d); }
 
 .result-pre {
   font-family: var(--font-mono, monospace);

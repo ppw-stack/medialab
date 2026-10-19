@@ -22,7 +22,7 @@ from app.core.logging import configure_logging, get_logger
 from app.core.metrics import render_metrics, state
 from app.db.session import dispose_db, init_db, writer
 from app.services.factory import AdapterFactory, init_factory
-from app.services.jobs import register_jobs
+from app.services.job_registry import register_jobs
 from app.services.scheduler import scheduler_center
 
 logger = get_logger(__name__)

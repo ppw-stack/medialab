@@ -217,13 +217,28 @@ class CrossSeedMonitorService:
                 anomaly_types[a.anomaly_type] = anomaly_types.get(a.anomaly_type, 0) + 1
 
         # 自动暂停 (后台作业, 无二次确认, 走白名单逻辑)
+        # 每个下载器只解析一次 adapter（原先每 hash 都查一次 DB + 取 factory，
+        # 3,000 个 hash 时是 3,000 次无用查询）
         stopped = 0
         stop_failed = 0
+        adapters: dict[int, Any] = {}
         for r in results:
-            for a in r.anomalies:
+            adapter = adapters.get(r.downloader_id)
+            if adapter is None:
                 try:
                     row = await self._resolve_downloader(r.downloader_id)
                     adapter = self._factory.downloader(row)
+                    adapters[r.downloader_id] = adapter
+                except Exception as exc:
+                    logger.warning(
+                        "取下载器 %d 适配器失败: %s", r.downloader_id, exc
+                    )
+                    adapter = None
+            if adapter is None:
+                stop_failed += len(r.anomalies)
+                continue
+            for a in r.anomalies:
+                try:
                     await adapter.set_pause([a.hash], paused=True)
                     stopped += 1
                     logger.info(

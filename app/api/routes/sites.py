@@ -306,6 +306,55 @@ async def test_site(site_id: int) -> dict[str, Any]:
         await adapter.close()
 
 
+class FeedTestResult(BaseModel):
+    """站点连通性测试结果。"""
+
+    ok: bool
+    status: str
+    item_count: int = 0
+    duration_ms: int = 0
+    sample_titles: list[str] = []
+    error: str = ""
+
+
+@router.get("/{site_id}/feed-test", summary="站点种子列表拉取测试")
+async def test_feed(site_id: int) -> FeedTestResult:
+    """测试站点连通性与解析结果（走 adapter.search_torrents）。
+
+    **不落库、不触发 cron**——纯诊断，避免用户"测试"操作意外添加任务。
+    """
+    from app.services.feed_fetcher import FeedFetcher
+
+    async with session_scope() as session:
+        site = (
+            await session.execute(select(Site).where(Site.id == site_id))
+        ).scalar_one_or_none()
+        if site is None:
+            raise HTTPException(status_code=404, detail="站点不存在")
+
+    factory = get_factory()
+    try:
+        url = factory.site_rss_url(site)
+    except (ValueError, AttributeError, KeyError, TypeError) as exc:
+        logger.warning("站点 %s 凭据解析失败：%s", site.name, exc)
+        return FeedTestResult(ok=False, status="credential_error", error=str(exc))
+    except Exception:
+        logger.exception("站点 %s 站点测试内部异常", site.name)
+        return FeedTestResult(ok=False, status="internal_error", error="站点 URL 生成失败")
+
+    adapter = factory.site(site)
+    fetcher = FeedFetcher(site.name)
+    result = await fetcher.fetch(adapter, url)
+    return FeedTestResult(
+        ok=result.ok,
+        status=str(result.status),
+        item_count=len(result.items),
+        duration_ms=result.duration_ms,
+        sample_titles=[item.title for item in result.items[:5]],
+        error=result.error,
+    )
+
+
 def _mask_rss_url(url: str | None) -> str:
     """掩码 RSS URL 中的凭据参数（passkey/apikey/key），防泄漏到前端。"""
     if not url:
