@@ -29,8 +29,9 @@ test('辅种下载器统计页面 (a5444dd @ dev)', async ({ page }) => {
   await expect(page.locator('th:has-text("原始名称")').first()).toBeVisible({ timeout: 15000 })
   await expect(page.locator('th:has-text("大小 (GB)")').first()).toBeVisible()
   await expect(page.locator('th:has-text("出现次数")').first()).toBeVisible()
-  await expect(page.locator('th:has-text("样本 hash")').first()).toBeVisible()
-  console.log(`  ✓ 表格列头: 原始名称 / 大小 / 出现次数 / 样本 hash`)
+  // 样本 hash 列已移除
+  await expect(page.locator('th:has-text("样本 hash")')).toHaveCount(0)
+  console.log(`  ✓ 表格列头: 原始名称 / 大小 / 出现次数 (样本 hash 已移除)`)
 
   // 8) 等首行数据
   await expect(page.locator('.ant-table-tbody > tr.ant-table-row').first()).toBeVisible({ timeout: 15000 })

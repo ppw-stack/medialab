@@ -36,9 +36,8 @@ const loading = ref(false)
 
 const statsColumns = [
   { title: '原始名称', dataIndex: 'name', key: 'name', ellipsis: true, minWidth: 360 },
-  { title: '大小 (GB)', dataIndex: 'size_gb', key: 'size_gb', width: 110, sorter: (a: StatsRow, b: StatsRow) => a.size_gb - b.size_gb },
-  { title: '出现次数', dataIndex: 'count', key: 'count', width: 110, sorter: (a: StatsRow, b: StatsRow) => a.count - b.count },
-  { title: '样本 hash', dataIndex: 'sample_hash', key: 'sample_hash', width: 120, className: 'hash-cell' },
+  { title: '大小 (GB)', dataIndex: 'size_gb', key: 'size_gb', width: 120, sorter: (a: StatsRow, b: StatsRow) => a.size_gb - b.size_gb },
+  { title: '出现次数', dataIndex: 'count', key: 'count', width: 120, sorter: (a: StatsRow, b: StatsRow) => a.count - b.count },
 ]
 
 async function loadDownloaders() {
@@ -151,14 +150,6 @@ onMounted(async () => {
                   {{ (record as StatsRow).count }}
                 </a-tag>
               </template>
-              <template v-else-if="column.key === 'sample_hash'">
-                <a-tooltip
-                  :title="`用于去重决策参考, 完整 hash 见 tr Web UI (前 12 位)`"
-                  placement="top"
-                >
-                  <span class="mono hash-cell">{{ (record as StatsRow).sample_hash }}</span>
-                </a-tooltip>
-              </template>
             </template>
           </a-table>
         </div>
@@ -235,11 +226,5 @@ onMounted(async () => {
   text-overflow: ellipsis;
   white-space: nowrap;
   vertical-align: middle;
-}
-
-.hash-cell {
-  color: var(--text-tertiary);
-  font-size: var(--text-xs);
-  cursor: help;
 }
 </style>
