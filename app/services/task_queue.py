@@ -66,10 +66,15 @@ def make_idem_key(kind: str, *, site_id: int | None, info_hash: str, extra: str 
 
     形式：``kind|site_id|info_hash|extra``。同一站点同一 hash 的同一操作
     只会入队一次。
+
+    ``|`` 是字段分隔符，info_hash/extra 中的 ``|`` 会被转义为 ``_``
+    以免破坏字段语义（item_id 是站点任意字符串，可能含特殊字符）。
+    info_hash 调用方应保证 40 位 hex，但本函数仍做 `.lower()` 归一化。
     """
-    parts = [kind, str(site_id or 0), info_hash.lower()]
+    safe_hash = (info_hash or "").lower().replace("|", "_")
+    parts = [kind, str(site_id or 0), safe_hash]
     if extra:
-        parts.append(extra)
+        parts.append(extra.replace("|", "_"))
     return "|".join(parts)
 
 
@@ -172,7 +177,12 @@ class TaskQueueService:
         """任务失败 → pending（退避重试）或 failed（永久）。
 
         重试策略：attempts 已达 :data:`MAX_ATTEMPTS` → 永久 ``failed``；
-        否则回 ``pending``，run_at 指数退避（``min(2**attempts, 30)`` 分钟）。
+        否则回 ``pending``，run_at 指数退避。
+
+        退避语义：claim 时已 `attempts += 1`，故 mark_failed 收到的
+        attempts 表示"本次失败是第 N 次尝试"（N 从 1 起）。退避基数为
+        ``2 ** (attempts - 1)``，即第 1 次失败退避 1 分钟、第 2 次 2 分钟、
+        第 3 次 4 分钟... 上限 30 分钟。
 
         :return: 终态（``pending`` / ``failed``），供调用方区分"待重试"与"死信"。
         """
@@ -183,7 +193,8 @@ class TaskQueueService:
         if row.attempts >= MAX_ATTEMPTS:
             row.status = TaskStatus.FAILED
             return TaskStatus.FAILED
-        delay_min = min(2 ** row.attempts, _BACKOFF_CAP_MINUTES)
+        # attempts 从 1 起（claim 时已自增），故退避基数减 1 让首次失败退避 1 分钟
+        delay_min = min(2 ** (row.attempts - 1), _BACKOFF_CAP_MINUTES)
         row.status = TaskStatus.PENDING
         row.run_at = format_bj(bj_now_dt() + timedelta(minutes=delay_min))
         return TaskStatus.PENDING
@@ -201,23 +212,39 @@ class TaskQueueService:
 
         进程在 claim 后崩溃时任务停在 running——本方法把它重新排回队列，
         由 drain 作业在下次运行时认领执行。
+
+        回收时把 run_at 推后一个退避窗口（基于当前 attempts），避免
+        僵死任务（attempts 已被前次 claim 自增）立即被下轮 claim_due
+        再认领并再次 attempts+1，导致重试次数快速耗尽。
         """
         rows = (
             await self._session.execute(
-                select(TaskQueue.id).where(
+                select(TaskQueue.id, TaskQueue.attempts).where(
                     TaskQueue.status == TaskStatus.RUNNING,
                     TaskQueue.updated_at < stale_before,
                 )
             )
-        ).scalars().all()
+        ).all()
         if not rows:
             return 0
-        await self._session.execute(
-            update(TaskQueue)
-            .where(TaskQueue.id.in_(rows))
-            .values(status=TaskStatus.PENDING)
-        )
-        return len(rows)
+        # 按 attempts 分组，给每组算一个退避 run_at（避免逐行更新）
+        from collections import defaultdict
+
+        by_attempts: dict[int, list[int]] = defaultdict(list)
+        for row_id, attempts in rows:
+            by_attempts[int(attempts or 0)].append(int(row_id))
+        now_dt = bj_now_dt()
+        for attempts, ids in by_attempts.items():
+            delay_min = min(
+                2 ** max(attempts - 1, 0), _BACKOFF_CAP_MINUTES
+            )
+            new_run_at = format_bj(now_dt + timedelta(minutes=delay_min))
+            await self._session.execute(
+                update(TaskQueue)
+                .where(TaskQueue.id.in_(ids))
+                .values(status=TaskStatus.PENDING, run_at=new_run_at)
+            )
+        return sum(len(ids) for ids in by_attempts.values())
 
     async def purge_finished(self, older_than: str) -> int:
         """清理终态任务（done / failed）中早于 ``older_than`` 的行。

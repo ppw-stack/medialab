@@ -112,19 +112,27 @@ def _promo_text_pct(promo_texts: list[str] | None) -> int | None:
 
 
 def _parse_iso_dt(value: object) -> str | None:
-    """Unix 秒 / ISO 8601 / 数字字符串 → 北京时间字符串。"""
+    """Unix 秒 / 毫秒 / ISO 8601 / 数字字符串 → 北京时间字符串。"""
     if value is None or value == "":
         return None
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
         ts = float(value)
+        # 兼容秒级与毫秒级 Unix timestamp：
+        # 秒级 1e9(2001) ~ 4.1e9(2100)；毫秒级 1e12(2001) ~ 4.1e12(2100)
         if 1_000_000_000 < ts < 4_102_444_800:
             from datetime import UTC
 
             from app.core.timeutils import format_bj
 
             return format_bj(datetime.fromtimestamp(ts, UTC))
+        if 1_000_000_000_000 < ts < 4_102_444_800_000:
+            from datetime import UTC
+
+            from app.core.timeutils import format_bj
+
+            return format_bj(datetime.fromtimestamp(ts / 1000, UTC))
         return None
     if isinstance(value, str):
         text = value.strip()
@@ -258,7 +266,9 @@ def _classify_from_status(status: dict[str, Any]) -> tuple[str, str | None, int 
     if isinstance(promo, dict):
         disc = promo.get("discount", "NORMAL")
         end = _parse_iso_dt(promo.get("endTime"))
-        free_disc = disc == "FREE" or disc == 100 or disc == "100" or disc == 0
+        # discount 语义：百分比（0-100），100 = 100% off = 免费，0 = 0% off = 无折扣
+        # 之前 `disc == 0` 把 0% off 误判为免费，会把"无促销"当"全站免费"
+        free_disc = disc == "FREE" or disc == 100 or disc == "100"
         if free_disc and end is not None:
             # 全站限时免费：有结束时间必须判 TIMED，不能当永久
             return FreeType.TIMED, end, None

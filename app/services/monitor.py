@@ -63,12 +63,12 @@ class MonitorFreeWindowService:
     """免费窗口巡检 + 临近截止自动暂停。
 
     提前暂停分钟数从 :class:`app.services.runtime_params.RuntimeParamManager`
-    实时读取，DB 改完下次作业生效。
+    实时读取，DB 改完下次作业生效。构造参数只用于首次 run 之前的占位。
     """
 
-    def __init__(self, factory: AdapterFactory, pre_pause_minutes: int) -> None:
+    def __init__(self, factory: AdapterFactory) -> None:
         self._factory = factory
-        self._pre_pause = timedelta(minutes=pre_pause_minutes)
+        self._pre_pause = timedelta(minutes=10)  # 占位，run() 内从 runtime_params 覆盖
 
     async def run(self) -> MonitorResult:
         """执行一次监测作业。"""

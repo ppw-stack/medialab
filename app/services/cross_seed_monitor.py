@@ -195,6 +195,12 @@ class CrossSeedMonitorService:
         for row in rows:
             try:
                 results.append(await self.scan_one(row.id))
+            except (NotCrossSeed, DownloaderDisabled) as exc:
+                # 配置错误：该下载器不再是辅种或已禁用，跳过（非运行时失败）
+                logger.info("辅种下载器 %s (id=%d) 跳过：%s", row.name, row.id, exc)
+            except DownloaderNotFound as exc:
+                # 配置已被删除：跳过
+                logger.info("辅种下载器 id=%d 已删除：%s", row.id, exc)
             except Exception as exc:
                 logger.warning(
                     "辅种下载器 %s (id=%d) 扫描失败: %s",

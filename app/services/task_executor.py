@@ -84,10 +84,12 @@ async def execute_add_torrent(
             }
         if not item.item_id:
             raise PushItemError("fatal", f"索引条目 id={index_id} 缺少 item_id")
+        # 提取标量到本地变量，session 关闭后不依赖 detached ORM 实例
         item_id = item.item_id
         name = item.name
+        site_id = item.site_id
         site = (
-            await session.execute(select(Site).where(Site.id == item.site_id))
+            await session.execute(select(Site).where(Site.id == site_id))
         ).scalar_one_or_none()
         dl = (
             await session.execute(
@@ -96,15 +98,23 @@ async def execute_add_torrent(
                 )
             )
         ).scalar_one_or_none()
+        # 同样提取 site/dl 的所需字段（session 关闭后访问标量虽安全——
+        # expire_on_commit=False，但显式提取更清晰且防未来变更）
+        if site is not None:
+            site_row = site  # 保留引用给 factory.site()
+        if dl is not None:
+            dl_enabled = dl.enabled
+            dl_save_path = dl.save_path
+            dl_row = dl  # 保留引用给 factory.downloader()
     if site is None:
-        raise PushItemError("fatal", f"站点 id={item.site_id} 已不存在")
+        raise PushItemError("fatal", f"站点 id={site_id} 已不存在")
     if dl is None:
         raise PushItemError("fatal", f"下载器 id={downloader_id} 已不存在")
-    if not dl.enabled:
+    if not dl_enabled:
         raise PushItemError("fatal", f"下载器 id={downloader_id} 已禁用")
 
     # 2) 下载 .torrent 文件
-    site_adapter = factory.site(site)
+    site_adapter = factory.site(site_row)
     try:
         torrent_bytes = await site_adapter.download_torrent(item_id)
     except Exception as exc:
@@ -118,7 +128,7 @@ async def execute_add_torrent(
         raise PushItemError("parse", "infohash 解析失败")
 
     # 4) 推送到下载器（duplicate → 幂等成功）
-    dl_adapter = factory.downloader(dl)
+    dl_adapter = factory.downloader(dl_row)
     idempotent = False
     try:
         await dl_adapter.add_torrent(
@@ -126,7 +136,7 @@ async def execute_add_torrent(
                 name=name,
                 torrent_bytes=torrent_bytes,
                 category="auto-push",
-                save_path=dl.save_path or None,
+                save_path=dl_save_path or None,
             )
         )
     except DownloaderError as exc:

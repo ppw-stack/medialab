@@ -83,8 +83,19 @@ class SchedulerCenter:
         self._tz = timezone
         self._scheduler: AsyncIOScheduler | None = None
         self._specs: dict[str, JobSpec] = {}
+        # _running 防同作业并发（cron + 手动触发共享）
         self._running: set[str] = set()
+        # _inflight 只追踪 cron 触发的作业 task——手动触发的 task 属于
+        # HTTP 请求上下文，drain 停机时不应 cancel 它们（会取消正在
+        # 返回响应的 HTTP 请求）。手动触发由调用方等待结果。
         self._inflight: set[asyncio.Task[None]] = set()
+        # _manual_inflight 追踪手动触发的作业 task：drain 会**等待**它们
+        # 收敛（不取消——取消会打断正在返回响应的 HTTP 请求），
+        # 且 inflight_count 要把它们算进去，否则：
+        # 1) 前端看到的 running 作业数会漏掉手动触发的那一个；
+        # 2) 停机时 drain 会看不到在途的手动作业，进程可能在它还在
+        #    写库时就退出。
+        self._manual_inflight: set[asyncio.Task[None]] = set()
         #: 停机期间置 False：拒绝新作业，只等在途作业收敛（FR-8.2）
         self.accepting_new_work = True
 
@@ -106,23 +117,47 @@ class SchedulerCenter:
         logger.info("调度中心已启动，已注册作业 %d 个", len(self._specs))
 
     def inflight_count(self) -> int:
-        """当前正在执行的作业数。"""
-        return len(self._inflight)
+        """当前正在执行的作业数（cron + 手动触发）。"""
+        return len(self._inflight) + len(self._manual_inflight)
 
     async def drain(self, *, timeout: float) -> None:  # noqa: ASYNC109
         """等待在途作业收敛，超时则取消（FR-8.2）。
 
         调用方须先 :meth:`stop_accepting` 或手工置 ``accepting_new_work=False``。
+
+        - **cron 作业**：等待超时后**取消**（作业可安全重跑）。
+        - **手动触发的作业**：只**等待**不取消——它跑在 HTTP 请求上下文里，
+          取消会打断正在返回响应的请求。超时后记 warning 继续。
         """
-        if not self._inflight:
+        cron = list(self._inflight)
+        manual = list(self._manual_inflight)
+        if not cron and not manual:
             return
-        done, pending = await asyncio.wait(list(self._inflight), timeout=timeout)
-        if pending:
-            logger.warning("等待在途作业超时，取消 %d 个", len(pending))
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-        logger.info("在途作业已收敛：完成 %d，取消 %d", len(done), len(pending))
+        try:
+            if cron:
+                done, pending = await asyncio.wait(cron, timeout=timeout)
+                if pending:
+                    logger.warning("等待在途作业超时，取消 %d 个", len(pending))
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                logger.info(
+                    "在途 cron 作业已收敛：完成 %d，取消 %d", len(done), len(pending)
+                )
+            if manual:
+                # 只等不取消：给手动触发的作业留出收尾时间
+                done_m, pending_m = await asyncio.wait(manual, timeout=timeout)
+                if pending_m:
+                    logger.warning(
+                        "等待手动触发的作业超时（%d 个未完成，不取消以免打断 HTTP 响应）",
+                        len(pending_m),
+                    )
+                else:
+                    logger.info("在途手动作业已收敛：完成 %d", len(done_m))
+        except Exception as exc:
+            # drain 兜底：停机路径上再抛异常会中断 shutdown，导致在途作业
+            # 状态不一致。CancelledError 之外的异常都吞掉并记录。
+            logger.warning("drain 期间异常（已吞掉以保停机完成）：%s", exc)
 
     async def shutdown(self, *, grace_seconds: int = 60) -> None:
         """停机：先停新调度，再等在途作业（FR-8.2）。"""
@@ -293,9 +328,13 @@ class SchedulerCenter:
             )
         started_dt = bj_now_dt()
         self._running.add(name)
-        task = asyncio.current_task()
-        if task is not None:
-            self._inflight.add(task)
+        # 手动触发的 task 加入 _manual_inflight（不是 _inflight）：
+        # - 计入 inflight_count()，前端能正确显示"运行中"
+        # - drain 停机时只等待不取消（取消会打断正在返回响应的 HTTP 请求）
+        # 调用方 await 本函数即等待结果。
+        manual_task = asyncio.current_task()
+        if manual_task is not None:
+            self._manual_inflight.add(manual_task)
         result: object = None
         try:
             result = await spec.func()
@@ -339,8 +378,8 @@ class SchedulerCenter:
             )
         finally:
             self._running.discard(name)
-            if task is not None:
-                self._inflight.discard(task)
+            if manual_task is not None:
+                self._manual_inflight.discard(manual_task)
         finished_dt = bj_now_dt()
         started_str = format_bj(started_dt)
         finished_str = format_bj(finished_dt)
@@ -452,7 +491,12 @@ def _record_run(
             _record_tasks.add(task)
             task.add_done_callback(_keep_record_task)
         else:
-            # 无运行 loop（同步上下文）— 直接 asyncio.run
-            asyncio.run(_persist())
+            # 无运行 loop（同步上下文）—— 不可用 asyncio.run：
+            # async engine 的 aiosqlite 连接池绑定在创建它的 loop 上，
+            # 在新 loop 里用会抛跨 loop 错误（与 runtime_params 同类问题）。
+            # 记录失败只影响历史统计，不该中断调用方，故记日志跳过。
+            logger.warning(
+                "记录作业 %s 执行历史失败：无运行中的 event loop，跳过写入", job_name
+            )
     except Exception as exc:
         logger.warning("记录作业 %s 执行历史失败：%s", job_name, exc)

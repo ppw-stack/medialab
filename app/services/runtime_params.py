@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -173,19 +172,36 @@ async def _load_and_seed_async(mgr: RuntimeParamManager, settings: AppSettings) 
     logger.info("运行时参数已初始化：%s", mgr._values)
 
 
+async def init_runtime_params_async(
+    settings: AppSettings,
+) -> RuntimeParamManager:
+    """启动期初始化（异步）。lifespan 内 await 本函数。
+
+    之前有同步壳 ``init_runtime_params`` 在已运行的 event loop 中开新线程
+    跑 ``asyncio.run``，导致跨 loop 使用 async engine（aiosqlite 连接池
+    绑定到创建时的 loop），会抛 InterfaceError 或静默错乱。
+    """
+    mgr = RuntimeParamManager()
+    await _load_and_seed_async(mgr, settings)
+    return mgr
+
+
 def init_runtime_params(settings: AppSettings) -> RuntimeParamManager:
-    """启动期初始化（同步壳）。"""
+    """启动期初始化（同步壳，仅用于无 event loop 的同步上下文如测试）。
+
+    已在 event loop 中时（lifespan 内）请改用
+    :func:`init_runtime_params_async` 并 ``await``。
+    """
     mgr = RuntimeParamManager()
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        # 同步上下文：直接 asyncio.run
         asyncio.run(_load_and_seed_async(mgr, settings))
         return mgr
-    # 已在 event loop 中（罕见）：在后台线程跑 init
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        ex.submit(lambda: asyncio.run(_load_and_seed_async(mgr, settings))).result()
-    return mgr
+    raise RuntimeError(
+        "init_runtime_params 不能在已运行的 event loop 中调用——"
+        "请改用 init_runtime_params_async 并 await"
+    )
 
 
 #: 全局单例

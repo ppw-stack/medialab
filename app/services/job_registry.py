@@ -71,7 +71,7 @@ def register_jobs(
     )
     logger.info(
         "已注册免费窗口监测作业：monitor_free_window cron=%r (pre_pause=%dmin)",
-        cfg.monitor_free_window_cron, cfg.monitor_pre_pause_minutes,
+        cfg.monitor_free_window_cron, _current_pre_pause_minutes(cfg),
     )
 
     scheduler_center.register(
@@ -131,9 +131,25 @@ async def _run_monitor_free_window(
 
     from app.services.monitor import MonitorFreeWindowService
 
-    svc = MonitorFreeWindowService(factory, cfg.monitor_pre_pause_minutes)
+    svc = MonitorFreeWindowService(factory)
     result = await svc.run()
     return asdict(result)
+
+
+def _current_pre_pause_minutes(cfg: AppSettings) -> int:
+    """当前生效的"提前暂停分钟数"（DB 运行时参数优先，回退到 settings）。
+
+    作业实际用的是 runtime_params（DB）里的值，不是 settings 里的初始值——
+    启动日志若打 settings 值会与实际行为不符。
+    取不到时回退到 settings 的值（而不是 0），否则日志会显示
+    "pre_pause=0min" 而实际生效的是 settings 里的分钟数。
+    """
+    from app.services.runtime_params import get_runtime_params
+
+    try:
+        return get_runtime_params().get_int("monitor_pre_pause_minutes")
+    except Exception:
+        return cfg.monitor_pre_pause_minutes
 
 
 async def _run_refresh_user_data(factory: AdapterFactory) -> dict[str, object]:

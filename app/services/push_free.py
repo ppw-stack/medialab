@@ -123,8 +123,11 @@ class PushFreeService:
             make_idem_key,
         )
 
+        # 一次性取所有运行时参数，避免循环内/外重复取值导致
+        # "限频值"与"展示值"不一致（AGENTS.md 参数内存-DB 顺序一致关注点）。
         rp = get_runtime_params()
         interval_ms = rp.get_int("push_download_interval_ms")
+        min_remaining_h = rp.get_int("push_min_remaining_hours")
         first = True
 
         for c in candidates:
@@ -196,10 +199,6 @@ class PushFreeService:
                 await tq.mark_done(task.id)
             pushed += 1
 
-        from app.services.runtime_params import get_runtime_params
-
-        rp = get_runtime_params()
-        min_remaining_h = rp.get_int("push_min_remaining_hours")
         result = PushResult(
             selected=len(candidates),
             pushed=pushed,
@@ -293,8 +292,10 @@ class PushFreeService:
         candidates: list[_Candidate] = []
         for row in rows:
             idx_id, site_id, item_id, name, free_type, free_end_at = row
-            # is_not_null 已 WHERE 过滤，类型收窄
-            assert item_id is not None
+            # is_not_null 已 WHERE 过滤，但 assert 在 `python -O` 下被剥离；
+            # 用显式 if 跳过更安全（防御类型契约变化）。
+            if item_id is None:
+                continue
             # 限时种：未过期 且 剩余时间 ≥ 阈值 → 入选
             # 显式拒绝已过期（<= now），避免下载器对一个已失效窗口做无意义拉取
             if (free_type == FreeType.TIMED
@@ -359,8 +360,12 @@ class PushFreeService:
                     .values(push_status=PushStatus.FAILED)
                 )
         except Exception as exc:
-            # 标记失败本身失败不应中断整个推送作业
-            logger.warning("标记推送失败状态失败：index_id=%d %s", index_id, exc)
+            # 标记失败本身失败不应中断整个推送作业；但需记录便于追溯——
+            # 否则 push_status 仍是 NULL 与实际"推送失败但标记未落"状态不符。
+            logger.warning(
+                "标记推送失败状态失败：index_id=%d（push_status 可能仍为 NULL）：%s",
+                index_id, exc,
+            )
 
 
 @dataclass(frozen=True, slots=True)

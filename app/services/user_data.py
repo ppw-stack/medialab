@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logging import get_logger
 from app.core.timeutils import bj_now
 from app.db.models import Site, SiteUserData
-from app.db.session import get_session_factory
+from app.db.session import get_session_factory, session_scope
 from app.services.factory import AdapterFactory
 from app.services.scheduler import JobStep
 
@@ -34,7 +34,14 @@ async def refresh_one_site(
     factory: AdapterFactory,
     site_row: Site,
 ) -> bool:
-    """刷新单站点的 user_data 行（4 字段）。返回是否成功写入。"""
+    """刷新单站点的 user_data 行（4 字段）。返回是否成功写入。
+
+    **注意**：本函数会在传入的 session 上下文内做网络调用
+    (``sa.get_user_snapshot()``)。调用方应确保 session 不是长事务写锁
+    （参考 :func:`refresh_all_sites` 与 :func:`refresh_site_user_data`
+    的短事务模式）。若需在网络拉取期间避免持锁，调用方应在外层
+    先完成网络拉取拿到 snapshot，再开短事务写入。
+    """
     try:
         sa = factory.site(site_row)
     except Exception as exc:
@@ -76,43 +83,63 @@ async def refresh_all_sites(factory: AdapterFactory) -> dict[str, object]:
     """刷新所有启用站点的 user_data。
 
     Returns: ``{"ok": N, "failed": M, "skipped": K, "total": T, "steps": [...]}``。
+
+    每站独立短事务：避免单 session 内循环网络 IO 导致写锁横跨所有
+    站点网络拉取（违反"作业短事务化"，与 push_free 并发时易 database is locked）。
     """
     factory_obj = get_session_factory()
+    # 短事务读站点列表，脱离 session 后只用标量字段
     async with factory_obj() as session:
         site_rows = (await session.execute(
-            select(Site).where(Site.enabled == True)  # noqa: E712
+            select(Site).where(Site.enabled.is_(True))
         )).scalars().all()
+        # 只提取需要的标量（id / name）——其余字段在每站的事务里重新加载，
+        # 不在这里读，避免 detached 访问 ORM 实例
+        sites = [(r.id, r.name) for r in site_rows]
+    total = len(sites)
 
-        ok = 0
-        failed = 0
-        skipped = 0
-        for site_row in site_rows:
-            try:
-                wrote = await refresh_one_site(session, factory, site_row)
-                if wrote:
-                    ok += 1
-                else:
+    ok = 0
+    failed = 0
+    skipped = 0
+    for site_id, site_name in sites:
+        try:
+            # 每站独立 session（短事务），网络 IO 不持写锁。
+            # 必须用 session_scope()——它负责 commit；裸 `async with
+            # factory() as session:` 退出时只 close 不 commit，
+            # 写进去的 site_user_data 会全部丢失（而 refresh_one_site
+            # 仍返回 True，计数会谎报成功）。
+            async with session_scope() as session:
+                # 重新加载 site 行（拿到完整 ORM 实例供 refresh_one_site）
+                site_row = (await session.execute(
+                    select(Site).where(Site.id == site_id)
+                )).scalar_one_or_none()
+                if site_row is None:
                     skipped += 1
-            except Exception as exc:
-                failed += 1
-                logger.exception("站点 %s 刷新异常：%s", site_row.name, exc)
-        await session.commit()
+                    continue
+                wrote = await refresh_one_site(session, factory, site_row)
+            if wrote:
+                ok += 1
+            else:
+                skipped += 1
+        except Exception as exc:
+            failed += 1
+            logger.exception("站点 %s 刷新异常：%s", site_name, exc)
 
     logger.info("refresh_user_data 完成：ok=%d failed=%d skipped=%d total=%d",
-                ok, failed, skipped, len(site_rows))
+                ok, failed, skipped, total)
     return {
         "ok": ok,
         "failed": failed,
         "skipped": skipped,
-        "total": len(site_rows),
+        "total": total,
         "summary": (
-            f"{len(site_rows)} 站，{ok} 成功"
+            f"{total} 站，{ok} 成功"
             + (f"，{failed} 失败" if failed else "")
             + (f"，{skipped} 跳过" if skipped else "")
         ),
         "steps": [
             JobStep(
-                "查询启用站点", "ok", len(site_rows), f"{len(site_rows)} 站"
+                "查询启用站点", "ok", total, f"{total} 站"
             ),
             JobStep(
                 "拉取 user_data",

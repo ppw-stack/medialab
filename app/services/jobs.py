@@ -166,10 +166,13 @@ async def _upsert_site_items(
                 },
             )
             try:
-                await session.execute(stmt)
-                ok += 1
+                # 用 savepoint 隔离单条 upsert 失败——rollback 会回滚
+                # 整个未提交事务（包括前序成功的行），导致 ok 计数与实际
+                # 入库行数不一致。begin_nested 失败只回滚到 savepoint。
+                async with session.begin_nested():
+                    await session.execute(stmt)
+                    ok += 1
             except Exception as exc:
-                await session.rollback()  # 失效事务回滚，避免 PendingRollbackError 连锁
                 logger.debug(
                     "站点 %s item_id=%s upsert 失败：%s", row.name, item_id, exc
                 )

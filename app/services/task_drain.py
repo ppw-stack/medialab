@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import copy
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -46,8 +47,11 @@ async def drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
         svc = TaskQueueService(session)
         claimed = await svc.claim_due(bj_now(), limit=_DRAIN_LIMIT)
         # 取出执行所需字段（脱离 session 后 ORM 实例属性已加载）
+        # 深拷贝 payload：payload 是 JSON 列，可能含嵌套 dict/list，
+        # 浅拷贝（dict(t.payload)）的内层仍是 ORM 实例引用的同一对象，
+        # session 关闭后访问可能触发 DetachedInstanceError。
         tasks = [
-            (t.id, t.kind, dict(t.payload)) for t in claimed
+            (t.id, t.kind, copy.deepcopy(t.payload)) for t in claimed
         ]
 
     # 3) 清理超期终态（无条件执行——即使本轮无任务，历史也该定期清理）

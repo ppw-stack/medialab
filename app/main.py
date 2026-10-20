@@ -68,11 +68,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # 运行时参数（DB 持久化的可调设置）必须在 register_jobs 之前
         # 初始化，让作业函数首次运行就能拿到最新值
         from app.services.runtime_params import (
-            init_runtime_params,
+            init_runtime_params_async,
             set_runtime_params,
         )
 
-        set_runtime_params(init_runtime_params(settings))
+        set_runtime_params(await init_runtime_params_async(settings))
         scheduler_center.start()
         register_jobs(factory)
 
