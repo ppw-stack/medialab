@@ -41,7 +41,10 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
     """
     started = asyncio.get_running_loop().time()
     total_written = 0
-    summary: list[tuple[int, str, int, int, int]] = []  # (site_id, name, pulled, ok, ko)
+    # (site_id, name, pulled, ok, ko, pull_error)
+    summary: list[tuple[int, str, int, int, int, str | None]] = []
+    # 拉取失败的站（网络/DNS/适配器异常）——与"站点没有种子"区分开
+    pull_failures: list[tuple[str, str]] = []
 
     async with session_scope() as session:
         stmt = select(Site).where(Site.enabled.is_(True))
@@ -49,10 +52,19 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
         rows: list[Site] = list(result.scalars().all())
 
     for row in rows:
-        feed_items = await _pull_site_items(factory, row)
+        feed_items, pull_error = await _pull_site_items(factory, row)
         ok, ko = await _upsert_site_items(row, feed_items)
         total_written += ok
-        summary.append((row.id, row.name, ok + ko, ok, ko))
+        summary.append((row.id, row.name, ok + ko, ok, ko, pull_error))
+        if pull_error is not None:
+            pull_failures.append((row.name, pull_error))
+
+    failed_sites = sum(1 for _, _, _, _, ko, _ in summary if ko > 0)
+    # 拉取失败的站也算"失败站"——否则作业会报"全部成功"而实际漏站
+    failed_site_names = {name for name, _ in pull_failures}
+    total_failed = failed_sites + len(
+        [n for n in failed_site_names if n not in {r[1] for r in summary if r[4] > 0}]
+    )
 
     if total_written:
         logger.info(
@@ -61,26 +73,46 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
         )
     else:
         logger.info("站点拉取：无种子写入（站数 %d）", len(rows))
+    if pull_failures:
+        logger.warning(
+            "站点拉取失败 %d 站：%s",
+            len(pull_failures),
+            ", ".join(f"{name}({err[:60]})" for name, err in pull_failures),
+        )
 
     stage_duration.labels(stage="fetch_all_sites").observe(
         asyncio.get_running_loop().time() - started
     )
-    failed_sites = sum(1 for _, _, _, _, ko in summary if ko > 0)
     return {
         "total_written": total_written,
         "scanned_sites": len(rows),
+        "failed_sites": total_failed,
         "summary": f"拉取 {len(rows)} 站，写入 {total_written} 条种子"
-        + (f"，{failed_sites} 站失败" if failed_sites else ""),
+        + (
+            f"，{total_failed} 站失败"
+            + (
+                "（" + ", ".join(name for name, _ in pull_failures) + "）"
+                if pull_failures
+                else ""
+            )
+            if total_failed
+            else ""
+        ),
         "steps": [
             JobStep(
                 "查询启用站点", "ok", len(rows), f"{len(rows)} 站"
             ),
             JobStep(
                 "拉取种子列表",
-                "warn" if failed_sites else "ok",
-                len(rows),
-                f"逐站拉取（上限 3 页），{failed_sites} 站失败"
-                if failed_sites
+                "warn" if total_failed else "ok",
+                len(rows) - len(pull_failures),
+                f"逐站拉取（上限 3 页），{total_failed} 站失败"
+                + (
+                    "：" + ", ".join(name for name, _ in pull_failures)
+                    if pull_failures
+                    else ""
+                )
+                if total_failed
                 else "逐站拉取（上限 3 页）",
             ),
             JobStep(
@@ -93,13 +125,24 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
     }
 
 
-async def _pull_site_items(factory: AdapterFactory, row: Site) -> list[FeedItem]:
-    """仅拉取单站种子列表（网络 IO，不持写事务）。"""
+async def _pull_site_items(
+    factory: AdapterFactory, row: Site
+) -> tuple[list[FeedItem], str | None]:
+    """拉取单站种子列表（网络 IO，不持写事务）。
+
+    Returns: ``(items, error)``——``error`` 非 None 表示**拉取失败**
+    （网络/DNS/解析/适配器异常）。
+
+    区分"拉取失败"与"站点确实没有种子"很重要：两者都返回空列表，
+    但前者是故障（站点被墙 / cookie 失效 / DNS 挂了），若混为一谈，
+    作业统计会报"全部成功"而实际漏掉了故障站（本次 prod 的 hddolby
+    DNS 解析失败就是这样被掩盖的）。
+    """
     try:
         adapter = factory.site(row)
     except Exception as exc:
         logger.warning("站点 %s 适配器创建失败：%s", row.name, exc)
-        return []
+        return ([], f"适配器创建失败：{exc}")
     try:
         feed_items: list[FeedItem] = []
         for page in range(1, 4):  # 拉 1-3 页
@@ -112,10 +155,10 @@ async def _pull_site_items(factory: AdapterFactory, row: Site) -> list[FeedItem]
     except Exception as exc:
         feed_pulls.labels(result="error", site=row.name).inc()
         logger.warning("站点 %s 拉取失败：%s", row.name, exc)
-        return []
+        return ([], str(exc))
     if feed_items:
         feed_pulls.labels(result="ok", site=row.name).inc(len(feed_items))
-    return feed_items
+    return (feed_items, None)
 
 
 async def _upsert_site_items(
