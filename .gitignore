@@ -55,4 +55,10 @@ web/blob-report/
 # 本地测试数据（qBittorrent 容器挂载）
 qbt-data/
 
+# Orca 交互产物（Playwright 截图等），不入库
+.orca/
+
+# 个人本地工具配置
+.claude/settings.local.json
+
 .playwright-mcp/

@@ -1,12 +1,11 @@
 # AGENTS.md — 仓库内 AI/协作者行为规范
 
 ## 必读文档
-1. `.orca/drops/PT辅种与自动监测系统-项目需求文档.md` v1.2 — 需求基线。
-2. `README.md` — 现状与命令。
-3. `app/adapters/sites/user_data.py` + `app/adapters/sites/parsers/nexus_php.py` — FR-1.6 站点用户数据契约。
+1. `README.md` — 现状与命令。
+2. `app/adapters/sites/user_data.py` + `app/adapters/sites/parsers/nexus_php.py` — FR-1.6 站点用户数据契约。
 
 ## 工作准则
-- 改动窗口锚定（FR-3.4）或中止链路（FR-3.5）前，先看需求文档 §3。
+- 改动窗口锚定（FR-3.4）或中止链路（FR-3.5）前，先确认需求基线与现状口径一致。
 - 数据删除以"不误删"为底线：hash 必须是 40 位 hex（拒绝 `all` / 通配），前端删除需确认，删磁盘数据单独开关并记审计日志。不引入回收站 / 保护期等未实现的机制。
 - 站点适配层改动后用真实站点（测试环境 cookie）拉取验证，不使用 mock 数据测试。
 - 不引入未文档化的反爬对抗 / 验证码绕过（R2 / 合规性）。

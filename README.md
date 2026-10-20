@@ -11,9 +11,7 @@
 - **F2 免费种窗口**：推送 + 监测 + 中止（push_free_torrents / monitor_free_window / FR-3.5 链路）
 - **FR-1.6 站点用户数据契约**（2026-10-18）：9 站 user_info / seeding_stats / message_count / hr_status 4 方法，刷新作业 `*/30 * * * *`，Vue UI（`/user-data` 列表 + Sites drawer），API 端点 `/api/v1/user-data` 与 `/api/v1/sites/{id}/user-data`
 
-`F2 辅种引擎` / `F4 巡检` / `F5 清理` 自 **M2** 起按文档 v1.2 实施。
-
-详细需求见 `.orca/drops/PT辅种与自动监测系统-项目需求文档.md`（v1.2，已评审通过）。
+`F2 辅种引擎` / `F4 巡检` / `F5 清理` 自 **M2** 起实施。
 
 ## 快速开始
 
