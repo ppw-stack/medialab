@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Request
+from fastapi import APIRouter, Cookie, HTTPException, Request
 from fastapi.responses import (
     FileResponse,
     JSONResponse,
@@ -156,7 +156,3 @@ def install_static(app, *, path: str = "/app/web/dist") -> None:
     app.add_route("/{full_path:path}", root_handler, methods=["GET"])
     logger.info("前端 SPA 静态托管已挂载（来源：%s）", path)
 
-
-#: ``Depends(require_session)`` 直接在路由用 ``dependencies=[Depends(require_session)]`` 即可，
-#: 不再导出额外别名。
-_HMAC_AUTH_ALIAS = Depends(require_session)  # 保留向后引用占位
