@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { api } from '../api'
 import { message } from 'ant-design-vue'
 
@@ -25,6 +25,15 @@ const TYPES = [
   { value: 'deluge', label: 'Deluge', implemented: false },
   { value: 'aria2', label: 'aria2', implemented: false },
 ]
+
+// 新建下拉只展示已实现的类型（选了也无法创建，后端 501）；编辑已有记录时
+// 若其类型未实现（历史遗留），该类型仍需出现在下拉里否则 select 显示原始值
+const selectableTypes = computed(() => {
+  if (editing.value && !isImplemented(editing.value.type)) {
+    return TYPES // 编辑未实现类型的已有记录：全量展示（该类型已选中，撤不掉）
+  }
+  return TYPES.filter((t) => t.implemented)
+})
 
 const data = ref<Downloader[]>([])
 const editing = ref<Downloader | null>(null)
@@ -291,12 +300,11 @@ const columns = [
           <a-form-item label="类型" name="type" style="flex: 1">
             <a-select v-model:value="formState.type">
               <a-select-option
-                v-for="t in TYPES"
+                v-for="t in selectableTypes"
                 :key="t.value"
                 :value="t.value"
-                :disabled="!t.implemented"
               >
-                {{ t.label }}{{ t.implemented ? '' : '（未实现）' }}
+                {{ t.label }}
               </a-select-option>
             </a-select>
           </a-form-item>

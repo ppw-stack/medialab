@@ -150,7 +150,8 @@ async def create_downloader(payload: DownloaderIn) -> DownloaderOut:
         raise HTTPException(status_code=400, detail=f"未知下载器类型：{payload.type}")
     if payload.type not in SUPPORTED_TYPES:
         raise HTTPException(
-            status_code=501, detail=f"下载器类型 {payload.type} 尚未实现"
+            status_code=501,
+            detail=f"下载器类型 {payload.type} 暂不支持，目前仅支持 qBittorrent / Transmission",
         )
     async with session_scope() as session:
         exists = (
