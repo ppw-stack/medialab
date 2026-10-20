@@ -1,14 +1,14 @@
 """下载器适配层（FR-1）。
 
-5 个核心契约方法：
+4 个核心契约方法：
 1. ping: 连通性检测
 2. add_torrent: 新增种子
 3. list_torrents: 查询种子列表
 4. set_pause: 修改状态（暂停/恢复）
-5. get_files: 获取种子详情（文件清单）
 
 附加可选：
 - close: 释放连接池（优雅停机用）
+- list_torrents_with_errors: 拉取全量种子 + 归一化错误信息（辅种巡查用）
 
 设计约束（FR-1.3）：子类**必须**实现全部抽象方法，不支持的能力返回安全默认值。
 """
@@ -56,15 +56,6 @@ class TorrentState(StrEnum):
     def is_fatal(self) -> bool:
         """FR-3.4 表：不等窗口，立即中止。"""
         return self in {TorrentState.ERROR, TorrentState.MISSING_FILES}
-
-
-@dataclass(frozen=True, slots=True)
-class TorrentFile:
-    """下载器上报的文件条目。删除目标只能来自此处（FR-5.2.5a）。"""
-
-    path: str
-    size: int = 0
-    priority: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,21 +148,14 @@ class DownloaderAdapter(ABC):
 
     @abstractmethod
     async def remove(self, hashes: Sequence[str], *, delete_data: bool) -> bool:
-        """4. 删除任务。``delete_data`` 必须独立可控（FR-5.2.3 先 false）。"""
+        """4. 删除任务。``delete_data`` 独立控制是否连磁盘数据一起删。"""
 
     @abstractmethod
     async def set_pause(self, hashes: Sequence[str], paused: bool) -> bool:
         """5. 批量暂停/恢复。"""
 
-    async def get_files(self, info_hash: str) -> list[TorrentFile]:
-        """6. 获取种子详情（文件清单）。
-
-        不支持时返回空列表，由调用方决定是否启用数据删除。
-        """
-        return []
-
     async def list_torrents_with_errors(self) -> list[dict[str, Any]]:
-        """7. 拉取全量种子，附带**规范化**的错误信息（辅种巡查用）。
+        """6. 拉取全量种子，附带**规范化**的错误信息（辅种巡查用）。
 
         返回的每项至少含：
 

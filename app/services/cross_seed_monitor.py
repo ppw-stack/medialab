@@ -8,7 +8,8 @@
 
 设计:
 - 不落库: 实时统计, 刷新即新
-- FR-5.2 兼容: 暂停是写操作, 走六重保护 (白名单/二次确认/...)
+- 只暂停不删除: 保留数据文件, 用户可自行恢复
+- 写操作前校验 hash 为 40 位 hex（拒绝 all/通配）
 
 下载器支持: 通过 adapter 的公开方法
 :meth:`DownloaderAdapter.list_torrents_with_errors` 取数——Transmission 与
@@ -216,7 +217,7 @@ class CrossSeedMonitorService:
             for a in r.anomalies:
                 anomaly_types[a.anomaly_type] = anomaly_types.get(a.anomaly_type, 0) + 1
 
-        # 自动暂停 (后台作业, 无二次确认, 走白名单逻辑)
+        # 自动暂停（后台作业无人值守；只暂停不删数据，hash 已由 adapter 校验）
         # 每个下载器只解析一次 adapter（原先每 hash 都查一次 DB + 取 factory，
         # 3,000 个 hash 时是 3,000 次无用查询）
         stopped = 0

@@ -227,7 +227,7 @@ class Qb5ApiClient:
         """hash 列表 → qBittorrent 要求的 "|" 分隔字符串。
 
         防御性校验：qB 会把保留字 ``all`` 解析为"所有种子"，传入任意非
-        40 位 hex 值即抛错，杜绝批量误删/误操作（FR-5.2）。
+        40 位 hex 值即抛错，杜绝批量误删/误操作。
         """
         if isinstance(hashes, str):
             items: list[str] = hashes.split("|")
@@ -408,18 +408,6 @@ class Qb5ApiClient:
         """GET /api/v2/torrents/webseeds — 种子 HTTP 来源列表。"""
         result = await self._get(
             "/api/v2/torrents/webseeds", params={"hash": hash_}
-        )
-        if not result:
-            return []
-        return list(result)
-
-    async def get_torrent_files(self, hash_: str) -> list[dict[str, Any]]:
-        """GET /api/v2/torrents/files?hash=... — 文件列表。
-
-        返回元素字段：index / name / size / progress / priority / is_seed / padding。
-        """
-        result = await self._get(
-            "/api/v2/torrents/files", params={"hash": hash_}
         )
         if not result:
             return []

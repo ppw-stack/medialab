@@ -2,7 +2,7 @@
 
 协议：HTTP/HTTPS POST /transmission/rpc，header ``X-Transmission-Session-Id``。
 认证：HTTP Basic（username/password）。
-契约：基类 5 抽象 + get_files + close 全部实现；不引入能力声明。
+契约：基类 5(含抽象 remove/set_pause) + list_torrents_with_errors + close 全部实现；不引入能力声明。
 差异（与 qBittorrent）：
     - add_torrent **不支持同时多个** URL/magnet（决策 1，硬拒收）
     - 无原生 RSS（FR-1 由本系统自拉补齐）
@@ -22,7 +22,6 @@ from app.adapters.downloaders.base import (
     AddTorrentPayload,
     DownloaderAdapter,
     DownloaderError,
-    TorrentFile,
     TorrentFilter,
     TorrentHandle,
     TorrentInfo,
@@ -32,7 +31,7 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-#: list_torrents / get_files 一次拉取的字段全集
+#: list_torrents 一次拉取的字段全集
 _FIELDS_ALL: tuple[str, ...] = (
     "id",
     "hashString",
@@ -367,23 +366,6 @@ class TransmissionAdapter(DownloaderAdapter):
         method = "torrent-stop" if paused else "torrent-start"
         await self._rpc(method, {"ids": list(hashes)})
         return True
-
-    async def get_files(self, info_hash: str) -> list[TorrentFile]:
-        resp = await self._rpc(
-            "torrent-get",
-            {"ids": [info_hash], "fields": ["files"]},
-        )
-        rows = resp.get("torrents") or []
-        if not rows:
-            return []
-        files = rows[0].get("files") or []
-        return [
-            TorrentFile(
-                path=f.get("name", ""), size=int(f.get("length") or 0)
-            )
-            for f in files
-            if f.get("name")
-        ]
 
     async def list_torrents_with_errors(self) -> list[dict[str, Any]]:
         """拉取全量种子，保留 TR 原生 error / errorString（巡查用）。"""

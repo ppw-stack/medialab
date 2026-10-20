@@ -13,7 +13,6 @@ from app.adapters.downloaders.base import (
     AddTorrentPayload,
     DownloaderAdapter,
     DownloaderError,
-    TorrentFile,
     TorrentFilter,
     TorrentHandle,
     TorrentInfo,
@@ -291,26 +290,6 @@ class QbittorrentAdapter(DownloaderAdapter):
         except Qb5ApiError as exc:
             raise DownloaderError(str(exc), transient=exc.transient) from exc
         return True
-
-    async def get_files(self, info_hash: str) -> list[TorrentFile]:
-        """FR-5.2.5a 的数据来源。删除目标只能来自此返回值。"""
-        try:
-            rows: list[dict[str, Any]] = await self._qb.get_torrent_files(info_hash)
-        except Qb5ApiError:
-            return []
-        out: list[TorrentFile] = []
-        for row in rows:
-            name = row.get("name")
-            if not name:
-                continue
-            out.append(
-                TorrentFile(
-                    path=str(name),
-                    size=int(row.get("size") or 0),
-                    priority=int(row.get("priority") or 0),
-                )
-            )
-        return out
 
     async def close(self) -> None:
         await self._qb.close()

@@ -39,7 +39,7 @@ _VALID_HASH_RE: re.Pattern[str] = re.compile(r"^[a-fA-F0-9]{40}$")
 
 
 def _reject_invalid_hashes(hashes: list[str]) -> None:
-    """校验批量操作的 hash 白名单（FR-5.2 路径三重校验同级约束）。"""
+    """校验批量操作的 hash 白名单（拒绝 ``all`` / 通配等会批量误删的值）。"""
     bad = [h for h in hashes if not _VALID_HASH_RE.fullmatch(h)]
     if bad:
         raise HTTPException(
@@ -402,7 +402,7 @@ async def remove_downloader_torrents(
         raise HTTPException(status_code=400, detail="批量操作上限 200")
     _reject_invalid_hashes(payload.hashes)
     _, adapter = await _resolve_downloader(downloader_id)
-    # 删数据为不可恢复操作：记审计日志（前端已弹窗二次确认）
+    # 删数据不可恢复：记审计日志（前端另有确认弹窗）
     if payload.delete_data:
         logger.warning(
             "删除下载器原生任务并删除磁盘数据：downloader_id=%d 数量=%d",
