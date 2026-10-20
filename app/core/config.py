@@ -1,8 +1,8 @@
 """配置中心（FR-7）。
 
-配置来源优先级：环境变量 > 数据库 > 配置文件默认值。
+配置来源优先级：环境变量 > 数据库。
 
-本模块只负责 **进程级启动配置**（环境/文件来源），站点与下载器的业务配置
+本模块只负责 **进程级启动配置**（环境来源），站点与下载器的业务配置
 存于数据库，由 :mod:`app.db` 与各服务读取，不走 pydantic-settings。
 """
 
@@ -41,9 +41,6 @@ class AppSettings(BaseSettings):
     # -- 路径 --
     data_dir: Path = Path("/app/data")
     log_dir: Path = Path("/app/logs")
-    config_file: Path | None = Field(
-        default=None, description="可选的 YAML 配置文件（最低优先级）"
-    )
 
     # -- Web 面板（FR-6 / 非功能·安全性）--
     web_host: str = "0.0.0.0"
@@ -62,7 +59,6 @@ class AppSettings(BaseSettings):
     db_path: Path | None = Field(default=None, description="默认 data_dir/seedhelper.db")
     db_journal_mode: Literal["WAL", "DELETE"] = "WAL"
     db_synchronous: Literal["NORMAL", "FULL", "OFF"] = "NORMAL"
-    db_single_writer_queue: bool = True
 
     # -- 调度 --
     scheduler_enabled: bool = True
