@@ -50,10 +50,11 @@ export async function apiFetch<T = unknown>(
 }
 
 /**
- * 只允许 GET / POST（避免部分代理/防火墙丢 PUT/DELETE）。
- * 更新/删除走专用 POST 端点，id 放 body：
+ * 以 GET / POST 为主（部分代理/防火墙会丢 PUT/DELETE）。
+ * 删除走专用 POST 端点，id 放 body：
  *   POST /{resource}/update   body={id, ...fields}
  *   POST /{resource}/delete   body={id}
+ * PUT 仅用于运行时参数更新（调度作业配置弹框）。
  */
 export const api = {
   get: <T = unknown>(path: string) => apiFetch<T>(path),

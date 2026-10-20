@@ -243,7 +243,7 @@ const columns = [
             <span v-else class="dim">—</span>
           </template>
           <template v-else-if="column.key === 'cross_seed'">
-            <a-tooltip v-if="record.is_cross_seed" title="标记为辅种下载器（仅记录，后续监控启用）">
+            <a-tooltip v-if="record.is_cross_seed" title="标记为辅种下载器（由辅种巡查作业自动扫描并暂停异常种子）">
               <a-tag color="cyan">辅种</a-tag>
             </a-tooltip>
             <span v-else class="dim">—</span>
@@ -329,7 +329,7 @@ const columns = [
         <a-form-item label="校验 TLS 证书" name="verify_tls" tooltip="自签名证书场景下关闭">
           <a-switch v-model:checked="formState.verify_tls" />
         </a-form-item>
-        <a-form-item label="辅种下载器" name="is_cross_seed" tooltip="标记此下载器用于辅种监测（当前只记录，后续启用监控）">
+        <a-form-item label="辅种下载器" name="is_cross_seed" tooltip="标记此下载器参与辅种巡查（定时作业自动扫描并暂停 tracker 未注册 / 数据丢失的种子）">
           <a-switch v-model:checked="formState.is_cross_seed" />
         </a-form-item>
         <a-form-item name="enabled" label="启用">

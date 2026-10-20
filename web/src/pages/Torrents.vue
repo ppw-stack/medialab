@@ -118,8 +118,6 @@ async function loadItems() {
       params.set('state', filterState.value.toLowerCase())
     }
     if (filterCategory.value.trim()) params.set('category', filterCategory.value.trim())
-    params.set('page', String(page.value))
-    params.set('page_size', String(pageSize.value))
     const resp = await api.get<ListResp>(
       `/downloaders/${activeTab.value}/torrents?${params.toString()}`,
     )
