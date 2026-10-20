@@ -86,6 +86,31 @@ _PROMO_CLASS_MAP: Final[dict[str, tuple[str, int | None]]] = {
 _TEXT_PCT_RE: Final = re.compile(r"(\d{1,3})\s*%")
 
 
+def _promo_text_pct(promo_texts: list[str] | None) -> int | None:
+    """从促销标签可见文本里提取折扣百分比。
+
+    输入形如 ``["30%", "50%"]``（各站 parser 从促销标签收集）。取**第一个**
+    可识别的百分比；无任何可识别值返回 ``None``（调用方回退到 class 推断的
+    默认折扣）。
+
+    只接受 ``0 < pct < 100``——100% 属永久免费（由 class 标记判定，不走
+    折扣路径），0% 无意义。
+    """
+    if not promo_texts:
+        return None
+    for text in promo_texts:
+        m = _TEXT_PCT_RE.search(str(text))
+        if not m:
+            continue
+        try:
+            pct = int(m.group(1))
+        except ValueError:
+            continue
+        if 0 < pct < 100:
+            return pct
+    return None
+
+
 def _parse_iso_dt(value: object) -> str | None:
     """Unix 秒 / ISO 8601 / 数字字符串 → 北京时间字符串。"""
     if value is None or value == "":
@@ -170,6 +195,9 @@ def _classify_from_html(
     if any(m in combined for m in _PERMANENT_MARKERS):
         return FreeType.PERMANENT, None, 1.0, 100
 
+    # 促销标签文本优先：class 推断不出折扣时，用可见文案定 NEUTRAL 折扣
+    promo_pct = _promo_text_pct(promo_texts)
+
     has_free = any(c.lower() == "free" for c in free_classes)
     if has_free:
         delta = _parse_remaining_delta(remaining_text)
@@ -186,12 +214,18 @@ def _classify_from_html(
         if free_type == FreeType.UNKNOWN:
             continue
         delta = _parse_remaining_delta(remaining_text)
-        pct = default_pct
+        pct = default_pct if promo_pct is None else promo_pct
         if delta is not None and free_type != FreeType.NEUTRAL:
             return free_type, delta, 0.9, pct
         return free_type, None, 0.85, pct
 
     # 文本兜底：在剩余文案里识别 "X%" 折扣（class 没匹配到时）
+    if promo_pct is not None:
+        delta = _parse_remaining_delta(remaining_text)
+        if delta is not None:
+            return FreeType.TIMED, delta, 0.7, promo_pct
+        return FreeType.NEUTRAL, None, 0.6, promo_pct
+
     if remaining_text:
         m = _TEXT_PCT_RE.search(remaining_text)
         if m:

@@ -515,8 +515,6 @@ class MteamAdapter(SiteAdapter):
         """
         if not self._apikey or not self._api_base():
             return None
-        if not self._apikey or not self._api_base():
-            return None
         try:
             resp = await self._client.post(
                 f"{self._api_base()}/api/member/profile",
