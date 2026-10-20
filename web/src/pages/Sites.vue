@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
-import { api } from '../api'
+import { api, errMsg } from '../api'
+import { formatBytes as fmtBytes } from '../utils/format'
 import { message } from 'ant-design-vue'
 import type { FormInstance } from 'ant-design-vue'
 
@@ -105,9 +106,13 @@ function onEdit(s: Site) {
 }
 
 async function onDelete(id: number) {
-  await api.post('/sites/delete', { id })
-  message.success('已删除')
-  load()
+  try {
+    await api.post('/sites/delete', { id })
+    message.success('已删除')
+    load()
+  } catch (err) {
+    message.error(`删除失败：${errMsg(err)}`)
+  }
 }
 
 async function onSave() {
@@ -226,17 +231,10 @@ async function openUserDataDrawer(s: Site) {
   try {
     drawerData.value = await api.get<UserDataSummary>(`/sites/${s.id}/user-data`)
   } catch (e) {
-    message.error('加载用户数据失败：' + (e as Error).message)
+    message.error('加载用户数据失败：' + errMsg(e))
   } finally {
     drawerLoading.value = false
   }
-}
-
-function fmtBytes(b: number): string {
-  if (!b) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
-  const i = Math.floor(Math.log(b) / Math.log(1024))
-  return (b / Math.pow(1024, i)).toFixed(2) + ' ' + units[i]
 }
 </script>
 
@@ -427,14 +425,14 @@ function fmtBytes(b: number): string {
         <a-form-item label="API Key（m-team 等，留空=不修改）" name="apikey">
           <a-input-password
             v-model:value="formState.apikey"
-            :placeholder="editing && (editing as any).has_apikey ? '已配置（留空保留）' : '在 m-team 控制台 → API 令牌获取'"
+            :placeholder="editing && editing.has_apikey ? '已配置（留空保留）' : '在 m-team 控制台 → API 令牌获取'"
             autocomplete="new-password"
           />
         </a-form-item>
         <a-form-item label="Cookies（NexusPHP 站点，留空=不修改）" name="cookies">
           <a-input-password
             v-model:value="formState.cookies"
-            :placeholder="editing && (editing as any).has_cookies ? '已配置（留空保留）' : '浏览器 DevTools → Application → Cookies'"
+            :placeholder="editing && editing.has_cookies ? '已配置（留空保留）' : '浏览器 DevTools → Application → Cookies'"
             autocomplete="new-password"
           />
         </a-form-item>

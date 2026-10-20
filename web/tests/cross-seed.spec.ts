@@ -67,11 +67,14 @@ test('辅种下载器统计页面 (a5444dd @ dev)', async ({ page }) => {
   }
 
   // 11) 截图 - tr-172 视图
+  // 截图目录用 Playwright 的标准输出目录（test-results/）——
+  // 原先写 ../.orca/drops/，该目录已被仓库删除（6f0341a），
+  // 截图会因目录不存在而失败。
   await page.screenshot({
-    path: '../.orca/drops/cross-seed-page-dev-2026-10-19.png',
+    path: 'test-results/cross-seed-page.png',
     fullPage: true,
   })
-  console.log(`  ✓ 截图: .orca/drops/cross-seed-page-dev-2026-10-19.png`)
+  console.log('  ✓ 截图: web/test-results/cross-seed-page.png')
 
   // 12) 验证菜单项文案 "辅种统计"
   const menuItem = page.locator('.ant-menu-item:has-text("辅种统计")')

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
-import { api } from '../../api'
+import { api, errMsg } from '../../api'
 import { message } from 'ant-design-vue'
 import SchedulerConfigModal from '../../components/SchedulerConfigModal.vue'
 import SchedulerHistoryModal from '../../components/SchedulerHistoryModal.vue'
@@ -97,9 +97,16 @@ onMounted(() => {
 })
 
 async function toggle(name: string, enabled: boolean) {
-  await api.post(`/scheduler/${name}/toggle?enabled=${enabled}`)
-  message.success(`${name} → ${enabled ? '启用' : '暂停'}`)
-  load()
+  try {
+    await api.post(`/scheduler/${name}/toggle?enabled=${enabled}`)
+    message.success(`${name} → ${enabled ? '启用' : '暂停'}`)
+    load()
+  } catch (e) {
+    // 失败时重新拉取状态——否则开关停在用户点击后的乐观状态，
+    // 与后端实际状态不一致。
+    message.error('切换失败：' + errMsg(e))
+    load()
+  }
 }
 
 async function runNow(name: string) {
@@ -114,7 +121,7 @@ async function runNow(name: string) {
       message.error(`${name} 失败：${summary || r.error || '未知错误'}`)
     }
   } catch (e) {
-    message.error('触发失败：' + (e as Error).message)
+    message.error('触发失败：' + errMsg(e))
   } finally {
     hide()
     runningJob.value = null

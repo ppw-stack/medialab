@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
-import { api } from '../api'
+import { api, errMsg } from '../api'
 import { message } from 'ant-design-vue'
 import HistoryStats from './HistoryStats.vue'
 import JobStepList, { type JobStep } from './JobStepList.vue'
@@ -49,13 +49,31 @@ async function load() {
     )
     runs.value = r.items
   } catch (e) {
-    message.error('加载历史失败：' + (e as Error).message)
+    message.error('加载历史失败：' + errMsg(e))
   } finally {
     loading.value = false
   }
 }
 
 // ---------------------------------------------------------- 步骤提取
+function pickSummary(
+  rawSummary: unknown,
+  latestSteps: JobStep[],
+  latest: RunItem | null,
+): string {
+  // 优先后端 summary；兜底取最后一步 detail；再兜底 error / '—'
+  if (typeof rawSummary === 'string' && rawSummary) return rawSummary
+  if (latestSteps.length) {
+    const last = latestSteps[latestSteps.length - 1]
+    // detail 可能是 null / 非字符串（后端 steps 来自 JSON）——
+    // 只有字符串才能直接返回，否则回退到 name
+    const detail = typeof last.detail === 'string' ? last.detail : ''
+    return detail || last.name
+  }
+  if (latest?.error) return '失败'
+  return '—'
+}
+
 function getSteps(r: RunItem | null): JobStep[] {
   if (!r?.result) return []
   const steps = (r.result as Record<string, unknown>).steps
@@ -98,14 +116,7 @@ const stats = computed(() => {
   const latest = list[0]
   const latestSteps = getSteps(latest)
   const rawSummary = latest?.result?.summary
-  const summary =
-    typeof rawSummary === 'string' && rawSummary
-      ? rawSummary
-      : latestSteps.length
-        ? latestSteps[latestSteps.length - 1].detail || latestSteps[latestSteps.length - 1].name
-        : latest?.error
-          ? '失败'
-          : '—'
+  const summary = pickSummary(rawSummary, latestSteps, latest)
   return {
     total: list.length,
     okCount,

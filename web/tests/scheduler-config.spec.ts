@@ -174,8 +174,8 @@ test('调度作业 - 截图', async ({ page }) => {
   await page.waitForLoadState('networkidle')
   await page.waitForTimeout(500)
   await page.screenshot({
-    path: '../.orca/drops/scheduler-tab-dev-2026-10-19.png',
+    path: 'test-results/scheduler-tab.png',
     fullPage: true,
   })
-  console.log('  ✓ 截图: .orca/drops/scheduler-tab-dev-2026-10-19.png')
+  console.log('  ✓ 截图: web/test-results/scheduler-tab.png')
 })

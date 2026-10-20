@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
-import { api } from '../api'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { api, errMsg } from '../api'
+import { formatBytes as fmtBytes } from '../utils/format'
 import { message } from 'ant-design-vue'
 
 interface UserData {
@@ -24,7 +25,7 @@ async function load() {
   try {
     data.value = await api.get<UserData[]>('/user-data')
   } catch (e) {
-    message.error('加载用户数据失败：' + (e as Error).message)
+    message.error('加载用户数据失败：' + errMsg(e))
   } finally {
     loading.value = false
   }
@@ -37,7 +38,7 @@ async function refreshOne(siteId: number) {
     message.success('已刷新')
     await load()
   } catch (e) {
-    message.error('刷新失败：' + (e as Error).message)
+    message.error('刷新失败：' + errMsg(e))
   } finally {
     refreshingSite.value = null
   }
@@ -48,20 +49,20 @@ async function refreshAll() {
   try {
     await api.post('/scheduler/refresh_user_data/run')
     message.success('已触发全局刷新（10s 后重新加载）')
-    setTimeout(load, 10000)
+    // 保存 timer 句柄便于卸载时清理——路由切走后 load() 仍会触发对
+    // 已销毁组件的 ref 写入。
+    // 先清掉上一个未触发的 timer：连点两次会让旧句柄被覆盖而无法在
+    // onUnmounted 里取消，10s 后仍会对已销毁组件写 ref。
+    if (refreshTimer) clearTimeout(refreshTimer)
+    refreshTimer = setTimeout(load, 10000)
   } catch (e) {
-    message.error('触发失败：' + (e as Error).message)
+    message.error('触发失败：' + errMsg(e))
   } finally {
     refreshingAll.value = false
   }
 }
 
-function fmtBytes(b: number): string {
-  if (!b) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
-  const i = Math.floor(Math.log(b) / Math.log(1024))
-  return (b / Math.pow(1024, i)).toFixed(2) + ' ' + units[i]
-}
+let refreshTimer: ReturnType<typeof setTimeout> | null = null
 
 function fmtAge(lastSeen: string): string {
   if (!lastSeen) return '-'
@@ -82,6 +83,13 @@ const summary = computed(() => {
 })
 
 onMounted(load)
+
+onUnmounted(() => {
+  if (refreshTimer) {
+    clearTimeout(refreshTimer)
+    refreshTimer = null
+  }
+})
 
 const columns = computed(() => [
   { title: '站点', dataIndex: 'site_name', key: 'site_name', width: 120 },

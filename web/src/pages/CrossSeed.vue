@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, watch } from 'vue'
-import { api } from '../api'
+import { api, errMsg } from '../api'
 import { message } from 'ant-design-vue'
 
 interface DownloaderItem {
@@ -47,7 +47,7 @@ async function loadDownloaders() {
       selectedId.value = downloaders.value[0].id
     }
   } catch (e) {
-    message.error('加载下载器失败：' + (e as Error).message)
+    message.error('加载下载器失败：' + errMsg(e))
   }
 }
 
@@ -65,7 +65,7 @@ async function loadScan(id: number) {
     scanResult.value = result
   } catch (e) {
     if (seq !== scanSeq) return
-    message.error('扫描失败：' + (e as Error).message)
+    message.error('扫描失败：' + errMsg(e))
     scanResult.value = null
   } finally {
     if (seq === scanSeq) loading.value = false

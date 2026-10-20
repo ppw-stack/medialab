@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
-import { api } from '../api'
+import { api, errMsg } from '../api'
 import { message } from 'ant-design-vue'
 
 interface Downloader {
@@ -39,18 +39,10 @@ const data = ref<Downloader[]>([])
 const editing = ref<Downloader | null>(null)
 const creating = ref(false)
 const testing = ref(false)
-const testResult = ref<{ reachable: boolean; detail: string; capabilities?: string[]; supports_data_deletion?: boolean } | null>(null)
+const testResult = ref<{ reachable: boolean; detail: string } | null>(null)
 const modalOpen = ref(false)
 const saving = ref(false)
 const formRef = ref<{ validate: () => Promise<unknown> } | null>(null)
-
-// 统一错误转字符串（避免 message.error 收到 [object Object]）
-function errMsg(e: unknown, fallback: string): string {
-  if (e && typeof e === 'object' && 'message' in e && typeof (e as { message: unknown }).message === 'string') {
-    return (e as { message: string }).message
-  }
-  return fallback
-}
 
 const formState = reactive<Record<string, unknown>>({
   name: '',
@@ -165,20 +157,33 @@ async function onTest(record?: Downloader) {
   testing.value = true
   testResult.value = null
   try {
-    const r = await api.post<{ reachable: boolean; detail: string; capabilities?: string[]; supports_data_deletion?: boolean }>(
-      `/downloaders/${target.id}/test`,
-      {},
-    )
-    testResult.value = {
-      reachable: r.reachable,
-      detail: r.detail,
-      capabilities: r.capabilities,
-      supports_data_deletion: r.supports_data_deletion,
+    if (record) {
+      // 列表行测连：测 DB 里已保存的配置
+      const r = await api.post<{ reachable: boolean; detail: string }>(
+        `/downloaders/${record.id}/test`,
+        {},
+      )
+      testResult.value = { reachable: r.reachable, detail: r.detail }
+    } else {
+      // 弹窗测连：用**表单里的值**测（用户可能刚改了 URL/账号/密码），
+      // 否则测出来的是旧配置，结果与表单内容矛盾
+      const r = await api.post<{ reachable: boolean; detail: string }>(
+        '/downloaders/test-config',
+        {
+          id: target.id,
+          type: formState.type,
+          url: formState.url,
+          username: formState.username,
+          password: formState.password,
+          verify_tls: formState.verify_tls,
+        },
+      )
+      testResult.value = { reachable: r.reachable, detail: r.detail }
     }
-    if (r.reachable) {
+    if (testResult.value.reachable) {
       message.success('测连成功')
     } else {
-      message.error(`测连失败：${r.detail}`)
+      message.error(`测连失败：${testResult.value.detail}`)
     }
   } catch (e) {
     message.error(errMsg(e, '测连失败'))
@@ -352,11 +357,7 @@ const columns = [
             <a-tag v-if="testResult" :color="testResult.reachable ? 'green' : 'red'">
               {{ testResult.reachable ? '✓ 已连通' : `✗ ${testResult.detail}` }}
             </a-tag>
-            <a-tag v-if="testResult?.supports_data_deletion" color="purple">支持数据删除</a-tag>
           </a-space>
-          <span v-if="testResult?.capabilities" class="mono dim">
-            能力：{{ testResult.capabilities.join(', ') }}
-          </span>
         </a-space>
       </div>
     </a-modal>

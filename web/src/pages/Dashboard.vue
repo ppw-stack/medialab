@@ -160,19 +160,19 @@ const JOB_LABELS: Record<string, string> = {
         row-key="name"
         size="middle"
       >
-        <template #bodyCell="{ record }">
+        <template #bodyCell="{ record }: { record: { name: string; enabled: boolean; running: boolean; cron: string } }">
           <div class="job-row">
             <span
               class="live-dot"
-              :class="{ 'live-dot--idle': !(record as any).running }"
+              :class="{ 'live-dot--idle': !record.running }"
             />
             <span class="job-row__name">
-              {{ JOB_LABELS[(record as any).name] || (record as any).name }}
+              {{ JOB_LABELS[record.name] || record.name }}
             </span>
-            <span class="job-row__cron mono">{{ (record as any).cron }}</span>
+            <span class="job-row__cron mono">{{ record.cron }}</span>
             <span class="job-row__state">
-              <a-tag v-if="(record as any).running" color="gold">RUNNING</a-tag>
-              <a-tag v-else-if="(record as any).enabled" color="green">READY</a-tag>
+              <a-tag v-if="record.running" color="gold">RUNNING</a-tag>
+              <a-tag v-else-if="record.enabled" color="green">READY</a-tag>
               <a-tag v-else>DISABLED</a-tag>
             </span>
           </div>

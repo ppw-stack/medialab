@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { api } from '../api'
+import { formatBytes } from '../utils/format'
 import { message } from 'ant-design-vue'
 
  interface TorrentIndexItem {
@@ -83,8 +84,6 @@ const sortOrder = ref<'asc' | 'desc'>('desc')
 const limit = ref(50)
 const offset = ref(0)
 const loading = ref(false)
-
-let timer: ReturnType<typeof setInterval> | null = null
 
 async function load(opts?: { reset?: boolean }) {
   loading.value = true
@@ -242,19 +241,15 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  if (timer) clearInterval(timer)
   if (searchTimer) clearTimeout(searchTimer)
 })
 
+/**
+ * 种子体积格式化：1 位小数，字节级整数不带小数
+ * （"500 B" / "1.5 KB" / "1.0 MB"）。
+ */
 function formatSize(n: number): string {
-  if (n < 1024) return `${n} B`
-  const units = ['KB', 'MB', 'GB', 'TB']
-  let v = n / 1024
-  for (const u of units) {
-    if (v < 1024) return `${v.toFixed(1)} ${u}`
-    v /= 1024
-  }
-  return `${v.toFixed(1)} PB`
+  return formatBytes(n, { decimals: 1, integerBytes: true })
 }
 
 function formatDate(s: string | null): string {
@@ -262,10 +257,6 @@ function formatDate(s: string | null): string {
   // 后端返回 "yyyy-MM-dd HH:mm:ss" 北京时间字符串，直接截取显示
   return s.length >= 16 ? s.substring(0, 16) : s
 }
-
-function formatDateFull(s: string | null): string {
-  if (!s) return ''
-  return s}
 
 function freeTypeLabel(ft: string, discountPct?: number | null) {
   const base = FREE_TYPE_LABELS[ft] ?? { label: ft, color: 'default' }
@@ -284,7 +275,11 @@ interface Countdown {
 function countdownFor(end: string | null): Countdown {
   if (!end) return { ms: Infinity, label: '—', cls: 'countdown--none' }
   // 后端返回北京时间字符串 "yyyy-MM-dd HH:mm:ss"，需加 +08:00 让 JS 正确解析为 UTC 时间
-  const ms = new Date(end.replace(' ', 'T') + '+08:00').getTime() - Date.now()
+  const d = new Date(end.replace(' ', 'T') + '+08:00')
+  // 防御：若后端未来改返回 ISO 8601 UTC（带 Z）或其他格式，
+  // `+08:00` 拼接会产出 Invalid Date → NaN
+  if (Number.isNaN(d.getTime())) return { ms: Infinity, label: '—', cls: 'countdown--none' }
+  const ms = d.getTime() - Date.now()
   if (ms <= 0) return { ms, label: '已截止', cls: 'countdown--urgent' }
   const hours = ms / 3600 / 1000
   let cls = 'countdown--safe'
@@ -447,7 +442,7 @@ const columns = [
             <span class="site-tag mono">{{ record.site_name }}</span>
           </template>
           <template v-else-if="column.key === 'published_at'">
-            <a-tooltip v-if="record.published_at" :title="formatDateFull(record.published_at)">
+            <a-tooltip v-if="record.published_at" :title="record.published_at">
               <span class="mono dim">{{ formatDate(record.published_at) }}</span>
             </a-tooltip>
             <span v-else class="dim">—</span>
@@ -486,13 +481,13 @@ const columns = [
             <span v-else class="dim">—</span>
           </template>
           <template v-else-if="column.key === 'pushed_at'">
-            <a-tooltip v-if="record.pushed_at" :title="formatDateFull(record.pushed_at)">
+            <a-tooltip v-if="record.pushed_at" :title="record.pushed_at">
               <span class="mono dim">{{ formatDate(record.pushed_at) }}</span>
             </a-tooltip>
             <span v-else class="dim">—</span>
           </template>
           <template v-else-if="column.key === 'last_seen_at'">
-            <a-tooltip v-if="record.last_seen_at" :title="formatDateFull(record.last_seen_at)">
+            <a-tooltip v-if="record.last_seen_at" :title="record.last_seen_at">
               <span class="mono dim">{{ formatDate(record.last_seen_at) }}</span>
             </a-tooltip>
             <span v-else class="dim">—</span>

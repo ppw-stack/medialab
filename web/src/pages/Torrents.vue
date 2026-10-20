@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
-import { api } from '../api'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { api, errMsg } from '../api'
+import { formatBytes } from '../utils/format'
 import { message } from 'ant-design-vue'
 
 interface DownloaderInfo {
@@ -51,44 +52,34 @@ const selectedRowKeys = ref<string[]>([])
 const batchLoading = ref(false)
 const deleteModalOpen = ref(false)
 
+// STATE_META：后端统一状态枚举（app/adapters/downloaders/base.py 的
+// TorrentState）的值 → 展示文案/颜色。
+//
+// 必须与后端枚举**逐字一致**（值大小写敏感）：
+//   downloading / stalledDL / pausedDL / checking / seeding / uploading
+//   / pausedUP / error / missingFiles / unknown
+//
+// 各下载器原生状态由后端适配层归一（qB 的 queuedUP→seeding、
+// metaDL→checking、forcedDL→downloading 等），前端只面对统一枚举。
 const STATE_META: Record<string, { label: string; color: string }> = {
-  DOWNLOADING: { label: '下载中', color: 'blue' },
-  UPLOADING: { label: '上传中', color: 'green' },
-  SEEDING: { label: '做种中', color: 'green' },
-  PAUSED_DL: { label: '暂停下载', color: 'orange' },
-  PAUSED_UP: { label: '暂停上传', color: 'orange' },
-  STALLED_DL: { label: '下载停滞', color: 'orange' },
-  STALLED_UP: { label: '上传停滞', color: 'orange' },
-  CHECKING: { label: '校验中', color: 'cyan' },
-  CHECKING_RESUME_DATA: { label: '校验恢复数据', color: 'cyan' },
-  ERROR: { label: '错误', color: 'red' },
-  MISSING_FILES: { label: '文件丢失', color: 'red' },
-  QUEUED: { label: '排队', color: 'default' },
-  ALLOCATING: { label: '分配空间', color: 'cyan' },
-  META_DL: { label: '下载元数据', color: 'cyan' },
-  FORCED_DL: { label: '强制下载', color: 'blue' },
-  FORCED_UP: { label: '强制上传', color: 'green' },
-  MOVING: { label: '移动文件', color: 'cyan' },
-  UNKNOWN: { label: '未知', color: 'default' },
   downloading: { label: '下载中', color: 'blue' },
-  uploading: { label: '上传中', color: 'green' },
-  seeding: { label: '做种中', color: 'green' },
-  pausedDL: { label: '暂停下载', color: 'orange' },
-  pausedUP: { label: '暂停上传', color: 'orange' },
   stalledDL: { label: '下载停滞', color: 'orange' },
-  stalledUP: { label: '上传停滞', color: 'orange' },
+  pausedDL: { label: '暂停下载', color: 'orange' },
   checking: { label: '校验中', color: 'cyan' },
+  seeding: { label: '做种中', color: 'green' },
+  uploading: { label: '上传中', color: 'green' },
+  pausedUP: { label: '暂停上传', color: 'orange' },
   error: { label: '错误', color: 'red' },
   missingFiles: { label: '文件丢失', color: 'red' },
-  queued: { label: '排队', color: 'default' },
   unknown: { label: '未知', color: 'default' },
 }
 
+// STATE_OPTIONS：过滤下拉。value 直接用后端枚举值，不再做
+// toLowerCase() 转换——后端枚举值是 camelCase（pausedDL / missingFiles），
+// 转小写会得到后端不认的值。
 const STATE_OPTIONS = [
   { value: '', label: '全部状态' },
-  ...Object.entries(STATE_META)
-    .filter(([key]) => key === key.toUpperCase())
-    .map(([value, m]) => ({ value, label: m.label })),
+  ...Object.entries(STATE_META).map(([value, m]) => ({ value, label: m.label })),
 ]
 
 function stateLabel(s: string): string {
@@ -115,7 +106,8 @@ async function loadItems() {
   try {
     const params = new URLSearchParams()
     if (filterState.value) {
-      params.set('state', filterState.value.toLowerCase())
+      // 不做 toLowerCase()——后端枚举值是 camelCase（pausedDL / missingFiles）
+      params.set('state', filterState.value)
     }
     if (filterCategory.value.trim()) params.set('category', filterCategory.value.trim())
     const resp = await api.get<ListResp>(
@@ -126,7 +118,12 @@ async function loadItems() {
   } catch (err) {
     items.value = []
     total.value = 0
-    console.error(`下载器 ${activeTab.value} 拉取失败：`, err)
+    // loadItems 由多个 watch 触发（切 tab / 改筛选 / 搜索防抖），
+    // 一次网络抖动会连弹多个 toast。全局限一次，避免刷屏。
+    message.error({
+      content: `下载器 ${activeTab.value} 拉取失败：${errMsg(err)}`,
+      key: 'torrents-load-failed',
+    })
   }
   finally { loading.value = false }
 }
@@ -143,7 +140,20 @@ watch(filterQ, () => {
 
 onMounted(async () => {
   await loadDownloaders()
-  await loadItems()
+  // loadDownloaders 会赋值 activeTab 触发上面的 watch 自动 loadItems，
+  // 不再手动调 loadItems——否则首屏会重复请求两次 /downloaders/{id}/torrents。
+  // 仅当没有可用下载器（activeTab 仍为 null）时才手动尝试。
+  if (activeTab.value === null) {
+    await loadItems()
+  }
+})
+
+onUnmounted(() => {
+  // 路由切走后定时器仍会触发 loadItems() 对已销毁组件的 ref 写入
+  if (searchTimer) {
+    clearTimeout(searchTimer)
+    searchTimer = null
+  }
 })
 
 const filtered = computed(() => {
@@ -152,15 +162,12 @@ const filtered = computed(() => {
   return items.value.filter((t) => t.name.toLowerCase().includes(q))
 })
 
+/**
+ * 任务体积 / 速率格式化：1 位小数，字节级整数不带小数
+ * （"500 B" / "1.5 KB" / "1.0 MB"）。
+ */
 function formatSize(n: number): string {
-  if (n < 1024) return `${n} B`
-  const units = ['KB', 'MB', 'GB', 'TB']
-  let v = n / 1024
-  for (const u of units) {
-    if (v < 1024) return `${v.toFixed(1)} ${u}`
-    v /= 1024
-  }
-  return `${v.toFixed(1)} PB`
+  return formatBytes(n, { decimals: 1, integerBytes: true })
 }
 
 function formatRate(n: number): string {

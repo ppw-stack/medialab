@@ -8,6 +8,26 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * 从 catch 的 unknown 值中提取错误消息——比 `(e as Error).message` 安全：
+ * 当 e 是非 Error 值时不会抛 TypeError。
+ *
+ * 依次尝试：
+ * 1. `Error` 实例 → `e.message`（空串则退回 fallback）
+ * 2. 字符串 → 原样
+ * 3. 带 `message` 字符串字段的普通对象（fetch 拒绝值常见形态）→ 该字段
+ * 4. 否则 → fallback
+ */
+export function errMsg(e: unknown, fallback = "未知错误"): string {
+  if (e instanceof Error) return e.message || fallback;
+  if (typeof e === "string") return e || fallback;
+  if (e && typeof e === "object" && "message" in e) {
+    const m = (e as { message: unknown }).message;
+    if (typeof m === "string" && m) return m;
+  }
+  return fallback;
+}
+
 export async function apiFetch<T = unknown>(
   path: string,
   opts: RequestInit = {}

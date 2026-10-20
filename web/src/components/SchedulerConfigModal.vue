@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { api } from '../api'
+import { api, errMsg } from '../api'
 import { message } from 'ant-design-vue'
 
 interface ParamSpec {
@@ -53,7 +53,7 @@ async function load() {
     cronDraft.value = r.cron
     paramDraft.value = { ...r.params }
   } catch (e) {
-    message.error('加载配置失败：' + (e as Error).message)
+    message.error('加载配置失败：' + errMsg(e))
   } finally {
     loading.value = false
   }
@@ -62,10 +62,31 @@ async function load() {
 function isDirty(): boolean {
   if (!config.value) return false
   if (cronDraft.value.trim() !== config.value.cron) return true
+  // 与 onSave 的判定逻辑一致：基于 fullParams 合并后比较，
+  // 避免 paramDraft 缺 key 时漏判（后端 params 比 specs 少 key 的情况）
+  return Object.entries(mergeParams()).some(
+    ([k, v]) => config.value!.params[k] !== v,
+  )
+}
+
+/**
+ * 合并后端当前值与草稿值。
+ *
+ * a-input-number 被用户清空时 v-model 会写入 `null`——那代表"没填"，
+ * 不是"要改成 null"。直接把它带上会：
+ * 1) 让 isDirty 误判为有改动；
+ * 2) 提交 null 给后端，被 `if v is not None` 静默丢弃 →
+ *    界面显示"已保存"但值没存进去。
+ * 故 null 一律按"不修改"处理（沿用后端当前值）。
+ */
+function mergeParams(): Record<string, number> {
+  if (!config.value) return {}
+  const merged: Record<string, number> = { ...config.value.params }
   for (const [k, v] of Object.entries(paramDraft.value)) {
-    if (config.value.params[k] !== v) return true
+    if (v === null || v === undefined) continue
+    merged[k] = v
   }
-  return false
+  return merged
 }
 
 async function onSave() {
@@ -81,7 +102,7 @@ async function onSave() {
       await api.post(`/scheduler/${props.jobName}/cron`, { cron: cronNew })
     }
     // 只传本任务专属的 param 全量 (覆盖该任务的 param 子集)
-    const fullParams: Record<string, number> = { ...config.value.params, ...paramDraft.value }
+    const fullParams = mergeParams()
     const dirty = Object.entries(fullParams).some(
       ([k, v]) => config.value!.params[k] !== v
     )
@@ -92,7 +113,7 @@ async function onSave() {
     emit('saved')
     emit('update:open', false)
   } catch (e) {
-    message.error('保存失败：' + (e as Error).message)
+    message.error('保存失败：' + errMsg(e))
   } finally {
     saving.value = false
   }
