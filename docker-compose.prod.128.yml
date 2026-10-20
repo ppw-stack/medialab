@@ -32,10 +32,6 @@ services:
       WEB_USERNAME: ${WEB_USERNAME:-admin}
       WEB_PASSWORD: ${WEB_PASSWORD}
       WEB_TOKEN: ${WEB_TOKEN}
-      # 容器 OS 时区（影响日志前缀与 date 输出）。应用自身的时间计算
-      # 不依赖它——app/core/timeutils.py 固定用 ZoneInfo("Asia/Shanghai")，
-      # 调度器用 settings.timezone。
-      TZ: ${TZ:-Asia/Shanghai}
       # SQLite 日志模式：DELETE（与 dev 一致）
       # WAL 会在数据目录留 -wal/-shm 文件，Unraid 上备份/替换 .db 时
       # 容易漏掉这两个文件导致数据不一致。DELETE 模式每次提交即落盘。

@@ -17,7 +17,6 @@ qBittorrent 均已实现（错误码/错误描述由 adapter 归一到统一契�
 """
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -25,6 +24,7 @@ from sqlalchemy import select
 
 from app.adapters.downloaders.base import DownloaderError
 from app.core.logging import get_logger
+from app.core.timeutils import bj_now
 from app.db.models import DownloaderInstance
 from app.db.session import session_scope
 from app.services.factory import get_factory
@@ -316,7 +316,7 @@ class CrossSeedMonitorService:
         :meth:`app.adapters.downloaders.base.DownloaderAdapter.list_torrents_with_errors`:
         id / hash / name / size / status / error_code / error_string。
         """
-        scanned_at = time.strftime("%Y-%m-%d %H:%M:%S")
+        scanned_at = bj_now()
         anomalies: list[AnomalyItem] = []
         # 统计: 按 (原始 name, size_bytes) 精确匹配, 不归一
         groups: dict[tuple[str, int], dict[str, Any]] = {}
