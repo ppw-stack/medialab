@@ -57,12 +57,15 @@
 > | 文件 | 目标 | 端口 | 数据 | 启动方式 |
 > |---|---|---|---|---|
 > | `docker-compose.yml` | dev（本机） | 8080 | `./data-dev` | `build` 本地构建 |
-> | `docker-compose.prod.yml` | **本机** prod | 8081 | `./data-prod` | `build` 本地构建 |
+> | `docker-compose.prod.yml` | **本机** prod | 8091 | `./data-prod` | `build` 本地构建 |
 > | `docker-compose.prod.128.yml` | **远端** prod（128） | 8091 | `/mnt/user/appdata/seedhelper/data` | 拉 Docker Hub 镜像，无 `build` |
 >
-> `scripts/deploy.sh prod` 用的是 **`docker-compose.prod.yml`**（本机 8081），
+> `scripts/deploy.sh prod` 用的是 **`docker-compose.prod.yml`**（本机 8091），
 > **不是** 128 那套。部署到 128 要手动用 `docker-compose.prod.128.yml`（见 §9）。
-> 本机当前没有跑 8081 那套（只有 `seedhelper-dev` 在运行）。
+> 本机当前没有跑 prod 那套（只有 `seedhelper-dev` 在运行）。
+>
+> 注：两个 prod 的**宿主端口都是 8091**（容器内都是 8080）——本机与 128
+> 是不同机器，不冲突。8091 是为了避开 8081（本机 qBittorrent 宿主端口）。
 
 ## 4. 常用地址与端点
 
@@ -208,7 +211,7 @@ cd web && npx playwright test
 
 # 部署
 ./scripts/deploy.sh dev deploy      # dev：build + up + healthcheck（本机 8080）
-./scripts/deploy.sh prod deploy     # 本机 prod（8081，非 128！见 §3）
+./scripts/deploy.sh prod deploy     # 本机 prod（8091，非 128！见 §3）
 ./scripts/deploy.sh status          # 查状态
 ./scripts/deploy.sh prod logs       # 跟日志
 

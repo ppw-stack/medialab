@@ -1,6 +1,6 @@
-# 生产环境（端口 8081，数据 ./data-prod/，独立配置 .env.prod）
+# 生产环境（端口 8091，数据 ./data-prod/，独立配置 .env.prod）
 # 与 docker-compose.yml (dev) 共享同一镜像但完全独立的数据/配置：
-# - 不同端口（dev:8080 / prod:8081）
+# - 不同端口（dev:8080 / prod:8091，避开 8081 qBittorrent）
 # - 不同 SQLite DB（dev:./data-dev / prod:./data-prod）
 # - 不同日志（dev:./logs-dev / prod:./logs-prod）
 # - 不同 WEB_TOKEN（互不授权）

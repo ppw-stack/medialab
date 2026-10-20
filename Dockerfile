@@ -50,7 +50,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM ${PY_IMAGE} AS runtime
 
 # tini：PID 1 与信号处理（优雅停机、FR-8.2）
-# curl：HEALTHCHECK；ca-certificates：HTTPS 访问 PT 站
+# curl：docker-compose 的 healthcheck 用；ca-certificates：HTTPS 访问 PT 站
 RUN apt-get update && \
     apt-get install -y --no-install-recommends tini curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
@@ -83,8 +83,8 @@ USER seedhelper
 
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8080/healthz || exit 1
+# healthcheck 在 docker-compose*.yml 中按部署级定义（不同环境可调）
+# 此处不重复维护，避免两处参数不一致
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 # --no-access-log 由 compose 通过命令行 args 覆盖（默认开 access log 用于生产可观测）

@@ -3,7 +3,7 @@ import vue from '@vitejs/plugin-vue'
 
 const BACKEND_PORT = process.env.VITE_BACKEND_PORT
   ? Number(process.env.VITE_BACKEND_PORT)
-  : 18180
+  : 8080  // 与 app/core/config.py 的 web_port 默认值一致
 
 // https://vite.dev/config/
 export default defineConfig({

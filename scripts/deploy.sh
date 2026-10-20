@@ -78,7 +78,17 @@ check_all() {
 do_build() { local env="$1"; local cf; cf=$(eval "$( [ "$env" = dev ] && echo dev_compose || echo prod_compose )"); hdr "[$env] build"; $cf build; }
 do_up() { local env="$1"; local cf; cf=$(eval "$( [ "$env" = dev ] && echo dev_compose || echo prod_compose )"); hdr "[$env] up"; $cf up -d; $cf ps; }
 do_down() { local env="$1"; local cf; cf=$(eval "$( [ "$env" = dev ] && echo dev_compose || echo prod_compose )"); hdr "[$env] down"; $cf down; }
-do_logs() { local env="$1"; local cf; cf=$(eval "$( [ "$env" = dev ] && echo dev_compose || echo prod_compose )"); $cf logs -f seedhelper-$env; }
+do_logs() {
+  local env="$1"
+  local cf
+  cf=$(eval "$( [ "$env" = dev ] && echo dev_compose || echo prod_compose )")
+  # all 模式下不能 -f（dev 的 -f 永不退出，prod logs 永远执行不到）
+  if [ "$ENV" = "all" ]; then
+    $cf logs --tail=200 seedhelper-$env
+  else
+    $cf logs -f seedhelper-$env
+  fi
+}
 do_status() {
   local env="$1"
   local port=$([ "$env" = dev ] && echo 8080 || echo 8091)
@@ -130,7 +140,7 @@ SeedHelper 一键部署脚本（dev / prod 双环境）
 
 env:
   dev      开发环境（端口 8080，数据 data-dev/，.env）
-  prod     生产环境（端口 8081，数据 data-prod/，.env.prod）
+  prod     生产环境（端口 8091，数据 data-prod/，.env.prod）
   all      两套都操作
 
 command:

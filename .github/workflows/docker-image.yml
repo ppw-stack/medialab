@@ -22,14 +22,15 @@ jobs:
       cancel-in-progress: true
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # 固定到完整 commit SHA 防止 tag 被劫持后执行恶意代码
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2  # v3.10.0
 
       - name: Log in to Docker Hub
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567  # v3.3.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -37,7 +38,7 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96  # v5.6.1
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -54,7 +55,7 @@ jobs:
             org.opencontainers.image.licenses=MIT
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@48aba3b46d1b1fec4febb7c5d0c644b249a11355  # v6.10.0
         with:
           context: .
           file: ./Dockerfile
@@ -68,6 +69,13 @@ jobs:
 
       - name: Set Docker Hub repo visibility to public
         if: github.event_name != 'pull_request'
+        # 非关键步骤：镜像已构建推送成功，这步失败只导致镜像保持私有
+        #（128 主机 pull 会失败）。
+        #
+        # continue-on-error 的语义：步骤失败**不会**让 job 变红，GitHub 也不
+        # 会为它渲染注解（`::error::` 会被吞掉）。所以下面在 run 里用
+        # `::warning::` 显式打一条注解——这样"镜像可能不可拉取"会在
+        # workflow 页面直接可见，而不是只躺在步骤日志里。
         continue-on-error: true
         env:
           DH_NAMESPACE: ppw111
@@ -96,7 +104,7 @@ jobs:
             sleep 3
           done
           if [ -z "$JWT" ]; then
-            echo "::error::failed to obtain Docker Hub JWT after 5 attempts"
+            echo "::warning::无法获取 Docker Hub JWT（重试 5 次失败），镜像可能保持私有，128 主机 pull 会失败"
             exit 1
           fi
           for i in 1 2 3 4 5; do
@@ -115,5 +123,5 @@ jobs:
             fi
             sleep 3
           done
-          echo "::error::failed to set visibility=public for ${DH_NAMESPACE}/${DH_REPO}"
+          echo "::warning::设置 ${DH_NAMESPACE}/${DH_REPO} 为 public 失败，镜像可能保持私有，128 主机 pull 会失败"
           exit 1

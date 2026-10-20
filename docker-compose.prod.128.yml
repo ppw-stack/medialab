@@ -11,7 +11,7 @@
 #
 # 启动（从本机推代码后，在 128 上执行）：
 #   cd /mnt/user/appdata/seedhelper/app
-#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+#   docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d
 # 或：
 #   ./scripts/deploy.sh prod
 #
