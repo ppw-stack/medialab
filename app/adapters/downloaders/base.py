@@ -1,10 +1,11 @@
 """下载器适配层（FR-1）。
 
-4 个核心契约方法：
+5 个核心契约方法：
 1. ping: 连通性检测
 2. add_torrent: 新增种子
 3. list_torrents: 查询种子列表
 4. set_pause: 修改状态（暂停/恢复）
+5. remove: 删除任务（delete_data 独立控制是否连磁盘数据一起删）
 
 附加可选：
 - close: 释放连接池（优雅停机用）
@@ -15,11 +16,30 @@
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
+
+#: BTIH infohash：40 位 hex。拒绝 ``all`` / 通配等会批量误删的值——
+#: qBittorrent 会把 ``all`` 解析为"应用到所有种子"，可一次删光全部任务及数据。
+_VALID_INFOHASH_RE: re.Pattern[str] = re.compile(r"^[a-fA-F0-9]{40}$")
+
+
+def validate_infohashes(hashes: Sequence[str]) -> None:
+    """校验 hash 列表全部是 40 位 hex（FR 删除底线：拒绝 all/通配）。
+
+    下载器适配器的 ``remove`` / ``set_pause`` 入口应调用本函数，避免
+    上游（API 路由已校验，但 service / 测试 / 未来入口无法保证）传入
+    ``all`` 等通配值导致批量误删。
+    """
+    bad = [h for h in hashes if not _VALID_INFOHASH_RE.fullmatch(h)]
+    if bad:
+        raise ValueError(
+            f"非法 infohash：{bad[:5]}（必须是 40 位 hex，不支持 all/通配）"
+        )
 
 
 class TorrentState(StrEnum):
@@ -35,6 +55,45 @@ class TorrentState(StrEnum):
     ERROR = "error"
     MISSING_FILES = "missingFiles"
     UNKNOWN = "unknown"
+
+    @classmethod
+    def parse(cls, value: str) -> TorrentState:
+        """宽松解析：接受枚举值、枚举名（大小写不敏感）与 snake_case 别名。
+
+        枚举的**值**是 camelCase（``pausedDL`` / ``missingFiles``，与
+        qBittorrent 原生 state 一致），而**名**是 UPPER_SNAKE（``PAUSED_DL``）。
+        前端下拉框用的是名，外部调用方常用 snake_case，故三种写法都接受。
+
+        :raises ValueError: 无法识别时抛出（调用方据此返回 400）。
+        """
+        raw = (value or "").strip()
+        if not raw:
+            raise ValueError("state 不能为空")
+        # 1) 精确值优先
+        try:
+            return cls(raw)
+        except ValueError:
+            pass
+        # 2) 枚举名（大小写不敏感）：PAUSED_DL / paused_dl
+        upper = raw.upper()
+        for member in cls:
+            if member.name == upper:
+                return member
+        # 3) snake_case ↔ camelCase 互转：paused_dl → pausedDL
+        camel = "".join(
+            part.capitalize() if i else part
+            for i, part in enumerate(raw.replace("-", "_").split("_"))
+        )
+        for member in cls:
+            if member.value.lower() == camel.lower():
+                return member
+            if member.name.lower() == raw.replace("-", "_").lower():
+                return member
+        raise ValueError(
+            f"未知 state: {value!r}（可用："
+            + ", ".join(sorted(m.value for m in cls))
+            + "）"
+        )
 
     @property
     def is_completed(self) -> bool:

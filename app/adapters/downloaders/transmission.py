@@ -26,6 +26,7 @@ from app.adapters.downloaders.base import (
     TorrentHandle,
     TorrentInfo,
     TorrentState,
+    validate_infohashes,
 )
 from app.core.logging import get_logger
 
@@ -197,7 +198,7 @@ class TransmissionAdapter(DownloaderAdapter):
 
     @staticmethod
     def _status_to_state(
-        status: int, percent: float, rate_dl: int
+        status: int, percent: float, rate_ul: int
     ) -> TorrentState:
         """TR status 码 → TorrentState。
 
@@ -205,6 +206,11 @@ class TransmissionAdapter(DownloaderAdapter):
         0=stopped, 1=queued verify, 2=verifying,
         3=queued download, 4=downloading,
         5=queued seed, 6=seeding
+
+        ``rate_ul`` 为上传速率（``rateUpload``）：status=6 表示已完成在做种，
+        有上传活动（``rate_ul > 0``）时归为 UPLOADING，否则 SEEDING。
+        之前误用 ``rateDownload``（下载速率），做种阶段下载速率本就接近 0，
+        会导致几乎所有做种种子都被判为 SEEDING 而非 UPLOADING。
         """
         if status == 0:
             if percent >= 1.0:
@@ -217,18 +223,19 @@ class TransmissionAdapter(DownloaderAdapter):
         if status == 5:
             return TorrentState.SEEDING
         if status == 6:
-            return TorrentState.UPLOADING if rate_dl > 0 else TorrentState.SEEDING
+            return TorrentState.UPLOADING if rate_ul > 0 else TorrentState.SEEDING
         return TorrentState.UNKNOWN
 
     @staticmethod
     def _row_to_info(row: dict[str, Any]) -> TorrentInfo:
         percent = float(row.get("percentDone") or 0)
         rate_dl = int(row.get("rateDownload") or 0)
+        rate_ul = int(row.get("rateUpload") or 0)
         raw_status = row.get("status")
         if raw_status is None:
             raw_status = -1
         state = TransmissionAdapter._status_to_state(
-            int(raw_status), percent, rate_dl
+            int(raw_status), percent, rate_ul
         )
         if row.get("errorString") and state in (
             TorrentState.DOWNLOADING,
@@ -352,6 +359,7 @@ class TransmissionAdapter(DownloaderAdapter):
     ) -> bool:
         if not hashes:
             return True
+        validate_infohashes(hashes)
         await self._rpc(
             "torrent-remove",
             {"ids": list(hashes), "delete-local-data": bool(delete_data)},
@@ -363,6 +371,7 @@ class TransmissionAdapter(DownloaderAdapter):
     ) -> bool:
         if not hashes:
             return True
+        validate_infohashes(hashes)
         method = "torrent-stop" if paused else "torrent-start"
         await self._rpc(method, {"ids": list(hashes)})
         return True

@@ -538,7 +538,8 @@ class TrApiClient:
         """
         await self._request(
             "torrent-remove",
-            {"ids": ids, "delete_local_data": delete_local_data},
+            # TR RPC 协议字段名用连字符（snake_case 会被静默忽略）
+            {"ids": ids, "delete-local-data": delete_local_data},
         )
 
     async def set_location(

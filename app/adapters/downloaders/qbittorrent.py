@@ -17,6 +17,7 @@ from app.adapters.downloaders.base import (
     TorrentHandle,
     TorrentInfo,
     TorrentState,
+    validate_infohashes,
 )
 from app.adapters.downloaders.qbittorrent_api import Qb5ApiClient, Qb5ApiError
 from app.core.logging import get_logger
@@ -72,6 +73,25 @@ _QB_STATUS_CODE: dict[str, int] = {
     "checkingResumeData": 2,
     "moving": 2,
 }
+
+
+def _completion_to_ts(value: object) -> int | None:
+    """qB ``completion_on`` → 完成时间戳；未完成返回 ``None``。
+
+    qBittorrent 对**未完成**的种子返回 ``-1``（不是 0 / None）。
+    ``-1`` 是真值，若直接写入，下游 ``if info.completed_at:`` 会把
+    未完成的种子误判为"已完成"。
+
+    qB 该字段可能是 int 或 float（不同版本 / 平台不一致），统一转 int；
+    字符串数字也接受。非法值一律按"未完成"处理（None）。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        ts = int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return None
+    return ts if ts > 0 else None
 
 
 class QbittorrentAdapter(DownloaderAdapter):
@@ -150,7 +170,9 @@ class QbittorrentAdapter(DownloaderAdapter):
                 num_connections=int(row.get("num_connections") or 0),
                 ratio=float(row.get("ratio") or 0),
                 added_at=row.get("added_on"),
-                completed_at=row.get("completion_on"),
+                # qB completion_on：未完成时返 -1（epoch 时间戳），不能直接写入。
+                # 下游 `if info.completed_at:` 会把 -1 当真值误判为已完成。
+                completed_at=_completion_to_ts(row.get("completion_on")),
                 eta=row.get("eta"),
             )
             if filt is not None and not self._matches(info, filt):
@@ -162,12 +184,16 @@ class QbittorrentAdapter(DownloaderAdapter):
         """拉取全量种子，规范化错误信息（巡查用）。
 
         qBittorrent 没有 TR 那种 tracker 错误码——它的错误体现在
-        ``state`` 上（``error`` / ``missingFiles``）以及可选的
-        ``tracker`` 字段（如 ``[DHT]`` / ``[PeX]`` 前缀含错误字样）。
+        ``state`` 上（``error`` / ``missingFiles``）。
 
         映射到统一契约：
         - ``error_code`` 0 = 无错；1 = tracker 警告；2 = tracker 错误；3 = 数据丢失
         - ``error_string`` 人类可读描述
+
+        注意：qB ``/torrents/info`` **不返回** tracker 字段，故不能从 row
+        直接取 tracker 错误文案。如需 tracker 级别详情，需按 hash 单独调
+        ``/api/v2/torrents/trackers``（开销大，本巡查场景不需要）。
+        本方法仅按 ``state`` 给出归一化错误码与中文描述。
         """
         try:
             rows: list[dict[str, Any]] = await self._qb.list_torrents()
@@ -181,13 +207,10 @@ class QbittorrentAdapter(DownloaderAdapter):
             error_string = ""
             if state == "missingFiles":
                 error_code = 3
-                error_string = str(row.get("tracker") or "") or "本地数据丢失"
+                error_string = "本地数据丢失"
             elif state == "error":
                 error_code = 2
-                error_string = str(row.get("tracker") or "") or "做种错误"
-            elif "error" in str(row.get("tracker") or "").lower():
-                error_code = 2
-                error_string = str(row.get("tracker") or "")
+                error_string = "做种错误"
             out.append({
                 "id": int(row.get("id") or 0),
                 "hash": str(row.get("hash", "")),
@@ -272,6 +295,7 @@ class QbittorrentAdapter(DownloaderAdapter):
         """附录 A：``deleteFiles`` 独立控制数据删除。"""
         if not hashes:
             return True
+        validate_infohashes(hashes)
         try:
             await self._qb.delete_torrents(list(hashes), delete_files=delete_data)
         except Qb5ApiError as exc:
@@ -281,6 +305,7 @@ class QbittorrentAdapter(DownloaderAdapter):
     async def set_pause(self, hashes: Sequence[str], paused: bool) -> bool:
         if not hashes:
             return True
+        validate_infohashes(hashes)
         # qBittorrent v5：pause=/torrents/stop, resume=/torrents/start
         try:
             if paused:

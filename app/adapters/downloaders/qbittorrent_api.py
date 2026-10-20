@@ -108,7 +108,7 @@ class Qb5ApiClient:
                 transient=False,
             )
         # ban 中直接 raise，不发请求（避免延长 ban 计时器）
-        now = asyncio.get_event_loop().time()
+        now = asyncio.get_running_loop().time()
         if now < self._ban_until:
             remaining = int(self._ban_until - now)
             raise Qb5ApiError(
@@ -145,9 +145,18 @@ class Qb5ApiClient:
         if resp.status_code == 403:
             # 检查是否 ban（qB 中文 qB 5.x 返"您的 IP 地址已被封禁"）
             body = resp.text
-            if "IP" in body or "ip" in body or "封禁" in body or "banned" in body.lower():
+            # 用更精确的子串匹配——之前 `'IP' in body` 会误判任何含 "IP"
+            # 的响应为 ban（如 "IP whitelist" 配置提示），掩盖真实 403 原因
+            body_lower = body.lower()
+            is_ban = (
+                "ip 地址已被封禁" in body
+                or "ip address has been banned" in body_lower
+                or "banned" in body_lower
+                or "封禁" in body
+            )
+            if is_ban:
                 # 设本地 ban_until = now + 30 分钟（qB 5.x 默认 ban 时长）
-                self._ban_until = asyncio.get_event_loop().time() + 30 * 60
+                self._ban_until = asyncio.get_running_loop().time() + 30 * 60
                 raise Qb5ApiError(
                     "qBittorrent IP 已被封禁 30 分钟（密码可能错，请先确认）",
                     status_code=403,
@@ -208,7 +217,19 @@ class Qb5ApiClient:
                 transient=transient,
             )
 
-        # 2xx：尝试返回 JSON；空 body 返回 None
+        # 2xx：JSON 端点返回 dict/list；纯文本端点原样返回 str。
+        #
+        # qBittorrent WebUI API 有一批**纯文本**端点（不是 JSON）：
+        #   /api/v2/app/version         → "v5.2.4"
+        #   /api/v2/app/webapiVersion   → "2.0"
+        #   /api/v2/app/defaultSavePath → "/downloads"
+        #   /api/v2/transfer/downloadLimit → "1048576"
+        #   /api/v2/torrents/add        → "Ok." / "Fails." / 裸 hash
+        #   /api/v2/torrents/pieceHashes → 换行分隔的 hash
+        # 这些端点的调用方按文本语义消费（如 add_torrent 判 text == "Ok."），
+        # 故非 JSON 时**必须原样返回文本**，不能包成 {"raw": ...}——
+        # 包了之后 str({"raw": "Ok."}) 不再等于 "Ok."，
+        # 会把成功的推送判成失败。
         if not resp.content:
             return None
         try:
