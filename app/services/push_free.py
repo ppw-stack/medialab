@@ -157,12 +157,14 @@ class PushFreeService:
                 errors.append(
                     f"site={c.site_id} item={c.item_id}: download_torrent: {exc}"
                 )
+                await self._mark_push_failed(c.index_id)
                 continue
             if not torrent_bytes or not torrent_bytes.startswith(b"d"):
                 skipped_dl_failed += 1
                 errors.append(
                     f"site={c.site_id} item={c.item_id}: 响应不是 bencoded torrent"
                 )
+                await self._mark_push_failed(c.index_id)
                 continue
 
             # 3.2) 解析 info_hash
@@ -172,6 +174,7 @@ class PushFreeService:
                 errors.append(
                     f"site={c.site_id} item={c.item_id}: infohash 解析失败"
                 )
+                await self._mark_push_failed(c.index_id)
                 continue
 
             # 3.3) 去重（运行时再查一次，防止两作业并发）
@@ -197,6 +200,7 @@ class PushFreeService:
                 errors.append(
                     f"site={c.site_id} item={c.item_id}: add_torrent: {exc}"
                 )
+                await self._mark_push_failed(c.index_id)
                 continue
 
             # 3.5) 更新 torrent_index.push_status = pushed
@@ -344,6 +348,37 @@ class PushFreeService:
             TorrentIndex.push_status == PushStatus.PUSHED,
         )
         return (await session.execute(stmt)).first() is not None
+
+    async def _mark_push_failed(self, index_id: int) -> None:
+        """标记推送失败（``push_status = failed``）。
+
+        让失败可追溯——原先失败只落在作业的 errors 列表里，DB 无痕迹，
+        ``push_status`` 的 ``failed`` 取值从未被写入（死语义）。
+
+        不会覆盖已 ``pushed`` 的行：并发场景下另一作业可能刚推成功，
+        覆盖会把成功记录改成失败。
+
+        注：候选查询条件是 ``push_status IS NULL OR != pushed``，故
+        ``failed`` 状态的条目**下轮仍会被选中重试**（重试语义正确）。
+        """
+        try:
+            async with session_scope() as session:
+                # push_status != PUSHED 对 NULL 求值为 NULL（不匹配），
+                # 故用 or_(NULL, != PUSHED) 显式覆盖"从未推过"的行
+                await session.execute(
+                    update(TorrentIndex)
+                    .where(
+                        TorrentIndex.id == index_id,
+                        or_(
+                            TorrentIndex.push_status.is_(None),
+                            TorrentIndex.push_status != PushStatus.PUSHED,
+                        ),
+                    )
+                    .values(push_status=PushStatus.FAILED)
+                )
+        except Exception as exc:
+            # 标记失败本身失败不应中断整个推送作业
+            logger.warning("标记推送失败状态失败：index_id=%d %s", index_id, exc)
 
 
 @dataclass(frozen=True, slots=True)

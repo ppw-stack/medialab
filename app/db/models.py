@@ -55,46 +55,7 @@ class PushStatus:
 class FreeSource:
     API = "api"
     LIST_TEXT = "list_text"
-    RSS_DESC = "rss_desc"
     SITE_DEFAULT = "site_default"
-    LEARNED = "learned"
-
-
-class CooldownReason:
-    USER_REMOVED = "user_removed"
-    USER_BLACKLISTED = "user_blacklisted"
-    WINDOW_EXPIRED = "window_expired"
-    DEAD_TORRENT = "dead_torrent"
-    DISK_FULL = "disk_full"
-    DUPLICATE = "duplicate"
-    MANUAL_SKIP = "manual_skip"
-
-
-class TriggerSource:
-    SCHEDULE = "schedule"
-    MANUAL = "manual"
-    WINDOW_ABORT = "window_abort"
-    RULE = "rule"
-
-
-class SkipReason:
-    """FR-2.3 七项过滤的跳过原因（逐条可追溯）。"""
-
-    DUPLICATE_LOCAL = "duplicate_local"
-    DUPLICATE_SITE = "duplicate_site"
-    CATEGORY_MISMATCH = "category_mismatch"
-    SIZE_EXCEEDED = "size_exceeded"
-    COOLDOWN = "cooldown"
-    DISK_FULL = "disk_full"
-    PATH_INVALID = "path_invalid"
-    NO_LOCAL_MATCH = "no_local_match"
-
-
-class Decision:
-    PENDING = "pending"
-    ACCEPTED = "accepted"
-    SKIPPED = "skipped"
-    FAILED = "failed"
 
 
 #: 永久免费不参与超时中止（FR-3.0 / R10）
@@ -199,7 +160,10 @@ class TorrentIndex(Base):
     #: 最近一次拉取时间（清理过期数据参考）
     last_seen_at: Mapped[str] = mapped_column(String(32), default=_bj_now, index=True)
     #: 推送状态（NULL = 未推过；pushed = 已推到默认下载器；failed = 推送失败）
-    push_status: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    #: 索引由 __table_args__ 的 Index("ix_torrent_index_push_status") 提供——
+    #: 此处不要加 index=True，否则与 __table_args__ 生成同名索引，
+    #: create_all 在新库上会报 "index already exists"。
+    push_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
     #: 推送时间
     pushed_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
