@@ -10,7 +10,6 @@ interface Site {
   rss_url_masked: string;
   has_apikey: boolean;
   has_cookies: boolean;
-  min_interval_minutes: number;
   created_at: string;
   updated_at: string;
 }
@@ -77,7 +76,6 @@ function onCreate() {
   modalOpen.value = true
   Object.assign(formState, {
     adapter: 'mteam',
-    min_interval_minutes: 60,
     enabled: true,
     name: '',
     domain: '',
@@ -169,7 +167,6 @@ const columns = [
   { title: '域名', key: 'domain' },
   { title: '凭据', key: 'credentials' },
   { title: '用户数据', key: 'userdata', width: 100 },
-  { title: '间隔', key: 'interval', width: 90 },
   { title: '启用', key: 'enabled', width: 80 },
   { title: '', key: 'action', width: 280 },
 ]
@@ -253,9 +250,6 @@ function fmtBytes(b: number): string {
             <a-button size="small" type="link" @click="openUserDataDrawer(record)">
               查看
             </a-button>
-          </template>
-          <template v-else-if="column.key === 'interval'">
-            <span class="mono">{{ record.min_interval_minutes }}m</span>
           </template>
           <template v-else-if="column.key === 'enabled'">
             <a-switch
@@ -371,10 +365,6 @@ function fmtBytes(b: number): string {
             :placeholder="editing && (editing as any).has_cookies ? '已配置（留空保留）' : '浏览器 DevTools → Application → Cookies'"
             autocomplete="new-password"
           />
-        </a-form-item>
-
-        <a-form-item label="站点拉取最小间隔 (分钟)" name="min_interval_minutes">
-          <a-input-number v-model:value="formState.min_interval_minutes" :min="15" :max="1440" style="width: 100%" />
         </a-form-item>
 
         <a-form-item name="enabled" label="启用">

@@ -106,7 +106,6 @@ class Site(Base):
     apikey: Mapped[str | None] = mapped_column(Text, nullable=True)
     cookies: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    min_interval_minutes: Mapped[int] = mapped_column(Integer, default=60)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
     created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)

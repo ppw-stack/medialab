@@ -33,7 +33,6 @@ class SiteCreate(BaseModel):
     apikey: str | None = Field(default=None, max_length=256)
     cookies: str | None = Field(default=None, max_length=4096)
     enabled: bool = True
-    min_interval_minutes: int | None = Field(default=None, ge=15, le=1440)
 
 
 class SiteUpdate(BaseModel):
@@ -48,7 +47,6 @@ class SiteUpdate(BaseModel):
     apikey: str | None = None
     cookies: str | None = None
     enabled: bool | None = None
-    min_interval_minutes: int | None = Field(default=None, ge=15, le=1440)
     adapter: (
         Literal[
             "mteam", "hhanclub", "hdsky", "ourbits", "audiences",
@@ -93,7 +91,6 @@ class SiteOut(BaseModel):
     rss_url_masked: str
     has_apikey: bool
     has_cookies: bool
-    min_interval_minutes: int
     created_at: str
     updated_at: str
 
@@ -153,7 +150,6 @@ async def create_site(payload: SiteCreate) -> SiteOut:
             rss_url=payload.rss_url,
             apikey=payload.apikey,
             cookies=payload.cookies,
-            min_interval_minutes=payload.min_interval_minutes or 60,
         )
         session.add(site)
         await session.flush()
@@ -372,7 +368,6 @@ def _to_out(site: Site) -> SiteOut:
         rss_url_masked=_mask_rss_url(site.rss_url),
         has_apikey=bool(site.apikey),
         has_cookies=bool(site.cookies),
-        min_interval_minutes=site.min_interval_minutes,
         created_at=site.created_at or "",
         updated_at=site.updated_at or "",
     )

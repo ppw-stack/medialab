@@ -437,6 +437,9 @@ class SingleWriterQueue:
                 "ALTER TABLE torrent_index ADD COLUMN pushed_at VARCHAR(32)",
                 # 下载器辅种标记字段 (FR 跨种/辅种监测, 2026-10-18)
                 "ALTER TABLE downloader_instances ADD COLUMN is_cross_seed BOOLEAN DEFAULT 0",
+                # 站点最小拉取间隔字段删除（7ef7c68 已移除 FR-2.2 下限逻辑，
+                # 字段成死配置：存在/可配/校验但拉取作业从不读 → 误导用户）
+                "ALTER TABLE sites DROP COLUMN min_interval_minutes",
                 # 站点用户数据契约精简 (FR-1.6 v2)：移除 username/userid/level/join_at/
                 # bonus/ratio/seeding_size/leeching_size/message_unread/hr_status
                 "ALTER TABLE site_user_data DROP COLUMN username",
