@@ -149,6 +149,39 @@ async function onTestRow(s: Site) {
   }
 }
 
+// ---- 拉取测试（feed-test）----
+interface FeedTestResult {
+  ok: boolean
+  status: string
+  item_count: number
+  duration_ms: number
+  sample_titles: string[]
+  error: string
+}
+const feedTestId = ref<number | null>(null)
+const feedTestModalOpen = ref(false)
+const feedTestResult = ref<FeedTestResult | null>(null)
+
+async function onFeedTest(s: Site) {
+  feedTestId.value = s.id
+  feedTestResult.value = null
+  feedTestModalOpen.value = true
+  try {
+    feedTestResult.value = await api.get<FeedTestResult>(`/sites/${s.id}/feed-test`)
+  } catch (exc) {
+    feedTestResult.value = {
+      ok: false,
+      status: 'request_error',
+      item_count: 0,
+      duration_ms: 0,
+      sample_titles: [],
+      error: exc instanceof Error ? exc.message : '请求失败',
+    }
+  } finally {
+    feedTestId.value = null
+  }
+}
+
 async function onToggleEnabled(s: Site, next: boolean) {
   // 乐观更新：先改 UI，失败回滚
   const prev = s.enabled
@@ -274,6 +307,14 @@ function fmtBytes(b: number): string {
                   :class="`test-result-dot--${testResults[record.id].status}`"
                 />
               </a-tooltip>
+              <a-button
+                size="small"
+                type="link"
+                :loading="feedTestId === record.id"
+                @click="onFeedTest(record)"
+              >
+                拉取测试
+              </a-button>
               <a-button size="small" type="link" @click="onEdit(record)">编辑</a-button>
               <a-popconfirm title="确认删除？" @confirm="onDelete(record.id)">
                 <a-button size="small" type="link" danger>删除</a-button>
@@ -284,6 +325,37 @@ function fmtBytes(b: number): string {
       </a-table>
       </div>
     </section>
+
+    <a-modal
+      :open="feedTestModalOpen"
+      title="拉取测试"
+      :footer="null"
+      @cancel="feedTestModalOpen = false"
+    >
+      <a-spin :spinning="feedTestResult === null">
+        <template v-if="feedTestResult">
+          <a-descriptions :column="1" bordered size="small">
+            <a-descriptions-item label="结果">
+              <a-tag :color="feedTestResult.ok ? 'green' : 'red'">
+                {{ feedTestResult.ok ? '成功' : '失败' }}
+              </a-tag>
+              <span class="mono">{{ feedTestResult.status }}</span>
+            </a-descriptions-item>
+            <a-descriptions-item label="拉取条数">{{ feedTestResult.item_count }}</a-descriptions-item>
+            <a-descriptions-item label="耗时">{{ feedTestResult.duration_ms }}ms</a-descriptions-item>
+            <a-descriptions-item v-if="feedTestResult.error" label="错误">
+              <span style="color: var(--accent-red)">{{ feedTestResult.error }}</span>
+            </a-descriptions-item>
+          </a-descriptions>
+          <template v-if="feedTestResult.sample_titles.length">
+            <div class="label-caps" style="margin: var(--sp-3) 0 var(--sp-2)">样本标题（前 5 条）</div>
+            <ul class="feed-test-samples">
+              <li v-for="(t, i) in feedTestResult.sample_titles" :key="i">{{ t }}</li>
+            </ul>
+          </template>
+        </template>
+      </a-spin>
+    </a-modal>
 
     <a-drawer
       :open="drawerOpen"
@@ -403,5 +475,18 @@ function fmtBytes(b: number): string {
 .test-result-dot--error {
   background: var(--status-red, #ef4444);
   box-shadow: 0 0 6px rgba(239, 68, 68, 0.4);
+}
+
+.feed-test-samples {
+  margin: 0;
+  padding-left: 1.2em;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.feed-test-samples li {
+  margin: 2px 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>
