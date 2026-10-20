@@ -8,12 +8,12 @@
 """
 from __future__ import annotations
 
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi import Query as QueryParam
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import CursorResult, func, or_, select
 
 from app.adapters.downloaders.base import AddTorrentPayload, DownloaderError
 from app.adapters.sites._bencode import infohash_from_torrent
@@ -362,15 +362,44 @@ async def push_torrent_index(index_id: int, payload: PushRequest) -> PushRespons
         raise HTTPException(status_code=502, detail=f"下载器推送失败：{exc}") from exc
 
     # 7) 更新 torrent_index.push_status = pushed
+    # TOCTOU 防御：在 update 语句加 `WHERE push_status != 'pushed'` 条件
+    # 并检查 affected_rows——两个并发请求都通过了第 3 步的去重检查时，
+    # 只有第一个 update 会命中行（push_status 仍非 pushed），第二个的
+    # affected_rows=0 表示已被并发推送，本次视为幂等成功。
+    #
+    # 注意 SQL 三值逻辑：`push_status != 'pushed'` 对 NULL 求值为 NULL
+    # （不匹配）。而 push_status 列 nullable，NULL = "从未推过"——
+    # 正是本方法要更新的行！故必须用 or_(IS NULL, != PUSHED) 显式覆盖，
+    # 否则从未推过的行永远匹配不上，rowcount 恒为 0，
+    # 会误判成"已被并发推送"而永不写入 pushed 状态。
     async with session_scope() as session:
-        await session.execute(
-            update(TorrentIndex)
-            .where(TorrentIndex.id == index_id)
-            .values(
-                push_status=PushStatus.PUSHED,
-                pushed_at=bj_now(),
-                info_hash=info_hash,
-            )
+        result = cast(
+            CursorResult[object],
+            await session.execute(
+                update(TorrentIndex)
+                .where(
+                    TorrentIndex.id == index_id,
+                    or_(
+                        TorrentIndex.push_status.is_(None),
+                        TorrentIndex.push_status != PushStatus.PUSHED,
+                    ),
+                )
+                .values(
+                    push_status=PushStatus.PUSHED,
+                    pushed_at=bj_now(),
+                    info_hash=info_hash,
+                )
+            ),
+        )
+    if result.rowcount == 0:
+        # 并发推送：另一个请求已先一步标记为 pushed
+        logger.info(
+            "手动推送 index_id=%d：并发请求已先推送，本次视为幂等成功",
+            index_id,
+        )
+        return PushResponse(
+            ok=True, detail="该种已被并发请求推送", info_hash=info_hash,
+            downloader_id=dl_id,
         )
 
     logger.info("手动推送 index_id=%d → downloader=%d item=%s", index_id, dl_id, item_id)

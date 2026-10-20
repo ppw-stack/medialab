@@ -21,7 +21,6 @@
 from __future__ import annotations
 
 import json
-from contextlib import suppress
 from typing import Any
 
 from apscheduler.triggers.cron import CronTrigger
@@ -61,8 +60,6 @@ class RunJobResult(BaseModel):
 @router.get("/scheduler", summary="调度作业状态")
 async def scheduler_status() -> dict[str, Any]:
     """返回调度中心当前注册的作业列表。"""
-    from app.core.config import get_settings
-
     settings = get_settings()
     return {
         "enabled": settings.scheduler_enabled,
@@ -108,11 +105,36 @@ class RuntimeParamsOut(BaseModel):
 
 
 class RuntimeParamsUpdateIn(BaseModel):
-    """运行时参数更新请求（部分更新）。"""
+    """运行时参数更新请求（部分更新）。
+
+    字段必须与 :data:`app.services.runtime_params.PARAM_SPECS` 一致——
+    之前手写字段列表漏了 ``push_download_interval_ms``，该参数被 pydantic
+    静默丢弃（前端显示"已保存"，实际没存进去）。
+    下面的 `_assert_params_model_covers_specs()` 在导入时校验两者一致，
+    新增 PARAM_SPECS 条目而忘了加字段会立刻报错（而不是静默丢数据）。
+    """
 
     push_min_remaining_hours: int | None = None
     push_max_per_run: int | None = None
     monitor_pre_pause_minutes: int | None = None
+    push_download_interval_ms: int | None = None
+
+
+def _assert_params_model_covers_specs() -> None:
+    """校验更新模型覆盖了全部已注册参数（导入时执行）。"""
+    from app.services.runtime_params import PARAM_SPECS
+
+    spec_keys = {s.key for s in PARAM_SPECS}
+    model_keys = set(RuntimeParamsUpdateIn.model_fields)
+    missing = spec_keys - model_keys
+    if missing:
+        raise RuntimeError(
+            "RuntimeParamsUpdateIn 缺少已注册参数："
+            f"{sorted(missing)}（新增 PARAM_SPECS 后必须同步加字段）"
+        )
+
+
+_assert_params_model_covers_specs()
 
 
 @router.get("/scheduler/runtime-params", summary="查询作业运行参数")
@@ -263,8 +285,11 @@ async def list_job_runs(
     for r in rows:
         parsed: Any = None
         if r.result_json:
-            with suppress(Exception):
+            try:
                 parsed = json.loads(r.result_json)
+            except (ValueError, TypeError) as exc:
+                # result_json 应是合法 JSON（内部写入），损坏时记日志便于排查
+                logger.warning("JobRun id=%s result_json 解析失败：%s", r.id, exc)
         items.append(JobRunItem.from_row(r, parsed_result=parsed))
 
     return JobRunPage(total=total, items=items)
@@ -282,8 +307,10 @@ async def get_job_run(run_id: int) -> JobRunItem:
 
     parsed: Any = None
     if r.result_json:
-        with suppress(Exception):
+        try:
             parsed = json.loads(r.result_json)
+        except (ValueError, TypeError) as exc:
+            logger.warning("JobRun id=%s result_json 解析失败：%s", r.id, exc)
     return JobRunItem.from_row(r, parsed_result=parsed)
 
 

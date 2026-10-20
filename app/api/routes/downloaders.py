@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import re
+from contextlib import suppress
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.downloaders.base import (
@@ -17,7 +18,7 @@ from app.adapters.downloaders.base import (
 )
 from app.api.auth import require_session
 from app.core.logging import get_logger
-from app.db.models import DownloaderInstance, PushStatus, TorrentIndex
+from app.db.models import DownloaderInstance
 from app.db.session import session_scope
 from app.services.factory import get_factory
 
@@ -74,6 +75,22 @@ class DownloaderUpdate(BaseModel):
     enabled: bool | None = None
     verify_tls: bool | None = None
     is_cross_seed: bool | None = None
+
+
+class DownloaderTestIn(BaseModel):
+    """测连请求体（测**未保存**的表单值）。
+
+    编辑弹窗里用户可能刚改了 URL / 账号 / 密码就点"测连"——
+    若只按 id 测 DB 里的旧配置，测出来的结果与表单内容矛盾。
+    故提供"按表单值测"的入口：全部字段可选，缺省时回落到 DB 里的值。
+    """
+
+    id: int
+    type: str | None = Field(default=None, description="下载器类型")
+    url: str | None = Field(default=None, max_length=512)
+    username: str | None = Field(default=None, max_length=128)
+    password: str | None = Field(default=None, max_length=512)
+    verify_tls: bool | None = None
 
 
 class DownloaderOut(BaseModel):
@@ -234,19 +251,10 @@ async def delete_downloader(payload: DownloaderDeleteIn) -> dict[str, int]:
         ).scalar_one_or_none()
         if row is None:
             raise HTTPException(status_code=404, detail="下载器不存在")
-        # 检查引用：有推送过的种子则拒绝物理删除
-        ref_count = (
-            await session.execute(
-                select(func.count())
-                .select_from(TorrentIndex)
-                .where(TorrentIndex.push_status == PushStatus.PUSHED)
-            )
-        ).scalar_one()
-        if ref_count:
-            raise HTTPException(
-                status_code=409,
-                detail=f"下载器下还有 {ref_count} 条任务，请先清理或迁移后再删除",
-            )
+        # 删除下载器实例配置仅是 DB 层操作——`TorrentIndex` 没有
+        # `downloader_id` 列（推送状态记录的是"种子级"而非"下载器级"），
+        # 故无法按下载器维度做引用计数。已在下载器里运行的种子
+        # 由用户在下载器控制台自行清理，删除配置不阻塞于历史推送。
         await session.execute(
             delete(DownloaderInstance).where(DownloaderInstance.id == payload.id)
         )
@@ -275,6 +283,79 @@ async def test_downloader(downloader_id: int) -> dict[str, Any]:
         }
     except DownloaderError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/test-config", summary="测连（用未保存的表单值）")
+async def test_downloader_config(payload: DownloaderTestIn) -> dict[str, Any]:
+    """用**表单里的值**测连（不落库）。
+
+    编辑弹窗的"测连"按钮与凭据输入框相邻，用户很可能刚改完 URL/账号/
+    密码就点测连。按 id 测 DB 里的旧配置会得到与表单矛盾的结果
+    （表单看着是新的，测的是旧的）。故这里用表单值构造临时适配器测。
+
+    未提供的字段回落到 DB 里的值（编辑时只改了部分字段也能测）。
+    """
+    async with session_scope() as session:
+        row = (
+            await session.execute(
+                select(DownloaderInstance).where(DownloaderInstance.id == payload.id)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(status_code=404, detail="下载器不存在")
+
+    url = payload.url or row.url
+    username = payload.username if payload.username is not None else row.username
+    password = payload.password if payload.password is not None else row.password
+    verify_tls = (
+        payload.verify_tls if payload.verify_tls is not None else row.verify_tls
+    )
+    dl_type = payload.type or row.type
+
+    # 构造**一次性**适配器（不入 factory 缓存——不能污染已缓存实例）
+    from app.adapters.downloaders.base import DownloaderAdapter
+
+    try:
+        adapter: DownloaderAdapter
+        match dl_type:
+            case "qbittorrent":
+                from app.adapters.downloaders.qbittorrent import QbittorrentAdapter
+
+                adapter = QbittorrentAdapter(
+                    row.name, url, username or "", password or "",
+                    verify_tls=verify_tls,
+                )
+            case "transmission":
+                from app.adapters.downloaders.transmission import (
+                    TransmissionAdapter,
+                )
+
+                adapter = TransmissionAdapter(
+                    row.name, url, username or "", password or "",
+                    verify_tls=verify_tls,
+                )
+            case _:
+                raise HTTPException(
+                    status_code=400, detail=f"不支持的下载器类型：{dl_type}"
+                )
+    except HTTPException:
+        raise
+    except (ValueError, NotImplementedError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        reachable = await adapter.ping()
+    except DownloaderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    finally:
+        close = getattr(adapter, "close", None)
+        if close is not None:
+            with suppress(Exception):
+                await close()
+    return {
+        "reachable": reachable,
+        "detail": "ok" if reachable else "unreachable",
+    }
 
 
 # ================================================================ 下载器原生任务
@@ -313,7 +394,14 @@ def _to_downloader_torrent_out(t: Any) -> DownloaderTorrentOut:
     return DownloaderTorrentOut(
         hash=t.hash,
         name=t.name,
-        state=t.state.name if isinstance(t.state, TorrentState) else str(t.state),
+        # 用枚举**值**（camelCase，如 pausedDL / missingFiles）而非 name
+        # （PAUSED_DL）——前端 STATE_META 与过滤参数都用值，
+        # 且过滤参数要能被 TorrentState.parse 原样解析回去。
+        state=(
+            t.state.value
+            if isinstance(t.state, TorrentState)
+            else str(t.state)
+        ),
         progress=t.progress,
         size=t.size,
         downloaded=t.downloaded,
@@ -357,9 +445,14 @@ async def list_downloader_torrents(
     states: frozenset[TorrentState] = frozenset()
     if state:
         try:
-            states = frozenset({TorrentState(state)})
-        except ValueError:
-            states = frozenset()
+            # TorrentState.parse 接受枚举值 / 枚举名 / snake_case 别名
+            states = frozenset({TorrentState.parse(state)})
+        except ValueError as exc:
+            # 之前静默降级为"不过滤"返全量，会误以为 foobar 匹配到了所有任务
+            raise HTTPException(
+                status_code=400,
+                detail=str(exc),
+            ) from exc
 
     tags: frozenset[str] = frozenset()
     try:
@@ -403,10 +496,13 @@ async def remove_downloader_torrents(
     _reject_invalid_hashes(payload.hashes)
     _, adapter = await _resolve_downloader(downloader_id)
     # 删数据不可恢复：记审计日志（前端另有确认弹窗）
+    # AGENTS.md "删磁盘数据单独开关并记审计日志"——审计的取证价值在于
+    # 能定位"删了什么"，故记完整 hash 列表（最多 200 条，已校验格式）
     if payload.delete_data:
         logger.warning(
-            "删除下载器原生任务并删除磁盘数据：downloader_id=%d 数量=%d",
+            "删除下载器原生任务并删除磁盘数据：downloader_id=%d 数量=%d hashes=%s",
             downloader_id, len(payload.hashes),
+            ",".join(payload.hashes[:50]),
         )
     try:
         ok = await adapter.remove(payload.hashes, delete_data=payload.delete_data)

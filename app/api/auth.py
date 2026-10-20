@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import threading
 
-from fastapi import APIRouter, Cookie, HTTPException, Request
+from fastapi import APIRouter, Cookie, FastAPI, HTTPException, Request
 from fastapi.responses import (
     FileResponse,
     JSONResponse,
@@ -40,6 +41,27 @@ class StatusOut(BaseModel):
     username: str | None = None
 
 
+#: 时序均衡用的虚拟 PBKDF2 哈希（用户名不存在时也跑同样迭代）。
+#: 进程级缓存——hash_password 本身要跑 600k 次 PBKDF2，每次登录现算
+#: 会让"均衡"多出一倍 CPU 开销。
+_dummy_hash: str | None = None
+#: 首次计算虚拟哈希的锁——并发登录时只算一次，其余等待。
+_dummy_hash_lock = threading.Lock()
+
+
+def _dummy_password_hash() -> str:
+    """返回（并缓存）一个恒定的虚拟密码哈希，仅用于时序均衡。"""
+    global _dummy_hash
+    if _dummy_hash is None:
+        with _dummy_hash_lock:
+            # 双检：拿到锁时可能已被其他线程算好
+            if _dummy_hash is None:
+                from app.core.auth import hash_password
+
+                _dummy_hash = hash_password("dummy-password-for-timing-equalization")
+    return _dummy_hash
+
+
 @router.get("/api/v1/auth/status", response_model=StatusOut)
 async def auth_status(
     request: Request,
@@ -64,15 +86,25 @@ async def login(
     payload: LoginIn, response: Response
 ) -> dict[str, str]:
     settings: AppSettings = get_settings()
-    ok = (
-        payload.username == settings.web_username
-        and settings.web_password is not None
-        and await asyncio.to_thread(
-            verify_password,
-            payload.password,
-            settings.web_password.get_secret_value(),
-        )
+    # 防用户名枚举时序侧信道：无论用户名是否正确，都跑一次 PBKDF2 验证
+    # （用户名不存在时对一个虚拟哈希跑同样 600k 迭代），让两条失败路径
+    # 耗时接近。成功路径也跑 PBKDF2，与失败路径耗时差仅"成功返回"本身。
+    #
+    # 注意：PBKDF2 验证必须**无条件**执行，不能写成
+    #   `username_ok and ... and await verify_password(...)`
+    # ——Python 的 and 会短路，用户名错误时 await 根本不执行，
+    # 虚拟哈希就白算了，恰好留下"用户名错误比密码错误快"的时序差。
+    username_ok = payload.username == settings.web_username
+    stored = (
+        settings.web_password.get_secret_value()
+        if settings.web_password is not None and username_ok
+        else _dummy_password_hash()
     )
+    # 先无条件跑验证（耗时路径一致），再与用户名/密码配置做逻辑与
+    password_ok = await asyncio.to_thread(
+        verify_password, payload.password, stored
+    )
+    ok = username_ok and settings.web_password is not None and password_ok
     if not ok:
         # 显式延迟以防计时攻击（M1 验证 → M5 实践）
         await asyncio.sleep(0.5)
@@ -114,15 +146,13 @@ async def require_session(
     raise HTTPException(status_code=401, detail="未登录")
 
 
-def install_static(app, *, path: str = "/app/web/dist") -> None:
+def install_static(app: FastAPI, *, path: str = "/app/web/dist") -> None:
     """挂载前端构建产物到 ``/``。
 
     SPA fallback：未知路径返回 ``index.html``，由前端路由接管。
     API 路径（``/api/*``、``/healthz``、``/metrics``）由 FastAPI 自身处理。
     """
     import os
-
-    from fastapi.responses import FileResponse
 
     if not os.path.isdir(path):
         logger.info("前端构建产物不存在于 %s，跳过静态托管", path)
@@ -135,7 +165,7 @@ def install_static(app, *, path: str = "/app/web/dist") -> None:
         name="assets",
     )
 
-    async def spa_fallback(full_path: str):  # type: ignore[no-untyped-def]
+    async def spa_fallback(full_path: str) -> FileResponse | JSONResponse:
         # API 与运维路径不接管
         if full_path.startswith(
             ("/api/", "/healthz", "/metrics", "/assets", "/docs", "/openapi")
@@ -149,7 +179,10 @@ def install_static(app, *, path: str = "/app/web/dist") -> None:
     # 任何其他路径都返回 index.html
 
     # 直接挂到根：当 FastAPI 路由表中没有该路径时，触发 SPA fallback
-    async def root_handler(request: Request) -> FileResponse:
+    # 返回类型用 Response 基类——spa_fallback 可能返回 FileResponse
+    # （前端 index.html）或 JSONResponse（404 / 未构建），
+    # 二者都是 Response 子类；FastAPI 对 Response 子类不生成 response_model
+    async def root_handler(request: Request) -> Response:
         return await spa_fallback(request.url.path)
 
     app.add_route("/", root_handler, methods=["GET"])

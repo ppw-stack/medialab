@@ -248,17 +248,22 @@ async def get_site_user_data(site_id: int) -> dict[str, Any]:
 
 @router.post("/{site_id}/user-data/refresh", summary="手动刷新站点用户数据")
 async def refresh_site_user_data(site_id: int) -> dict[str, Any]:
-    """立即调 :meth:`SiteAdapter.get_user_snapshot` → 写 site_user_data。"""
+    """立即调 :meth:`SiteAdapter.get_user_snapshot` → 写 site_user_data。
+
+    短事务模式：避免在 DB 事务内做网络往返导致写锁横跨整个 HTTP 请求
+    （阻塞 cron 与其他写）。
+    """
+    from app.db.session import session_scope
+    from app.services.factory import get_factory
+    from app.services.user_data import refresh_one_site
+
+    factory = get_factory()
     async with session_scope() as session:
         site = (
             await session.execute(select(Site).where(Site.id == site_id))
         ).scalar_one_or_none()
         if site is None:
             raise HTTPException(status_code=404, detail="站点不存在")
-        from app.services.factory import get_factory
-        from app.services.user_data import refresh_one_site
-
-        factory = get_factory()
         ok = await refresh_one_site(session, factory, site)
     return {"ok": ok, "site_id": site_id}
 
@@ -352,7 +357,11 @@ async def test_feed(site_id: int) -> FeedTestResult:
 
 
 def _mask_rss_url(url: str | None) -> str:
-    """掩码 RSS URL 中的凭据参数（passkey/apikey/key），防泄漏到前端。"""
+    """掩码 RSS URL 中的凭据参数（passkey/apikey/key/auth），防泄漏到前端。
+
+    注意：``key`` 必须带 ``=`` 才匹配，所以 ``keyword=`` / ``keys=`` 等
+    含 "key" 的正常参数名不会被误伤（正则要求参数名整体等于 key）。
+    """
     if not url:
         return ""
     return re.sub(r"(?i)((?:passkey|apikey|key|auth)=)[^&]+", r"\1***", url)

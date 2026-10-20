@@ -14,6 +14,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app.adapters.downloaders.base import DownloaderError
 from app.api.auth import require_session
 from app.core.logging import get_logger
 from app.services.cross_seed_monitor import (
@@ -76,6 +77,10 @@ async def scan_one(downloader_id: int) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except UnsupportedDownloader as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
+    except DownloaderError as exc:
+        # 下载器可达但报错（认证失败 / 网络异常 / 协议错误）——返回 502
+        # 结构化错误，而不是漏成 500 带堆栈。
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     return result.to_dict()
 
 
