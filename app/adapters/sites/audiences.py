@@ -45,6 +45,7 @@ from app.adapters.sites.base import (
     TorrentDetail,
     parse_abs_datetime,
     parse_publish_time,
+    parse_size_from_br,
 )
 from app.adapters.sites.parsers import nexus_php
 from app.adapters.sites.user_data import SiteUserSnapshot
@@ -188,7 +189,8 @@ class AudiencesAdapter(SiteAdapter):
             logger.warning("Audiences 拉取 HTTP %d", resp.status_code)
             return []
         items = AudiencesAdapter._parse_torrents_html(resp.text)
-        return items
+        # 单次拉取上限（防止恶意站返回巨大响应撑爆内存）
+        return items[:_MAX_ITEMS_PER_PULL]
 
     # ------------------------------------------------------------ 2.5 get_torrent_url
     async def get_torrent_url(self, item_id: str) -> str | None:
@@ -278,22 +280,9 @@ class AudiencesAdapter(SiteAdapter):
                 size_td = tr.find("td", class_="torrent-size-cell")
                 if size_td is not None:
                     td_html = size_td.decode()
-                    m_sz = re.search(
-                        r"(\d+(?:\.\d+)?)\s*<br\s*/?>\s*(TB|GB|MB|KB)",
-                        td_html,
-                        re.IGNORECASE,
-                    )
-                    if m_sz is not None:
-                        with contextlib.suppress(KeyError, ValueError):
-                            size_bytes = int(
-                                float(m_sz.group(1))
-                                * {
-                                    "TB": 1024 ** 4,
-                                    "GB": 1024 ** 3,
-                                    "MB": 1024 ** 2,
-                                    "KB": 1024,
-                                }[m_sz.group(2).upper()]
-                            )
+                    # 用共享 helper（支持千分位）——内联正则会在
+                    # "1,234.56<br/>GB" 处截断成 "234.56"，写入错误的体积
+                    size_bytes = parse_size_from_br(td_html)
 
             # ---------------- published_at: torrent-time-cell 的 span[title]
             published_at = parse_publish_time(tr)

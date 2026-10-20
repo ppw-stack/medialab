@@ -41,6 +41,7 @@ from app.adapters.sites.base import (
     SiteProfile,
     TorrentBrief,
     TorrentDetail,
+    parse_abs_datetime,
     parse_publish_time,
 )
 from app.adapters.sites.parsers import nexus_php
@@ -330,7 +331,6 @@ class SoulvoiceAdapter(SiteAdapter):
                 t = str(span.get("title") or "")
                 if not _ABS_DATETIME_RE.match(t):
                     continue
-                from app.adapters.sites.base import parse_abs_datetime
                 if published_at is not None and parse_abs_datetime(t) == published_at:
                     continue
                 remaining_abs = t

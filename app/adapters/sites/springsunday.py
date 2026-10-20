@@ -99,6 +99,7 @@ _ABS_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 #: 登录态检测
 _LOGGED_IN_RE = re.compile(r"(userdetails\.php|logout\.php|takelogout\.php)", re.IGNORECASE)
 _LOGIN_REDIRECT_RE = re.compile(r"login\.php", re.IGNORECASE)
+_REFUND_RE = re.compile(r"torrent-pro-(?:refund-left|refund-right)")
 
 
 class SpringsundayAdapter(SiteAdapter):
@@ -236,6 +237,10 @@ class SpringsundayAdapter(SiteAdapter):
 
         passkey 对当前用户恒定——缓存复用（self._passkey_cache），同一
         Adapter 实例生命周期内不再二次拉取。
+
+        **重要**：缓存假设实例与用户（cookie）绑定。AdapterFactory 在
+        站点配置（含 cookies）变更后必须调 ``invalidate_site`` 重建
+        实例，否则缓存的 passkey 会指向旧用户导致 403。
         """
         if self._passkey_cache is not None:
             return self._passkey_cache, "1"
@@ -354,8 +359,7 @@ class SpringsundayAdapter(SiteAdapter):
                             break
             # SSD 退还种（"1d 退还"）结构不同：外层是 class="nowrap"（无 torrent-pro-icon），
             # 内层才是 torrent-pro-refund-left/right，需独立循环识别
-            _refund_re = re.compile(r"torrent-pro-(?:refund-left|refund-right)")
-            for span in tr.find_all("span", class_=_refund_re):
+            for span in tr.find_all("span", class_=_REFUND_RE):
                 refund_classes: list[str] = list(span.get("class") or [])
                 for c in refund_classes:
                     if c.startswith("torrent-pro-") and c != "torrent-pro-icon":

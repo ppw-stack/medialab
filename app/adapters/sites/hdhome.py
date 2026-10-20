@@ -45,6 +45,14 @@ from app.adapters.sites.parsers import nexus_php
 from app.adapters.sites.user_data import SiteUserSnapshot
 from app.core.logging import get_logger
 
+
+class _TorrentDownloadError(RuntimeError):
+    """下载 .torrent 失败（缺 cookies / HTTP 错误 / 非法响应）。
+
+    与其他 NexusPHP 站一致：feed_fetcher 不调 download_torrent，本错误
+    由 task_executor 包成 PushItemError 上报，不触发站点熔断。
+    """
+
 logger = get_logger(__name__)
 
 
@@ -322,6 +330,11 @@ class HdhomeAdapter(SiteAdapter):
         """先拉详情页解析 downhash 完整 URL，再 GET 拿 bencoded bytes。"""
         if not item_id:
             raise ValueError("item_id 不能为空")
+        if not self._cookies:
+            # 与其他 NexusPHP 站一致：未配置 cookie 时直接报下载错误，
+            # 不要让流程走到 BreakerTripped——后者会被 feed_fetcher 当熔断处理，
+            # 把"未配置 cookie"误升级为站点熔断。
+            raise _TorrentDownloadError("缺少 cookies")
         url = await self.get_torrent_url(item_id)
         if not url:
             raise BreakerTripped(f"无法从详情页提取下载 URL id={item_id}")

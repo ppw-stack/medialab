@@ -16,7 +16,14 @@ def bdecode_info(data: bytes) -> dict[bytes, Any]:
         if c == b'd':
             idx += 1
             d: dict[bytes, Any] = {}
-            while data[idx:idx + 1] != b'e':
+            # 守卫：未闭合 dict/list（缺末尾 'e'）时 slice 返回空 bytes，
+            # 与 b'e' 永不相等会死循环。遇到空 slice 即视为 truncated。
+            while True:
+                nxt = data[idx:idx + 1]
+                if nxt == b'e':
+                    break
+                if not nxt:
+                    raise ValueError("unterminated dict (missing 'e')")
                 k, idx = _decode(idx)
                 v, idx = _decode(idx)
                 d[k] = v
@@ -24,7 +31,12 @@ def bdecode_info(data: bytes) -> dict[bytes, Any]:
         if c == b'l':
             idx += 1
             lst: list[Any] = []
-            while data[idx:idx + 1] != b'e':
+            while True:
+                nxt = data[idx:idx + 1]
+                if nxt == b'e':
+                    break
+                if not nxt:
+                    raise ValueError("unterminated list (missing 'e')")
                 v, idx = _decode(idx)
                 lst.append(v)
             return lst, idx + 1

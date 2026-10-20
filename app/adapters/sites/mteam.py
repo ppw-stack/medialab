@@ -197,8 +197,13 @@ class MteamAdapter(SiteAdapter):
             return None
         if isinstance(value, (int, float)):
             ts = float(value)
+            # 兼容秒级与毫秒级 Unix timestamp：
+            # 秒级区间 1e9(2001) ~ 4.1e9(2100)；毫秒级区间 1e12(2001) ~ 4.1e12(2100)
             if 1_000_000_000 < ts < 4_102_444_800:
                 dt = datetime.fromtimestamp(ts, UTC)
+                return format_bj(dt)
+            if 1_000_000_000_000 < ts < 4_102_444_800_000:
+                dt = datetime.fromtimestamp(ts / 1000, UTC)
                 return format_bj(dt)
             return None
         if isinstance(value, str):

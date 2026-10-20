@@ -169,7 +169,9 @@ def _find_active_count(text: str, html: str = "") -> tuple[int, int]:
             if "积分" not in ctx and "bonus" not in ctx.lower():
                 seeding_count = _parse_int(m.group(1))
     if leeching_count == 0:
-        m = re.search(r"下载(?:中)?[:：]\s*([\d,]+)", text)
+        # 用 \b 边界 + 排除"已"前缀，避免把"已下载: 100"（历史下载量）
+        # 当当前 leeching 数
+        m = re.search(r"(?<!已)下载(?:中)?[:：]\s*([\d,]+)", text)
         if m:
             ctx = text[max(0, m.start() - 5):m.end()]
             if "量" not in ctx and "ed" not in ctx.lower():
@@ -191,14 +193,29 @@ def parse_user_snapshot(html: str | bytes) -> SiteUserSnapshot | None:
     labeled = _extract_labeled_values(html)
 
     # 1. upload / download（navbar/JSON 模式拿 value，转字节）
+    # 优先用 labeled 提取的值；仅当 labeled 为空时才回退到全文 regex。
+    # 不允许 regex 命中后覆盖 labeled 已正确解析的值——千分位如
+    # "1,234.56 TB" 会被 regex `[\d.]+` 在逗号处截断为 "1"，导致
+    # 正确值被错误覆盖。
     upload = parse_size_text(labeled.get("upload", ""))
-    m = re.search(r"上传量[:：]\s*([\d.]+)\s*(TB|GB|MB|KB)", text, re.IGNORECASE)
-    if m:
-        upload = parse_size_text(f"{m.group(1)} {m.group(2)}")
+    if not upload:
+        m = re.search(
+            r"上传量[:：]\s*([\d.,]+)\s*(TB|GB|MB|KB)", text, re.IGNORECASE
+        )
+        if m:
+            # 去千分位后再 parse
+            upload = parse_size_text(
+                f"{m.group(1).replace(',', '')} {m.group(2)}"
+            )
     download = parse_size_text(labeled.get("download", ""))
-    m = re.search(r"下载量[:：]\s*([\d.]+)\s*(TB|GB|MB|KB)", text, re.IGNORECASE)
-    if m:
-        download = parse_size_text(f"{m.group(1)} {m.group(2)}")
+    if not download:
+        m = re.search(
+            r"下载量[:：]\s*([\d.,]+)\s*(TB|GB|MB|KB)", text, re.IGNORECASE
+        )
+        if m:
+            download = parse_size_text(
+                f"{m.group(1).replace(',', '')} {m.group(2)}"
+            )
 
     # 2. seeding / leeching 数量
     seeding_count, leeching_count = _find_active_count(text, html)

@@ -54,10 +54,13 @@ _META: dict[str, AdapterMeta] = {
 }
 
 # 启动时检查两个 dict 同步（开发期防御）
-assert set(_BUILTIN) == set(_META), (
-    f"adapter 注册表不一致：_BUILTIN={set(_BUILTIN) - set(_META)} "
-    f"_META={set(_META) - set(_BUILTIN)}"
-)
+# 用 raise 而非 assert——assert 在 `python -O` 下被剥离，启动期一致性
+# 校验失效会导致两份手维护 dict 不同步的 bug 静默漏过。
+if set(_BUILTIN) != set(_META):
+    raise RuntimeError(
+        f"adapter 注册表不一致：_BUILTIN-only={set(_BUILTIN) - set(_META)} "
+        f"_META-only={set(_META) - set(_BUILTIN)}"
+    )
 
 
 def resolve(name: str) -> type[SiteAdapter]:

@@ -19,7 +19,6 @@ ourbits 在 Cloudflare 后，需 cf_clearance cookie。
 
 from __future__ import annotations
 
-import contextlib
 import re
 
 import httpx
@@ -34,6 +33,7 @@ from app.adapters.sites.base import (
     TorrentDetail,
     parse_abs_datetime,
     parse_publish_time,
+    parse_size_from_br,
 )
 from app.adapters.sites.parsers import nexus_php
 from app.adapters.sites.user_data import SiteUserSnapshot
@@ -64,8 +64,12 @@ _DETAILS_ID_RE = re.compile(r"details\.php\?id=(\d+)", re.IGNORECASE)
 
 #: 详情页 anchor href 里的 passkey download URL
 #: ``/download.php?id=357094&passkey=74f6bd64e80ba32094b6f71485727f9a&https=1``
+#:
+#: 参数分隔符兼容 ``&amp;`` HTML 实体——本正则匹配的是**原始响应文本**
+#: （``resp.text``），未经 BS4 反转义，站点把 ``&`` 写成 ``&amp;`` 时
+#: 纯 ``&`` 模式会匹配不到，导致下载链接提取失败。
 _SIGNED_DL_RE = re.compile(
-    r"download\.php\?id=(\d+)&passkey=([a-f0-9]+)(?:&https=(\d))?",
+    r"download\.php\?id=(\d+)(?:&amp;|&)passkey=([a-f0-9]+)(?:(?:&amp;|&)https=(\d))?",
     re.IGNORECASE,
 )
 
@@ -185,7 +189,8 @@ class OurbitsAdapter(SiteAdapter):
             logger.warning("OurBits 拉取 HTTP %d", resp.status_code)
             return []
         items = OurbitsAdapter._parse_spstate7_html(resp.text)
-        return items
+        # 单次拉取上限（防止恶意站返回巨大响应撑爆内存）
+        return items[:_MAX_ITEMS_PER_PULL]
 
     # ------------------------------------------------------------ 2.5 get_torrent_url
     async def get_torrent_url(self, item_id: str) -> str | None:
@@ -256,22 +261,9 @@ class OurbitsAdapter(SiteAdapter):
             for td in tr.find_all("td"):
                 td_html: str = td.decode()
                 if size_bytes == 0:
-                    m_sz = re.search(
-                        r"(\d+(?:\.\d+)?)\s*<br\s*/?>\s*(TB|GB|MB|KB)",
-                        td_html,
-                        re.IGNORECASE,
-                    )
-                    if m_sz is not None:
-                        with contextlib.suppress(KeyError, ValueError):
-                            size_bytes = int(
-                                float(m_sz.group(1))
-                                * {
-                                    "TB": 1024 ** 4,
-                                    "GB": 1024 ** 3,
-                                    "MB": 1024 ** 2,
-                                    "KB": 1024,
-                                }[m_sz.group(2).upper()]
-                            )
+                    # 用共享 helper（支持千分位）——内联正则会在 "1,234.56<br/>GB"
+                    # 处截断成 "234.56"，写入错误的体积
+                    size_bytes = parse_size_from_br(td_html)
 
             # ---------------- published_at：发布时间单元格（短相对时长 td），
             # 避免误取描述栏里的"优惠剩余时间"

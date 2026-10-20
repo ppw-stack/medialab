@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 
 import httpx
@@ -209,8 +210,12 @@ class SiteAdapter(ABC):
 # ---------------------------------------------------------------- 工具函数
 
 #: ``"50.54 GB"`` / ``"1191.58 MB"`` → ``int`` 字节
+#:
+#: 数值部分允许千分位逗号：``"1,234.56 TB"``。NexusPHP 站点的
+#: userdetails 页在数值 ≥ 1000 时会带逗号分隔，不支持会把这类值
+#: 全部解析成 0（静默丢数据）。
 _SIZE_RE = re.compile(
-    r"^\s*(\d+(?:\.\d+)?)\s*(TB|GB|MB|KB|B)\s*$",
+    r"^\s*([\d,]+(?:\.\d+)?)\s*(TB|GB|MB|KB|B)\s*$",
     re.IGNORECASE,
 )
 _SIZE_FACTORS = {
@@ -233,7 +238,8 @@ def parse_size_text(text: str | None) -> int:
     m = _SIZE_RE.match(text.strip())
     if m is None:
         return 0
-    value, unit = m.group(1), m.group(2).upper()
+    # 去千分位逗号（"1,234.56" → "1234.56"），float() 不接受逗号
+    value, unit = m.group(1).replace(",", ""), m.group(2).upper()
     try:
         return int(float(value) * _SIZE_FACTORS[unit])
     except (KeyError, ValueError):
@@ -244,17 +250,20 @@ def parse_size_from_br(text: str | None) -> int:
     """把 ``"50.54<br />GB"`` 解析为字节整数（HTML 跨 tag 用）。
 
     比 :func:`parse_size_text` 更宽松：匹配 ``<br />`` / ``<br>`` 之间的数字与单位。
+
+    数值部分支持千分位（``"1,234.56<br />GB"``）——与 :func:`parse_size_text`
+    一致，否则 ≥1000 的体积会被截断成错值（"1,234.56" → "234.56"）。
     """
     if not text:
         return 0
     m = re.search(
-        r"(\d+(?:\.\d+)?)\s*<br\s*/?>\s*(TB|GB|MB|KB)",
+        r"([\d,]+(?:\.\d+)?)\s*<br\s*/?>\s*(TB|GB|MB|KB)",
         text,
         re.IGNORECASE,
     )
     if m is None:
         return parse_size_text(text)
-    value, unit = m.group(1), m.group(2).upper()
+    value, unit = m.group(1).replace(",", ""), m.group(2).upper()
     try:
         return int(float(value) * _SIZE_FACTORS[unit])
     except (KeyError, ValueError):
@@ -282,13 +291,22 @@ def parse_abs_datetime(text: str | None) -> str | None:
 
     站点时间本身就是北京时间（无时区标记），不再做时区转换。
     无法解析（含 ``None`` / 空串 / 格式异常）时返回 ``None``。
+
+    格式合法但**日历上不存在**的时间（``"2026-13-45 99:99:99"``）也返回
+    ``None``——正则只管形状，这类值进了 DB 会被当成真实时间展示。
     """
     if not text:
         return None
-    m = _ABS_DATETIME_RE.match(text.strip())
+    raw = text.strip()
+    m = _ABS_DATETIME_RE.match(raw)
     if m is None:
         return None
-    return text.strip()
+    # 日历合法性校验（月份 1-12、日 1-31、时 0-23、分秒 0-59）
+    try:
+        datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return raw
 
 
 #: 发布时间单元格文本（纯相对时长）：``"5时14分"`` / ``"2天18时"`` / ``"1月0天"`` / ``"1分钟"``

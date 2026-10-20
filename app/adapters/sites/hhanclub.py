@@ -94,9 +94,11 @@ def _parse_hhanclub_snapshot(html: str) -> SiteUserSnapshot | None:
 
     def _grab(icon_alt: str, parser: Callable[[str], int]) -> int:
         """抓 ``<img alt=ICON>&nbsp;VALUE`` 中 VALUE，parser 转 int。"""
+        # lookahead `(?=<|$)`：数值后紧跟标签或文本尾均可（原来只允许 `<`，
+        # 若 navbar 把上传量放在最后一个 <td> 无后续标签会漏抓）
         m = re.search(
             r'alt=["\']' + re.escape(icon_alt) + r'["\'][^>]*>'
-            r'\s*(?:&nbsp;|\xa0)?\s*([^<\n]+?)(?=<)',
+            r'\s*(?:&nbsp;|\xa0)?\s*([^<\n]+?)(?=<|$)',
             html,
         )
         if not m:
@@ -337,7 +339,9 @@ class HhanclubAdapter(SiteAdapter):
             # 因此以"最近的、包含 size 子 div 的祖先"为卡片容器。
             container: Tag | None = None
             for depth, ancestor in enumerate(a.parents):
-                if ancestor is None or depth > 8:
+                # BS4 parents 迭代到 None 时停止迭代而非 yield None，
+                # 故 `ancestor is None` 永不为真——只需限制深度
+                if depth > 8:
                     break
                 if ancestor.find("div", class_="torrent-info-text-size") is not None:
                     container = ancestor
@@ -383,7 +387,14 @@ class HhanclubAdapter(SiteAdapter):
                     for cls in classes:
                         if cls.startswith("promotion-tag-"):
                             # promotion-tag-free / -2xfree / -50 / -30 → free/2xfree/50/30
+                            # HHan v2 fork 用非标准名（2xfree/2up），
+                            # 映射到 NexusPHP 标准 class 名以兼容 WindowParser
+                            _HH_TAG_MAP: dict[str, str] = {
+                                "2xfree": "twoupfree",
+                                "2up": "twoup",
+                            }
                             tag_key = cls[len("promotion-tag-"):]
+                            tag_key = _HH_TAG_MAP.get(tag_key, tag_key)
                             if tag_key not in _hh_seen:
                                 free_classes.append(tag_key)
                                 _hh_seen.add(tag_key)
