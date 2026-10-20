@@ -59,12 +59,12 @@ test('总览 - 下载器在途区块在有数据时渲染', async ({ page }) => 
   }
 })
 
-test('总览 - 调度作业列表显示 5 个作业', async ({ page }) => {
+test('总览 - 调度作业列表显示 6 个作业', async ({ page }) => {
   await login(page)
   await page.goto('/')
   await page.waitForLoadState('networkidle')
 
   const rows = page.locator('.job-row')
-  await expect(rows).toHaveCount(5)
-  console.log('  ✓ 调度作业 5 行')
+  await expect(rows).toHaveCount(6)
+  console.log('  ✓ 调度作业 6 行')
 })

@@ -19,8 +19,6 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import or_, select, update
 
-from app.adapters.downloaders.base import AddTorrentPayload, DownloaderError
-from app.adapters.sites._bencode import infohash_from_torrent
 from app.core.config import AppSettings
 from app.core.logging import get_logger
 from app.core.timeutils import bj_now, bj_now_dt, format_bj
@@ -28,7 +26,6 @@ from app.db.models import (
     DownloaderInstance,
     FreeType,
     PushStatus,
-    Site,
     TorrentIndex,
 )
 from app.db.session import session_scope
@@ -38,7 +35,6 @@ from app.services.scheduler import JobStep
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from app.adapters.sites.base import SiteAdapter
 
 logger = get_logger(__name__)
 
@@ -109,111 +105,95 @@ class PushFreeService:
                 ),
             )
 
-        # 2.5) 按 site_id 预建 adapter 映射——download_torrent 实时拉 bytes
-        async with session_scope() as session:
-            site_rows = (
-                await session.execute(
-                    select(Site).where(
-                        Site.id.in_({c.site_id for c in candidates})
-                    )
-                )
-            ).scalars().all()
-        site_adapters: dict[int, SiteAdapter] = {
-            row.id: self._factory.site(row) for row in site_rows
-        }
-
-        # 3) 逐个推送
+        # 3) 逐个推送（经 task_queue 入队 → claim → 执行 → mark，
+        #    崩溃后由 drain_task_queue 作业重试；见 app.services.task_queue 模块头）
         pushed = 0
         skipped_dup = 0
         skipped_dl_failed = 0
         skipped_parse = 0
         failed = 0
+        retried = 0
         errors: list[str] = []
 
-        adapter = self._factory.downloader(default_dl)
         from app.services.runtime_params import get_runtime_params
+        from app.services.task_executor import PushItemError, execute_add_torrent
+        from app.services.task_queue import (
+            TaskKind,
+            TaskQueueService,
+            make_idem_key,
+        )
 
         rp = get_runtime_params()
         interval_ms = rp.get_int("push_download_interval_ms")
         first = True
 
         for c in candidates:
-            site_adapter = site_adapters.get(c.site_id)
-            if site_adapter is None:
-                failed += 1
-                errors.append(f"site={c.site_id} 适配器缺失")
-                continue
-
             # 3.0) 站点限频保护：首个不等待，后续每次下载前 sleep
             if not first and interval_ms > 0:
                 await asyncio.sleep(interval_ms / 1000)
             first = False
 
-            # 3.1) 下载 .torrent 文件
-            try:
-                torrent_bytes = await site_adapter.download_torrent(c.item_id)
-            except Exception as exc:
-                skipped_dl_failed += 1
-                errors.append(
-                    f"site={c.site_id} item={c.item_id}: download_torrent: {exc}"
-                )
-                await self._mark_push_failed(c.index_id)
-                continue
-            if not torrent_bytes or not torrent_bytes.startswith(b"d"):
-                skipped_dl_failed += 1
-                errors.append(
-                    f"site={c.site_id} item={c.item_id}: 响应不是 bencoded torrent"
-                )
-                await self._mark_push_failed(c.index_id)
-                continue
-
-            # 3.2) 解析 info_hash
-            info_hash = infohash_from_torrent(torrent_bytes)
-            if info_hash is None:
-                skipped_parse += 1
-                errors.append(
-                    f"site={c.site_id} item={c.item_id}: infohash 解析失败"
-                )
-                await self._mark_push_failed(c.index_id)
-                continue
-
-            # 3.3) 去重（运行时再查一次，防止两作业并发）
+            # 3.1) 入队（幂等）——同一 (site_id, item_id) 只入队一次。
+            # idem 命中说明：已推过（done）/ 在推（running）/ 待重试（pending/failed）
+            # → 本作业不重复处理，drain_task_queue 作业负责重试。
+            idem_key = make_idem_key(
+                TaskKind.ADD_TORRENT,
+                site_id=c.site_id,
+                info_hash=c.item_id,
+                extra=f"dl={downloader_id}",
+            )
+            payload: dict[str, object] = {
+                "index_id": c.index_id,
+                "downloader_id": downloader_id,
+            }
             async with session_scope() as session:
-                exists = await self._is_already_pushed(
-                    session, c.site_id, c.item_id
-                )
-            if exists:
+                tq = TaskQueueService(session)
+                enq = await tq.enqueue(TaskKind.ADD_TORRENT, payload, idem_key=idem_key)
+                if not enq.created:
+                    skipped_dup += 1
+                    continue
+                task = await tq.claim_one(enq.task_id)
+            if task is None:
                 skipped_dup += 1
                 continue
 
-            # 3.4) 用 torrent_bytes 推送到下载器
+            # 3.2) 执行（claim 已落库——此后崩溃，任务停在 running，
+            #      超 STALE_RUNNING_MINUTES 后被 drain 作业回收重试）
             try:
-                payload = AddTorrentPayload(
-                    name=c.name,
-                    torrent_bytes=torrent_bytes,
-                    category="auto-push",
-                    save_path=default_dl.save_path or None,
-                )
-                await adapter.add_torrent(payload)
-            except DownloaderError as exc:
+                await execute_add_torrent(payload, self._factory)
+            except PushItemError as exc:
+                async with session_scope() as session:
+                    tq = TaskQueueService(session)
+                    if exc.category == "fatal":
+                        await tq.mark_failed_forever(task.id, str(exc))
+                        final_state = "failed"
+                    else:
+                        final_state = await tq.mark_failed(task.id, str(exc))
+                errors.append(f"site={c.site_id} item={c.item_id}: {exc}")
+                await self._mark_push_failed(c.index_id)
+                if exc.category == "download":
+                    skipped_dl_failed += 1
+                elif exc.category == "parse":
+                    skipped_parse += 1
+                elif final_state == "failed":
+                    failed += 1
+                else:
+                    retried += 1
+                continue
+            except Exception as exc:
+                async with session_scope() as session:
+                    tq = TaskQueueService(session)
+                    final_state = await tq.mark_failed(
+                        task.id, f"{type(exc).__name__}: {exc}"
+                    )
                 failed += 1
-                errors.append(
-                    f"site={c.site_id} item={c.item_id}: add_torrent: {exc}"
-                )
+                errors.append(f"site={c.site_id} item={c.item_id}: {exc}")
                 await self._mark_push_failed(c.index_id)
                 continue
 
-            # 3.5) 更新 torrent_index.push_status = pushed
             async with session_scope() as session:
-                await session.execute(
-                    update(TorrentIndex)
-                    .where(TorrentIndex.id == c.index_id)
-                    .values(
-                        push_status=PushStatus.PUSHED,
-                        pushed_at=bj_now(),
-                        info_hash=info_hash,
-                    )
-                )
+                tq = TaskQueueService(session)
+                await tq.mark_done(task.id)
             pushed += 1
 
         from app.services.runtime_params import get_runtime_params
@@ -231,6 +211,7 @@ class PushFreeService:
             summary=(
                 f"选中 {len(candidates)}，推送 {pushed} 成功"
                 + (f"，{failed} 失败" if failed else "")
+                + (f"，{retried} 退避重试" if retried else "")
             ),
             steps=(
                 JobStep("查询默认下载器", "ok", 1, default_dl.name),
@@ -250,16 +231,17 @@ class PushFreeService:
                     "推送到下载器",
                     "warn" if failed else "ok",
                     pushed,
-                    f"{pushed} 成功，{failed} 失败",
+                    f"{pushed} 成功，{failed} 失败，{retried} 退避重试，"
+                    f"{skipped_dup} 幂等跳过",
                 ),
             ),
         )
         logger.info(
             "push_free: 选中 %d，推送 %d，跳过重复 %d，下载失败 %d，"
-            "解析失败 %d，推送失败 %d",
+            "解析失败 %d，推送失败 %d，退避重试 %d",
             result.selected, result.pushed, result.skipped_already_pushed,
             result.skipped_download_failed, result.skipped_parse_failed,
-            result.failed,
+            result.failed, retried,
         )
         return result
 

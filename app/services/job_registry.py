@@ -7,10 +7,11 @@
 已注册作业：
 
 - ``fetch_all_sites`` — 按站遍历所有启用站点拉取种子列表，写入 torrent_index
-- ``push_free_torrents`` — 选免费种自动推到默认下载器
+- ``push_free_torrents`` — 选免费种自动推到默认下载器（经 task_queue 幂等入队）
 - ``monitor_free_window`` — 巡检已推免费种，临近窗口截止自动暂停
 - ``refresh_user_data`` — 拉取 9 站用户数据（上传/下载/做种数）
 - ``scan_cross_seed`` — 巡查辅种下载器，暂停 tracker 未注册 / 数据丢失的种子
+- ``drain_task_queue`` — 排空任务队列：崩溃恢复（僵死 running 回收）+ 退避重试
 """
 from __future__ import annotations
 
@@ -94,6 +95,14 @@ def register_jobs(
         cfg.scan_cross_seed_cron,
     )
 
+    scheduler_center.register(
+        JobSpec(
+            name="drain_task_queue",
+            func=lambda: _run_and_return(_run_drain_task_queue(factory)),
+            cron="*/5 * * * *",
+        )
+    )
+    logger.info("已注册任务队列排空作业：drain_task_queue cron='*/5 * * * *'")
 
 # ============================================================ 作业入口
 async def _run_fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
@@ -140,6 +149,12 @@ async def _run_scan_cross_seed() -> dict[str, object]:
 
     svc = CrossSeedMonitorService()
     return await svc.run_scan_job()
+
+async def _run_drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
+    """排空任务队列（崩溃恢复 + 退避重试）。"""
+    from app.services.task_drain import drain_task_queue
+
+    return await drain_task_queue(factory)
 
 
 async def _run_and_return(result: Awaitable[object]) -> object:

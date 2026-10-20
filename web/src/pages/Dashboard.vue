@@ -75,6 +75,7 @@ const JOB_LABELS: Record<string, string> = {
   monitor_free_window: '免费窗口监测',
   refresh_user_data: '做种用量',
   scan_cross_seed: '辅种巡查',
+  drain_task_queue: '队列排空',
 }
 </script>
 
