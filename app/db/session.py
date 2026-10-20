@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from datetime import datetime
 from typing import cast
 
 from sqlalchemy import CursorResult, event, text
@@ -226,6 +227,20 @@ async def _backfill_discount_pct() -> None:
         logger.info("discount_pct 历史回填：%d 行", len(updates))
 
 
+#: 时间存储切换点（北京时间，naive）。
+#:
+#: e861ccf（2026-10-16 18:03:33 +08:00）把时间存储统一为**北京时间字符串**，
+#: 之前的时间列写的是 naive UTC，之后写的是北京时间字符串。
+#:
+#: 迁移时用它区分同一列里混存的两种语义：
+#: - 值 < 切换点 → 当时写的是 UTC → +8h 转北京时间
+#: - 值 >= 切换点 → 当时写的是北京时间字符串 → 原样保留
+#:
+#: 不加这个区分会让"列声明仍是 DATETIME、但值已是北京时间"的行
+#: （如 225f3d6 新增的 pushed_at）被再 +8h，时间凭空 +8 小时。
+_BJ_STRING_CUTOVER = datetime(2026, 10, 16, 18, 3, 33)
+
+
 #: 需要从 UTC 迁移为北京时间字符串的表 → 时间列名列表。
 #: 迁移逻辑：对每张表用 PRAGMA table_info 检查列类型，若含 DATETIME/TIMESTAMP
 #: 列则重建表（SQLite 不支持 ALTER COLUMN TYPE），把 UTC 值 +8h 转为北京时间字符串。
@@ -234,8 +249,7 @@ async def _backfill_discount_pct() -> None:
 #: 批次 N 的表只在 ``user_version < N`` 时迁移——已迁过的库（user_version=1）
 #: 不会重复 +8h，而后续新增的表（如批次 2 的 site_user_data）仍会被迁移。
 #: 新增表时**追加新批次**，不要改旧批次（否则已迁库会重复迁移）。
-_DATETIME_MIGRATION_BATCHES: dict[int, dict[str, list[str]]] = {
-    1: {
+_DATETIME_MIGRATION_BATCHES: dict[int, dict[str, list[str]]] = {    1: {
         "downloader_instances": ["created_at", "updated_at"],
         "sites": ["created_at", "updated_at"],
         "torrent_index": [
@@ -296,18 +310,42 @@ async def _migrate_datetime_to_bj_str() -> None:
                 )
                 cols_info = pragma_result.all()
                 needs_migration = False
+                # 实际存在且仍是 DATETIME 声明的列（**逐列**判定）
+                #
+                # 不能只按"表里有没有 DATETIME 列"决定整表是否迁移：
+                # 1) 逐列判定可避免对"已是 VARCHAR 的北京时间字符串"列
+                #    再 +8h（列声明残留 DATETIME 但值已是北京时间时，
+                #    整表迁移会把值再偏移 8 小时）；
+                # 2) 逐列判定天然跳过"本表不存在该列"的情况
+                #    （老库缺列时整表迁移会 SELECT 到不存在的列 → 启动崩溃）。
+                datetime_cols: list[str] = []
+                present_cols: set[str] = set()
                 # 推断主键列：PRAGMA 第 5 字段 pk > 0 即主键；多列主键取第一列
                 pk_col: str = "id"
                 for col in cols_info:
                     col_name = col[1]
                     col_type = (col[2] or "").upper()
-                    if col_name in columns and col_type in ("DATETIME", "TIMESTAMP", "DATE"):
+                    present_cols.add(col_name)
+                    if col_name in columns and col_type in (
+                        "DATETIME", "TIMESTAMP", "DATE",
+                    ):
+                        datetime_cols.append(col_name)
                         needs_migration = True
                     # col 索引: (cid, name, type, notnull, dflt_value, pk)
                     if len(col) >= 6 and col[5] and isinstance(col[5], int) and col[5] > 0:
                         pk_col = col_name
                 if not needs_migration:
                     continue
+                # 只处理"存在且仍是 DATETIME 声明"的列
+                target_cols = [
+                    c for c in columns
+                    if c in datetime_cols
+                ]
+                missing = [c for c in columns if c not in present_cols]
+                if missing:
+                    logger.info(
+                        "表 %s 缺少列 %s（跳过这些列的迁移）", table_name, missing
+                    )
 
                 logger.info(
                     "开始迁移表 %s 的 DateTime 列 → 北京时间字符串（PK=%s）",
@@ -318,9 +356,7 @@ async def _migrate_datetime_to_bj_str() -> None:
                 # 1) "YYYY-MM-DD HH:MM:SS" (naive UTC)
                 # 2) "YYYY-MM-DD HH:MM:SS.ffffff" (naive UTC, 微秒)
                 # 迁移：把每列的 UTC 值 +8h，去掉微秒后缀，格式统一为 "yyyy-MM-dd HH:mm:ss"
-                from datetime import datetime
-
-                for col_name in columns:
+                for col_name in target_cols:
                     # 逐行更新：解析旧 UTC 值 → +8h → 写回字符串
                     # 用 SQLite 的 datetime() 函数做批量更新（如果可用）
                     # SQLite 没有 datetime() 函数，用字符串操作：
@@ -340,6 +376,17 @@ async def _migrate_datetime_to_bj_str() -> None:
                     from collections import defaultdict
 
                     by_new_val: dict[str, list[object]] = defaultdict(list)
+                    # 已经是北京时间的值（列声明残留 DATETIME，但值早就是
+                    # 北京字符串）不能再 +8h，否则时间会凭空 +8 小时。
+                    #
+                    # 判据用**切换点**而不是"值是否在未来"：切换点是
+                    # e861ccf（2026-10-16 18:03 +08:00）——该提交把时间存储
+                    # 统一为北京时间字符串，之前写的是 naive UTC，之后写的
+                    # 是北京时间字符串。
+                    # 切换点之后写入的值 → 已是北京时间，原样保留；
+                    # 切换点之前的值 → 是 UTC，+8h 转换。
+                    # （用"值 +8h > now"判会误伤 16 小时前的北京时间值。）
+                    skipped_bj = 0
                     for row_pk, old_val in rows:
                         if old_val is None:
                             continue
@@ -356,6 +403,17 @@ async def _migrate_datetime_to_bj_str() -> None:
                                     old_dt = datetime.fromisoformat(old_str)
                                 except ValueError:
                                     continue
+                            # 判定该行是 UTC 还是北京时间：
+                            # - 值早于切换点（_BJ_STRING_CUTOVER）→ 当时写的是
+                            #   naive UTC → +8h 转北京时间
+                            # - 值晚于切换点 → 当时写的是北京时间字符串 →
+                            #   原样保留（再 +8h 会凭空多 8 小时）
+                            #
+                            # 切换点取 e861ccf（2026-10-16 18:03 +08:00）——
+                            # 该提交把时间存储统一为北京时间字符串。
+                            if old_dt >= _BJ_STRING_CUTOVER:
+                                skipped_bj += 1
+                                continue
                             # UTC → +8h → 北京时间字符串
 
                             aware_utc = old_dt.replace(tzinfo=UTC)
@@ -363,6 +421,12 @@ async def _migrate_datetime_to_bj_str() -> None:
                             by_new_val[bj_str].append(row_pk)
                         except Exception:
                             continue
+
+                    if skipped_bj:
+                        logger.info(
+                            "表 %s 列 %s：%d 行已是北京时间，跳过 +8h 转换",
+                            table_name, col_name, skipped_bj,
+                        )
 
                     for new_val, pks in by_new_val.items():
                         placeholders = ",".join(f":pk{i}" for i in range(len(pks)))

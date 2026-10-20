@@ -65,10 +65,6 @@ module = ["apscheduler.*", "aioresponses.*", "sqlalchemy.ext.asyncio.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["app.api.auth"]
-ignore_errors = true
-
-[[tool.mypy.overrides]]
 module = ["sqlalchemy.*"]
 disable_error_code = ["no-untyped-call", "no-untyped-def", "union-attr", "misc", "operator"]
 
