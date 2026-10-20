@@ -14,8 +14,12 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
+    concurrency:
+      group: docker-image-${{ github.ref }}
+      cancel-in-progress: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -68,24 +72,30 @@ jobs:
         env:
           DH_NAMESPACE: ppw111
           DH_REPO: seedhelper
+          DH_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
+          set -euo pipefail
+          JWT=""
           for i in 1 2 3 4 5; do
+            PAYLOAD=$(jq -nc --arg u "$DH_USERNAME" --arg p "$DH_TOKEN" '{username:$u,password:$p}')
             LOGIN_RESP=$(curl -sS -X POST \
               -H "Content-Type: application/json" \
-              -d "{\"username\":\"${{ secrets.DOCKERHUB_USERNAME }}\",\"password\":\"${{ secrets.DOCKERHUB_TOKEN }}\"}" \
+              --data "$PAYLOAD" \
               -w "\nHTTP=%{http_code}" \
               "https://hub.docker.com/v2/users/login/")
-            HTTP=$(echo "$LOGIN_RESP" | tail -n1 | sed 's/HTTP=//')
-            BODY=$(echo "$LOGIN_RESP" | head -n-1)
-            echo "login attempt=$i http=$HTTP body=$BODY"
-            JWT=$(echo "$BODY" | jq -r .token 2>/dev/null)
-            if [ -n "$JWT" ] && [ "$JWT" != "null" ]; then
+            HTTP=$(printf '%s\n' "$LOGIN_RESP" | tail -n1 | sed 's/HTTP=//')
+            BODY=$(printf '%s\n' "$LOGIN_RESP" | head -n-1)
+            # 响应体含 JWT / 凭据回显, 只输出 HTTP 状态码
+            echo "login attempt=$i http=$HTTP"
+            JWT=$(printf '%s' "$BODY" | jq -r '.token // empty' 2>/dev/null || true)
+            if [ -n "$JWT" ]; then
               echo "✓ got JWT (len=${#JWT})"
               break
             fi
             sleep 3
           done
-          if [ -z "$JWT" ] || [ "$JWT" = "null" ]; then
+          if [ -z "$JWT" ]; then
             echo "::error::failed to obtain Docker Hub JWT after 5 attempts"
             exit 1
           fi
@@ -93,12 +103,12 @@ jobs:
             RESP=$(curl -sS -X PATCH \
               -H "Authorization: JWT ${JWT}" \
               -H "Content-Type: application/json" \
-              -d '{"is_private":false}' \
+              --data '{"is_private":false}' \
               -w "\n%{http_code}" \
               "https://hub.docker.com/v2/repositories/${DH_NAMESPACE}/${DH_REPO}/")
-            HTTP_CODE=$(echo "$RESP" | tail -n1)
-            BODY=$(echo "$RESP" | head -n-1)
-            echo "patch attempt=$i http_code=$HTTP_CODE body=$BODY"
+            HTTP_CODE=$(printf '%s\n' "$RESP" | tail -n1)
+            BODY=$(printf '%s\n' "$RESP" | head -n-1)
+            echo "patch attempt=$i http_code=$HTTP_CODE"
             if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "204" ]; then
               echo "✓ ${DH_NAMESPACE}/${DH_REPO} set to public"
               exit 0
