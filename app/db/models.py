@@ -2,9 +2,11 @@
 
 M1 建立全部表结构（M2~M5 只填充逻辑）。时间列统一北京时间字符串。
 
-注：领域枚举（``FreeType`` / ``PushStatus`` / ``FreeSource``）已搬到
+注：领域枚举（``FreeType`` / ``PushStatus`` / ``FreeSource``）住在
 :mod:`app.domain.enums`——它们是业务概念，不属于数据库层。本模块
-保留同名 re-export，向后兼容 ``from app.db.models import FreeType``。
+**不再 re-export**：需要枚举请直接
+``from app.domain.enums import FreeType``（避免"枚举住在 db 层"的
+错觉重新长回来）。
 """
 
 from __future__ import annotations
@@ -23,23 +25,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from app.domain.enums import (
-    NON_ABORTABLE_FREE_TYPES,
-    TYPES_WITHOUT_WINDOW,
-    FreeSource,
-    FreeType,
-    PushStatus,
-)
+from app.domain.enums import FreeType
 
 __all__ = [
-    "NON_ABORTABLE_FREE_TYPES",
-    "TYPES_WITHOUT_WINDOW",
     "Base",
     "DownloaderInstance",
-    "FreeSource",
-    "FreeType",
     "JobRun",
-    "PushStatus",
     "SchedulerJobSetting",
     "Site",
     "SiteUserData",

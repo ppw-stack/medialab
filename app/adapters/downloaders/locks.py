@@ -43,10 +43,6 @@ class DownloaderLocks:
         async with lock:
             yield
 
-    def is_busy(self, key: str) -> bool:
-        lock = self._locks.get(key)
-        return lock is not None and lock.locked()
-
 
 #: 全局锁表
 locks = DownloaderLocks()

@@ -324,7 +324,6 @@ class MteamAdapter(SiteAdapter):
             items.append(
                 FeedItem(
                     title=raw.get("name") or "",
-                    link=self._detail_url(torrent_id),
                     item_id=torrent_id,
                     # m-team 搜索响应直接带 infoHash（小写 hex）
                     info_hash=(str(raw["infoHash"]).lower() or None)

@@ -420,7 +420,6 @@ class SpringsundayAdapter(SiteAdapter):
             items.append(
                 FeedItem(
                     title=title,
-                    link=f"details.php?id={item_id}",
                     item_id=item_id,
                     info_hash=None,
                     size=size_bytes,

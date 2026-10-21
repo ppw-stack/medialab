@@ -26,14 +26,21 @@ from app.db.models import TaskQueue
 
 
 class TaskKind(StrEnum):
+    """任务类型。
+
+    目前**只有** ``ADD_TORRENT`` 一种（手动推送与自动推送合流后，
+    队列里只跑加种任务）。
+
+    历史上有 8 种（``remove_torrent`` / ``set_category`` / ``set_path`` /
+    ``set_rate_limit`` / ``pause`` / ``resume`` / ``abort_window``）——
+    全部零调用，随对应的功能模块下线（``2b63e4f`` 移除清理模块、
+    ``a2b3cd0`` 手推合流）而成为死枚举，已删除。
+
+    注：``kind`` 是**落库的持久化值**，改名会丢历史任务。故
+    ``ADD_TORRENT`` 的字符串值 ``"add_torrent"`` 不可改。
+    """
+
     ADD_TORRENT = "add_torrent"
-    REMOVE_TORRENT = "remove_torrent"
-    SET_CATEGORY = "set_category"
-    SET_PATH = "set_path"
-    SET_RATE_LIMIT = "set_rate_limit"
-    PAUSE = "pause"
-    RESUME = "resume"
-    ABORT_WINDOW = "abort_window"
 
 
 class TaskStatus(StrEnum):

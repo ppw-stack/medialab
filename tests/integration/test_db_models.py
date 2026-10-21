@@ -9,14 +9,13 @@ from __future__ import annotations
 
 import pytest
 from app.db.models import (
-    FreeType,
-    PushStatus,
     Site,
     SiteUserData,
     TaskQueue,
     TorrentIndex,
 )
 from app.db.session import session_scope
+from app.domain.enums import FreeType, PushStatus
 from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import IntegrityError
 

@@ -18,8 +18,9 @@ from datetime import timedelta
 import pytest
 from app.core.config import get_settings
 from app.core.timeutils import bj_now_dt, format_bj
-from app.db.models import DownloaderInstance, FreeType, PushStatus, TorrentIndex
+from app.db.models import DownloaderInstance, TorrentIndex
 from app.db.session import session_scope
+from app.domain.enums import FreeType, PushStatus
 from app.services.factory import AdapterFactory
 from app.services.push_free import PushFreeService
 from app.services.runtime_params import (

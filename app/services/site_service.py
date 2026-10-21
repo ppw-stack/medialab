@@ -478,7 +478,6 @@ async def self_test_site(site_id: int) -> SiteSelfTestResult:
         # 业务层 WindowParser.parse() 自检：用一段"剩余 2 天 6 小时"文案
         probe_item = FeedItem(
             title="[self-test] 剩余 2 天 6 小时",
-            link="",
             description="剩余 2 天 6 小时",
         )
         probe = WindowParser.parse(probe_item)

@@ -49,13 +49,17 @@ class SiteHealth:
 class FeedItem:
     """归一化的种子条目（search_torrents 返回值）。
 
-    注：本类不再带 ``torrent_url`` 字段——URL 的获取由
+    注：本类不带 ``torrent_url`` 字段——URL 的获取由
     :meth:`SiteAdapter.get_torrent_url` 在消费时（push / manual push）实时
     调用，避免"列表页刷时拼"与"详情页拼"的不一致。
+
+    历史上有 ``link`` 字段（各 HTML 站填 ``details.php?id=<站内 ID>``），
+    但**全仓零读取**——详情页 URL 由 :meth:`SiteAdapter.get_torrent_url`
+    实时生成，``link`` 只是重复信息，已删除。需要详情页 URL 的地方
+    调 ``get_torrent_url(item_id)``。
     """
 
     title: str
-    link: str
     item_id: str | None = None  # 站内 ID（用于 detail/download/status）
     info_hash: str | None = None
     size: int = 0
@@ -173,17 +177,6 @@ class SiteAdapter(ABC):
 
         失败时抛出异常或返回 ``b""``。
         """
-
-    async def download_torrent_url(self, url: str) -> bytes:
-        """下载已签名的 .torrent URL（绕过裸 /download.php 的 404）。
-
-        默认实现走内部 ``_client``；子类可覆盖以注入站点特定的 headers
-        （referer / cookies）。失败时抛出异常。
-        """
-
-        resp = await self._client.get(url, timeout=self._timeout)
-        resp.raise_for_status()
-        return resp.content
 
     @abstractmethod
     async def get_torrent_url(self, item_id: str) -> str | None:

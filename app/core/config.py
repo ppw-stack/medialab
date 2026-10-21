@@ -43,8 +43,10 @@ class AppSettings(BaseSettings):
     log_dir: Path = Path("/app/logs")
 
     # -- Web 面板（FR-6 / 非功能·安全性）--
-    web_host: str = "0.0.0.0"
-    web_port: int = 8080
+    # 注：``web_host`` / ``web_port`` 曾在此处配置监听地址与端口，但
+    # **从未被读取**——容器入口（Dockerfile CMD）直接写死
+    # ``uvicorn --host 0.0.0.0 --port 8080``。留着只会让人以为改这里
+    # 能改监听端口（改了不生效），已删除。
     web_username: str = "admin"
     web_password: SecretStr | None = None
     web_token: SecretStr | None = None

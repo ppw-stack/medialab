@@ -117,29 +117,6 @@ class AdapterFactory:
         """
         return row.rss_url or None
 
-    async def downloader_for_id(self, downloader_id: int) -> object | None:
-        """按 id 取下载器，缺失返回 None（Cleaner 用）。
-
-        异步签名——调用方需 await。
-        """
-        from sqlalchemy import select
-
-        from app.db.models import DownloaderInstance
-        from app.db.session import session_scope
-
-        async with session_scope() as s:
-            row = (
-                await s.execute(
-                    select(DownloaderInstance).where(
-                        DownloaderInstance.id == downloader_id,
-                        DownloaderInstance.enabled.is_(True),
-                    )
-                )
-            ).scalar_one_or_none()
-            if row is None:
-                return None
-            return self.downloader(row)
-
     # ------------------------------------------------------------ 失效
     def invalidate_downloader(self, downloader_id: int) -> None:
         """丢弃缓存，下次访问时用新配置重建。
@@ -151,10 +128,6 @@ class AdapterFactory:
 
     def invalidate_site(self, site_id: int) -> None:
         self._sites.pop(site_id, None)
-
-    def invalidate_all(self) -> None:
-        self._downloaders.clear()
-        self._sites.clear()
 
     async def aclose_all(self) -> None:
         """关闭全部连接池（优雅停机）。"""

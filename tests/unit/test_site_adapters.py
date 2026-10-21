@@ -279,7 +279,7 @@ async def test_close_is_idempotent(name: None) -> None:
 # ------------------------------------------------------------------ 数据类
 
 def test_feed_item_defaults() -> None:
-    item = FeedItem(title="t", link="l")
+    item = FeedItem(title="t")
     assert item.item_id is None
     assert item.info_hash is None
     assert item.size == 0

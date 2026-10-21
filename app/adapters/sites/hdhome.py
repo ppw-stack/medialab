@@ -322,7 +322,6 @@ class HdhomeAdapter(SiteAdapter):
             items.append(
                 FeedItem(
                     title=title,
-                    link=f"details.php?id={item_id}",
                     item_id=item_id,
                     info_hash=None,  # NexusPHP 列表页不直接给 hash
                     size=size_bytes,

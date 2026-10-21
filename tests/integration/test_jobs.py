@@ -92,7 +92,6 @@ class _FakeAdapter(SiteAdapter):
         return [
             FeedItem(
                 title=f"torrent-{self.profile.name}-{i}",
-                link="",
                 item_id=f"{i}",
                 size=1024 * (i + 1),
                 description="剩余 2 天",

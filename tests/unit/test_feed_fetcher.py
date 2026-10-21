@@ -70,7 +70,7 @@ class _StubAdapter(SiteAdapter):
 
 
 def _items(n: int = 2) -> list[FeedItem]:
-    return [FeedItem(title=f"t{i}", link="", item_id=str(i)) for i in range(n)]
+    return [FeedItem(title=f"t{i}", item_id=str(i)) for i in range(n)]
 
 
 # ------------------------------------------------------------------ 退避计算

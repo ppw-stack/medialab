@@ -40,9 +40,13 @@ class FreeType:
 
 
 class PushStatus:
-    """torrent_index 推送状态（替代原 torrents 表去重）。"""
+    """torrent_index 推送状态。
 
-    PENDING = "pending"
+    注：**没有** ``PENDING`` —— ``torrent_index.push_status`` 列是
+    nullable，``NULL`` 即表示「从未推过」，不需要再有一个 ``pending``
+    取值（历史上有过，从未写入，已删除）。
+    """
+
     PUSHED = "pushed"
     FAILED = "failed"
 

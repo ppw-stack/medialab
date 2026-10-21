@@ -530,7 +530,7 @@ class WindowParser:
     @staticmethod
     def parse_payload(payload: dict[str, object]) -> FreeWindow:
         """直接接受 payload dict（测试便捷入口）。"""
-        item = FeedItem(title="[payload]", link="", free_payload=payload)
+        item = FeedItem(title="[payload]", free_payload=payload)
         return WindowParser.parse(item)
 
 

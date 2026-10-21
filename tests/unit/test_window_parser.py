@@ -11,13 +11,13 @@ from datetime import UTC, datetime
 
 import pytest
 from app.adapters.sites.base import FeedItem
-from app.db.models import FreeType
+from app.domain.enums import FreeType
 from app.services.window_parser import WindowParser, is_refund_marker
 
 # ------------------------------------------------------------------ str 路径
 
 def test_str_path_timed_remaining_text() -> None:
-    item = FeedItem(title="t", link="", description="剩余 2 天 6 小时")
+    item = FeedItem(title="t", description="剩余 2 天 6 小时")
     w = WindowParser.parse(item)
     assert w.free_type == FreeType.TIMED
     assert w.free_end_at is not None
@@ -25,14 +25,14 @@ def test_str_path_timed_remaining_text() -> None:
 
 
 def test_str_path_permanent_marker() -> None:
-    item = FeedItem(title="t", link="", description="永久免费种")
+    item = FeedItem(title="t", description="永久免费种")
     w = WindowParser.parse(item)
     assert w.free_type == FreeType.PERMANENT
     assert w.free_end_at is None
 
 
 def test_str_path_unknown() -> None:
-    item = FeedItem(title="t", link="", description="普通种子")
+    item = FeedItem(title="t", description="普通种子")
     w = WindowParser.parse(item)
     assert w.free_type == FreeType.UNKNOWN
     assert w.free_end_at is None
@@ -40,7 +40,7 @@ def test_str_path_unknown() -> None:
 
 
 def test_str_path_empty_description() -> None:
-    w = WindowParser.parse(FeedItem(title="t", link=""))
+    w = WindowParser.parse(FeedItem(title="t"))
     assert w.free_type == FreeType.UNKNOWN
 
 
@@ -261,7 +261,7 @@ def test_window_is_permanent_property() -> None:
 
 def test_non_abortable_free_types_only_permanent() -> None:
     """不参与超时中止的类型集合只含 PERMANENT。"""
-    from app.db.models import NON_ABORTABLE_FREE_TYPES
+    from app.domain.enums import NON_ABORTABLE_FREE_TYPES
 
     assert frozenset({FreeType.PERMANENT}) == NON_ABORTABLE_FREE_TYPES
     assert FreeType.NEUTRAL not in NON_ABORTABLE_FREE_TYPES

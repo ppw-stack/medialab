@@ -27,8 +27,8 @@ core → db → adapters → services → api
 | 2.1 抽站点公共基类 | ❌ **已决定不做** | — |
 | 2.2 default_downloader 零调用 | ✅ 已修 | `194eecb` |
 | 2.3 core→db 逆向依赖 | ✅ 已修 | `b8f86ca` |
-| 2.4 API 层漏业务逻辑 | ✅ 已修 | *(本批)* |
-| 3. 死代码 | ⏳ 待做（Phase 3） | — |
+| 2.4 API 层漏业务逻辑 | ✅ 已修 | `b99194e` |
+| 3. 死代码 | ✅ 已修 | *(本批)* |
 | 4. 前端类型分散 | ⏳ 待做（Phase 4） | — |
 
 ---
@@ -223,12 +223,28 @@ get_user_snapshot   × 7    (7 站 15 行几乎一模一样)
 
 | 对象 | 状态 |
 |---|---|
-| `TaskKind` 8 个成员 | 只有 `ADD_TORRENT` 在用，其余 7 个死 |
-| `PushStatus.PENDING` | 从未写入（NULL 已表示「未推过」） |
-| `FeedItem.link` | 全仓零读取 |
-| `SiteAdapter.download_torrent_url()` | 零调用 |
-| `SingleWriterQueue.write()` | 零调用（见 1.6） |
-| `factory.default_downloader()` | 零调用（见 2.2） |
+| `TaskKind` 7 个死成员 | ✅ 已删（`ADD_TORRENT` 之外全删） |
+| `PushStatus.PENDING` | ✅ 已删（`NULL` 已表示「未推过」） |
+| `FeedItem.link` | ✅ 已删（只写不读；详情 URL 由 `get_torrent_url()` 实时生成） |
+| `SiteAdapter.download_torrent_url()` | ✅ 已删（零调用、无子类覆盖） |
+| `SingleWriterQueue.write()` | ✅ 已删（见 1.6） |
+| `factory.default_downloader()` | ✅ 已删（见 2.2） |
+| `factory.downloader_for_id()` | ✅ 已删（零调用） |
+| `factory.invalidate_all()` | ✅ 已删（零调用） |
+| `DownloaderLocks.is_busy()` | ✅ 已删（零调用） |
+| `AppSettings.web_host` / `web_port` | ✅ 已删（从未被读取——容器 CMD 写死 8080） |
+| `db/models.py` 的枚举 re-export | ✅ 已删（枚举只住 `app.domain.enums`） |
+| `FreeWindow.raw_text` | ⚠️ **保留**（调试用；12 处写入、0 处读取，但删了会丢排障线索） |
+| `AppRuntimeParam.value_str` | ⚠️ **保留**（DB 列，删要迁移；`job_settings.py` 的注释提到它） |
+| `TorrentInfo.num_seeds` 等 | ⚠️ **保留**（适配器契约字段，未来 UI 会用） |
+| `qbittorrent_api` / `transmission_api` 的协议方法 | ⚠️ **保留**（协议完整性层，按需补齐） |
+
+**死代码检测写成测试**（`tests/unit/test_dead_code.py`，31 例）——
+不靠眼力翻 grep，而是解析 AST：
+
+- 枚举成员：扫 `Enum.MEMBER` 引用（生产代码计数，**测试引用不算**）
+- dataclass 字段：扫 `.field` 的 **Load** 上下文（只写不读 = 死字段）
+- 方法：扫 `hasattr` 式存在性检查 + 全仓引用计数
 
 ---
 

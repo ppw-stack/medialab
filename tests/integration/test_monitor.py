@@ -20,12 +20,11 @@ from app.adapters.downloaders.base import TorrentInfo, TorrentState
 from app.core.timeutils import bj_now_dt, format_bj
 from app.db.models import (
     DownloaderInstance,
-    FreeType,
-    PushStatus,
     Site,
     TorrentIndex,
 )
 from app.db.session import session_scope
+from app.domain.enums import FreeType, PushStatus
 from app.services.factory import AdapterFactory
 from app.services.monitor import MonitorFreeWindowService
 from app.services.runtime_params import (

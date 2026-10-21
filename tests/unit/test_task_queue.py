@@ -375,13 +375,6 @@ def test_max_attempts_is_5() -> None:
     "kind",
     [
         TaskKind.ADD_TORRENT,
-        TaskKind.REMOVE_TORRENT,
-        TaskKind.SET_CATEGORY,
-        TaskKind.SET_PATH,
-        TaskKind.SET_RATE_LIMIT,
-        TaskKind.PAUSE,
-        TaskKind.RESUME,
-        TaskKind.ABORT_WINDOW,
     ],
 )
 def test_task_kind_values_are_stable(kind: TaskKind) -> None:

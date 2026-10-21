@@ -15,8 +15,9 @@ from __future__ import annotations
 import pytest
 from app.adapters.downloaders.base import AddTorrentPayload, DownloaderError
 from app.adapters.sites.base import SiteAdapter, SiteHealth, SiteProfile
-from app.db.models import DownloaderInstance, PushStatus, Site, TorrentIndex
+from app.db.models import DownloaderInstance, Site, TorrentIndex
 from app.db.session import session_scope
+from app.domain.enums import PushStatus
 from app.services.factory import AdapterFactory
 from app.services.push_service import PushError, push_index_entry
 from app.services.task_queue import TaskKind
