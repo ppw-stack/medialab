@@ -8,21 +8,16 @@
 """
 from __future__ import annotations
 
-from typing import Any, Final, cast
+from typing import Any, Final
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi import Query as QueryParam
 from pydantic import BaseModel
-from sqlalchemy import CursorResult, func, or_, select
+from sqlalchemy import func, select
 
-from app.adapters.downloaders.base import AddTorrentPayload, DownloaderError
-from app.adapters.sites._bencode import infohash_from_torrent
 from app.api.auth import require_session
 from app.core.logging import get_logger
-from app.core.timeutils import bj_now
 from app.db.models import (
-    DownloaderInstance,
-    PushStatus,
     Site,
     TorrentIndex,
 )
@@ -267,140 +262,34 @@ async def push_torrent_index(index_id: int, payload: PushRequest) -> PushRespons
 
     - 未指定 downloader_id → 用 is_default=True 且 enabled 的下载器
     - 已推送过（push_status == pushed）→ 直接返回已存在
-    - 实时调 SiteAdapter.download_torrent 拿 .torrent bytes；下载失败 → 400
+    - 下载 .torrent 失败 → 502
+
+    实现：走 :func:`app.services.push_service.push_index_entry`——
+    与自动推送（``push_free``）**同一条队列 + 同一个执行器**
+    （``task_queue`` → ``task_executor.execute_add_torrent``）。
+
+    此前这里是独立实现，与自动推送链路分叉：手推不走队列（无崩溃恢复 /
+    幂等键 / 退避），且两边的 TOCTOU 防御已经漂移。
     """
-    from sqlalchemy import update
+    from app.services.push_service import PushError, push_index_entry
 
-    from app.db.models import Site
-
-    # 1) 读索引条目 + 站点（用于构造 adapter）
-    async with session_scope() as session:
-        item = (
-            await session.execute(select(TorrentIndex).where(TorrentIndex.id == index_id))
-        ).scalar_one_or_none()
-        if item is None:
-            raise HTTPException(status_code=404, detail="索引条目不存在")
-        if not item.item_id:
-            raise HTTPException(status_code=400, detail="该条目缺少 item_id，无法推送")
-        site_row = (
-            await session.execute(
-                select(Site).where(Site.id == item.site_id)
-            )
-        ).scalar_one_or_none()
-        if site_row is None:
-            raise HTTPException(status_code=404, detail="站点不存在")
-
-        # 2) 解析下载器
-        if payload.downloader_id is not None:
-            dl = (
-                await session.execute(
-                    select(DownloaderInstance).where(
-                        DownloaderInstance.id == payload.downloader_id
-                    )
-                )
-            ).scalar_one_or_none()
-            if dl is None:
-                raise HTTPException(status_code=404, detail="下载器不存在")
-            if not dl.enabled:
-                raise HTTPException(status_code=400, detail="下载器已禁用")
-        else:
-            dl = (
-                await session.execute(
-                    select(DownloaderInstance).where(
-                        DownloaderInstance.is_default.is_(True),
-                        DownloaderInstance.enabled.is_(True),
-                    )
-                )
-            ).scalar_one_or_none()
-            if dl is None:
-                raise HTTPException(status_code=400, detail="未配置默认下载器")
-
-        # 3) 去重：push_status == pushed 则直接返回
-        if item.push_status == PushStatus.PUSHED:
-            return PushResponse(
-                ok=True, detail="该种已推送过", downloader_id=dl.id
-            )
-
-        item_id = item.item_id
-        name = item.name
-        dl_id = dl.id
-        dl_row = dl
-
-    # 4) 下载 .torrent 文件
-    factory = get_factory()
-    site_adapter = factory.site(site_row)
     try:
-        torrent_bytes = await site_adapter.download_torrent(item_id)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400, detail=f"下载 torrent 文件失败：{exc}"
-        ) from exc
-    if not torrent_bytes or not torrent_bytes.startswith(b"d"):
-        raise HTTPException(
-            status_code=400, detail="站点返回的不是有效的 torrent 文件"
-        )
-
-    # 5) 解析 info_hash
-    info_hash = infohash_from_torrent(torrent_bytes)
-    if info_hash is None:
-        raise HTTPException(
-            status_code=400, detail="torrent 文件解析 info_hash 失败"
-        )
-
-    # 6) 调下载器
-    adapter = factory.downloader(dl_row)
-    try:
-        await adapter.add_torrent(
-            AddTorrentPayload(
-                name=name,
-                torrent_bytes=torrent_bytes,
-                category="manual-push",
-                save_path=dl_row.save_path or None,
-            )
-        )
-    except DownloaderError as exc:
-        raise HTTPException(status_code=502, detail=f"下载器推送失败：{exc}") from exc
-
-    # 7) 更新 torrent_index.push_status = pushed
-    # TOCTOU 防御：在 update 语句加 `WHERE push_status != 'pushed'` 条件
-    # 并检查 affected_rows——两个并发请求都通过了第 3 步的去重检查时，
-    # 只有第一个 update 会命中行（push_status 仍非 pushed），第二个的
-    # affected_rows=0 表示已被并发推送，本次视为幂等成功。
-    #
-    # 注意 SQL 三值逻辑：`push_status != 'pushed'` 对 NULL 求值为 NULL
-    # （不匹配）。而 push_status 列 nullable，NULL = "从未推过"——
-    # 正是本方法要更新的行！故必须用 or_(IS NULL, != PUSHED) 显式覆盖，
-    # 否则从未推过的行永远匹配不上，rowcount 恒为 0，
-    # 会误判成"已被并发推送"而永不写入 pushed 状态。
-    async with session_scope() as session:
-        result = cast(
-            CursorResult[object],
-            await session.execute(
-                update(TorrentIndex)
-                .where(
-                    TorrentIndex.id == index_id,
-                    or_(
-                        TorrentIndex.push_status.is_(None),
-                        TorrentIndex.push_status != PushStatus.PUSHED,
-                    ),
-                )
-                .values(
-                    push_status=PushStatus.PUSHED,
-                    pushed_at=bj_now(),
-                    info_hash=info_hash,
-                )
-            ),
-        )
-    if result.rowcount == 0:
-        # 并发推送：另一个请求已先一步标记为 pushed
-        logger.info(
-            "手动推送 index_id=%d：并发请求已先推送，本次视为幂等成功",
+        outcome = await push_index_entry(
             index_id,
+            payload.downloader_id,
+            get_factory(),
+            category="manual-push",
         )
-        return PushResponse(
-            ok=True, detail="该种已被并发请求推送", info_hash=info_hash,
-            downloader_id=dl_id,
-        )
+    except PushError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
 
-    logger.info("手动推送 index_id=%d → downloader=%d item=%s", index_id, dl_id, item_id)
-    return PushResponse(ok=True, detail="推送成功", info_hash=info_hash, downloader_id=dl_id)
+    logger.info(
+        "手动推送 index_id=%d → downloader=%s：%s",
+        index_id, outcome.downloader_id, outcome.detail,
+    )
+    return PushResponse(
+        ok=outcome.ok,
+        detail=outcome.detail,
+        info_hash=outcome.info_hash,
+        downloader_id=outcome.downloader_id,
+    )

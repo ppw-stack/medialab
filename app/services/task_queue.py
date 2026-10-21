@@ -126,7 +126,17 @@ class TaskQueueService:
             async with self._session.begin_nested():
                 await self._session.flush()
         except IntegrityError:
-            # 并发插入同键：唯一约束兜底，视为幂等命中
+            # 并发插入同键：唯一约束兜底，视为幂等命中。
+            #
+            # **必须先 rollback**：flush 失败后 session 处于「事务已回滚」
+            # 状态，直接查询会抛 PendingRollbackError（"This Session's
+            # transaction has been rolled back due to a previous exception
+            # during flush"）。
+            #
+            # 注意 savepoint（begin_nested）已把失败限制在嵌套事务内，
+            # 但 SQLAlchemy 仍会把 session 标记为需要 rollback——因为
+            # 唯一约束冲突在 SQLite 层是「整个语句」失败。
+            await self._session.rollback()
             row = (
                 await self._session.execute(
                     select(TaskQueue).where(TaskQueue.idem_key == idem_key)

@@ -18,6 +18,7 @@ from app.db.session import session_scope
 from app.services.task_queue import (
     MAX_ATTEMPTS,
     STALE_RUNNING_MINUTES,
+    EnqueueResult,
     TaskKind,
     TaskQueueService,
     TaskStatus,
@@ -83,6 +84,30 @@ async def test_enqueue_is_idempotent(db: None) -> None:
         assert second.task_id == first.task_id
         # 幂等命中时返回既有任务状态
         assert second.existing_status == TaskStatus.PENDING
+
+
+async def test_concurrent_enqueue_same_key_is_idempotent(db: None) -> None:
+    """并发入队同键 → 一个创建成功，另一个幂等命中（**不抛异常**）。
+
+    回归：唯一约束冲突后必须先 rollback 再查询，否则 session 处于
+    「事务已回滚」状态，查询会抛 PendingRollbackError。
+    """
+    import asyncio
+
+    async def _enq() -> EnqueueResult:
+        async with session_scope() as session:
+            svc = TaskQueueService(session)
+            return await svc.enqueue(
+                TaskKind.ADD_TORRENT, {"i": 1}, idem_key="race"
+            )
+
+    results = await asyncio.gather(_enq(), _enq(), return_exceptions=True)
+    assert not any(isinstance(r, Exception) for r in results), (
+        f"并发入队不应抛异常：{results}"
+    )
+    created = [r for r in results if r.created]
+    assert len(created) == 1, "只应创建一个任务"
+    assert len({r.task_id for r in results}) == 1, "两个结果应指向同一任务"
 
 
 async def test_enqueue_different_keys_coexist(db: None) -> None:

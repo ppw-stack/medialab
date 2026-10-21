@@ -16,9 +16,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import select, update
+from sqlalchemy import CursorResult, or_, select, update
 
 from app.adapters.downloaders.base import AddTorrentPayload, DownloaderError
 from app.adapters.sites._bencode import infohash_from_torrent
@@ -57,10 +57,15 @@ def _is_duplicate_error(exc: DownloaderError) -> bool:
 
 
 async def execute_add_torrent(
-    payload: dict[str, Any], factory: AdapterFactory
+    payload: dict[str, Any],
+    factory: AdapterFactory,
+    *,
+    category: str = "auto-push",
 ) -> dict[str, Any]:
     """执行 ADD_TORRENT 任务：下载 .torrent → 解析 hash → 推送 → 更新索引。
 
+    :param category: 推送到下载器时用的分类标签。自动推送是 ``auto-push``，
+        手动推送是 ``manual-push``（供用户在下载器里区分来源）。
     :return: ``{"info_hash": str, "name": str, "idempotent": bool}``；
         ``idempotent=True`` 表示幂等命中（已推过 / duplicate），未实际重复添加。
     """
@@ -135,7 +140,7 @@ async def execute_add_torrent(
             AddTorrentPayload(
                 name=name,
                 torrent_bytes=torrent_bytes,
-                category="auto-push",
+                category=category,
                 save_path=dl_save_path or None,
             )
         )
@@ -146,15 +151,37 @@ async def execute_add_torrent(
             raise PushItemError("add", f"add_torrent: {exc}") from exc
 
     # 5) 更新 torrent_index.push_status = pushed
+    #
+    # TOCTOU 防御：加 `push_status != 'pushed'` 条件并检查 affected_rows——
+    # 两个并发执行者都通过了第 1 步的幂等检查时，只有第一个 update 会命中行
+    # （push_status 仍非 pushed），第二个的 rowcount=0 表示已被并发推送，
+    # 本次视为幂等成功。
+    #
+    # 注意 SQL 三值逻辑：`push_status != 'pushed'` 对 NULL 求值为 NULL
+    # （不匹配）。而 push_status 列 nullable，NULL = "从未推过"——正是本
+    # 方法要更新的行！故必须用 or_(IS NULL, != PUSHED) 显式覆盖。
     async with session_scope() as session:
-        await session.execute(
-            update(TorrentIndex)
-            .where(TorrentIndex.id == index_id)
-            .values(
-                push_status=PushStatus.PUSHED,
-                pushed_at=bj_now(),
-                info_hash=info_hash,
-            )
+        result = cast(
+            CursorResult[object],
+            await session.execute(
+                update(TorrentIndex)
+                .where(
+                    TorrentIndex.id == index_id,
+                    or_(
+                        TorrentIndex.push_status.is_(None),
+                        TorrentIndex.push_status != PushStatus.PUSHED,
+                    ),
+                )
+                .values(
+                    push_status=PushStatus.PUSHED,
+                    pushed_at=bj_now(),
+                    info_hash=info_hash,
+                )
+            ),
+        )
+    if result.rowcount == 0:
+        logger.info(
+            "推送 index_id=%d：并发执行者已先推送，本次视为幂等成功", index_id
         )
     return {"info_hash": info_hash, "name": name, "idempotent": idempotent}
 

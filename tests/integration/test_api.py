@@ -342,3 +342,34 @@ async def test_job_runs_empty(client: httpx.AsyncClient) -> None:
     data = resp.json()
     assert data["total"] == 0
     assert data["items"] == []
+
+
+# ------------------------------------------------------------------ 手动推送
+
+async def test_push_missing_index_404(client: httpx.AsyncClient) -> None:
+    """手推不存在的索引 → 404。"""
+    resp = await client.post("/api/v1/torrent-index/999999/push", json={})
+    assert resp.status_code == 404
+
+
+async def test_push_without_default_downloader_400(
+    client: httpx.AsyncClient,
+) -> None:
+    """未配置默认下载器 → 400。"""
+    from app.db.models import Site, TorrentIndex
+
+    async with session_scope() as session:
+        session.add(Site(name="s1", domain="s1.test", adapter="hdsky"))
+        session.add(
+            TorrentIndex(site_id=1, item_id="i1", name="t", free_type="freeleech_permanent")
+        )
+        await session.flush()
+        index_id = (
+            await session.execute(
+                select(TorrentIndex.id).where(TorrentIndex.item_id == "i1")
+            )
+        ).scalar_one()
+
+    resp = await client.post(f"/api/v1/torrent-index/{index_id}/push", json={})
+    assert resp.status_code == 400
+    assert "未配置默认下载器" in resp.json()["detail"]
