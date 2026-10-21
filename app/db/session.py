@@ -109,6 +109,21 @@ async def dispose_db() -> None:
     _session_factory = None
 
 
+async def reset_db_for_test(settings: AppSettings) -> None:
+    """丢弃现有 engine 并按新 settings 重建（**仅测试用**）。
+
+    :func:`init_db` 是幂等的（``_engine is not None`` 时直接返回），
+    因此测试之间无法切换 DB 路径。本函数先 dispose 旧连接池再重建，
+    让每个测试用例能用独立的临时 DB。
+
+    注意：``aiosqlite`` 连接池绑定创建它的 event loop —— 配合
+    ``pytest-asyncio`` 的 function 级 loop scope，必须**每个测试**
+    重建 engine，不能跨用例复用。
+    """
+    await dispose_db()
+    init_db(settings)
+
+
 #: 站点 adapter 迁移：从旧值映射到新值。空 dict 表示无迁移。
 ADAPTER_VALUE_MIGRATIONS: dict[str, str] = {
     "generic": "mteam",  # 旧通用 adapter → m-team 专用 adapter（重构后唯一支持的实现）

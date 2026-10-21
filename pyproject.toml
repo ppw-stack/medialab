@@ -24,7 +24,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3",
-    "pytest-asyncio>=0.24",
+    # 实装 1.4.0：1.x 弃用了未显式指定 loop scope 的写法
+    "pytest-asyncio>=1.0",
     "pytest-cov>=6.0",
     "respx>=0.21",
     "ruff>=0.8",
@@ -67,6 +68,15 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = ["sqlalchemy.*"]
 disable_error_code = ["no-untyped-call", "no-untyped-def", "union-attr", "misc", "operator"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# pytest-asyncio 1.x：auto 模式免去每个 async 用例加 @pytest.mark.asyncio
+asyncio_mode = "auto"
+# event loop 作用域 = function。aiosqlite 连接池绑定创建它的 loop，
+# 跨 loop 复用会抛 InterfaceError → DB fixture 必须 function 级。
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-q --strict-markers"
 
 [tool.coverage.run]
 source = ["app"]
