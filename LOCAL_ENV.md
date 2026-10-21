@@ -309,9 +309,28 @@ git push origin main
 # 2) 128 上拉新镜像
 ssh mp "docker pull ppw111/seedhelper:latest"
 
-# 3) 128 上重建容器（注意用 .128.yml 那个文件）
-ssh mp "cd /mnt/user/appdata/seedhelper/app && docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d"
+# 3) 128 上重建容器（注意用 .128.yml 那个文件 + TAG=latest）
+ssh mp "cd /mnt/user/appdata/seedhelper/app && TAG=latest docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d"
 ```
+
+> ⚠️ **第 3 步必须带 `TAG=latest`**（2026-10-22 实测确认）。
+> `docker-compose.prod.128.yml` 里写的是 `image: docker.io/ppw111/seedhelper:${TAG:-0.1.0}`，
+> 而 `.env.prod` **没有** `TAG` 键 → compose 会解析成 `0.1.0`，
+> 部署的是**旧镜像**（`0.1.0` 标签自 10 月起就没更新过），
+> 容器却会显示"重建成功"，**极易误判成部署成功**。
+> 现网跑的容器用的是 `latest`，所以显式传 `TAG=latest` 才与现状一致。
+>
+> ⚠️ **部署前先备份 DB**（手工，见 DEPLOY.md §8）：
+> ```bash
+> ssh mp "cd /mnt/user/appdata/seedhelper/data && sqlite3 seedhelper.db \".backup './seedhelper.db.bak.\$(date +%Y%m%d_%H%M%S)'\""
+> ```
+> 备份后用 `PRAGMA integrity_check;` 确认（损坏的副本没有抢救价值）。
+>
+> ⚠️ **CI 的 "Set Docker Hub repo visibility to public" 步骤失败会让整个
+> workflow 显示为 failed**，但那一步是 `continue-on-error: true`——
+> **镜像其实已经推送成功**（`Build and push` 步骤是成功的）。
+> 判断镜像有没有推上去要看 Docker Hub 的 tag `last_updated`，
+> 不要只看 workflow 的红绿灯。
 
 > ⚠️ 128 上的 `/mnt/user/appdata/seedhelper/app/` **不是 git 仓库**，且代码副本已陈旧
 > （仍是 10 月 14 日的版本）。容器真正跑的是 Docker Hub 镜像里的代码，
