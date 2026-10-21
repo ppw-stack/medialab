@@ -21,6 +21,7 @@
 | `DEPLOY.md` | Docker 双环境部署流程 |
 | `LOCAL_ENV.md` | **本机 / prod 环境实况**：主机、工具链、端口、API 路径、凭据获取、部署链路 |
 | `AGENTS.md` | AI / 协作者行为规范 |
+| `docs/architecture-debt.md` | **架构债清单**：2026-10-21 全代码审查的发现（Phase 1~4 的输入） |
 
 ## 快速开始
 
@@ -44,9 +45,48 @@ curl http://localhost:8080/metrics | head
 uv sync --extra dev
 
 # 静态检查
-uv run ruff check app/
+uv run ruff check app/ tests/
 uv run mypy app/
+
+# 后端测试
+uv run pytest
+uv run pytest --cov=app          # 带覆盖率（当前基线 44%）
 ```
+
+### 测试
+
+```
+tests/
+├── conftest.py           # 基础设施：独立 DB / respx 拦截真实网络
+├── unit/                 # 纯函数、无 IO
+│   ├── test_timeutils.py       # 北京时间基准
+│   ├── test_auth.py            # PBKDF2 + session 签名
+│   ├── test_bencode.py         # .torrent → infohash
+│   ├── test_window_parser.py   # 免费窗口判定（业务规则核心）
+│   ├── test_scheduler.py       # 调度中心
+│   ├── test_task_queue.py      # 崩溃恢复 / 幂等 / 退避
+│   └── test_site_adapters.py   # 9 站契约（含「拉取失败必须抛错」）
+└── integration/          # DB / 作业 / API
+    ├── test_db_models.py
+    ├── test_jobs.py            # 站点拉取（失败站统计）
+    ├── test_push_free.py       # 免费种推送（选种白名单）
+    └── test_api.py
+```
+
+测试用**独立临时 DB**，不会碰 `/app/data` 或 `data-dev/`；所有 HTTP 请求
+必须用 respx mock，未 mock 的请求会直接失败（不会误拉真实 PT 站）。
+
+### CI 闸门
+
+`.github/workflows/ci.yml` 在每次 push / PR 上跑：
+
+| job | 检查 |
+|---|---|
+| backend | `ruff` + `mypy` + `pytest` |
+| frontend | `vue-tsc` + `oxlint` |
+
+**全绿才允许合并。** Playwright e2e 需要真实下载器与真实站点，
+CI 上跑不了也不跑（需在本机起 dev 容器后执行）。
 
 ## 架构
 
