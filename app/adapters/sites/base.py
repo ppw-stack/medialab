@@ -291,18 +291,6 @@ def parse_size_from_br(text: str | None) -> int:
 _ABS_DATETIME_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$")
 
 
-def bs4_attr(value: object) -> str:
-    """把 BS4 ``Tag.get()`` 返值（``str | list[str] | None``）归一为 ``str``。
-
-    BS4 属性值可能是 list（class 等）或 None，统一 cast 为字符串便于 regex 处理。
-    """
-    if value is None:
-        return ""
-    if isinstance(value, list):
-        return " ".join(str(v) for v in value)
-    return str(value)
-
-
 def parse_abs_datetime(text: str | None) -> str | None:
     """把 ``"2026-10-15 14:51:34"`` 原样返回为北京时间字符串。
 

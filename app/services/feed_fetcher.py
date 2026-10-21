@@ -1,19 +1,19 @@
-"""站点拉取器（FR-2.2 节奏控制 + 熔断保护）。
+"""站点拉取器（FR-2.2 节奏控制）。
 
-PT 站对高频请求极其敏感（R2：被封 = 账号风险），因此本模块的三条约束都是
-**安全要求**而非性能优化：
+PT 站对高频请求极其敏感（R2：被封 = 账号风险），因此本模块的约束是
+**安全要求**而非性能优化：**指数退避重试 3 次**，而不是无限重试。
 
-1. **频率下限 15 分钟**（FR-2.2 强制下限），配置再小也会被夹住。
-2. **指数退避重试 3 次**，而不是无限重试。
-3. **429/403 立即熔断该站 1 小时**——这两种状态说明站点已把我们标记为
-   异常流量，继续请求只会加速账号暴露。
-
-熔断状态持久化在 ``feeds.breaker_until``，进程重启不会遗忘（避免重启即
-绕过熔断）。
+429/403 由适配层抛 :class:`BreakerTripped`，本模块识别后立即放弃本次拉取
+（这类状态说明站点已把我们标记为异常流量，继续请求只会加速账号暴露）。
 
 注：本模块是兼容层——实际拉取已统一走各 adapter 的
 :meth:`SiteAdapter.search_torrents`（API/HTML），不再独立发 HTTP 请求。
-本类保留用于：单站连通性测试（``/sites/{id}/feed-test``）+ 熔断节奏控制。
+本类保留用于：单站连通性测试（``/sites/{id}/feed-test``）。
+
+历史：FR-2.2 原设计还有"频率下限 15 分钟"与"熔断状态持久化到
+``feeds.breaker_until``"，两者随 ``feeds`` 表一起下线（现表结构见
+:mod:`app.db.models`），对应的 :meth:`FeedFetcher.should_pull` /
+``BreakerState`` 已删除。
 """
 
 from __future__ import annotations
@@ -33,18 +33,13 @@ from app.adapters.sites.base import (
     SiteFetchError,
 )
 from app.core.logging import get_logger
-from app.core.timeutils import bj_now_dt, parse_bj
 
 logger = get_logger(__name__)
 
 #: 重试次数（FR-2.2）
 MAX_RETRIES = 3
-#: 熔断时长（秒，FR-2.2：429/403 熔断 1 小时）
-BREAKER_SECONDS = 3600
 #: 单次请求超时
 REQUEST_TIMEOUT = 30.0
-#: 反爬合规：仅常规浏览器标识，绝不做 UA 伪装对抗（R2）
-USER_AGENT = "SeedHelper/0.1 (+https://github.com/seedhelper)"
 
 
 class FeedParseError(RuntimeError):
@@ -74,22 +69,10 @@ class PullResult:
         return self.status in {PullStatus.OK, PullStatus.EMPTY}
 
 
-@dataclass(frozen=True, slots=True)
-class BreakerState:
-    """熔断状态。"""
-
-    tripped: bool
-    until: str | None = None
-
-    @classmethod
-    def clear(cls) -> BreakerState:
-        return cls(tripped=False, until=None)
-
-
 class FeedFetcher:
-    """站点拉取器（兼容层，节奏控制 + 熔断）。
+    """站点拉取器（兼容层，节奏控制）。
 
-    **退避 + 熔断**都在这里，站点适配层只负责解析（分层约束，§7.1）。
+    **退避**在这里，站点适配层只负责解析（分层约束，§7.1）。
     """
 
     def __init__(
@@ -102,19 +85,6 @@ class FeedFetcher:
         self._site = site_name
         self._timeout = timeout
         self._jitter = jitter
-
-    def should_pull(self, breaker_until: str | None) -> tuple[bool, str]:
-        """是否应该拉取：当前仅保留熔断检查（FR-2.2 频率下限已移除）。
-
-        :param breaker_until: 该站点的熔断结束时刻（北京时间字符串或 None）。
-        """
-        now = bj_now_dt()
-        if breaker_until:
-            until_dt = parse_bj(breaker_until)
-            if until_dt is not None and until_dt > now:
-                remain = int((until_dt - now).total_seconds())
-                return False, f"熔断中，剩余 {remain}s"
-        return True, ""
 
     def compute_backoff(self, attempt: int) -> float:
         """指数退避 + 抖动（FR-2.2）。
@@ -208,24 +178,3 @@ class FeedFetcher:
     @staticmethod
     def _elapsed_ms(started: float) -> int:
         return int((time.monotonic() - started) * 1000)
-
-
-async def fetch_with_own_client(
-    url: str,
-    *,
-    cookies: str | None = None,
-    timeout: float = REQUEST_TIMEOUT,  # noqa: ASYNC109
-) -> httpx.Response:
-    """直接用 httpx 拉取（供站点适配层内部复用）。
-
-    显式携带固定 UA（R2：仅常规浏览器标识，不做伪装对抗）。
-    """
-    headers = {"User-Agent": USER_AGENT, "Accept": "application/json, text/html, */*"}
-    async with httpx.AsyncClient(
-        timeout=timeout, follow_redirects=True, headers=headers
-    ) as client:
-        resp = await client.get(url)
-        if resp.status_code in {403, 429}:
-            raise BreakerTripped(f"HTTP {resp.status_code}")
-        resp.raise_for_status()
-        return resp

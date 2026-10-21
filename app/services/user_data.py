@@ -14,8 +14,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -152,46 +150,3 @@ async def refresh_all_sites(factory: AdapterFactory) -> dict[str, object]:
             ),
         ],
     }
-
-
-async def get_user_data_for_site(site_id: int) -> dict[str, Any] | None:
-    """API 查询用：取一站最近一次 user_data（4 业务字段）。"""
-    factory_obj = get_session_factory()
-    async with factory_obj() as session:
-        row = (await session.execute(
-            select(SiteUserData).where(SiteUserData.site_id == site_id)
-        )).scalar_one_or_none()
-        if row is None:
-            return None
-        return {
-            "site_id": row.site_id,
-            "upload": row.upload,
-            "download": row.download,
-            "seeding_count": row.seeding_count,
-            "leeching_count": row.leeching_count,
-            "last_seen_at": row.last_seen_at,
-        }
-
-
-async def get_user_data_all() -> list[dict[str, Any]]:
-    """API 查询用：取所有站点最近 user_data（4 业务字段）。"""
-    factory_obj = get_session_factory()
-    async with factory_obj() as session:
-        rows = (await session.execute(
-            select(SiteUserData, Site.name, Site.adapter)
-            .join(Site, Site.id == SiteUserData.site_id)
-            .order_by(SiteUserData.last_seen_at.desc())
-        )).all()
-        return [
-            {
-                "site_id": ud.site_id,
-                "site_name": site_name,
-                "adapter": adapter,
-                "upload": ud.upload,
-                "download": ud.download,
-                "seeding_count": ud.seeding_count,
-                "leeching_count": ud.leeching_count,
-                "last_seen_at": ud.last_seen_at,
-            }
-            for ud, site_name, adapter in rows
-        ]
