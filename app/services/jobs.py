@@ -17,13 +17,14 @@ from datetime import timedelta
 from sqlalchemy import select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from app.adapters.sites.base import BreakerTripped, FeedItem
+from app.adapters.sites.base import FeedItem
 from app.core.logging import get_logger
 from app.core.metrics import feed_pulls, stage_duration
 from app.core.timeutils import bj_now, bj_now_dt, format_bj, parse_bj
 from app.db.models import Site, TorrentIndex
 from app.db.session import session_scope
 from app.services.factory import AdapterFactory
+from app.services.feed_fetcher import FeedFetcher, PullStatus
 from app.services.scheduler import JobStep
 from app.services.window_parser import WindowParser
 
@@ -187,30 +188,34 @@ async def _pull_site_items(
     except Exception as exc:
         logger.warning("站点 %s 适配器创建失败：%s", row.name, exc)
         return ([], f"适配器创建失败：{exc}", None)
-    feed_items: list[FeedItem] = []
-    try:
-        for page in range(1, 4):  # 拉 1-3 页
-            page_items = await adapter.search_torrents(
-                {}, page_size=200, page_number=page,
-            )
-            feed_items.extend(page_items)
-            if not page_items:
-                break  # 后续页无数据就停，避免无效请求
-    except BreakerTripped as exc:
+
+    # 分页拉取 + 指数退避重试（FR-2.2）。
+    # 重试让 DNS 抖动 / 连接重置这类**瞬态**故障有机会自愈，
+    # 而不必每次都记成失败站。
+    fetcher = FeedFetcher(row.name)
+    result = await fetcher.fetch_pages(adapter, max_pages=3, page_size=200)
+    feed_items = list(result.items)
+
+    if result.status == PullStatus.BREAKER_TRIPPED:
         # 限流/封禁 → 熔断本站，本轮不再请求
         feed_pulls.labels(result="breaker", site=row.name).inc()
-        breaker_until = await _open_breaker(row, str(exc))
+        breaker_until = await _open_breaker(row, result.error)
         logger.warning(
             "站点 %s 触发熔断，暂停拉取至 %s：%s",
-            row.name, breaker_until, exc,
+            row.name, breaker_until, result.error,
         )
         return (feed_items, None, breaker_until)  # 熔断不算「拉取失败」
-    except Exception as exc:
+    if result.status == PullStatus.PARSE_ERROR:
         feed_pulls.labels(result="error", site=row.name).inc()
-        logger.warning("站点 %s 拉取失败：%s", row.name, exc)
+        logger.warning("站点 %s 解析失败：%s", row.name, result.error)
+        return (feed_items, result.error, None)
+    if result.status == PullStatus.HTTP_ERROR:
+        feed_pulls.labels(result="error", site=row.name).inc()
+        logger.warning("站点 %s 拉取失败：%s", row.name, result.error)
         # 保留已拉到的分页数据：第 3 页失败不该让前 2 页白拉
         # （但本站仍记为失败站，交由上层统计）
-        return (feed_items, str(exc), None)
+        return (feed_items, result.error, None)
+
     if feed_items:
         feed_pulls.labels(result="ok", site=row.name).inc(len(feed_items))
     return (feed_items, None, None)

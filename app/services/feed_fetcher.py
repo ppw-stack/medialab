@@ -69,6 +69,25 @@ class PullResult:
         return self.status in {PullStatus.OK, PullStatus.EMPTY}
 
 
+@dataclass(frozen=True, slots=True)
+class PagesResult:
+    """分页拉取结果（生产路径用）。
+
+    与 :class:`PullResult` 的区别：多一个 ``pages_fetched``
+    （实际拉到几页），用于区分「站点只有 1 页」与「第 2 页就失败」。
+    """
+
+    status: PullStatus
+    items: tuple[FeedItem, ...] = ()
+    pages_fetched: int = 0
+    duration_ms: int = 0
+    error: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status in {PullStatus.OK, PullStatus.EMPTY}
+
+
 class FeedFetcher:
     """站点拉取器（兼容层，节奏控制）。
 
@@ -174,6 +193,122 @@ class FeedFetcher:
         if items is None:
             raise FeedParseError("适配器返回 None")
         return items
+
+    async def fetch_pages(
+        self,
+        adapter: SiteAdapter,
+        *,
+        max_pages: int = 3,
+        page_size: int = 200,
+    ) -> PagesResult:
+        """分页拉取（**生产路径**用这个），带指数退避重试。
+
+        与 :meth:`fetch` 的关系：
+
+        - ``fetch()`` 是**单页**语义，供 ``/sites/{id}/feed-test`` 诊断端点用
+        - ``fetch_pages()`` 是**分页**语义，供 ``fetch_all_sites`` 作业用
+
+        分页与重试的交互：
+
+        1. 逐页拉取（第 1..max_pages 页），某页空 → 停止后续页
+        2. 某页网络类失败 → **该页重试**（指数退避 + 抖动）
+        3. 某页重试耗尽 → **保留已拉到的前几页数据**，但整站记为失败
+           （第 3 页失败不该让前 2 页白拉）
+        4. 某页解析类失败 → 不重试，整站记为解析失败
+        5. 某页 :class:`BreakerTripped` → 立即放弃整站（熔断信号）
+
+        耗时上界：``max_pages`` × ``MAX_RETRIES`` 次请求 + 退避 sleep。
+        退避基数 1/2/4 秒，最坏单站额外约 7 秒。
+
+        注：**不做站点级 sleep**（FR-2.2 的「频率下限 15 分钟」已在
+        7ef7c68 移除，2a08bfd 进一步删掉了 min_interval_minutes 字段——
+        cron 周期已是事实上的间隔）。本方法只在**失败后**重试。
+        """
+        started = time.monotonic()
+        items: list[FeedItem] = []
+        pages_fetched = 0
+
+        for page_number in range(1, max_pages + 1):
+            try:
+                page_items = await self._fetch_page(
+                    adapter, page_number=page_number, page_size=page_size
+                )
+            except BreakerTripped as exc:
+                logger.warning("站点 %s 第 %d 页触发熔断：%s", self._site, page_number, exc)
+                return PagesResult(
+                    status=PullStatus.BREAKER_TRIPPED,
+                    items=tuple(items),
+                    pages_fetched=pages_fetched,
+                    duration_ms=self._elapsed_ms(started),
+                    error=str(exc),
+                )
+            except FeedParseError as exc:
+                logger.warning(
+                    "站点 %s 第 %d 页解析失败：%s", self._site, page_number, exc
+                )
+                return PagesResult(
+                    status=PullStatus.PARSE_ERROR,
+                    items=tuple(items),
+                    pages_fetched=pages_fetched,
+                    duration_ms=self._elapsed_ms(started),
+                    error=str(exc),
+                )
+            except (httpx.HTTPError, SiteFetchError) as exc:
+                # 该页重试耗尽：保留已拉到的数据，整站记为失败
+                logger.warning(
+                    "站点 %s 第 %d 页重试 %d 次仍失败：%s",
+                    self._site, page_number, MAX_RETRIES, exc,
+                )
+                return PagesResult(
+                    status=PullStatus.HTTP_ERROR,
+                    items=tuple(items),
+                    pages_fetched=pages_fetched,
+                    duration_ms=self._elapsed_ms(started),
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            items.extend(page_items)
+            pages_fetched += 1
+            if not page_items:
+                break  # 后续页无数据就停，避免无效请求
+
+        return PagesResult(
+            status=PullStatus.OK if items else PullStatus.EMPTY,
+            items=tuple(items),
+            pages_fetched=pages_fetched,
+            duration_ms=self._elapsed_ms(started),
+            error="",
+        )
+
+    async def _fetch_page(
+        self, adapter: SiteAdapter, *, page_number: int, page_size: int
+    ) -> list[FeedItem]:
+        """拉取单页（带退避重试）。失败抛异常，由 :meth:`fetch_pages` 分类。"""
+        last_error: Exception | None = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                items = await adapter.search_torrents(
+                    {}, page_size=page_size, page_number=page_number
+                )
+            except (BreakerTripped, FeedParseError):
+                raise  # 语义明确，不重试
+            except (httpx.HTTPError, SiteFetchError) as exc:
+                last_error = exc
+                logger.warning(
+                    "站点 %s 第 %d 页第 %d/%d 次拉取失败：%s",
+                    self._site, page_number, attempt + 1, MAX_RETRIES, exc,
+                )
+                if attempt + 1 < MAX_RETRIES:
+                    await asyncio.sleep(self.compute_backoff(attempt))
+                continue
+            except Exception as exc:
+                # 解析/契约类：重试无意义
+                raise FeedParseError(f"search_torrents 解析失败：{exc}") from exc
+            if items is None:
+                raise FeedParseError("适配器返回 None")
+            return items
+        # 重试耗尽
+        assert last_error is not None
+        raise last_error
 
     @staticmethod
     def _elapsed_ms(started: float) -> int:

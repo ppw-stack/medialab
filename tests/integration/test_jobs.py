@@ -40,9 +40,18 @@ class _FakeAdapter(SiteAdapter):
 
     adapter_type = "fake"
 
-    def __init__(self, profile: SiteProfile, *, mode: str = "ok", **_: object) -> None:
+    def __init__(
+        self,
+        profile: SiteProfile,
+        *,
+        mode: str = "ok",
+        fail_times: int = 0,
+        **_: object,
+    ) -> None:
         super().__init__(profile)
         self.mode = mode
+        #: 前 N 次调用抛异常（模拟瞬态故障），之后恢复正常
+        self.fail_times = fail_times
         self.calls = 0
 
     async def check_reachability(self) -> SiteHealth:
@@ -60,6 +69,11 @@ class _FakeAdapter(SiteAdapter):
             from app.adapters.sites.base import SiteFetchError
 
             raise SiteFetchError("Name or service not known")
+        if self.mode == "flaky" and self.calls <= self.fail_times:
+            # 瞬态故障：前 fail_times 次失败，之后成功
+            from app.adapters.sites.base import SiteFetchError
+
+            raise SiteFetchError("连接被重置")
         if self.mode == "breaker":
             from app.adapters.sites.base import BreakerTripped
 
@@ -68,6 +82,9 @@ class _FakeAdapter(SiteAdapter):
             from app.adapters.sites.base import BreakerTripped
 
             raise BreakerTripped("拉取返回 403，需熔断")
+        if self.mode == "parse":
+            # 解析类异常（站点改版）——重试无意义
+            raise ValueError("HTML 结构变了")
         if self.mode == "empty":
             return []
         if page_number > 1:
@@ -103,15 +120,26 @@ class _FakeAdapter(SiteAdapter):
 
 @pytest.fixture
 def factory_with(monkeypatch: pytest.MonkeyPatch):
-    """构造工厂，按站点名注入不同行为的假适配器。"""
+    """构造工厂，按站点名注入不同行为的假适配器。
 
-    def _make(modes: dict[str, str]) -> AdapterFactory:
+    ``modes`` 的值可以是：
+    - 字符串：模式名（"ok" / "empty" / "raise" / "breaker" / "breaker403" / "flaky"）
+    - 元组 ``(模式, fail_times)``：flaky 模式用，指定前几次失败
+    """
+
+    def _make(modes: dict[str, str | tuple[str, int]]) -> AdapterFactory:
         f = AdapterFactory()
 
         def _site(row: Site, *, cookies: str | None = None) -> _FakeAdapter:
-            mode = modes.get(row.name, "ok")
+            spec = modes.get(row.name, "ok")
+            if isinstance(spec, tuple):
+                mode, fail_times = spec
+            else:
+                mode, fail_times = spec, 0
             return _FakeAdapter(
-                SiteProfile(name=row.name, domain=row.domain), mode=mode
+                SiteProfile(name=row.name, domain=row.domain),
+                mode=mode,
+                fail_times=fail_times,
             )
 
         monkeypatch.setattr(f, "site", _site)
@@ -228,6 +256,74 @@ async def test_steps_ok_when_no_failure(db: None, factory_with) -> None:
 
     pull_step = next(s for s in result["steps"] if s.name == "拉取种子列表")
     assert pull_step.status == "ok"
+
+
+# ------------------------------------------------------------------ 重试
+
+async def test_transient_failure_is_retried_and_succeeds(
+    db: None, factory_with
+) -> None:
+    """瞬态故障（连接重置）重试后成功 → **不算失败站**。
+
+    这是把退避重试接回主链路的核心收益：DNS 抖动 / 连接重置这类
+    故障本来重试一次就能好，之前每次都记成失败站。
+    """
+    await _add_sites("s1")
+    factory = factory_with({"s1": ("flaky", 1)})  # 第 1 次失败，第 2 次成功
+    result = await fetch_all_sites(factory)
+
+    assert result["failed_sites"] == 0, "重试成功不该算失败"
+    assert result["total_written"] == 3
+
+
+async def test_retry_exhausted_still_counts_as_failed(
+    db: None, factory_with
+) -> None:
+    """重试耗尽（连续 3 次失败）→ 计入失败站。"""
+    await _add_sites("s1")
+    factory = factory_with({"s1": ("flaky", 99)})  # 一直失败
+    result = await fetch_all_sites(factory)
+
+    assert result["failed_sites"] == 1
+    assert result["total_written"] == 0
+
+
+async def test_retry_does_not_apply_to_parse_errors(
+    db: None, factory_with
+) -> None:
+    """解析类失败不重试（站点改版重试无意义，且加剧限流）。"""
+    await _add_sites("s1")
+    adapters: list[_FakeAdapter] = []
+    factory = AdapterFactory()
+
+    def _site(row: Site, *, cookies: str | None = None) -> _FakeAdapter:
+        a = _FakeAdapter(SiteProfile(name=row.name, domain=row.domain), mode="parse")
+        adapters.append(a)
+        return a
+
+    factory.site = _site  # type: ignore[method-assign]
+    result = await fetch_all_sites(factory)
+
+    assert result["failed_sites"] == 1
+    assert adapters[0].calls == 1, "解析错误不应重试"
+
+
+async def test_breaker_is_not_retried(db: None, factory_with) -> None:
+    """熔断不重试——继续请求只会加速账号暴露。"""
+    await _add_sites("s1")
+    adapters: list[_FakeAdapter] = []
+    factory = AdapterFactory()
+
+    def _site(row: Site, *, cookies: str | None = None) -> _FakeAdapter:
+        a = _FakeAdapter(SiteProfile(name=row.name, domain=row.domain), mode="breaker")
+        adapters.append(a)
+        return a
+
+    factory.site = _site  # type: ignore[method-assign]
+    result = await fetch_all_sites(factory)
+
+    assert result["skipped_breaker"] == 1
+    assert adapters[0].calls == 1, "熔断后不应重试"
 
 
 # ------------------------------------------------------------------ 熔断

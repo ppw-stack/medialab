@@ -14,10 +14,7 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import httpx
-import pytest
 from app.adapters.sites.base import (
     BreakerTripped,
     FeedItem,
@@ -34,23 +31,6 @@ from app.services.feed_fetcher import (
     FeedParseError,
     PullStatus,
 )
-
-
-@pytest.fixture(autouse=True)
-def _no_backoff_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
-    """把退避 sleep 压成 0——测试不该真的等 1s/2s/4s。
-
-    退避**计算**的测试（``compute_backoff``）不受影响：这里只拦 sleep。
-    """
-    real_sleep = asyncio.sleep
-
-    async def _instant_sleep(delay: float, *args: object, **kw: object) -> None:
-        # 0 延迟直接返回；其他延迟照常（防止测试里出现无限等待）
-        if delay > 5:
-            raise AssertionError(f"退避延迟过大：{delay}s")
-        await real_sleep(0, *args, **kw)  # type: ignore[arg-type]
-
-    monkeypatch.setattr("app.services.feed_fetcher.asyncio.sleep", _instant_sleep)
 
 
 class _StubAdapter(SiteAdapter):
@@ -258,3 +238,88 @@ def test_pull_result_ok_property() -> None:
     assert PullResult(status=PullStatus.HTTP_ERROR).ok is False
     assert PullResult(status=PullStatus.PARSE_ERROR).ok is False
     assert PullResult(status=PullStatus.BREAKER_TRIPPED).ok is False
+
+
+# ------------------------------------------------------- fetch_pages（生产路径）
+
+async def test_fetch_pages_collects_all_pages() -> None:
+    """多页结果合并。"""
+    adapter = _StubAdapter([_items(2), _items(2), _items(2)])
+    result = await FeedFetcher("s").fetch_pages(adapter, max_pages=3)
+    assert result.status == PullStatus.OK
+    assert len(result.items) == 6
+    assert result.pages_fetched == 3
+
+
+async def test_fetch_pages_stops_on_empty_page() -> None:
+    """某页为空 → 停止后续页（避免无效请求）。"""
+    adapter = _StubAdapter([_items(2), []])
+    result = await FeedFetcher("s").fetch_pages(adapter, max_pages=3)
+    assert result.status == PullStatus.OK
+    assert len(result.items) == 2
+    assert result.pages_fetched == 2
+    assert adapter.calls == 2, "空页之后不应继续请求"
+
+
+async def test_fetch_pages_respects_max_pages() -> None:
+    """不请求超过 max_pages 页。"""
+    adapter = _StubAdapter([_items(1)] * 10)
+    result = await FeedFetcher("s").fetch_pages(adapter, max_pages=2)
+    assert adapter.calls == 2
+    assert result.pages_fetched == 2
+
+
+async def test_fetch_pages_retries_network_error() -> None:
+    """某页网络故障 → 该页重试，成功则整站成功。"""
+    adapter = _StubAdapter([httpx.ConnectError("DNS 抖动"), _items(2)])
+    result = await FeedFetcher("s").fetch_pages(adapter, max_pages=3)
+    assert result.status == PullStatus.OK
+    assert len(result.items) == 2
+
+
+async def test_fetch_pages_keeps_earlier_pages_on_failure() -> None:
+    """第 2 页失败 → 保留第 1 页数据，但整站记为失败。
+
+    「第 3 页失败不该让前 2 页白拉」——但本站仍算失败站。
+    """
+    # 3 次重试都失败
+    err = httpx.ConnectError("挂了")
+    adapter = _StubAdapter([_items(2), err, err, err])
+    result = await FeedFetcher("s").fetch_pages(adapter, max_pages=3)
+    assert result.status == PullStatus.HTTP_ERROR
+    assert result.ok is False
+    assert len(result.items) == 2, "前 1 页的数据要保留"
+    assert result.pages_fetched == 1
+
+
+async def test_fetch_pages_breaker_stops_immediately() -> None:
+    """熔断 → 立即放弃，不重试，也不拉后续页。"""
+    adapter = _StubAdapter([BreakerTripped("429"), _items(2)])
+    result = await FeedFetcher("s").fetch_pages(adapter, max_pages=3)
+    assert result.status == PullStatus.BREAKER_TRIPPED
+    assert adapter.calls == 1
+    assert result.items == ()
+
+
+async def test_fetch_pages_parse_error_does_not_retry() -> None:
+    adapter = _StubAdapter([ValueError("HTML 变了"), _items(2)])
+    result = await FeedFetcher("s").fetch_pages(adapter, max_pages=3)
+    assert result.status == PullStatus.PARSE_ERROR
+    assert adapter.calls == 1, "解析错误不应重试"
+
+
+async def test_fetch_pages_empty_result_is_empty_not_failure() -> None:
+    """站点确实没种子 → EMPTY，不是失败。"""
+    adapter = _StubAdapter([[]])
+    result = await FeedFetcher("s").fetch_pages(adapter, max_pages=3)
+    assert result.status == PullStatus.EMPTY
+    assert result.ok is True
+
+
+async def test_pages_result_ok_property() -> None:
+    from app.services.feed_fetcher import PagesResult
+
+    assert PagesResult(status=PullStatus.OK).ok is True
+    assert PagesResult(status=PullStatus.EMPTY).ok is True
+    assert PagesResult(status=PullStatus.HTTP_ERROR).ok is False
+    assert PagesResult(status=PullStatus.BREAKER_TRIPPED).ok is False

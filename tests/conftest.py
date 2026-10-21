@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
@@ -96,3 +97,24 @@ def no_network() -> Iterator[respx.MockRouter]:
     """
     with respx.mock(assert_all_mocked=True) as router:
         yield router
+
+
+@pytest.fixture(autouse=True)
+def fast_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把退避 sleep 压成 0——测试不该真等 1s/2s/4s。
+
+    只拦 ``app.services.feed_fetcher`` 里的 sleep（退避重试用），
+    **不动**其他模块的 sleep。退避「计算」的测试
+    （``compute_backoff``）不受影响——它不 sleep。
+
+    背景：拉取路径接回退避重试后，集成测试里的失败用例会各等
+    1+2+4 秒，全套从 7s 涨到 24s。
+    """
+    real_sleep = asyncio.sleep
+
+    async def _instant_sleep(delay: float, *args: object, **kw: object) -> None:
+        if delay > 5:
+            raise AssertionError(f"退避延迟过大：{delay}s")
+        await real_sleep(0, *args, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("app.services.feed_fetcher.asyncio.sleep", _instant_sleep)
