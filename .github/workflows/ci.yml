@@ -1,0 +1,97 @@
+name: ci
+
+# 静态检查与测试闸门（Phase 0）。
+#
+# 与 docker-image.yml **并行**：那个 workflow 只做镜像构建 + 推送，
+# 加检查会拖慢发布链路，故独立成 job。
+#
+# 闸门内容（AGENTS.md「静态检查不通过禁止合并」的落地）：
+#   backend : ruff + mypy + pytest
+#   frontend: vue-tsc（类型）+ oxlint（lint）
+#
+# 刻意**不含** Playwright e2e：现有 e2e 连的是真实下载器
+# （192.168.0.172:9091）和真实站点，CI 上跑不了也不该跑。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: backend (ruff + mypy + pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        # 固定到完整 commit SHA 防止 tag 被劫持后执行恶意代码
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5.4.2
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        # --frozen：用 uv.lock 里的精确版本，不用 pyproject 的浮动范围
+        run: uv sync --extra dev --frozen
+
+      - name: Ruff
+        run: uv run ruff check app/ tests/
+
+      - name: Mypy
+        # 只查 app/：测试代码不必过 --strict
+        run: uv run mypy app/
+
+      - name: Pytest
+        # --cov-fail-under=0：当前覆盖率基线远低于 pyproject 里的 70，
+        # 硬套会让 CI 一上来就红。覆盖率只打印，逐步抬高阈值（只许升不许降）。
+        run: |
+          uv run pytest \
+            --cov=app \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-fail-under=0
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  frontend:
+    name: frontend (vue-tsc + oxlint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Type check
+        working-directory: web
+        run: npx vue-tsc -b
+
+      - name: Lint
+        working-directory: web
+        run: npx oxlint .
