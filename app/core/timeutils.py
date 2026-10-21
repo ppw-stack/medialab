@@ -53,7 +53,3 @@ def to_bj(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=BJ_TZ)
     return dt.astimezone(BJ_TZ).strftime(_TIME_FORMAT)
-
-
-def _ci_gate_probe() -> int:
-    return "故意类型错误"
