@@ -19,6 +19,7 @@ from typing import Final
 
 from app.db.models import (
     NON_ABORTABLE_FREE_TYPES,
+    TYPES_WITHOUT_WINDOW,
     FreeSource,
     FreeType,
 )
@@ -42,7 +43,11 @@ class FreeWindow:
 
     @property
     def is_permanent(self) -> bool:
-        """永久免费/中性种：不参与超时中止（FR-3.0 表、R10）。"""
+        """是否永久免费（不参与超时中止，FR-3.0 表、R10）。
+
+        注意与「无窗口类型」区分：NEUTRAL（半价下载）**不是**永久免费——
+        monitor 的规则是「当前不是免费种 → 立即暂停」，NEUTRAL 走这条路径。
+        """
         return self.free_type in NON_ABORTABLE_FREE_TYPES
 
     @property
@@ -59,8 +64,9 @@ class FreeWindow:
         )
 
     def __post_init__(self) -> None:
-        # 永久免费不得带结束时刻，避免误入看护链路
-        if self.is_permanent and self.free_end_at is not None:
+        # 无窗口类型不得带结束时刻，避免误入看护链路。
+        # 与「是否永久免费」是两个概念——见 app.db.models.TYPES_WITHOUT_WINDOW
+        if self.free_type in TYPES_WITHOUT_WINDOW and self.free_end_at is not None:
             raise ValueError(
                 f"free_type={self.free_type} 为非限时类型，free_end_at 必须为 None（R10）"
             )

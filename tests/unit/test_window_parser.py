@@ -245,11 +245,26 @@ def test_nexusphp_neutral_ignores_remaining_abs() -> None:
 
 
 def test_window_is_permanent_property() -> None:
+    """``is_permanent`` 只对永久免费为 True。
+
+    NEUTRAL（半价/三折）**不是**永久免费——monitor 的现行行为是
+    「当前不是免费种 → 立即暂停」，NEUTRAL 走这条路径。
+    「不参与超时中止」≠「永不暂停」，两者曾被混进同一个集合。
+    """
     from app.core.windows import FreeWindow
 
     assert FreeWindow(free_type=FreeType.PERMANENT).is_permanent is True
-    assert FreeWindow(free_type=FreeType.NEUTRAL).is_permanent is True
+    assert FreeWindow(free_type=FreeType.NEUTRAL).is_permanent is False
     assert FreeWindow(free_type=FreeType.TIMED).is_permanent is False
+    assert FreeWindow(free_type=FreeType.UNKNOWN).is_permanent is False
+
+
+def test_non_abortable_free_types_only_permanent() -> None:
+    """不参与超时中止的类型集合只含 PERMANENT。"""
+    from app.db.models import NON_ABORTABLE_FREE_TYPES
+
+    assert frozenset({FreeType.PERMANENT}) == NON_ABORTABLE_FREE_TYPES
+    assert FreeType.NEUTRAL not in NON_ABORTABLE_FREE_TYPES
 
 
 def test_window_is_low_confidence() -> None:

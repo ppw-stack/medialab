@@ -58,8 +58,35 @@ class FreeSource:
     SITE_DEFAULT = "site_default"
 
 
-#: 永久免费不参与超时中止（FR-3.0 / R10）
-NON_ABORTABLE_FREE_TYPES: Final = frozenset({FreeType.PERMANENT, FreeType.NEUTRAL})
+#: 不参与超时中止的免费类型（FR-3.0 / R10「永久免费绝不挂看护」）。
+#:
+#: **只含 PERMANENT**。NEUTRAL（半价/三折下载）不在其中：
+#:
+#: - ``app/services/monitor.py`` 的实际行为是「当前不是免费种 → 立即暂停」，
+#:   NEUTRAL 走的是这条路径（用户规则）
+#: - 「不参与超时中止」≠「永不暂停」——NEUTRAL 没有时间窗口，
+#:   本就不存在「超时中止」的场景，把它塞进这个集合是语义混淆
+#:
+#: 历史上这里含 NEUTRAL，与 monitor 的实际行为矛盾（潜伏 bug：
+#: ``is_permanent`` / ``is_actionable`` 零调用点，所以从未暴露）。
+#: 现按 monitor 的现行行为对齐。
+NON_ABORTABLE_FREE_TYPES: Final = frozenset({FreeType.PERMANENT})
+
+#: **不得携带 free_end_at** 的类型（构造 :class:`FreeWindow` 时校验）。
+#:
+#: 与 :data:`NON_ABORTABLE_FREE_TYPES` 是**两个不同概念**：
+#:
+#: - 非中止类型 = 不参与超时中止（永久免费）
+#: - 无窗口类型 = 本身没有时间窗口，带 end_at 是契约违规
+#:
+#: NEUTRAL（中性下载不限时）与 TWOU_TIMED（2X 永久有效）属后者。
+#: 历史上两者混用同一个集合，导致把 NEUTRAL 移出非中止集合时
+#: 连带丢掉了「NEUTRAL 不得带 end_at」的校验。
+TYPES_WITHOUT_WINDOW: Final = frozenset({
+    FreeType.PERMANENT,
+    FreeType.NEUTRAL,
+    FreeType.TWOU_TIMED,
+})
 
 
 # ---------------------------------------------------------------- 基础表
