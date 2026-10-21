@@ -13,10 +13,13 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import httpx
 import pytest
 import respx
 from app.adapters.sites.base import FeedItem, SiteAdapter, SiteHealth, SiteProfile
+from app.core.timeutils import bj_now, bj_now_dt, format_bj, parse_bj
 from app.db.models import Site, TorrentIndex
 from app.db.session import session_scope
 from app.services.factory import AdapterFactory
@@ -31,6 +34,8 @@ class _FakeAdapter(SiteAdapter):
     - ``"ok"``     → 返回若干条目
     - ``"empty"``  → 返回 []（站点确实没种子，**不算失败**）
     - ``"raise"``  → 抛 SiteFetchError（故障，**必须计入失败站**）
+    - ``"breaker"``→ 抛 BreakerTripped（限流，**熔断跳过**，不算失败）
+    - ``"breaker403"`` → 同上，但 403（熔断时长减半）
     """
 
     adapter_type = "fake"
@@ -55,6 +60,14 @@ class _FakeAdapter(SiteAdapter):
             from app.adapters.sites.base import SiteFetchError
 
             raise SiteFetchError("Name or service not known")
+        if self.mode == "breaker":
+            from app.adapters.sites.base import BreakerTripped
+
+            raise BreakerTripped("拉取返回 429，需熔断")
+        if self.mode == "breaker403":
+            from app.adapters.sites.base import BreakerTripped
+
+            raise BreakerTripped("拉取返回 403，需熔断")
         if self.mode == "empty":
             return []
         if page_number > 1:
@@ -215,6 +228,118 @@ async def test_steps_ok_when_no_failure(db: None, factory_with) -> None:
 
     pull_step = next(s for s in result["steps"] if s.name == "拉取种子列表")
     assert pull_step.status == "ok"
+
+
+# ------------------------------------------------------------------ 熔断
+
+async def test_breaker_tripped_opens_breaker(db: None, factory_with) -> None:
+    """限流（429）→ 写入 sites.breaker_until。"""
+    await _add_sites("s1")
+    factory = factory_with({"s1": "breaker"})
+    result = await fetch_all_sites(factory)
+
+    async with session_scope() as session:
+        row = (
+            await session.execute(select(Site).where(Site.name == "s1"))
+        ).scalar_one()
+        assert row.breaker_until is not None, "熔断后必须写 breaker_until"
+        assert row.breaker_until > bj_now(), "breaker_until 应在未来"
+    assert result["skipped_breaker"] == 1
+
+
+async def test_breaker_is_not_counted_as_failed(db: None, factory_with) -> None:
+    """熔断是保护性跳过，**不是**故障——不能进 failed_sites。"""
+    await _add_sites("s1")
+    factory = factory_with({"s1": "breaker"})
+    result = await fetch_all_sites(factory)
+
+    assert result["failed_sites"] == 0
+    assert result["skipped_breaker"] == 1
+    assert "熔断" in str(result["summary"])
+
+
+async def test_breaker_skip_does_not_send_request(db: None, factory_with) -> None:
+    """熔断期内跳过该站且**不发请求**——继续请求只会加速账号暴露。"""
+    await _add_sites("s1")
+    factory = factory_with({"s1": "breaker"})
+    await fetch_all_sites(factory)  # 第一轮：触发熔断
+
+    # 第二轮：应被熔断跳过，适配器不被调用
+    adapter = _FakeAdapter(SiteProfile(name="s1", domain="s1.test"), mode="ok")
+    factory2 = AdapterFactory()
+
+    def _site(row: Site, *, cookies: str | None = None) -> _FakeAdapter:
+        return adapter
+
+    factory2.site = _site  # type: ignore[method-assign]
+    result = await fetch_all_sites(factory2)
+
+    assert adapter.calls == 0, "熔断期内不应发起请求"
+    assert result["skipped_breaker"] == 1
+    assert result["total_written"] == 0
+
+
+async def test_expired_breaker_is_ignored(db: None, factory_with) -> None:
+    """熔断已过期 → 正常拉取。"""
+    expired = format_bj(bj_now_dt() - timedelta(minutes=1))
+    async with session_scope() as session:
+        session.add(
+            Site(name="s1", domain="s1.test", adapter="hdsky", breaker_until=expired)
+        )
+        await session.flush()
+
+    factory = factory_with({"s1": "ok"})
+    result = await fetch_all_sites(factory)
+
+    assert result["skipped_breaker"] == 0
+    assert result["total_written"] == 3
+
+
+async def test_breaker_does_not_block_other_sites(db: None, factory_with) -> None:
+    """A 站熔断不影响 B 站正常拉取。"""
+    await _add_sites("bad", "good")
+    factory = factory_with({"bad": "breaker", "good": "ok"})
+    result = await fetch_all_sites(factory)
+
+    assert result["skipped_breaker"] == 1
+    assert result["failed_sites"] == 0
+    assert result["total_written"] == 3, "好站仍要正常写入"
+
+    async with session_scope() as session:
+        rows = (await session.execute(select(TorrentIndex))).scalars().all()
+        assert {r.site_id for r in rows} == {2}  # 只有 good 站
+
+
+async def test_breaker_403_has_shorter_duration(db: None, factory_with) -> None:
+    """403 熔断时长减半（30min）——403 可能是 cookie 失效而非限流。"""
+    await _add_sites("s1")
+    factory = factory_with({"s1": "breaker403"})
+    await fetch_all_sites(factory)
+
+    async with session_scope() as session:
+        row = (
+            await session.execute(select(Site).where(Site.name == "s1"))
+        ).scalar_one()
+        until = parse_bj(row.breaker_until)
+        assert until is not None
+        minutes = (until - bj_now_dt()).total_seconds() / 60
+        assert 29 <= minutes <= 31
+
+
+async def test_breaker_429_has_full_duration(db: None, factory_with) -> None:
+    """429 明确是限流 → 熔断 1 小时。"""
+    await _add_sites("s1")
+    factory = factory_with({"s1": "breaker"})
+    await fetch_all_sites(factory)
+
+    async with session_scope() as session:
+        row = (
+            await session.execute(select(Site).where(Site.name == "s1"))
+        ).scalar_one()
+        until = parse_bj(row.breaker_until)
+        assert until is not None
+        minutes = (until - bj_now_dt()).total_seconds() / 60
+        assert 59 <= minutes <= 61
 
 
 # ------------------------------------------------------------------ 幂等
