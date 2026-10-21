@@ -23,6 +23,7 @@ import respx
 from app.adapters.sites import resolve
 from app.adapters.sites._registry import list_available, list_meta
 from app.adapters.sites.base import (
+    BreakerTripped,
     FeedItem,
     SiteAdapter,
     SiteFetchError,
@@ -144,6 +145,46 @@ async def test_search_torrents_raises_on_http_error(name: str) -> None:
             with pytest.raises(Exception) as exc_info:
                 await adapter.search_torrents({})
             assert isinstance(exc_info.value, (SiteFetchError, httpx.HTTPError))
+    finally:
+        await adapter.close()
+
+
+# ------------------------------------------ 契约：限流必须抛 BreakerTripped
+
+#: m-team 是 API 站（JSON），其余 8 站是 HTML 站
+_HTML_ADAPTERS = tuple(a for a in ALL_ADAPTERS if a not in _API_ONLY_ADAPTERS)
+
+
+@pytest.mark.parametrize("name", ALL_ADAPTERS)
+@pytest.mark.parametrize("status", [403, 429])
+async def test_search_torrents_raises_breaker_on_rate_limit(
+    name: str, status: int
+) -> None:
+    """403/429 限流必须抛 BreakerTripped（熔断信号），不是普通拉取失败。
+
+    限流与「站点改版 / 404」是两种故障：前者要熔断让站冷却，
+    后者重试无意义。之前 8 个 HTML 站一律 ``>= 400`` 抛 SiteFetchError，
+    熔断机制形同虚设。
+    """
+    adapter = _make(name)
+    try:
+        with _mock_all_error(httpx.Response(status, text="rate limited")):
+            with pytest.raises(BreakerTripped) as exc_info:
+                await adapter.search_torrents({})
+            assert str(status) in str(exc_info.value)
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.parametrize("name", ALL_ADAPTERS)
+async def test_search_torrents_5xx_is_not_breaker(name: str) -> None:
+    """5xx 是站点故障，**不是**限流——不该触发熔断。"""
+    adapter = _make(name)
+    try:
+        with _mock_all_error(httpx.Response(500, text="server error")):
+            with pytest.raises(Exception) as exc_info:
+                await adapter.search_torrents({})
+            assert not isinstance(exc_info.value, BreakerTripped)
     finally:
         await adapter.close()
 

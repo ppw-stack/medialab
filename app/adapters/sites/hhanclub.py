@@ -33,6 +33,7 @@ from bs4 import BeautifulSoup
 from bs4.element import Tag
 
 from app.adapters.sites.base import (
+    BreakerTripped,
     FeedItem,
     SiteAdapter,
     SiteFetchError,
@@ -261,6 +262,12 @@ class HhanclubAdapter(SiteAdapter):
             # 拉取失败必须抛出：返回 [] 表示"站点确实没有种子"，
             # 与"站点挂了"混淆会让作业统计看不出故障站
             raise SiteFetchError(f"HHanClub 拉取失败：{exc}") from exc
+        if resp.status_code in (403, 429):
+            # 限流/封禁 → 熔断信号（FR-2.2），不是普通拉取失败。
+            # 403 可能是 cookie 失效而非限流，熔断时长减半（见 jobs.py）。
+            raise BreakerTripped(
+                f"HHanClub 拉取返回 {resp.status_code}，需熔断"
+            )
         if resp.status_code >= 400:
             raise SiteFetchError(
                 f"HHanClub 拉取 HTTP {resp.status_code}"
