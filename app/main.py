@@ -64,15 +64,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await migrate_adapter_values()
     state["db_healthy"].set(1 if await writer.healthcheck() else 0)
 
-    if settings.scheduler_enabled:
-        # 运行时参数（DB 持久化的可调设置）必须在 register_jobs 之前
-        # 初始化，让作业函数首次运行就能拿到最新值
-        from app.services.runtime_params import (
-            init_runtime_params_async,
-            set_runtime_params,
-        )
+    # 运行时参数（DB 持久化的可调设置）必须在 register_jobs 之前初始化，
+    # 让作业函数首次运行就能拿到最新值。
+    #
+    # 注意：**不放在 scheduler_enabled 分支里**——运行时参数是 API 层
+    # 也会读的配置（GET/PUT /api/v1/scheduler/runtime-params），调度器
+    # 关闭时该端点仍要可用。之前放在 if 内，scheduler_enabled=False
+    # 时端点直接 500（RuntimeError: 运行时参数未初始化）。
+    from app.services.runtime_params import (
+        init_runtime_params_async,
+        set_runtime_params,
+    )
 
-        set_runtime_params(await init_runtime_params_async(settings))
+    set_runtime_params(await init_runtime_params_async(settings))
+
+    if settings.scheduler_enabled:
         # 作业启停状态（DB 持久化）同样必须在 register_jobs 之前载入：
         # register() 会按 enabled 决定是否把作业安排到 APScheduler，
         # 届时才知道被用户停用的作业该不该排
