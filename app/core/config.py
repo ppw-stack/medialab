@@ -117,6 +117,35 @@ class AppSettings(BaseSettings):
 
 
 @lru_cache(maxsize=1)
-def get_settings() -> AppSettings:
-    """进程内单例。"""
+def _get_settings_cached() -> AppSettings:
+    """从环境变量 / ``.env`` 读取的进程内单例。"""
     return AppSettings()
+
+
+#: 全局 settings 覆盖（测试 / 嵌入场景注入）。
+#:
+#: 为 None 时 :func:`get_settings` 走环境变量路径（生产行为）；
+#: 非 None 时一律返回该对象，忽略环境变量。
+_settings_override: AppSettings | None = None
+
+
+def set_settings(settings: AppSettings | None) -> None:
+    """覆盖全局 settings（测试 / 嵌入场景）。
+
+    传 ``None`` 恢复为「从环境变量读取」。
+
+    历史：原先 :func:`create_app` 用 ``get_settings.cache_clear()`` 试图
+    注入 settings，但 :func:`get_settings` 是**无参**的 lru_cache 工厂——
+    ``cache_clear()`` 只是让它下次重读 ``.env``，传入的 settings 对象被
+    完全丢弃，注入形同虚设（测试无法用独立 DB，见 Phase 0 计划）。
+    本函数提供真正的注入通道。
+    """
+    global _settings_override
+    _settings_override = settings
+
+
+def get_settings() -> AppSettings:
+    """进程内单例。有 override 时返回 override，否则读环境变量。"""
+    if _settings_override is not None:
+        return _settings_override
+    return _get_settings_cached()

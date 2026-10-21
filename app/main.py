@@ -17,7 +17,7 @@ from fastapi.responses import Response
 
 from app import __version__
 from app.core.auth import hash_password, init_hmac_key
-from app.core.config import AppSettings, get_settings
+from app.core.config import AppSettings, get_settings, set_settings
 from app.core.logging import configure_logging, get_logger
 from app.core.metrics import render_metrics, state
 from app.db.session import dispose_db, init_db, writer
@@ -99,7 +99,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app(settings: AppSettings | None = None) -> FastAPI:
     """应用工厂。测试可注入独立 settings。"""
     if settings is not None:
-        get_settings.cache_clear()
+        # 注入全局 settings（override 通道）。
+        # 原先这里是 get_settings.cache_clear()——但 get_settings 是
+        # **无参**的 lru_cache 工厂，cache_clear() 只让它下次重读 .env，
+        # 传入的 settings 对象被完全丢弃，注入形同虚设（测试无法用独立
+        # DB，会写到 /app/data）。现改用 set_settings() 建立真正的覆盖。
+        set_settings(settings)
 
     app = FastAPI(
         title="SeedHelper",
