@@ -19,7 +19,7 @@ core → db → adapters → services → api
 |---|---|---|
 | 1.1 拉取路径无退避/重试 | ✅ 已修 | `4e48619` |
 | 1.2 熔断没人接 | ✅ 已修 | `fddac72` `e8eab3c` `49f81e3` |
-| 1.3 手推/自动推分叉 | ⏳ 待做（Phase 1 末项） | — |
+| 1.3 手推/自动推分叉 | ✅ 已修 | `a2b3cd0` |
 | 1.4 NEUTRAL 语义矛盾 | ✅ 已修 | `4aeea82` |
 | 1.5 站点名单 4 处 | ✅ 已修 | `69dcc58` |
 | 1.6 单写者队列名实不符 | ✅ 已修 | `87fd5bd` |
@@ -67,7 +67,7 @@ core → db → adapters → services → api
 
 熔断时长：429 → 1 小时，403 → 30 分钟（403 可能是 cookie 失效非限流）。
 
-### 1.3 手推 / 自动推两条链路分叉 ⏳
+### 1.3 手推 / 自动推两条链路分叉 ✅
 
 `app/api/routes/torrent_index.py:290-405` 手工重写了一遍
 `task_executor.execute_add_torrent` 的完整流程（下载 → 解 hash →
@@ -75,9 +75,19 @@ add → 标 pushed），连 TOCTOU 防御
 （`or_(IS NULL, != PUSHED)`）都复制了一份；手推还不走 `task_queue`
 （无崩溃恢复 / 幂等键 / 退避）。
 
-处置：手推改为入 `task_queue`，复用 `execute_add_torrent`。
+**已修**：
+- 新增 `app/services/push_service.py`——手推改为「入队 + 同步等待」，
+  与自动推**同一条队列 + 同一个执行器**（用户点了仍拿到同步结果；
+  任务已落库，进程崩了 `drain_task_queue` 会接手）
+- `task_executor.execute_add_torrent` 补上 TOCTOU 防御（两条链路都受保护）
+- 路由只留参数校验 + 结果转换（405 → 294 行）
 
-### 1.4 `FreeType.NEUTRAL` 语义自相矛盾
+**顺带修一个并发 bug**（新写的并发测试暴露的）：
+`task_queue.enqueue` 的 `IntegrityError` 分支直接查询同一 session，
+但 flush 失败后 session 处于「事务已回滚」状态 → 抛
+`PendingRollbackError`。并发入队同键时必现。已加 `rollback()`。
+
+### 1.4 `FreeType.NEUTRAL` 语义自相矛盾 ✅
 
 - `app/db/models.py:62` 把 NEUTRAL 放进 `NON_ABORTABLE_FREE_TYPES`
   → `app/core/windows.py:is_permanent` 返回 True
@@ -193,7 +203,7 @@ get_user_snapshot   × 7    (7 站 15 行几乎一模一样)
 
 ---
 
-## 顺带记录：Phase 0 中修掉的问题
+## 顺带记录：Phase 0/1 中修掉的问题
 
 | 问题 | commit |
 |---|---|
@@ -201,3 +211,19 @@ get_user_snapshot   × 7    (7 站 15 行几乎一模一样)
 | 运行时参数初始化被 `scheduler_enabled` 绑死 → API 500 | `e5c83e6` |
 | `EnqueueResult.existing_status` 注释与实现不符 | `74f1d06` |
 | `_BACKOFF_CAP_MINUTES` 注释与实现不符（且 30 上限不可达） | `74f1d06` |
+| `task_queue.enqueue` 的 IntegrityError 分支未 rollback → 并发入队抛 PendingRollbackError | `a2b3cd0` |
+| 22 条 ALTER 被 `suppress(Exception)` 静默吞掉真失败 | `87fd5bd` |
+| ruff 配置指向不存在的 `app/db/migrations/**` 目录 | `21951bd` |
+
+---
+
+## 测试与覆盖率
+
+| 阶段 | 用例数 | 覆盖率 |
+|---|---|---|
+| 起点（Phase 0 前） | 0 | 0% |
+| Phase 0 完成 | 276 | 44% |
+| Phase 1 完成 | 382 | 48% |
+
+覆盖率门槛在 `pyproject.toml` 的 `[tool.coverage.report] fail_under`，
+当前 0（不阻断），**只许升不许降**。补测试后逐步抬高。
