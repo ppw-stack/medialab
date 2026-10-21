@@ -174,6 +174,15 @@ cron 的**持久化来源是 `.env` / `.env.prod`**（`FETCH_ALL_SITES_CRON` / `
 > `scan_cross_seed` 有 `SCAN_CROSS_SEED_CRON` 配置项，但当前 `.env` / `.env.prod` 未设置，
 > 走 `app/core/config.py` 的默认值 `0 */6 * * *`。
 
+> ⚠️ **作业的启停（enabled）同样不落库**：`JobSpec.enabled` 只存在内存。
+> `POST /api/v1/scheduler/{job_name}/toggle?enabled=false` 禁用某作业后，
+> **重启容器会自动恢复为启用**（`register_jobs` 用默认 `enabled=True` 重建）。
+> 需要长期禁用，只能改代码或在注册处改默认值。
+>
+> 排查小技巧：disable 的请求会出现在容器访问日志里，形如
+> `POST /api/v1/scheduler/push_free_torrents/toggle?enabled=false`，
+> 来源 IP 即操作者（本机是 `192.168.0.253`）。
+
 ## 7. 站点适配器（9 站）
 
 `app/adapters/sites/`：`mteam` / `hdsky` / `hhanclub` / `audiences` / `hdhome` / `hddolby` / `ourbits` / `soulvoice` / `springsunday`
@@ -182,6 +191,24 @@ cron 的**持久化来源是 `.env` / `.env.prod`**（`FETCH_ALL_SITES_CRON` / `
 
 **时区**：`settings.timezone` 默认 `Asia/Shanghai`（`app/core/config.py`），
 必须与站点规则时区一致，否则保种时长 / 免费窗口计算会偏差。
+
+**拉取失败的表达方式**（2026-10-21 修复，commit `3fcfef1`）：
+`search_torrents` 返回 `[]` = "站点确实没有种子"（正常）；
+拉取失败必须抛 `SiteFetchError`（`app/adapters/sites/base.py`）。
+9 个 adapter 此前把 `httpx.HTTPError` 吞掉返回 `[]`，导致
+`fetch_all_sites` 的 `failed_sites` 恒为 0，故障站完全不可见。
+`feed_fetcher` 把 `SiteFetchError` 归入**可重试**一类（重试 3 次后
+`status=http_error`），不是 `parse_error`。
+
+> ⚠️ `hddolby` 站 DNS **间歇性**解析失败（`Name or service not known`），
+> dev / prod 都会出现。属站点或网络侧问题，不是代码缺陷。
+> 现在会在 `fetch_all_sites` 结果里如实报 `failed_sites: 1` 并点名
+> `hddolby`，日志出现 `站点拉取失败 1 站：hddolby(...)`。
+
+> ⚠️ `BreakerTripped` 熔断机制目前是**死代码**：`should_pull()` 全仓无人调用，
+> `feeds` 表也不存在（现只有 `sites` / `torrent_index` / `task_queue` /
+> `app_runtime_params` / `job_runs` / `site_user_data`）。
+> 只有 mteam / hdhome 的下载路径会抛 `BreakerTripped`，无处落盘。
 
 ## 8. 数据与存储
 
@@ -192,7 +219,9 @@ cron 的**持久化来源是 `.env` / `.env.prod`**（`FETCH_ALL_SITES_CRON` / `
 | 日志 | `logs-dev/` / `logs-prod/` |
 | 下载目录 | `/data/torrents`（dev 挂载） |
 
-- SQLite 走 **WAL**，但 dev compose 设了 `DB_JOURNAL_MODE=DELETE`（commit 后立即落盘，避免重启丢 info_hash）。
+- SQLite 默认走 **WAL**，但 dev / prod compose 都设了 `DB_JOURNAL_MODE=DELETE`
+  （commit 后立即落盘，避免重启丢 info_hash；prod 于 `2f2bc08` 从 WAL 改为 DELETE）。
+  部署后应确认 `-wal` / `-shm` 文件已清除。
 - `user_version` 迁移为**批次制**，老库不会重复 +8h，重复执行幂等。
 - 配置目录 `config/` 挂载进容器（`local.yaml` 属本地配置，已 gitignore）。
 
