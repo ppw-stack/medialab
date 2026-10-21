@@ -22,7 +22,7 @@ import pytest
 import pytest_asyncio
 import respx
 from app.core.config import AppSettings, set_settings
-from app.db.session import dispose_db, reset_db_for_test
+from app.db.session import dispose_db, reset_db_for_test, writer
 from pydantic import SecretStr
 
 
@@ -59,10 +59,28 @@ def app_settings(settings: AppSettings) -> Iterator[AppSettings]:
 
 @pytest_asyncio.fixture
 async def db(app_settings: AppSettings) -> AsyncIterator[None]:
-    """重建 DB engine（function 级 —— 见模块 docstring）。"""
+    """重建 DB engine + 建表（function 级 —— 见模块 docstring）。
+
+    建表走 :meth:`SingleWriterQueue.create_all`（与生产同一条路径），
+    它还包含 22 条幂等 ALTER 迁移 —— 测试与生产的表结构必须一致，
+    否则「测试过了但 prod 崩」这类问题会被漏掉。
+
+    **每个用例前删库文件**：``settings`` 是 session 级（DB 路径固定），
+    不删的话上一个用例的行会漏进下一个（``task_queue`` 的 ``idem_key``
+    唯一约束会直接让「幂等入队」用例互相干扰）。
+    """
+    _remove_db_files(app_settings)
     await reset_db_for_test(app_settings)
+    await writer.create_all()
     yield
     await dispose_db()
+
+
+def _remove_db_files(settings: AppSettings) -> None:
+    """删掉测试 DB 及其 WAL/SHM 副产物，保证每个用例从空库开始。"""
+    db_file = settings.db_file
+    for path in (db_file, Path(f"{db_file}-wal"), Path(f"{db_file}-shm")):
+        path.unlink(missing_ok=True)
 
 
 @pytest.fixture(autouse=True)

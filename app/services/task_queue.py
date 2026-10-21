@@ -46,7 +46,12 @@ class TaskStatus(StrEnum):
 #: running 超过该时长视为僵死（进程崩溃），回收为 pending 重试
 STALE_RUNNING_MINUTES = 30
 
-#: 退避基数（分钟）：第 N 次失败后 run_at = now + min(2**N, 30) 分钟
+#: 退避基数（分钟）：第 N 次失败后 run_at = now + min(2**(N-1), 30) 分钟
+#:
+#: 注：在当前 :data:`MAX_ATTEMPTS` = 5 下，30 分钟上限**实际不可达**
+#: （attempts 达到 MAX_ATTEMPTS 即转永久 failed，退避序列止于
+#: 1→2→4→8 分钟）。此上限是为提高 MAX_ATTEMPTS 预留的安全阀，
+#: 不是当前行为的一部分。
 _BACKOFF_CAP_MINUTES = 30
 
 
@@ -57,7 +62,12 @@ class EnqueueResult:
     task_id: int
     #: False = 幂等命中，队列中已存在等价任务
     created: bool
-    #: 幂等命中时既有任务的状态；created=True 时为 pending
+    #: 幂等命中时既有任务的状态；created=True 时为 None
+    #:
+    #: 注：新建路径返回 None 而非 "pending"——新建任务的初始状态确实是
+    #: pending，但**读回它需要额外一次 SELECT**，而调用方（push_free）
+    #: 只在 ``created=False``（幂等命中）时读这个字段来判断既有任务状态。
+    #: 故语义统一为「仅幂等命中时有值」。
     existing_status: str | None = None
 
 
