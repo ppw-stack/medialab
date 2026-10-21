@@ -108,6 +108,17 @@ class Site(Base):
 
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    #: 熔断截止时刻（北京时间字符串，NULL = 未熔断）。
+    #:
+    #: 站点返回 403/429（限流 / 封禁）时写入，见
+    #: :class:`app.adapters.sites.base.BreakerTripped`。熔断期内
+    #: 拉取作业**跳过该站且不发请求**——继续请求只会加速账号暴露。
+    #:
+    #: 历史：FR-2.2 原设计把熔断状态存在 ``feeds.breaker_until``，
+    #: 该表已下线；``feeds`` 属于「种子条目」而非「站点配置」，
+    #: 熔断是**站点级**状态，故落在本表。
+    breaker_until: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
     created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
     updated_at: Mapped[str] = mapped_column(
         String(32), default=_bj_now, onupdate=_bj_now

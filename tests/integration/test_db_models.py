@@ -195,3 +195,38 @@ async def test_expected_indexes_exist(db: None) -> None:
         names = await conn.run_sync(_indexes)
     assert "ix_torrent_index_push_status" in names
     assert "ix_torrent_index_last_seen" in names
+
+
+# ------------------------------------------------------------------ 熔断字段
+
+async def test_sites_has_breaker_until_column(db: None) -> None:
+    """熔断状态落在 sites 表（站点级状态）。"""
+    from app.db.session import get_engine
+
+    def _cols(conn: object) -> list[str]:
+        return [c["name"] for c in inspect(conn).get_columns("sites")]  # type: ignore[arg-type]
+
+    async with get_engine().connect() as conn:
+        cols = await conn.run_sync(_cols)
+    assert "breaker_until" in cols
+
+
+async def test_breaker_until_defaults_to_null(db: None) -> None:
+    """新建站点默认未熔断。"""
+    async with session_scope() as session:
+        site = Site(name="s1", domain="d1", adapter="hdsky")
+        session.add(site)
+        await session.flush()
+        assert site.breaker_until is None
+
+
+async def test_breaker_until_is_persisted(db: None) -> None:
+    async with session_scope() as session:
+        site = Site(name="s1", domain="d1", adapter="hdsky", breaker_until="2026-10-21 20:00:00")
+        session.add(site)
+        await session.flush()
+        site_id = site.id
+
+    async with session_scope() as session:
+        row = (await session.execute(select(Site).where(Site.id == site_id))).scalar_one()
+        assert row.breaker_until == "2026-10-21 20:00:00"
