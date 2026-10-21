@@ -37,6 +37,7 @@ from bs4 import BeautifulSoup
 from app.adapters.sites.base import (
     FeedItem,
     SiteAdapter,
+    SiteFetchError,
     SiteHealth,
     SiteProfile,
     TorrentBrief,
@@ -206,11 +207,14 @@ class SpringsundayAdapter(SiteAdapter):
         try:
             resp = await self._client.get(url, timeout=self._timeout)
         except httpx.HTTPError as exc:
-            logger.warning("SpringSunday 拉取失败：%s", exc)
-            return []
+            # 拉取失败必须抛出：返回 [] 表示"站点确实没有种子"，
+            # 与"站点挂了"混淆会让作业统计看不出故障站
+            raise SiteFetchError(f"SpringSunday 拉取失败：{exc}") from exc
         if resp.status_code >= 400:
-            logger.warning("SpringSunday 拉取 HTTP %d", resp.status_code)
-            return []
+            raise SiteFetchError(
+                f"SpringSunday 拉取 HTTP {resp.status_code}"
+                f"（第 {page_number} 页）"
+            )
         items = SpringsundayAdapter._parse_torrents_html(resp.text)
         return items
 

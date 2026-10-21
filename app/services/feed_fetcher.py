@@ -26,7 +26,12 @@ from enum import StrEnum
 
 import httpx
 
-from app.adapters.sites.base import BreakerTripped, FeedItem, SiteAdapter
+from app.adapters.sites.base import (
+    BreakerTripped,
+    FeedItem,
+    SiteAdapter,
+    SiteFetchError,
+)
 from app.core.logging import get_logger
 from app.core.timeutils import bj_now_dt, parse_bj
 
@@ -137,7 +142,8 @@ class FeedFetcher:
                     duration_ms=self._elapsed_ms(started),
                     error=str(exc),
                 )
-            except httpx.HTTPError as exc:
+            except (httpx.HTTPError, SiteFetchError) as exc:
+                # 网络类故障（DNS / 连接 / HTTP 错误）：可重试
                 last_error = f"{type(exc).__name__}: {exc}"
                 logger.warning(
                     "站点 %s 第 %d/%d 次拉取失败：%s",
@@ -180,14 +186,18 @@ class FeedFetcher:
     async def _fetch_once(self, adapter: SiteAdapter, url: str | None) -> list[FeedItem]:
         """单次拉取。返回任务列表（站点拉取路径走 adapter.search_torrents）。
 
-        异常分类：网络类（httpx.HTTPError）原样上抛由 fetch() 重试；
-        解析/契约类包装为 :class:`FeedParseError` 不再重试（站点改版重试无意义，
-        且避免对限流站点每轮额外请求）。
+        异常分类：网络类（httpx.HTTPError / :class:`SiteFetchError`）原样
+        上抛由 fetch() 重试；解析/契约类包装为 :class:`FeedParseError`
+        不再重试（站点改版重试无意义，且避免对限流站点每轮额外请求）。
+
+        ``SiteFetchError`` 必须在可重试一类——它包装的是 DNS / 连接 /
+        HTTP 错误这类**暂时性**故障，重试有意义；若被归到解析类，
+        一次网络抖动就会让整个站点被判 PARSE_ERROR 直接放弃。
         """
         _ = url  # 兼容层保留参数，路径不再直接使用
         try:
             items = await adapter.search_torrents({})
-        except (BreakerTripped, httpx.HTTPError, FeedParseError):
+        except (BreakerTripped, httpx.HTTPError, FeedParseError, SiteFetchError):
             raise  # 各自的语义已明确，透传
         except Exception as exc:
             raise FeedParseError(f"search_torrents 解析失败：{exc}") from exc

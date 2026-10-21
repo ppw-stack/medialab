@@ -98,6 +98,18 @@ class BreakerTripped(RuntimeError):
     """
 
 
+class SiteFetchError(RuntimeError):
+    """站点拉取失败（网络 / DNS / HTTP 错误 / 解析失败）。
+
+    与"站点确实没有种子"区分开：后者是**正常的空结果**（返回 ``[]``），
+    前者是**故障**——必须抛异常让上层统计成失败站。
+
+    之前各 adapter 的 ``search_torrents`` 把 ``httpx.HTTPError`` 吞掉返回
+    ``[]``，导致 DNS 挂掉 / 站点被墙时作业照常报"全部成功"，
+    故障完全不可见（prod 的 hddolby 就是这样被掩盖的）。
+    """
+
+
 class SiteAdapter(ABC):
     """站点统一接口（FR-1.5）。
 
@@ -148,6 +160,11 @@ class SiteAdapter(ABC):
 
         ``query`` 为可空字典，键如 keyword/categories/free_only 等。
         不支持搜索的站点应返回 ``[]``。
+
+        **拉取失败必须抛 :class:`SiteFetchError`**（或让原始
+        ``httpx.HTTPError`` 向上传播），不能吞掉异常返回 ``[]``——
+        返回空列表代表"站点确实没有种子"，与"站点挂了"是两回事，
+        混用会让作业统计看不出故障站。
         """
 
     @abstractmethod

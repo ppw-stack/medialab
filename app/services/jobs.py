@@ -59,12 +59,13 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
         if pull_error is not None:
             pull_failures.append((row.name, pull_error))
 
-    failed_sites = sum(1 for _, _, _, _, ko, _ in summary if ko > 0)
-    # 拉取失败的站也算"失败站"——否则作业会报"全部成功"而实际漏站
-    failed_site_names = {name for name, _ in pull_failures}
-    total_failed = failed_sites + len(
-        [n for n in failed_site_names if n not in {r[1] for r in summary if r[4] > 0}]
-    )
+    # 失败站 = 拉取失败（网络/DNS/适配器异常）或写入失败（DB 错误）的站。
+    # 按站名去重——同一站可能两类错误都命中。
+    failed_site_names: set[str] = {
+        name for _, name, _, _, ko, _ in summary if ko > 0
+    }
+    failed_site_names |= {name for name, _ in pull_failures}
+    total_failed = len(failed_site_names)
 
     if total_written:
         logger.info(
@@ -83,21 +84,13 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
     stage_duration.labels(stage="fetch_all_sites").observe(
         asyncio.get_running_loop().time() - started
     )
+    failed_names = ", ".join(sorted(failed_site_names))
     return {
         "total_written": total_written,
         "scanned_sites": len(rows),
         "failed_sites": total_failed,
         "summary": f"拉取 {len(rows)} 站，写入 {total_written} 条种子"
-        + (
-            f"，{total_failed} 站失败"
-            + (
-                "（" + ", ".join(name for name, _ in pull_failures) + "）"
-                if pull_failures
-                else ""
-            )
-            if total_failed
-            else ""
-        ),
+        + (f"，{total_failed} 站失败（{failed_names}）" if total_failed else ""),
         "steps": [
             JobStep(
                 "查询启用站点", "ok", len(rows), f"{len(rows)} 站"
@@ -105,13 +98,9 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
             JobStep(
                 "拉取种子列表",
                 "warn" if total_failed else "ok",
-                len(rows) - len(pull_failures),
+                len(rows) - total_failed,
                 f"逐站拉取（上限 3 页），{total_failed} 站失败"
-                + (
-                    "：" + ", ".join(name for name, _ in pull_failures)
-                    if pull_failures
-                    else ""
-                )
+                + (f"：{failed_names}" if total_failed else "")
                 if total_failed
                 else "逐站拉取（上限 3 页）",
             ),
@@ -155,7 +144,9 @@ async def _pull_site_items(
     except Exception as exc:
         feed_pulls.labels(result="error", site=row.name).inc()
         logger.warning("站点 %s 拉取失败：%s", row.name, exc)
-        return ([], str(exc))
+        # 保留已拉到的分页数据：第 3 页失败不该让前 2 页白拉
+        # （但本站仍记为失败站，交由上层统计）
+        return (feed_items, str(exc))
     if feed_items:
         feed_pulls.labels(result="ok", site=row.name).inc(len(feed_items))
     return (feed_items, None)

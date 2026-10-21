@@ -35,6 +35,7 @@ from bs4.element import Tag
 from app.adapters.sites.base import (
     FeedItem,
     SiteAdapter,
+    SiteFetchError,
     SiteHealth,
     SiteProfile,
     TorrentBrief,
@@ -257,11 +258,14 @@ class HhanclubAdapter(SiteAdapter):
         try:
             resp = await self._client.get(url, timeout=self._timeout)
         except httpx.HTTPError as exc:
-            logger.warning("HHanClub 拉取失败：%s", exc)
-            return []
+            # 拉取失败必须抛出：返回 [] 表示"站点确实没有种子"，
+            # 与"站点挂了"混淆会让作业统计看不出故障站
+            raise SiteFetchError(f"HHanClub 拉取失败：{exc}") from exc
         if resp.status_code >= 400:
-            logger.warning("HHanClub 拉取 HTTP %d", resp.status_code)
-            return []
+            raise SiteFetchError(
+                f"HHanClub 拉取 HTTP {resp.status_code}"
+                f"（第 {page_number} 页）"
+            )
         items = HhanclubAdapter._parse_spstate0_html(resp.text)
         # 同步刷新 download URL cache（供 get_torrent_url 0-HTTP 命中）
         self._download_url_cache = HhanclubAdapter._extract_download_urls(

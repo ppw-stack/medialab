@@ -36,6 +36,7 @@ from app.adapters.sites.base import (
     BreakerTripped,
     FeedItem,
     SiteAdapter,
+    SiteFetchError,
     SiteHealth,
     SiteProfile,
     TorrentBrief,
@@ -286,18 +287,23 @@ class MteamAdapter(SiteAdapter):
                 timeout=self._timeout,
             )
         except httpx.HTTPError as exc:
-            logger.warning("m-team %s 搜索失败：%s", self.name, exc)
-            return []
+            # 拉取失败必须抛出：返回 [] 表示"站点确实没有种子"，
+            # 与"站点挂了"混淆会让作业统计看不出故障站
+            raise SiteFetchError(f"m-team {self.name} 搜索失败：{exc}") from exc
         if resp.status_code in (403, 429):
             raise BreakerTripped(f"m-team {self.name} 返回 {resp.status_code}，需熔断")
         if resp.status_code >= 400:
-            logger.warning("m-team %s 搜索返回 %s", self.name, resp.status_code)
-            return []
+            raise SiteFetchError(
+                f"m-team {self.name} 搜索返回 {resp.status_code}"
+            )
         try:
             payload = resp.json()
         except (TypeError, ValueError) as exc:
-            logger.warning("m-team %s 搜索响应非 JSON：%s", self.name, exc)
-            return []
+            # API 返回非 JSON 说明站点侧出错（登录页 / WAF / 网关错误），
+            # 不是"没有种子"
+            raise SiteFetchError(
+                f"m-team {self.name} 搜索响应非 JSON：{exc}"
+            ) from exc
         if str(payload.get("code")) != "0":
             logger.warning(
                 "m-team %s 搜索 code=%s message=%s",
