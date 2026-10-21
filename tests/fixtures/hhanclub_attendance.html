@@ -1,0 +1,1717 @@
+<!--<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">-->
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+ <meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+ <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
+ <meta http-equiv="Pragma" content="no-cache"/>
+ <meta http-equiv="Expires" content="0"/>
+ <meta name="generator" content="NexusPHP"/>
+ <title>HHCLUB - Powered by NexusPHP</title>
+ <link rel="shortcut icon" href="favicon.ico" type="image/x-icon"/>
+ <link rel="search" type="application/opensearchdescription+xml" title="TESTUSER Torrents"
+ href="opensearch.php"/>
+ <link rel="stylesheet" href="styles/mediumfont.css" type="text/css"/>
+ <link rel="stylesheet" href="styles/sprites.css" type="text/css"/>
+ <link rel="stylesheet" href="pic/forum_pic/chs/forumsprites.css"
+ type="text/css"/>
+ <link rel="stylesheet" href="styles/HHan/theme.css" type="text/css"/>
+ <link rel="stylesheet" href="styles/HHan/DomTT.css" type="text/css"/>
+ <link rel="stylesheet" href="styles/curtain_imageresizer.css" type="text/css"/>
+ <link rel="stylesheet" href="styles/nexus.css" type="text/css"/>
+<!-- <link rel="stylesheet" href="styles/swiper-bundle.min.css" type="text/css"/>-->
+ <link rel="alternate" type="application/rss+xml" title="TESTUSER Torrents" href="torrentrss.php"/>
+<!-- -->
+<!-- -->
+</head>
+<body >
+<!-- 容器 封闭在stdfood -->
+<div id="Container">
+ <!-- 顶部菜单 -->
+ <div id="nav" class="!min-h-[80px] !w-[max(100%,900px)]" >
+ <div id="absolute-top-menu" class="absolute left-[65px] xl:left-[5%] big-1500:left-[12%] h-[80px] z-10">
+ <ul id="mainmenu" class="menu "><li style="margin-top:10px">
+ </li><li><a href="index.php">首页</a></li><li><a href="forums.php">论坛</a></li> <li class="group relative ">
+ <a href="torrents.php" >
+ <span class="flex items-center">
+ <span class="h-full text-center">种子</span>
+ </span>
+ </a>
+ <div class="hidden group-hover:block absolute right-[0px] w-[100px]">
+ <div class="h-[22px] bg-[#F1F3F5] mt-[-5px]"></div>
+ <div class="bg-white grid grid-cols-1 gap-1 py-1 !rounded-md text-left !text-[13px] font-sm leading-6 ">
+ <a class="w-full rounded-md !text-[#888A8D] !text-[15px]" href="torrents.php?cat[]=401">电影</a>
+ <hr class="w-full bg-[#191E32]" />
+ <a class="w-full rounded-md !text-[#888A8D] !text-[15px]" href="torrents.php?cat[]=402">电视剧</a>
+ <hr class="w-full bg-[#191E32]" />
+ <a class="w-full rounded-md !text-[#888A8D] !text-[15px]" href="torrents.php?cat[]=403">综艺</a>
+ <hr class="w-full bg-[#191E32]" />
+ <a class="w-full rounded-md !text-[#888A8D] !text-[15px]" href="torrents.php?cat[]=407">体育</a>
+ <hr class="w-full bg-[#191E32]" />
+ <a class="w-full rounded-md !text-[#888A8D] !text-[15px]" href="torrents.php?cat[]=404">纪录片</a>
+ <hr class="w-full bg-[#191E32]" />
+ <a class="w-full rounded-md !text-[#888A8D] !text-[15px]" href="torrents.php?cat[]=405">动漫</a>
+ <hr class="w-full bg-[#191E32]" />
+ <a class="w-full rounded-md !text-[#888A8D] !text-[15px]" href="torrents.php?cat[]=412">短剧</a>
+ </div>
+ </div>
+ </li>
+ <li class="group relative ">
+ <a href="special.php" >
+ <span class="flex items-center">
+ <span class="h-full text-center">音乐</span>
+ </span>
+ </a>
+ <div class="hidden group-hover:block absolute right-[22%] w-[100px]">
+ <div class="h-[22px] bg-[#F1F3F5] mt-[-5px]"></div>
+ <div class="bg-white grid grid-cols-1 gap-1 py-1 !rounded-md text-left !text-[13px] font-sm leading-6 ">
+ <a class="w-full rounded-md !text-[#888A8D] !text-[15px]" href="special.php?cat[]=410">音乐</a>
+ <hr class="w-full bg-[#191E32]" /><a class="w-full rounded-md !text-[#888A8D] !text-[15px]" href="special.php?cat[]=411">MV</a>
+ </div>
+ </div>
+ </li>
+<li><a href="rescue.php">保种</a></li><li><a href="viewrequests.php">求种</a></li><li><a href="upload.php">发布</a></li><li><a href="subtitles.php">字幕</a></li><li><a href="https://wiki.hhanclub.net/zh/home" target='_blank'>规则</a></li>
+ <li class="group ">
+ <a><div class="flex flex-row">其他
+ <img class="w-[15px] h-[15px] relative top-[4px] left-[5px] filter group-hover:invert" src="styles/HHan/icons/icon-menu-arrow-grey.svg" alt=""></div></a>
+ <div class="flex flex-row-reverse">
+ <div class="hidden group-hover:block">
+ <div class="h-[22px] bg-[#F1F3F5] mt-[-5px]"></div>
+ <div class="bg-white grid grid-cols-1 gap-1 py-1 !rounded-md text-left font-sm leading-6" style="right: -5px; position: relative; ">
+ <a href="/lucky.php" class="w-full" target="_blank" style="font-size: 15px !important;"><div class="cursor-pointer hover:bg-[#d4d4d4] hover:text-[#1F2126] rounded-md text-[#888A8D]" >幸运大转盘</div></a>
+ <hr class="w-full bg-[#191E32]" />
+ <a href="contactstaff.php" class="w-full" style="font-size: 15px !important;"><div class="cursor-pointer hover:bg-[#d4d4d4] hover:text-[#1F2126] rounded-md text-[#888A8D]" >联系管理组</div></a>
+ <hr class="w-full bg-[#191E32]"/>
+ <a href="http://wiki.hhanclub.net/zh/%E7%AB%99%E7%82%B9%E8%A7%84%E5%88%99/%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98" target="_blank" class="w-full" style="font-size: 15px !important;"><div class="w-full cursor-pointer hover:bg-[#d4d4d4] hover:text-[#1F2126] rounded-md text-[#888A8D]" >常见问题</div></a><hr class="w-full bg-[#191E32]" />
+ <a href="donate.php" class="w-full" style="font-size: 15px !important;"><div class="cursor-pointer hover:bg-[#d4d4d4] hover:text-[#1F2126] rounded-md text-[#888A8D]" >捐赠</div></a><hr class="w-full bg-[#191E32]" /><a href="offers.php" class="w-full" style="font-size: 15px !important;">候选</a>
+ </div>
+ </div>
+ </div>
+ </li> </div>
+ <div id="searchdiv" class="absolute h-[80px] right-[10px] big-1500:right-1/10 inline-flex gap-x-5" >
+ <div class="relative" >
+ <div id="topsearch" class="search hidden xl:flex " style="width: 340px;">
+ <div class="relative w-[calc(100%-48px)] flex">
+ <select style="-webkit-appearance: none;" id="search_area" name="search_area" class="rounded-l-2xl w-[30%] pl-[28px] bg-[#FFFFFF] shadow-[0_1px_0_0_rgba(25,30,50,0.3)] border-r-2 border-zinc-200">
+ <option value="0">标题</option>
+ <option value="1">简介</option>
+ <option value="3">发布者</option>
+ <option value="4">IMDb链接</option>
+ </select>
+ <div class="relative flex w-[70%]">
+ <input id="searchinput" value="" placeholder="搜索电影、综艺、音乐,回车搜索" size='16px' name="keyword"
+ type="text" autocomplete="off" style="padding-left: 10px; box-shadow: 0 1px 0 0 rgba(25, 30, 50, 0.3);">
+ <span id="search_suggest"
+ class="absolute flex flex-col bg-white w-[100%] items-center top-[36px]" >
+ </span>
+ </div>
+ </div>
+ <div class="absolute right-[0]">
+ <button id="searchbutton" type="button" class="shadow-[0_1px_0_0_rgba(25,30,50,0.3)] !rounded-r-2xl" onclick="displaySearchMore()"></button>
+ <div id="search-more-select" class="transition-all hidden duration-1000 ease-[cubic-bezier(0.63, -0.14, 0.32, 1.02)] flex flex-col gap-y-[10px] gap-x-[2%] bg-[#353C58] absolute w-[80vw] z-50 rounded-lg right-[-120px] top-[60px] p-[25px]">
+ <!--<div class="top-search-more-sub-table">
+ <div class="top-search-more-title">热门搜索:</div>
+ </div>-->
+ <div class="top-search-more-sub-table">
+ <div class="top-search-more-title">标签:</div>
+ <div class="top-search-more-content">
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="tag-3" name="tag_id" value="3">
+ <label class="top-search-checkbox-label" for="tag-3">
+ <a href="https://hhanclub.top/torrents.php?tag_id3=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #0000ff">官方</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="tag-17" name="tag_id" value="17">
+ <label class="top-search-checkbox-label" for="tag-17">
+ <a href="https://hhanclub.top/torrents.php?tag_id17=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #4682B4 ">完结</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="tag-8" name="tag_id" value="8">
+ <label class="top-search-checkbox-label" for="tag-8">
+ <a href="https://hhanclub.top/torrents.php?tag_id8=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #ff3300">原创</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="tag-1" name="tag_id" value="1">
+ <label class="top-search-checkbox-label" for="tag-1">
+ <a href="https://hhanclub.top/torrents.php?tag_id1=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #990000">禁转</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="tag-2" name="tag_id" value="2">
+ <label class="top-search-checkbox-label" for="tag-2">
+ <a href="https://hhanclub.top/torrents.php?tag_id2=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #009900">首发</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="tag-5" name="tag_id" value="5">
+ <label class="top-search-checkbox-label" for="tag-5">
+ <a href="https://hhanclub.top/torrents.php?tag_id5=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #FF6699">国语</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="tag-10" name="tag_id" value="10">
+ <label class="top-search-checkbox-label" for="tag-10">
+ <a href="https://hhanclub.top/torrents.php?tag_id10=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #FF9999">粤语</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="tag-6" name="tag_id" value="6">
+ <label class="top-search-checkbox-label" for="tag-6">
+ <a href="https://hhanclub.top/torrents.php?tag_id6=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #99CC00">中字</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="tag-14" name="tag_id" value="14">
+ <label class="top-search-checkbox-label" for="tag-14">
+ <a href="https://hhanclub.top/torrents.php?tag_id14=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #FF0099">特效</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="tag-11" name="tag_id" value="11">
+ <label class="top-search-checkbox-label" for="tag-11">
+ <a href="https://hhanclub.top/torrents.php?tag_id11=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #6633CC">DIY</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="tag-12" name="tag_id" value="12">
+ <label class="top-search-checkbox-label" for="tag-12">
+ <a href="https://hhanclub.top/torrents.php?tag_id12=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #0066FF">杜比视界</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="tag-7" name="tag_id" value="7">
+ <label class="top-search-checkbox-label" for="tag-7">
+ <a href="https://hhanclub.top/torrents.php?tag_id7=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #38b03f">HDR</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="tag-13" name="tag_id" value="13">
+ <label class="top-search-checkbox-label" for="tag-13">
+ <a href="https://hhanclub.top/torrents.php?tag_id13=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #CC00FF">HLG</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="tag-15" name="tag_id" value="15">
+ <label class="top-search-checkbox-label" for="tag-15">
+ <a href="https://hhanclub.top/torrents.php?tag_id15=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #FF6633">应求</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="tag-18" name="tag_id" value="18">
+ <label class="top-search-checkbox-label" for="tag-18">
+ <a href="https://hhanclub.top/torrents.php?tag_id18=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #FF6633">转载</span>
+ </a>
+ </label>
+ </div>
+ <div>
+ <input type="button" class="top-search-select-all" value="全选" id="tag_id-select-all" onclick="checkBoxSelectAllOrNowTag('tag_id', false)">
+ <input type="button" class="top-search-select-all" value="全不选" style="display:none;" id="tag_id-select-none" onclick="checkBoxSelectAllOrNowTag('tag_id', true)">
+ </div>
+ </div>
+ </div>
+ <hr class="w-full h-[1px] bg-[#FFFFFF]" />
+ <div class="top-search-more-sub-table">
+ <div class="top-search-more-title">类型:</div>
+ <div class="top-search-more-content">
+ <div class="top-search-checkbox">
+ <input type="checkbox" name="cat[]" value="409" id="cat409">
+ <label class="top-search-checkbox-label !items-end" for="cat409">
+ <a href="https://hhanclub.net/torrents.php?cat[]=409">
+ <img loading="lazy" class="rounded-[10px]" src="styles/HHan/icons/icon-other.svg" alt="TESTUSER">
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" name="cat[]" value="407" id="cat407">
+ <label class="top-search-checkbox-label !items-end" for="cat407">
+ <a href="https://hhanclub.net/torrents.php?cat[]=407">
+ <img loading="lazy" class="rounded-[10px]" src="styles/HHan/icons/icon-gym.svg" alt="TESTUSER">
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" name="cat[]" value="403" id="cat403">
+ <label class="top-search-checkbox-label !items-end" for="cat403">
+ <a href="https://hhanclub.net/torrents.php?cat[]=403">
+ <img loading="lazy" class="rounded-[10px]" src="styles/HHan/icons/icon-variety.svg" alt="TESTUSER">
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" name="cat[]" value="402" id="cat402">
+ <label class="top-search-checkbox-label !items-end" for="cat402">
+ <a href="https://hhanclub.net/torrents.php?cat[]=402">
+ <img loading="lazy" class="rounded-[10px]" src="styles/HHan/icons/icon-tv.svg" alt="TESTUSER">
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" name="cat[]" value="405" id="cat405">
+ <label class="top-search-checkbox-label !items-end" for="cat405">
+ <a href="https://hhanclub.net/torrents.php?cat[]=405">
+ <img loading="lazy" class="rounded-[10px]" src="styles/HHan/icons/icon-cartoon.svg" alt="TESTUSER">
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" name="cat[]" value="404" id="cat404">
+ <label class="top-search-checkbox-label !items-end" for="cat404">
+ <a href="https://hhanclub.net/torrents.php?cat[]=404">
+ <img loading="lazy" class="rounded-[10px]" src="styles/HHan/icons/icon-doc.svg" alt="TESTUSER">
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" name="cat[]" value="401" id="cat401">
+ <label class="top-search-checkbox-label !items-end" for="cat401">
+ <a href="https://hhanclub.net/torrents.php?cat[]=401">
+ <img loading="lazy" class="rounded-[10px]" src="styles/HHan/icons/icon-movie.svg" alt="TESTUSER">
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" name="cat[]" value="412" id="cat412">
+ <label class="top-search-checkbox-label !items-end" for="cat412">
+ <a href="https://hhanclub.net/torrents.php?cat[]=412">
+ <img loading="lazy" class="rounded-[10px]" src="styles/HHan/icons/icon-duanju.svg" alt="TESTUSER">
+ </a>
+ </label>
+ </div>
+ <div>
+ <input type="button" class="top-search-select-all" value="全选" id="cat-select-all" onclick="checkBoxSelectAllOrNow('cat', false)">
+ <input type="button" class="top-search-select-all" value="全不选" style="display:none;" id="cat-select-none" onclick="checkBoxSelectAllOrNow('cat', true)">
+<!-- <button class="top-search-select-all" id="cat-select-all" onclick="checkBoxSelectAllOrNow('cat', false)">全选</button>-->
+<!-- <button class="top-search-select-all" style="display:none;" id="cat-select-none" onclick="checkBoxSelectAllOrNow('cat', true)">全不选</button>-->
+ </div>
+ </div>
+ </div>
+ <hr class="w-full h-[1px] bg-[#FFFFFF]" />
+ <div class="top-search-more-sub-table">
+ <div class="top-search-more-title">音乐区:</div>
+ <div class="top-search-more-content">
+ <div class="top-search-checkbox">
+ <input type="checkbox" name="sp_cat[]" value="411" id="cat411">
+ <label class="top-search-checkbox-label !items-end" for="cat411">
+ <a href="https://hhanclub.net/special.php?cat[]=411">
+ <img loading="lazy" class="rounded-[10px]" src="styles/HHan/icons/icon-mv.svg" alt="TESTUSER">
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" name="sp_cat[]" value="410" id="cat410">
+ <label class="top-search-checkbox-label !items-end" for="cat410">
+ <a href="https://hhanclub.net/special.php?cat[]=410">
+ <img loading="lazy" class="rounded-[10px]" src="styles/HHan/icons/icon-music.svg" alt="TESTUSER">
+ </a>
+ </label>
+ </div>
+ <div>
+ <input type="button" class="top-search-select-all" value="全选" id="sp_cat-select-all" onclick="checkBoxSelectAllOrNow('sp_cat', false)">
+ <input type="button" class="top-search-select-all" value="全不选" style="display:none;" id="sp_cat-select-none" onclick="checkBoxSelectAllOrNow('sp_cat', true)">
+ <!-- <button class="top-search-select-all" id="cat-select-all" onclick="checkBoxSelectAllOrNow('cat', false)">全选</button>-->
+ <!-- <button class="top-search-select-all" style="display:none;" id="cat-select-none" onclick="checkBoxSelectAllOrNow('cat', true)">全不选</button>-->
+ </div>
+ </div>
+ </div>
+ <hr class="w-full h-[1px] bg-[#FFFFFF]" />
+ <div class="top-search-more-sub-table">
+ <div class="top-search-more-title">来源:</div>
+ <div class="top-search-more-content">
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="source7" name="source[]" value="7">
+ <label class="top-search-checkbox-label" for="source7">
+ <a href="https://hhanclub.net/torrents.php?source[]=7"><div class="top-search-select-text">UHD Blu-ray</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="source1" name="source[]" value="1">
+ <label class="top-search-checkbox-label" for="source1">
+ <a href="https://hhanclub.net/torrents.php?source[]=1"><div class="top-search-select-text">Blu-ray</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="source2" name="source[]" value="2">
+ <label class="top-search-checkbox-label" for="source2">
+ <a href="https://hhanclub.net/torrents.php?source[]=2"><div class="top-search-select-text">WEB-DL</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="source3" name="source[]" value="3">
+ <label class="top-search-checkbox-label" for="source3">
+ <a href="https://hhanclub.net/torrents.php?source[]=3"><div class="top-search-select-text">DVD</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="source4" name="source[]" value="4">
+ <label class="top-search-checkbox-label" for="source4">
+ <a href="https://hhanclub.net/torrents.php?source[]=4"><div class="top-search-select-text">HDTV</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="source5" name="source[]" value="5">
+ <label class="top-search-checkbox-label" for="source5">
+ <a href="https://hhanclub.net/torrents.php?source[]=5"><div class="top-search-select-text">TV</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="source6" name="source[]" value="6">
+ <label class="top-search-checkbox-label" for="source6">
+ <a href="https://hhanclub.net/torrents.php?source[]=6"><div class="top-search-select-text">Other</div></a>
+ </label>
+ </div>
+ <div>
+ <input value="全选" class="top-search-select-all" id="source-select-all" onclick="checkBoxSelectAllOrNow('source', false)">
+ <input value="全不选" class="top-search-select-all" style="display:none;" id="source-select-none" onclick="checkBoxSelectAllOrNow('source', true)">
+ </div>' </div>
+ </div>
+ <hr class="w-full h-[1px] bg-[#FFFFFF]" />
+ <div class="top-search-more-sub-table">
+ <div class="top-search-more-title">媒介:</div>
+ <div class="top-search-more-content">
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="medium11" name="medium[]" value="11">
+ <label class="top-search-checkbox-label" for="medium11">
+ <a href="https://hhanclub.net/torrents.php?medium[]=11"><div class="top-search-select-text">UHD Blu-ray</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="medium1" name="medium[]" value="1">
+ <label class="top-search-checkbox-label" for="medium1">
+ <a href="https://hhanclub.net/torrents.php?medium[]=1"><div class="top-search-select-text">FHD Blu-ray</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="medium2" name="medium[]" value="2">
+ <label class="top-search-checkbox-label" for="medium2">
+ <a href="https://hhanclub.net/torrents.php?medium[]=2"><div class="top-search-select-text">UHD REMUX</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="medium3" name="medium[]" value="3">
+ <label class="top-search-checkbox-label" for="medium3">
+ <a href="https://hhanclub.net/torrents.php?medium[]=3"><div class="top-search-select-text">Remux</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="medium7" name="medium[]" value="7">
+ <label class="top-search-checkbox-label" for="medium7">
+ <a href="https://hhanclub.net/torrents.php?medium[]=7"><div class="top-search-select-text">Encode</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="medium10" name="medium[]" value="10">
+ <label class="top-search-checkbox-label" for="medium10">
+ <a href="https://hhanclub.net/torrents.php?medium[]=10"><div class="top-search-select-text">WEB-DL</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="medium5" name="medium[]" value="5">
+ <label class="top-search-checkbox-label" for="medium5">
+ <a href="https://hhanclub.net/torrents.php?medium[]=5"><div class="top-search-select-text">HDTV</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="medium6" name="medium[]" value="6">
+ <label class="top-search-checkbox-label" for="medium6">
+ <a href="https://hhanclub.net/torrents.php?medium[]=6"><div class="top-search-select-text">DVDR</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="medium8" name="medium[]" value="8">
+ <label class="top-search-checkbox-label" for="medium8">
+ <a href="https://hhanclub.net/torrents.php?medium[]=8"><div class="top-search-select-text">CD</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="medium9" name="medium[]" value="9">
+ <label class="top-search-checkbox-label" for="medium9">
+ <a href="https://hhanclub.net/torrents.php?medium[]=9"><div class="top-search-select-text">Track</div></a>
+ </label>
+ </div>
+ <div>
+ <input value="全选" class="top-search-select-all" id="medium-select-all" onclick="checkBoxSelectAllOrNow('medium', false)">
+ <input value="全不选" class="top-search-select-all" style="display:none;" id="medium-select-none" onclick="checkBoxSelectAllOrNow('medium', true)">
+ </div>' </div>
+ </div>
+ <hr class="w-full h-[1px] bg-[#FFFFFF]" />
+ <div class="top-search-more-sub-table">
+ <div class="top-search-more-title">编码:</div>
+ <div class="top-search-more-content">
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="codec6" name="codec[]" value="6">
+ <label class="top-search-checkbox-label" for="codec6">
+ <a href="https://hhanclub.net/torrents.php?codec[]=6"><div class="top-search-select-text">HEVC/H265/x265</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="codec1" name="codec[]" value="1">
+ <label class="top-search-checkbox-label" for="codec1">
+ <a href="https://hhanclub.net/torrents.php?codec[]=1"><div class="top-search-select-text">AVC/H264/x264</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="codec2" name="codec[]" value="2">
+ <label class="top-search-checkbox-label" for="codec2">
+ <a href="https://hhanclub.net/torrents.php?codec[]=2"><div class="top-search-select-text">VC-1</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="codec4" name="codec[]" value="4">
+ <label class="top-search-checkbox-label" for="codec4">
+ <a href="https://hhanclub.net/torrents.php?codec[]=4"><div class="top-search-select-text">MPEG-2</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="codec7" name="codec[]" value="7">
+ <label class="top-search-checkbox-label" for="codec7">
+ <a href="https://hhanclub.net/torrents.php?codec[]=7"><div class="top-search-select-text">VP8/9 </div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="codec5" name="codec[]" value="5">
+ <label class="top-search-checkbox-label" for="codec5">
+ <a href="https://hhanclub.net/torrents.php?codec[]=5"><div class="top-search-select-text">Other</div></a>
+ </label>
+ </div>
+ <div>
+ <input value="全选" class="top-search-select-all" id="codec-select-all" onclick="checkBoxSelectAllOrNow('codec', false)">
+ <input value="全不选" class="top-search-select-all" style="display:none;" id="codec-select-none" onclick="checkBoxSelectAllOrNow('codec', true)">
+ </div>' </div>
+ </div>
+ <hr class="w-full h-[1px] bg-[#FFFFFF]" />
+ <div class="top-search-more-sub-table">
+ <div class="top-search-more-title">音频编码:</div>
+ <div class="top-search-more-content">
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="audiocodec9" name="audiocodec[]" value="9">
+ <label class="top-search-checkbox-label" for="audiocodec9">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=9"><div class="top-search-select-text">TrueHD Atmos</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="audiocodec10" name="audiocodec[]" value="10">
+ <label class="top-search-checkbox-label" for="audiocodec10">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=10"><div class="top-search-select-text">TrueHD</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="audiocodec11" name="audiocodec[]" value="11">
+ <label class="top-search-checkbox-label" for="audiocodec11">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=11"><div class="top-search-select-text">DTS-X</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="audiocodec12" name="audiocodec[]" value="12">
+ <label class="top-search-checkbox-label" for="audiocodec12">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=12"><div class="top-search-select-text">DTS-HD|MA</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="audiocodec15" name="audiocodec[]" value="15">
+ <label class="top-search-checkbox-label" for="audiocodec15">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=15"><div class="top-search-select-text">DTS-HD|HR</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="audiocodec13" name="audiocodec[]" value="13">
+ <label class="top-search-checkbox-label" for="audiocodec13">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=13"><div class="top-search-select-text">DTS</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="audiocodec8" name="audiocodec[]" value="8">
+ <label class="top-search-checkbox-label" for="audiocodec8">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=8"><div class="top-search-select-text">DD/AC3</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="audiocodec14" name="audiocodec[]" value="14">
+ <label class="top-search-checkbox-label" for="audiocodec14">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=14"><div class="top-search-select-text">DDP/EAC3</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="audiocodec6" name="audiocodec[]" value="6">
+ <label class="top-search-checkbox-label" for="audiocodec6">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=6"><div class="top-search-select-text">AAC</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="audiocodec3" name="audiocodec[]" value="3">
+ <label class="top-search-checkbox-label" for="audiocodec3">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=3"><div class="top-search-select-text">LPCM/PCM</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="audiocodec4" name="audiocodec[]" value="4">
+ <label class="top-search-checkbox-label" for="audiocodec4">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=4"><div class="top-search-select-text">MP2/3</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="audiocodec1" name="audiocodec[]" value="1">
+ <label class="top-search-checkbox-label" for="audiocodec1">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=1"><div class="top-search-select-text">FLAC</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="audiocodec2" name="audiocodec[]" value="2">
+ <label class="top-search-checkbox-label" for="audiocodec2">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=2"><div class="top-search-select-text">APE</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="audiocodec5" name="audiocodec[]" value="5">
+ <label class="top-search-checkbox-label" for="audiocodec5">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=5"><div class="top-search-select-text">OGG</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="audiocodec16" name="audiocodec[]" value="16">
+ <label class="top-search-checkbox-label" for="audiocodec16">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=16"><div class="top-search-select-text">Opus</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="audiocodec17" name="audiocodec[]" value="17">
+ <label class="top-search-checkbox-label" for="audiocodec17">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=17"><div class="top-search-select-text">WAV</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="audiocodec18" name="audiocodec[]" value="18">
+ <label class="top-search-checkbox-label" for="audiocodec18">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=18"><div class="top-search-select-text">TAA</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="audiocodec7" name="audiocodec[]" value="7">
+ <label class="top-search-checkbox-label" for="audiocodec7">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=7"><div class="top-search-select-text">Other</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="audiocodec19" name="audiocodec[]" value="19">
+ <label class="top-search-checkbox-label" for="audiocodec19">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=19"><div class="top-search-select-text">ALAC</div></a>
+ </label>
+ </div>
+ <div>
+ <input value="全选" class="top-search-select-all" id="audiocodec-select-all" onclick="checkBoxSelectAllOrNow('audiocodec', false)">
+ <input value="全不选" class="top-search-select-all" style="display:none;" id="audiocodec-select-none" onclick="checkBoxSelectAllOrNow('audiocodec', true)">
+ </div>' </div>
+ </div>
+ <hr class="w-full h-[1px] bg-[#FFFFFF]" />
+ <div class="top-search-more-sub-table">
+ <div class="top-search-more-title">分辨率:</div>
+ <div class="top-search-more-content">
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="standard6" name="standard[]" value="6">
+ <label class="top-search-checkbox-label" for="standard6">
+ <a href="https://hhanclub.net/torrents.php?standard[]=6"><div class="top-search-select-text">4320p/8K</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="standard1" name="standard[]" value="1">
+ <label class="top-search-checkbox-label" for="standard1">
+ <a href="https://hhanclub.net/torrents.php?standard[]=1"><div class="top-search-select-text">2160p/4K</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="standard2" name="standard[]" value="2">
+ <label class="top-search-checkbox-label" for="standard2">
+ <a href="https://hhanclub.net/torrents.php?standard[]=2"><div class="top-search-select-text">1080p</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="standard4" name="standard[]" value="4">
+ <label class="top-search-checkbox-label" for="standard4">
+ <a href="https://hhanclub.net/torrents.php?standard[]=4"><div class="top-search-select-text">1080i</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="standard3" name="standard[]" value="3">
+ <label class="top-search-checkbox-label" for="standard3">
+ <a href="https://hhanclub.net/torrents.php?standard[]=3"><div class="top-search-select-text">720p</div></a>
+ </label>
+ </div>
+ <div>
+ <input value="全选" class="top-search-select-all" id="standard-select-all" onclick="checkBoxSelectAllOrNow('standard', false)">
+ <input value="全不选" class="top-search-select-all" style="display:none;" id="standard-select-none" onclick="checkBoxSelectAllOrNow('standard', true)">
+ </div>' </div>
+ </div>
+ <hr class="w-full h-[1px] bg-[#FFFFFF]" />
+ <div class="top-search-more-sub-table">
+ <div class="top-search-more-title">处理:</div>
+ <div class="top-search-more-content">
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="processing3" name="processing[]" value="3">
+ <label class="top-search-checkbox-label" for="processing3">
+ <a href="https://hhanclub.net/torrents.php?processing[]=3"><div class="top-search-select-text">美剧</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="processing4" name="processing[]" value="4">
+ <label class="top-search-checkbox-label" for="processing4">
+ <a href="https://hhanclub.net/torrents.php?processing[]=4"><div class="top-search-select-text">日剧</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="processing5" name="processing[]" value="5">
+ <label class="top-search-checkbox-label" for="processing5">
+ <a href="https://hhanclub.net/torrents.php?processing[]=5"><div class="top-search-select-text">韩剧</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="processing6" name="processing[]" value="6">
+ <label class="top-search-checkbox-label" for="processing6">
+ <a href="https://hhanclub.net/torrents.php?processing[]=6"><div class="top-search-select-text">港剧</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="processing7" name="processing[]" value="7">
+ <label class="top-search-checkbox-label" for="processing7">
+ <a href="https://hhanclub.net/torrents.php?processing[]=7"><div class="top-search-select-text">台剧</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="processing8" name="processing[]" value="8">
+ <label class="top-search-checkbox-label" for="processing8">
+ <a href="https://hhanclub.net/torrents.php?processing[]=8"><div class="top-search-select-text">大陆剧</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="processing9" name="processing[]" value="9">
+ <label class="top-search-checkbox-label" for="processing9">
+ <a href="https://hhanclub.net/torrents.php?processing[]=9"><div class="top-search-select-text">英剧</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="processing10" name="processing[]" value="10">
+ <label class="top-search-checkbox-label" for="processing10">
+ <a href="https://hhanclub.net/torrents.php?processing[]=10"><div class="top-search-select-text">其他</div></a>
+ </label>
+ </div>
+ <div>
+ <input value="全选" class="top-search-select-all" id="processing-select-all" onclick="checkBoxSelectAllOrNow('processing', false)">
+ <input value="全不选" class="top-search-select-all" style="display:none;" id="processing-select-none" onclick="checkBoxSelectAllOrNow('processing', true)">
+ </div>' </div>
+ </div>
+ <hr class="w-full h-[1px] bg-[#FFFFFF]" />
+ <div class="top-search-more-sub-table">
+ <div class="top-search-more-title">其他:</div>
+ <div class="top-search-more-content">
+ <div>
+ <label for="top-search-mode" class="top-search-select-text">匹配模式:</label>
+ <select id="top-search-mode" name="search-mode" class="top-search-select-select">
+ <option value="0">与</option>
+ <option value="1">或</option>
+ <option value="2">准确</option>
+ </select>
+ </div>
+ <div>
+ <label for="top-search-incldead" class="top-search-select-text">显示断种/活种:</label>
+ <select id="top-search-incldead" name="incldead" class="top-search-select-select">
+ <option value="0">包括断种</option>
+ <option
+ value="1" selected>活种</option>
+ <option
+ value="2">断种</option>
+ </select>
+ </div>
+ <div>
+ <label for="top-search-spstate" class="top-search-select-text">显示促销种子:</label>
+ <select id="top-search-spstate" name="spstate" class="top-search-select-select">
+ <option value="0" selected>全部</option>
+ <option value="1">普通</option><option value="2">免费</option><option value="3">2X</option><option value="4">2X免费</option><option value="5">50%</option><option value="6">2X 50%</option><option value="7">30%</option> </select>
+ </div>
+ <div>
+ <label for="top-search-inclbookmarked" class="top-search-select-text">显示收藏:</label>
+ <select id="top-search-inclbookmarked" name="inclbookmarked" class="top-search-select-select">
+ <option value="0" selected>全部</option>
+ <option
+ value="1" >仅收藏</option>
+ <option
+ value="2" >仅未收藏</option>
+ </select>
+ </div>
+ </div>
+ </div>
+ <hr class="w-full h-[1px] bg-[#FFFFFF]" />
+ <div class="w-[100%] flex flex-row items-center justify-center">
+ <input type="button" value="搜索" onclick="toSearchTorrents() " class="w-[100px] h-[45px] rounded-[10px] bg-[#F29D38] text-base font-medium mt-[20px] text-[#FFFFFF]">
+ </div>
+ </div>
+ </div>
+ </div>
+ <div id="" class="flex xl:hidden ">
+ <button onclick="displaySMSearchMore()" class="w-[36px] h-[36px]">
+ </button>
+ </div>
+ <!--<div>
+ <div>类型</div><div></div>
+ <div>
+ </div>-->
+ </div>
+ <div class="z-50 flex rounded-full p-[1px] relative">
+ <img id='user-avatar' loading='lazy' class='cursor-pointer border-[2px] z-50 border-red-300' style='width: 36px;height: 36px;max-width: 36px; border-radius:100%' src='https://hhanclub.net/pic/default_avatar.png' name='avatarimg'> <div id="user-info-panel" class="absolute z-30 hidden bg-[#FFFFFF] flex flex-col rounded-lg big-1500:right-[-220px] w-[280px] right-[0px] big-1500:w-[320px] " >
+ <div class="flex flex-col w-full items-center mt-[150px] gap-y-[5px]">
+ <div class="!text-base"><div class="flex flex-wrap items-center"><a href="https://hhanclub.net/userdetails.php?id=12345" class='InsaneUser_Name'>TESTUSER</a><img src="pic/medal/4th.svg" laoding="lazy" width="35px" height="35px" title="四周年站庆勋章" class="nexus-username-medal preview !max-w-8 !max-h-8 !rounded-md" style="margin-left: 2pt" /></div></div>
+ </div>
+ <div id="user-info-scroll" class="flex flex-col divide-y-[1px] divide-y-[#C9CCD0] mt-[25px] items-center w-[calc(100%-30px)] ml-[15px]">
+ <div class="flex flex-col w-full items-start gap-x-[5px] gap-y-[15px] mb-[25px]">
+ <div class="flex flex-row items-center gap-x-[10px]">
+ <img loading="lazy" class="w-[15px] h-[15px]" src="styles/HHan/icons/icon-ratio.svg" alt="分享率">
+ <div class="text-sm flex items-center justify-start gap-x-[10px] "
+ style="">
+ [分享率]:&nbsp;5.875</div>
+ </div>
+ <div class="text-sm flex items-center justify-start gap-x-[10px]"><img class="w-[15px] h-[15px]"
+ src="styles/HHan/icons/icon-claim.svg"
+ alt="认领">[认领]:<a href="claim.php?uid=12345">[0/200]</a> </div>
+ <div class="text-sm flex items-center justify-start gap-x-[10px]"><img class="w-[15px] h-[15px]"
+ src="styles/HHan/icons/icon-user-hr.svg"
+ alt="HR">[H&R]:<a href="myhr.php">[0/<font color="red">0</font>/5]</a> </div>
+ </div>
+ <div class="grid grid-cols-[50%_50%] gap-y-[15px] gap-x-[5px] pb-[25px] w-[100%] pt-[25px]">
+ <div class="flex flex-row gap-x-[25px] ">
+ <div class="flex flex-row items-center">
+ <img loading="lazy" src="styles/HHan/icons/icon-attendance.svg" class="w-[18px] h-[18px]" alt="签到">
+ <a href="attendance.php"><div class="text-sm w-[90px]">[签到得憨豆]</div></a>
+ </div>
+ </div>
+ <div class="flex flex-row gap-x-[25px] ">
+ <div class="flex flex-row items-center">
+ <img src="styles/HHan/icons/icon-invite.svg" alt="邀请">
+ <a href="/invite.php?id=12345"><div class="text-sm flex flex-wrap break-all">[邀请]:&nbsp&nbsp;0</div></a>
+ </div>
+ </div>
+ <div class="flex flex-row items-center ">
+ <img src="styles/HHan/icons/icon-bean.svg" class="w-[18px] h-[18px]" alt="憨豆">
+ <a href="mybonus.php">
+ <div
+ class="text-sm flex flex-wrap break-all">1,375,283</div>
+ </a>
+ </div>
+ <a href="medal.php" class="flex gap-x-[5px] items-center text-sm justify-start cursor-pointer ">
+ <img alt="勋章" class="w-[15px] h-[15px]" src="styles/HHan/icons/icon-medal.svg" />
+ <span class="">[勋章]</span>
+ </a>
+ <div class="text-sm flex items-center justify-start"><img class="w-[15px] h-[15px]" src="styles/HHan/icons/icon-user-upload.svg" alt="上传">&nbsp;89.309 TB</div>
+ <a href="userdetails.php?id=12345&action=2">TESTUSER</a>
+ <div class="text-sm flex items-center justify-start"><img class="w-[15px] h-[15px]" src="styles/HHan/icons/icon-user-download.svg" alt="下载">&nbsp;15.200 TB</div>
+ <a href="userdetails.php?id=12345&action=3">TESTUSER</a>
+ </div>
+ <div class="flex flex-col w-[100%] pt-[25px] pb-[25px] gap-y-[15px]">
+ <a href="userdetails.php?id=12345">TESTUSER</a>
+ <a href="usercp.php"><div class="flex flex-row items-center justify-between">
+ <div class="flex items-center text-base">
+ <img src="styles/HHan/icons/icon-user.svg" alt="个人中心">&nbsp;&nbsp;
+ 控制面板
+ </div>
+ <img src="styles/HHan/icons/icon-load-more.svg" alt="">
+ </div></a>
+ <a href="getrss.php"><div class="flex flex-row items-center justify-between">
+ <div class="flex items-center text-base">
+ <img src="styles/HHan/icons/icon-rss.svg" alt="获取RSS">&nbsp;&nbsp;
+ 获取RSS
+ </div>
+ <img src="styles/HHan/icons/icon-load-more.svg" alt="">
+ </div></a>
+ <a href="torrents.php?inclbookmarked=1&allsec=1&incldead=0"><div class="flex flex-row items-center justify-between">
+ <div class="flex items-center text-base">
+ <img src="styles/HHan/icons/icon-personal-collection.svg" alt="个人收藏">&nbsp;&nbsp;
+ 个人收藏
+ </div>
+ <img src="styles/HHan/icons/icon-load-more.svg" alt="">
+ </div></a>
+ <a href="messages.php"><div class="flex flex-row items-center justify-between">
+ <div class="flex items-center text-base">
+ <img src="styles/HHan/icons/icon-latest-message.svg" alt="最近消息">&nbsp;&nbsp;
+ 最近消息
+ </div>
+ <img src="styles/HHan/icons/icon-load-more.svg" alt="">
+ </div></a>
+ </div>
+ <a href="logout.php" class="w-[100%]"><div class="flex items-center justify-between w-[100%] pt-[25px] pb-[25px]">
+ <div class="flex items-center text-base">
+ <img src="styles/HHan/icons/icon-logout.svg" alt="退出登录">&nbsp;&nbsp;
+ 退出登录
+ </div>
+ </div></a>
+ </div>
+ </div>
+ </div>
+ <div class="relative ">
+ <div id="display-message-alert" class="cursor-pointer" onclick="displayMessage()" ><img src="styles/HHan/icons/icon-notification.svg" class="w-[36px] h-[36px]" alt="通知"></div>
+ <div class="flex flex-col py-[15px] px-[20px] gap-y-[10px] hidden rounded-md bg-[#FFFFFF] absolute top-[45px] w-[300px] big-1500:right-[-125px] right-[0]" id="top-message-alert">
+ <div class="w-full py-[5px]" >
+ <a class="flex w-full px-[5px] !text-base text-left" href="messages.php">
+ 暂无新的短讯 </a>
+ </div>
+ <hr class="w-full bg-gray-350 h-[1px]" />
+ <div class="w-full py-[5px]" >
+ <a class="flex w-full px-[5px] !text-base text-left" href="index.php">
+ 有1条未读的重要消息 </a>
+ </div>
+ <hr class="w-full bg-gray-350 h-[1px]" />
+ </div>
+ <div onclick="displayMessage()" class="ml-[-1rem] h-4 w-4 absolute top-[0] right-[0]">
+ <div>
+ <span style="background: #fc7b7b;"
+ class="animate-ping absolute inline-flex h-4 w-4 rounded-full opacity-75"></span>
+ <span style="background: #FF6C6C;" class="absolute inline-flex rounded-full h-4 w-4"></span>
+ <div style="width:16px;font-weight: 500;font-size: 8px;line-height: 16px;color: #FFFFFF;"
+ class="text-center absolute inline-flex rounded-full h-4 w-4">
+ <div style="margin:auto auto;">
+ 1 </div>
+ </div>
+ </div>
+ </div>
+ </div>
+ <!-- <div class="block xl:hidden">
+ <div class="w-5"></div>
+ </div> -->
+ </div>
+ <div id="sm_search-div" class="absolute w-[100%] left-[0] top-[80px] !rounded-md bg-[#353C58] flex flex-col p-5 hidden">
+ <div class="flex justify-center items-center">
+ <select style="-webkit-appearance: none;" name="sm_search_area" id="sm_search_area"
+ class="rounded-l-lg w-[10%] pl-5 bg-[#FFFFFF] shadow-[0_1px_0_0_rgba(25,30,50,0.3)] border-r-2 border-zinc-200">
+ <option value="0">标题</option>
+ <option value="1">简介</option>
+ <option value="3">发布者</option>
+ <option value="4">IMDb链接</option>
+ </select>
+ <form id="sm_form_search" action="" class="w-[80%]" >
+ <input type="text" name="sm_keyword" class="w-full" id="sm_keyword" value="">
+ </form>
+ <input type="button" class="text-center bg-[#4F5879] text-center text-[#FFFFFF] px-5 !rounded-r-lg" onclick="toSearchTorrents(true) " value="搜索">
+ </div>
+ <div class="flex flex-col">
+ <div class="top-search-more-sub-table">
+ <div class="top-search-more-title">标签:</div>
+ <div class="top-search-more-content">
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_tag-3" name="sm_tag_id" value="3">
+ <label class="top-search-checkbox-label" for="sm_tag-3">
+ <a href="https://hhanclub.top/torrents.php?tag_id3=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #0000ff">官方</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_tag-17" name="sm_tag_id" value="17">
+ <label class="top-search-checkbox-label" for="sm_tag-17">
+ <a href="https://hhanclub.top/torrents.php?tag_id17=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #4682B4 ">完结</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_tag-8" name="sm_tag_id" value="8">
+ <label class="top-search-checkbox-label" for="sm_tag-8">
+ <a href="https://hhanclub.top/torrents.php?tag_id8=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #ff3300">原创</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_tag-1" name="sm_tag_id" value="1">
+ <label class="top-search-checkbox-label" for="sm_tag-1">
+ <a href="https://hhanclub.top/torrents.php?tag_id1=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #990000">禁转</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_tag-2" name="sm_tag_id" value="2">
+ <label class="top-search-checkbox-label" for="sm_tag-2">
+ <a href="https://hhanclub.top/torrents.php?tag_id2=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #009900">首发</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_tag-5" name="sm_tag_id" value="5">
+ <label class="top-search-checkbox-label" for="sm_tag-5">
+ <a href="https://hhanclub.top/torrents.php?tag_id5=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #FF6699">国语</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_tag-10" name="sm_tag_id" value="10">
+ <label class="top-search-checkbox-label" for="sm_tag-10">
+ <a href="https://hhanclub.top/torrents.php?tag_id10=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #FF9999">粤语</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_tag-6" name="sm_tag_id" value="6">
+ <label class="top-search-checkbox-label" for="sm_tag-6">
+ <a href="https://hhanclub.top/torrents.php?tag_id6=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #99CC00">中字</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_tag-14" name="sm_tag_id" value="14">
+ <label class="top-search-checkbox-label" for="sm_tag-14">
+ <a href="https://hhanclub.top/torrents.php?tag_id14=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #FF0099">特效</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_tag-11" name="sm_tag_id" value="11">
+ <label class="top-search-checkbox-label" for="sm_tag-11">
+ <a href="https://hhanclub.top/torrents.php?tag_id11=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #6633CC">DIY</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_tag-12" name="sm_tag_id" value="12">
+ <label class="top-search-checkbox-label" for="sm_tag-12">
+ <a href="https://hhanclub.top/torrents.php?tag_id12=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #0066FF">杜比视界</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_tag-7" name="sm_tag_id" value="7">
+ <label class="top-search-checkbox-label" for="sm_tag-7">
+ <a href="https://hhanclub.top/torrents.php?tag_id7=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #38b03f">HDR</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_tag-13" name="sm_tag_id" value="13">
+ <label class="top-search-checkbox-label" for="sm_tag-13">
+ <a href="https://hhanclub.top/torrents.php?tag_id13=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #CC00FF">HLG</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_tag-15" name="sm_tag_id" value="15">
+ <label class="top-search-checkbox-label" for="sm_tag-15">
+ <a href="https://hhanclub.top/torrents.php?tag_id15=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #FF6633">应求</span>
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_tag-18" name="sm_tag_id" value="18">
+ <label class="top-search-checkbox-label" for="sm_tag-18">
+ <a href="https://hhanclub.top/torrents.php?tag_id18=1">
+ <span class="font-small text-light text-center text-[#FFFFFF] rounded-[5px] px-[10px] h-[24px] flex flex-row items-center justify-center" style="background: #FF6633">转载</span>
+ </a>
+ </label>
+ </div>
+ <div>
+ <input type="button" class="top-search-select-all" value="全选" id="sm_tag_id-select-all" onclick="checkBoxSelectAllOrNowTag('sm_tag_id', false)">
+ <input type="button" class="top-search-select-all" value="全不选" style="display:none;" id="sm_tag_id-select-none" onclick="checkBoxSelectAllOrNowTag('sm_tag_id', true)">
+ </div>
+ </div>
+ </div>
+ <hr class="w-full h-[1px] bg-[#FFFFFF]" />
+ <div class="top-search-more-sub-table">
+ <div class="top-search-more-title">类型:</div>
+ <div class="top-search-more-content">
+ <div class="top-search-checkbox">
+ <input type="checkbox" name="sm_cat[]" value="409" id="sm_cat409">
+ <label class="top-search-checkbox-label !items-end" for="sm_cat409">
+ <a href="https://hhanclub.net/torrents.php?cat[]=409">
+ <img class="rounded-[10px]" src="styles/HHan/icons/icon-other.svg" alt="TESTUSER">
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" name="sm_cat[]" value="407" id="sm_cat407">
+ <label class="top-search-checkbox-label !items-end" for="sm_cat407">
+ <a href="https://hhanclub.net/torrents.php?cat[]=407">
+ <img class="rounded-[10px]" src="styles/HHan/icons/icon-gym.svg" alt="TESTUSER">
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" name="sm_cat[]" value="403" id="sm_cat403">
+ <label class="top-search-checkbox-label !items-end" for="sm_cat403">
+ <a href="https://hhanclub.net/torrents.php?cat[]=403">
+ <img class="rounded-[10px]" src="styles/HHan/icons/icon-variety.svg" alt="TESTUSER">
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" name="sm_cat[]" value="402" id="sm_cat402">
+ <label class="top-search-checkbox-label !items-end" for="sm_cat402">
+ <a href="https://hhanclub.net/torrents.php?cat[]=402">
+ <img class="rounded-[10px]" src="styles/HHan/icons/icon-tv.svg" alt="TESTUSER">
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" name="sm_cat[]" value="405" id="sm_cat405">
+ <label class="top-search-checkbox-label !items-end" for="sm_cat405">
+ <a href="https://hhanclub.net/torrents.php?cat[]=405">
+ <img class="rounded-[10px]" src="styles/HHan/icons/icon-cartoon.svg" alt="TESTUSER">
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" name="sm_cat[]" value="404" id="sm_cat404">
+ <label class="top-search-checkbox-label !items-end" for="sm_cat404">
+ <a href="https://hhanclub.net/torrents.php?cat[]=404">
+ <img class="rounded-[10px]" src="styles/HHan/icons/icon-doc.svg" alt="TESTUSER">
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" name="sm_cat[]" value="401" id="sm_cat401">
+ <label class="top-search-checkbox-label !items-end" for="sm_cat401">
+ <a href="https://hhanclub.net/torrents.php?cat[]=401">
+ <img class="rounded-[10px]" src="styles/HHan/icons/icon-movie.svg" alt="TESTUSER">
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" name="sm_cat[]" value="412" id="sm_cat412">
+ <label class="top-search-checkbox-label !items-end" for="sm_cat412">
+ <a href="https://hhanclub.net/torrents.php?cat[]=412">
+ <img class="rounded-[10px]" src="styles/HHan/icons/icon-duanju.svg" alt="TESTUSER">
+ </a>
+ </label>
+ </div>
+ <div>
+ <input type="button" class="top-search-select-all" value="全选" id="sm_cat-select-all" onclick="checkBoxSelectAllOrNow('sm_cat', false)">
+ <input type="button" class="top-search-select-all" value="全不选" style="display:none;" id="sm_cat-select-none" onclick="checkBoxSelectAllOrNow('sm_cat', true)">
+ <!-- <button class="top-search-select-all" id="cat-select-all" onclick="checkBoxSelectAllOrNow('cat', false)">全选</button>-->
+ <!-- <button class="top-search-select-all" style="display:none;" id="cat-select-none" onclick="checkBoxSelectAllOrNow('cat', true)">全不选</button>-->
+ </div>
+ </div>
+ </div>
+ <hr class="w-full h-[1px] bg-[#FFFFFF]" />
+ <div class="top-search-more-sub-table">
+ <div class="top-search-more-title">音乐区:</div>
+ <div class="top-search-more-content">
+ <div class="top-search-checkbox">
+ <input type="checkbox" name="sm_sp_cat[]" value="411" id="sm_sp_cat411">
+ <label class="top-search-checkbox-label !items-end" for="sm_sp_cat411">
+ <a href="https://hhanclub.net/special.php?cat[]=411">
+ <img class="rounded-[10px]" src="styles/HHan/icons/icon-mv.svg" alt="TESTUSER">
+ </a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" name="sm_sp_cat[]" value="410" id="sm_sp_cat410">
+ <label class="top-search-checkbox-label !items-end" for="sm_sp_cat410">
+ <a href="https://hhanclub.net/special.php?cat[]=410">
+ <img class="rounded-[10px]" src="styles/HHan/icons/icon-music.svg" alt="TESTUSER">
+ </a>
+ </label>
+ </div>
+ <div>
+ <input type="button" class="top-search-select-all" value="全选" id="sm_sp_cat-select-all" onclick="checkBoxSelectAllOrNow('sm_sp_cat', false)">
+ <input type="button" class="top-search-select-all" value="全不选" style="display:none;" id="sm_sp_cat-select-none" onclick="checkBoxSelectAllOrNow('sm_sp_cat', true)">
+ <!-- <button class="top-search-select-all" id="cat-select-all" onclick="checkBoxSelectAllOrNow('cat', false)">全选</button>-->
+ <!-- <button class="top-search-select-all" style="display:none;" id="cat-select-none" onclick="checkBoxSelectAllOrNow('cat', true)">全不选</button>-->
+ </div>
+ </div>
+ </div>
+ <hr class="w-full h-[1px] bg-[#FFFFFF]" />
+ <div class="top-search-more-sub-table">
+ <div class="top-search-more-title">来源:</div>
+ <div class="top-search-more-content">
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_source7" name="sm_source[]" value="7">
+ <label class="top-search-checkbox-label" for="sm_source7">
+ <a href="https://hhanclub.net/torrents.php?source[]=7"><div class="top-search-select-text">UHD Blu-ray</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_source1" name="sm_source[]" value="1">
+ <label class="top-search-checkbox-label" for="sm_source1">
+ <a href="https://hhanclub.net/torrents.php?source[]=1"><div class="top-search-select-text">Blu-ray</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_source2" name="sm_source[]" value="2">
+ <label class="top-search-checkbox-label" for="sm_source2">
+ <a href="https://hhanclub.net/torrents.php?source[]=2"><div class="top-search-select-text">WEB-DL</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_source3" name="sm_source[]" value="3">
+ <label class="top-search-checkbox-label" for="sm_source3">
+ <a href="https://hhanclub.net/torrents.php?source[]=3"><div class="top-search-select-text">DVD</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_source4" name="sm_source[]" value="4">
+ <label class="top-search-checkbox-label" for="sm_source4">
+ <a href="https://hhanclub.net/torrents.php?source[]=4"><div class="top-search-select-text">HDTV</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_source5" name="sm_source[]" value="5">
+ <label class="top-search-checkbox-label" for="sm_source5">
+ <a href="https://hhanclub.net/torrents.php?source[]=5"><div class="top-search-select-text">TV</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_source6" name="sm_source[]" value="6">
+ <label class="top-search-checkbox-label" for="sm_source6">
+ <a href="https://hhanclub.net/torrents.php?source[]=6"><div class="top-search-select-text">Other</div></a>
+ </label>
+ </div>
+ <div>
+ <input value="全选" class="top-search-select-all" id="sm_source-select-all" onclick="checkBoxSelectAllOrNow('sm_source', false)">
+ <input value="全不选" class="top-search-select-all" style="display:none;" id="sm_source-select-none" onclick="checkBoxSelectAllOrNow('sm_source', true)">
+ </div>' </div>
+ </div>
+ <hr class="w-full h-[1px] bg-[#FFFFFF]" />
+ <div class="top-search-more-sub-table">
+ <div class="top-search-more-title">媒介:</div>
+ <div class="top-search-more-content">
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_medium11" name="sm_medium[]" value="11">
+ <label class="top-search-checkbox-label" for="sm_medium11">
+ <a href="https://hhanclub.net/torrents.php?medium[]=11"><div class="top-search-select-text">UHD Blu-ray</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_medium1" name="sm_medium[]" value="1">
+ <label class="top-search-checkbox-label" for="sm_medium1">
+ <a href="https://hhanclub.net/torrents.php?medium[]=1"><div class="top-search-select-text">FHD Blu-ray</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_medium2" name="sm_medium[]" value="2">
+ <label class="top-search-checkbox-label" for="sm_medium2">
+ <a href="https://hhanclub.net/torrents.php?medium[]=2"><div class="top-search-select-text">UHD REMUX</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_medium3" name="sm_medium[]" value="3">
+ <label class="top-search-checkbox-label" for="sm_medium3">
+ <a href="https://hhanclub.net/torrents.php?medium[]=3"><div class="top-search-select-text">Remux</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_medium7" name="sm_medium[]" value="7">
+ <label class="top-search-checkbox-label" for="sm_medium7">
+ <a href="https://hhanclub.net/torrents.php?medium[]=7"><div class="top-search-select-text">Encode</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_medium10" name="sm_medium[]" value="10">
+ <label class="top-search-checkbox-label" for="sm_medium10">
+ <a href="https://hhanclub.net/torrents.php?medium[]=10"><div class="top-search-select-text">WEB-DL</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_medium5" name="sm_medium[]" value="5">
+ <label class="top-search-checkbox-label" for="sm_medium5">
+ <a href="https://hhanclub.net/torrents.php?medium[]=5"><div class="top-search-select-text">HDTV</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_medium6" name="sm_medium[]" value="6">
+ <label class="top-search-checkbox-label" for="sm_medium6">
+ <a href="https://hhanclub.net/torrents.php?medium[]=6"><div class="top-search-select-text">DVDR</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_medium8" name="sm_medium[]" value="8">
+ <label class="top-search-checkbox-label" for="sm_medium8">
+ <a href="https://hhanclub.net/torrents.php?medium[]=8"><div class="top-search-select-text">CD</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_medium9" name="sm_medium[]" value="9">
+ <label class="top-search-checkbox-label" for="sm_medium9">
+ <a href="https://hhanclub.net/torrents.php?medium[]=9"><div class="top-search-select-text">Track</div></a>
+ </label>
+ </div>
+ <div>
+ <input value="全选" class="top-search-select-all" id="sm_medium-select-all" onclick="checkBoxSelectAllOrNow('sm_medium', false)">
+ <input value="全不选" class="top-search-select-all" style="display:none;" id="sm_medium-select-none" onclick="checkBoxSelectAllOrNow('sm_medium', true)">
+ </div>' </div>
+ </div>
+ <hr class="w-full h-[1px] bg-[#FFFFFF]" />
+ <div class="top-search-more-sub-table">
+ <div class="top-search-more-title">编码:</div>
+ <div class="top-search-more-content">
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_codec6" name="sm_codec[]" value="6">
+ <label class="top-search-checkbox-label" for="sm_codec6">
+ <a href="https://hhanclub.net/torrents.php?codec[]=6"><div class="top-search-select-text">HEVC/H265/x265</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_codec1" name="sm_codec[]" value="1">
+ <label class="top-search-checkbox-label" for="sm_codec1">
+ <a href="https://hhanclub.net/torrents.php?codec[]=1"><div class="top-search-select-text">AVC/H264/x264</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_codec2" name="sm_codec[]" value="2">
+ <label class="top-search-checkbox-label" for="sm_codec2">
+ <a href="https://hhanclub.net/torrents.php?codec[]=2"><div class="top-search-select-text">VC-1</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_codec4" name="sm_codec[]" value="4">
+ <label class="top-search-checkbox-label" for="sm_codec4">
+ <a href="https://hhanclub.net/torrents.php?codec[]=4"><div class="top-search-select-text">MPEG-2</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_codec7" name="sm_codec[]" value="7">
+ <label class="top-search-checkbox-label" for="sm_codec7">
+ <a href="https://hhanclub.net/torrents.php?codec[]=7"><div class="top-search-select-text">VP8/9 </div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_codec5" name="sm_codec[]" value="5">
+ <label class="top-search-checkbox-label" for="sm_codec5">
+ <a href="https://hhanclub.net/torrents.php?codec[]=5"><div class="top-search-select-text">Other</div></a>
+ </label>
+ </div>
+ <div>
+ <input value="全选" class="top-search-select-all" id="sm_codec-select-all" onclick="checkBoxSelectAllOrNow('sm_codec', false)">
+ <input value="全不选" class="top-search-select-all" style="display:none;" id="sm_codec-select-none" onclick="checkBoxSelectAllOrNow('sm_codec', true)">
+ </div>' </div>
+ </div>
+ <hr class="w-full h-[1px] bg-[#FFFFFF]" />
+ <div class="top-search-more-sub-table">
+ <div class="top-search-more-title">音频编码:</div>
+ <div class="top-search-more-content">
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_audiocodec9" name="sm_audiocodec[]" value="9">
+ <label class="top-search-checkbox-label" for="sm_audiocodec9">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=9"><div class="top-search-select-text">TrueHD Atmos</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_audiocodec10" name="sm_audiocodec[]" value="10">
+ <label class="top-search-checkbox-label" for="sm_audiocodec10">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=10"><div class="top-search-select-text">TrueHD</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_audiocodec11" name="sm_audiocodec[]" value="11">
+ <label class="top-search-checkbox-label" for="sm_audiocodec11">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=11"><div class="top-search-select-text">DTS-X</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_audiocodec12" name="sm_audiocodec[]" value="12">
+ <label class="top-search-checkbox-label" for="sm_audiocodec12">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=12"><div class="top-search-select-text">DTS-HD|MA</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_audiocodec15" name="sm_audiocodec[]" value="15">
+ <label class="top-search-checkbox-label" for="sm_audiocodec15">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=15"><div class="top-search-select-text">DTS-HD|HR</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_audiocodec13" name="sm_audiocodec[]" value="13">
+ <label class="top-search-checkbox-label" for="sm_audiocodec13">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=13"><div class="top-search-select-text">DTS</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_audiocodec8" name="sm_audiocodec[]" value="8">
+ <label class="top-search-checkbox-label" for="sm_audiocodec8">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=8"><div class="top-search-select-text">DD/AC3</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_audiocodec14" name="sm_audiocodec[]" value="14">
+ <label class="top-search-checkbox-label" for="sm_audiocodec14">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=14"><div class="top-search-select-text">DDP/EAC3</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_audiocodec6" name="sm_audiocodec[]" value="6">
+ <label class="top-search-checkbox-label" for="sm_audiocodec6">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=6"><div class="top-search-select-text">AAC</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_audiocodec3" name="sm_audiocodec[]" value="3">
+ <label class="top-search-checkbox-label" for="sm_audiocodec3">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=3"><div class="top-search-select-text">LPCM/PCM</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_audiocodec4" name="sm_audiocodec[]" value="4">
+ <label class="top-search-checkbox-label" for="sm_audiocodec4">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=4"><div class="top-search-select-text">MP2/3</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_audiocodec1" name="sm_audiocodec[]" value="1">
+ <label class="top-search-checkbox-label" for="sm_audiocodec1">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=1"><div class="top-search-select-text">FLAC</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_audiocodec2" name="sm_audiocodec[]" value="2">
+ <label class="top-search-checkbox-label" for="sm_audiocodec2">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=2"><div class="top-search-select-text">APE</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_audiocodec5" name="sm_audiocodec[]" value="5">
+ <label class="top-search-checkbox-label" for="sm_audiocodec5">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=5"><div class="top-search-select-text">OGG</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_audiocodec16" name="sm_audiocodec[]" value="16">
+ <label class="top-search-checkbox-label" for="sm_audiocodec16">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=16"><div class="top-search-select-text">Opus</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_audiocodec17" name="sm_audiocodec[]" value="17">
+ <label class="top-search-checkbox-label" for="sm_audiocodec17">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=17"><div class="top-search-select-text">WAV</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_audiocodec18" name="sm_audiocodec[]" value="18">
+ <label class="top-search-checkbox-label" for="sm_audiocodec18">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=18"><div class="top-search-select-text">TAA</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_audiocodec7" name="sm_audiocodec[]" value="7">
+ <label class="top-search-checkbox-label" for="sm_audiocodec7">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=7"><div class="top-search-select-text">Other</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_audiocodec19" name="sm_audiocodec[]" value="19">
+ <label class="top-search-checkbox-label" for="sm_audiocodec19">
+ <a href="https://hhanclub.net/torrents.php?audiocodec[]=19"><div class="top-search-select-text">ALAC</div></a>
+ </label>
+ </div>
+ <div>
+ <input value="全选" class="top-search-select-all" id="sm_audiocodec-select-all" onclick="checkBoxSelectAllOrNow('sm_audiocodec', false)">
+ <input value="全不选" class="top-search-select-all" style="display:none;" id="sm_audiocodec-select-none" onclick="checkBoxSelectAllOrNow('sm_audiocodec', true)">
+ </div>' </div>
+ </div>
+ <hr class="w-full h-[1px] bg-[#FFFFFF]" />
+ <div class="top-search-more-sub-table">
+ <div class="top-search-more-title">分辨率:</div>
+ <div class="top-search-more-content">
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_standard6" name="sm_standard[]" value="6">
+ <label class="top-search-checkbox-label" for="sm_standard6">
+ <a href="https://hhanclub.net/torrents.php?standard[]=6"><div class="top-search-select-text">4320p/8K</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_standard1" name="sm_standard[]" value="1">
+ <label class="top-search-checkbox-label" for="sm_standard1">
+ <a href="https://hhanclub.net/torrents.php?standard[]=1"><div class="top-search-select-text">2160p/4K</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_standard2" name="sm_standard[]" value="2">
+ <label class="top-search-checkbox-label" for="sm_standard2">
+ <a href="https://hhanclub.net/torrents.php?standard[]=2"><div class="top-search-select-text">1080p</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_standard4" name="sm_standard[]" value="4">
+ <label class="top-search-checkbox-label" for="sm_standard4">
+ <a href="https://hhanclub.net/torrents.php?standard[]=4"><div class="top-search-select-text">1080i</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_standard3" name="sm_standard[]" value="3">
+ <label class="top-search-checkbox-label" for="sm_standard3">
+ <a href="https://hhanclub.net/torrents.php?standard[]=3"><div class="top-search-select-text">720p</div></a>
+ </label>
+ </div>
+ <div>
+ <input value="全选" class="top-search-select-all" id="sm_standard-select-all" onclick="checkBoxSelectAllOrNow('sm_standard', false)">
+ <input value="全不选" class="top-search-select-all" style="display:none;" id="sm_standard-select-none" onclick="checkBoxSelectAllOrNow('sm_standard', true)">
+ </div>' </div>
+ </div>
+ <hr class="w-full h-[1px] bg-[#FFFFFF]" />
+ <div class="top-search-more-sub-table">
+ <div class="top-search-more-title">处理:</div>
+ <div class="top-search-more-content">
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_processing3" name="sm_processing[]" value="3">
+ <label class="top-search-checkbox-label" for="sm_processing3">
+ <a href="https://hhanclub.net/torrents.php?processing[]=3"><div class="top-search-select-text">美剧</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_processing4" name="sm_processing[]" value="4">
+ <label class="top-search-checkbox-label" for="sm_processing4">
+ <a href="https://hhanclub.net/torrents.php?processing[]=4"><div class="top-search-select-text">日剧</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_processing5" name="sm_processing[]" value="5">
+ <label class="top-search-checkbox-label" for="sm_processing5">
+ <a href="https://hhanclub.net/torrents.php?processing[]=5"><div class="top-search-select-text">韩剧</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_processing6" name="sm_processing[]" value="6">
+ <label class="top-search-checkbox-label" for="sm_processing6">
+ <a href="https://hhanclub.net/torrents.php?processing[]=6"><div class="top-search-select-text">港剧</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_processing7" name="sm_processing[]" value="7">
+ <label class="top-search-checkbox-label" for="sm_processing7">
+ <a href="https://hhanclub.net/torrents.php?processing[]=7"><div class="top-search-select-text">台剧</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_processing8" name="sm_processing[]" value="8">
+ <label class="top-search-checkbox-label" for="sm_processing8">
+ <a href="https://hhanclub.net/torrents.php?processing[]=8"><div class="top-search-select-text">大陆剧</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_processing9" name="sm_processing[]" value="9">
+ <label class="top-search-checkbox-label" for="sm_processing9">
+ <a href="https://hhanclub.net/torrents.php?processing[]=9"><div class="top-search-select-text">英剧</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_processing10" name="sm_processing[]" value="10">
+ <label class="top-search-checkbox-label" for="sm_processing10">
+ <a href="https://hhanclub.net/torrents.php?processing[]=10"><div class="top-search-select-text">其他</div></a>
+ </label>
+ </div>
+ <div>
+ <input value="全选" class="top-search-select-all" id="sm_processing-select-all" onclick="checkBoxSelectAllOrNow('sm_processing', false)">
+ <input value="全不选" class="top-search-select-all" style="display:none;" id="sm_processing-select-none" onclick="checkBoxSelectAllOrNow('sm_processing', true)">
+ </div>' </div>
+ </div>
+ <hr class="w-full h-[1px] bg-[#FFFFFF]" />
+ <div class="top-search-more-sub-table">
+ <div class="top-search-more-title">制作组:</div>
+ <div class="top-search-more-content">
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_team1" name="sm_team[]" value="1">
+ <label class="top-search-checkbox-label" for="sm_team1">
+ <a href="https://hhanclub.net/torrents.php?team[]=1"><div class="top-search-select-text">HHWEB</div></a>
+ </label>
+ </div>
+ <div class="top-search-checkbox">
+ <input type="checkbox" id="sm_team5" name="sm_team[]" value="5">
+ <label class="top-search-checkbox-label" for="sm_team5">
+ <a href="https://hhanclub.net/torrents.php?team[]=5"><div class="top-search-select-text">Other</div></a>
+ </label>
+ </div>
+ <div>
+ <input value="全选" class="top-search-select-all" id="sm_team-select-all" onclick="checkBoxSelectAllOrNow('sm_team', false)">
+ <input value="全不选" class="top-search-select-all" style="display:none;" id="sm_team-select-none" onclick="checkBoxSelectAllOrNow('sm_team', true)">
+ </div>' </div>
+ </div>
+ <hr class="w-full h-[1px] bg-[#FFFFFF]" />
+ <div class="top-search-more-sub-table">
+ <div class="top-search-more-title">其他:</div>
+ <div class="top-search-more-content">
+ <div>
+ <label for="sm_top-search-mode" class="top-search-select-text">匹配模式:</label>
+ <select id="top-search-mode" name="sm_search-mode" class="top-search-select-select">
+ <option value="0">与</option>
+ <option value="1">或</option>
+ <option value="2">准确</option>
+ </select>
+ </div>
+ <div>
+ <label for="sm_top-search-incldead" class="top-search-select-text">显示断种/活种:</label>
+ <select id="sm_top-search-incldead" name="sm_incldead" class="top-search-select-select">
+ <option value="0">包括断种</option>
+ <option
+ value="1" selected>活种</option>
+ <option
+ value="2">断种</option>
+ </select>
+ </div>
+ <div>
+ <label for="sm_top-search-spstate" class="top-search-select-text">显示促销种子:</label>
+ <select id="sm_top-search-spstate" name="sm_spstate" class="top-search-select-select">
+ <option value="0" selected>全部</option>
+ <option value="1">普通</option><option value="2">免费</option><option value="3">2X</option><option value="4">2X免费</option><option value="5">50%</option><option value="6">2X 50%</option><option value="7">30%</option> </select>
+ </div>
+ <div>
+ <label for="sm_top-search-inclbookmarked" class="top-search-select-text">显示收藏:</label>
+ <select id="sm_top-search-inclbookmarked" name="sm_inclbookmarked" class="top-search-select-select">
+ <option value="0" selected>全部</option>
+ <option
+ value="1" >仅收藏</option>
+ <option
+ value="2" >仅未收藏</option>
+ </select>
+ </div>
+ </div>
+ </div>
+ <hr class="w-full h-[1px] bg-[#FFFFFF]" />
+ <div class="w-[100%] flex flex-row items-center justify-center">
+ <input type="button" value="搜索" onclick="toSearchTorrents(true) " class="w-[100px] h-[45px] rounded-[10px] bg-[#F29D38] text-base font-medium mt-[20px] text-[#FFFFFF]">
+ </div>
+ </div>
+ </div>
+ <!--<div class="flex flex-row-reverse">
+ <divw class="w-3"></divw>
+ <div class="w-[350px] h-[500px] bg-white rounded-md">
+ <div class="h-[80px] bg-[#F1F3F5]"></div>
+ <div>
+ 123
+ </div>
+ </div>
+ </div>-->
+ </div>
+ <div id="mainContent" class="!w-[max(100%,900px)]">
+<link rel="stylesheet" href="styles/HHan/css/open-window.css">
+<!-- -->
+<div id="content" class="relative">
+ <div id="open-window"></div>
+ <!-- 一部分的图案 -->
+ <div>
+ </div>
+ <!-- 签到规则提示-->
+ <div>
+ <div class="rule-tips ">
+ <div class="rule-tips-1">
+ <ul>
+ <li>
+ 首次签到获得10个憨豆。
+ </li>
+ <li>
+ 每次连续签到可额外获得5个憨豆，直到1000封顶。 </li>
+ </ul>
+ </div>
+ <div></div>
+ <div class="rule-tips-2">
+ <ul>
+ <li>
+ 连续签到第 10 天，额外获得 200 憨豆。
+ </li>
+ <li>
+ 连续签到第 20 天，额外获得 500 憨豆。
+ </li>
+ <li>
+ 连续签到第 30 天，额外获得 1000 憨豆。
+ </li>
+ </ul>
+ </div>
+ <div>
+ <p class="register-now-info register-info">这是您的第196次签到，已连续签到1天，本次签到获得10个憨豆。你目前拥有补签卡40张。</p>
+ </div>
+ </div>
+ <div class="switch-month">
+ <button type="button" class="switch-month-button" onclick="switchMonth(false)"><</button>
+ <p id="date-display">
+ 2026-10 </p>
+ <button type="button" class="switch-month-button" onclick="switchMonth(true)">></button>
+ </div>
+ </div>
+ <div class="register-rank"><p class="register-info">
+ 今日签到排名：355 / 613</p></div>
+ <!-- 日历表格-->
+ <div class="month-of">
+ <div class="week">
+ <ul>
+ <li>
+ <div class="day-of"><p class="t">星期一</p></div>
+ </li>
+ <li>
+ <div class="day-of"><p class="t">星期二</p></div>
+ </li>
+ <li>
+ <div class="day-of"><p class="t">星期三</p></div>
+ </li>
+ <li>
+ <div class="day-of"><p class="t">星期四</p></div>
+ </li>
+ <li>
+ <div class="day-of"><p class="t">星期五</p></div>
+ </li>
+ <li>
+ <div class="day-of"><p class="t">星期六</p></div>
+ </li>
+ <li>
+ <div class="day-of"><p class="t">星期日</p></div>
+ </li>
+ </ul>
+ </div>
+ <div id="day-register">
+ <div hidden="hidden" class="claimed">a</div>
+ <div hidden="hidden" class="retroactive">b</div>
+ <div hidden="hidden" class="pending-checkin">c</div>
+ <!-- <div>
+ <ul>
+ <li>
+ <div class="calender-sub">
+ <div class="the-day"><p>27日</p></div>
+ <div class="get-bonus">
+ <div class="bonus-info">
+ <p>120</p>
+ </div>
+ <div class="checkin">
+ <button type="button" class="claimed">已领取</button>
+ </div>
+ </div>
+ </li>
+ </ul>
+ </div>-->
+ <div class="bottom-div"></div>
+ </div>
+ </div>
+</div>
+</div><div id="footer" class="pagefoot"><div style="height:50px"></div><div style="word-wrap:break-word;width:70%;margin: 0px auto" align="center">本站列出的文件并没有保存在本站的服务器上。本站仅负责连接，我们对被传播文件的内容一无所知。本站的链接均由用户自发提供。HH的管理员无法对用户的提交内容或其他行为负责。您不能使用HH传播或下载任何您没有使用许可的文件或材料，由此引起的后果由您自己承担。</div><div style="margin-top: 20px; margin-bottom: -10px;" align="center">获得本站最佳效果，请使用或者且使用大于1920*1080的分辨率。</div><div style="margin-top: 10px; margin-bottom: 30px;" align="center"> (c) <a href="https://hhanclub.net" target="_self">HHCLUB</a> 2022-2026 Powered by <a href="aboutnexus.php"><u>NexusPHP</u></a>[page created in 0.013 sec with 8 db queries, 41 reads and 3 writes of Redis and 1.23 MB ram]</div>
+<div style="display: none;" id="lightbox" class="lightbox"></div><div style="display: none;" id="curtain" class="curtain"></div></div></div>
+<img id="nexus-preview" style="display: none; position: absolute" src="" /></body></html>

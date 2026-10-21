@@ -142,7 +142,7 @@ python -c "import secrets; print('WEB_TOKEN=' + secrets.token_urlsafe(32))"
 curl -H "Authorization: Bearer $WEB_TOKEN" http://localhost:8080/api/v1/scheduler
 ```
 
-## 6. 调度作业（6 个）
+## 6. 调度作业（7 个）
 
 | 作业 | cron | 说明 |
 |---|---|---|
@@ -152,6 +152,7 @@ curl -H "Authorization: Bearer $WEB_TOKEN" http://localhost:8080/api/v1/schedule
 | `refresh_user_data` | `*/30 * * * *` | FR-1.6 用户数据刷新 |
 | `scan_cross_seed` | `0 */6 * * *` | 辅种巡查 |
 | `drain_task_queue` | `*/5 * * * *` | 任务队列排空 |
+| `daily_checkin` | `37 8 * * *` | 站点每日签到（FR-3.6，仅 3 站） |
 
 专属参数：
 
@@ -159,7 +160,7 @@ curl -H "Authorization: Bearer $WEB_TOKEN" http://localhost:8080/api/v1/schedule
 - `monitor_free_window`：`monitor_pre_pause_minutes`（`.env` 中为 10）
 
 cron 的**持久化来源是 `.env` / `.env.prod`**（`FETCH_ALL_SITES_CRON` / `PUSH_FREE_CRON` /
-`MONITOR_FREE_WINDOW_CRON` / `SCAN_CROSS_SEED_CRON` 等），
+`MONITOR_FREE_WINDOW_CRON` / `SCAN_CROSS_SEED_CRON` / `DAILY_CHECKIN_CRON` 等），
 `app/core/config.py` 提供默认值，`app/services/job_registry.py` 注册作业时读取。
 
 > ⚠️ 通过 API `POST /api/v1/scheduler/{job_name}/cron` 改 cron 是**运行时生效、不落库**的
@@ -169,6 +170,8 @@ cron 的**持久化来源是 `.env` / `.env.prod`**（`FETCH_ALL_SITES_CRON` / `
 > 目前是代码里硬编码的，没有对应的 env 变量。
 > `scan_cross_seed` 有 `SCAN_CROSS_SEED_CRON` 配置项，但当前 `.env` / `.env.prod` 未设置，
 > 走 `app/core/config.py` 的默认值 `0 */6 * * *`。
+> `daily_checkin` 有 `DAILY_CHECKIN_CRON` 配置项，默认 `37 8 * * *`
+> （分钟位 37 避开所有既有多 5 分钟作业）。
 
 > ✅ **作业的启停（enabled）已持久化**（2026-10-21，commit `6be6a9d`）：
 > 存在 `scheduler_job_settings` 表（`job_name` PK + `enabled`）。
@@ -212,6 +215,35 @@ cron 的**持久化来源是 `.env` / `.env.prod`**（`FETCH_ALL_SITES_CRON` / `
 > 现存表：`sites` / `torrent_index` / `task_queue` / `app_runtime_params` /
 > `job_runs` / `site_user_data` / `downloader_instances` /
 > `scheduler_job_settings`（+ 历史遗留的 `torrents` 空表）。
+
+### 7.1 每日签到（FR-3.6，2026-10-22）
+
+`daily_checkin` 作业（cron `37 8 * * *`）逐站调用
+`SiteAdapter.checkin()`。**9 站里只有 3 站实测可自动签到**：
+
+| 站点 | 端点 | 状态 |
+|---|---|---|
+| hhanclub | `GET/POST /attendance.php` | ✅ 已实现（签到得憨豆） |
+| soulvoice | `GET/POST /attendance.php` | ✅ 已实现（签到得魔力值） |
+| hdhome | `GET/POST /attendance.php` | ✅ 已实现（签到得魔力值） |
+| audiences | `GET /attendance.php` | ❌ Cloudflare Turnstile 人机验证 |
+| ourbits | `GET /attendance.php` | ❌ Turnstile + `form#attendance` |
+| hdsky | `GET /showup.php` | ❌ 图形验证码（`invalid_imagehash`） |
+| springsunday | — | ❌ 无签到功能（只有论坛"签到帖"） |
+| mteam | — | ❌ mTorrent API 无签到端点 |
+| hddolby | — | ❌ 未实现（SSL 握手失败，未验证） |
+
+> ⚠️ **不做验证码绕过**（AGENTS.md R2 合规红线）：需人机验证的站一律
+> 返回 `UNSUPPORTED`（"需人工签到"），不引入浏览器自动化、不解 Turnstile。
+>
+> 上游语义（`xiaomlove/nexusphp` 的 `public/attendance.php`）：**GET 只查状态**，
+> 仅当站点 `captcha.attendance.enabled = false` 时才顺带执行签到；**POST 才是
+> 执行签到**。这 3 站实测 GET 即完成签到（说明无图形验证码），
+> POST 仅作兜底。已签到时 POST 返回 200 + "已经签到过"，**不是错误**。
+>
+> 结果**不落库**（不建表）——作业返回值进 `job_runs.result_json`
+> （含 `summary` + `steps`），前端「调度 → 历史」直接可见。
+> 解析规则用真实页面固化成 fixture：`tests/fixtures/*_attendance.html`。
 
 ## 8. 数据与存储
 

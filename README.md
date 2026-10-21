@@ -10,6 +10,7 @@
 - **F1 站点拉取**：9 站适配器（mteam / hdsky / hhanclub / audiences / hdhome / hddolby / ourbits / soulvoice / springsunday）拉取免费种 + RSS 清理
 - **F2 免费种窗口**：推送 + 监测 + 中止（push_free_torrents / monitor_free_window / FR-3.5 链路）
 - **FR-1.6 站点用户数据契约**（2026-10-18）：9 站 user_info / seeding_stats / message_count / hr_status 4 方法，刷新作业 `*/30 * * * *`，Vue UI（`/user-data` 列表 + Sites drawer），API 端点 `/api/v1/user-data` 与 `/api/v1/sites/{id}/user-data`
+- **FR-3.6 站点每日签到**（2026-10-22）：`daily_checkin` 作业（cron `37 8 * * *`）对 hhanclub / soulvoice / hdhome 三站自动签到（NexusPHP `/attendance.php`）。其余 6 站不支持（无此功能或需人机验证，**不做绕过**）
 
 `F2 辅种引擎` / `F4 巡检` / `F5 清理` 自 **M2** 起实施。
 

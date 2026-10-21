@@ -12,6 +12,7 @@
 - ``refresh_user_data`` — 拉取 9 站用户数据（上传/下载/做种数）
 - ``scan_cross_seed`` — 巡查辅种下载器，暂停 tracker 未注册 / 数据丢失的种子
 - ``drain_task_queue`` — 排空任务队列：崩溃恢复（僵死 running 回收）+ 退避重试
+- ``daily_checkin`` — 对支持签到的站点执行每日签到（hhanclub / soulvoice / hdhome）
 """
 from __future__ import annotations
 
@@ -104,6 +105,17 @@ def register_jobs(
     )
     logger.info("已注册任务队列排空作业：drain_task_queue cron='*/5 * * * *'")
 
+    scheduler_center.register(
+        JobSpec(
+            name="daily_checkin",
+            func=lambda: _run_and_return(_run_daily_checkin(factory)),
+            cron=cfg.daily_checkin_cron,
+        )
+    )
+    logger.info(
+        "已注册站点签到作业：daily_checkin cron=%r", cfg.daily_checkin_cron,
+    )
+
 # ============================================================ 作业入口
 async def _run_fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
     """执行站点拉取。"""
@@ -171,6 +183,13 @@ async def _run_drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
     from app.services.task_drain import drain_task_queue
 
     return await drain_task_queue(factory)
+
+
+async def _run_daily_checkin(factory: AdapterFactory) -> dict[str, object]:
+    """执行站点每日签到。"""
+    from app.services.checkin import refresh_all_sites
+
+    return await refresh_all_sites(factory)
 
 
 async def _run_and_return(result: Awaitable[object]) -> object:

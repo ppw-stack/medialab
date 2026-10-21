@@ -3,6 +3,7 @@
 ## 必读文档
 1. `README.md` — 现状与命令。
 2. `app/adapters/sites/user_data.py` + `app/adapters/sites/parsers/nexus_php.py` — FR-1.6 站点用户数据契约。
+3. `app/adapters/sites/parsers/attendance.py` — FR-3.6 站点签到解析 helper。
 
 ## 工作准则
 - 改动窗口锚定（FR-3.4）或中止链路（FR-3.5）前，先确认需求基线与现状口径一致。
@@ -20,13 +21,22 @@
   - `search_torrents` 返回 `[]` = 站点确实没种子；抛 `SiteFetchError` = 故障（DNS / 连接 / HTTP）
   - 两者混用会让作业统计报"全部成功"而实际漏掉故障站（prod 的 hddolby DNS 失败就是这样被掩盖的）
   - 契约由 `tests/unit/test_site_adapters.py` 固化，9 站全参数化覆盖
+- **FR-3.6 站点每日签到契约**（2026-10-22 加入）：
+  - 适配器单方法 `checkin() → CheckinResult`，带状态枚举（success / already / unsupported / auth_expired / failed）——**不用 `None`**：签到必须区分"该站不支持"与"签到失败"，否则作业统计分不清
+  - **只实现实测可用的 3 站**（hhanclub / soulvoice / hdhome，走 NexusPHP `/attendance.php`）。其余 6 站走基类默认 `UNSUPPORTED`（audiences / ourbits 需 Turnstile、hdsky 需图形验证码、springSunday / mteam 无此功能、hddolby 未验证）
+  - **不做验证码绕过**（R2 合规红线）：检测到人机验证 → `UNSUPPORTED`（"需人工"），不引入浏览器自动化
+  - 失败必须抛 `SiteFetchError` / `BreakerTripped`，与拉取路径同一契约
+  - 签到熔断**不写** `sites.breaker_until` —— 不与 10 分钟一次的拉取作业共享熔断状态
+  - **不建表**：结果只进 `job_runs.result_json`（`summary` + `steps`），前端「调度 → 历史」可见
+  - 解析规则用**真实页面**固化成 fixture（`tests/fixtures/*_attendance.html`）——手写最小 HTML 会漏掉真实文案（hhanclub 成功页**不含**"签到成功"四字，只有统计文案）
+  - 契约由 `tests/unit/test_checkin_parser.py` + `tests/unit/test_site_adapters.py` + `tests/integration/test_checkin_job.py` 固化
 
 ## 必备命令
 ```bash
 uv sync --extra dev         # 装依赖
 uv run ruff check app/ tests/
 uv run mypy app/
-uv run pytest                # 后端测试（465 例）
+uv run pytest                # 后端测试（555 例）
 cd web && npx vue-tsc -b    # 前端类型检查
 cd web && npx oxlint .      # 前端 lint
 cd web && node scripts/check-types-placement.mjs  # 类型放置约束（API 契约类型集中在 src/types.ts）
@@ -54,7 +64,7 @@ uv run pytest --cov=app              # 带覆盖率（当前基线 53%）
 
 
 ## 提交信息格式
-Conventional Commits，作用域示例：`feat(crypto)` / `fix(free-seed)` / `docs(req)` / `refactor(sites)` / `feat(sites)` (FR-1.6 站点 userdata) / `feat(db)` (SiteUserData 表) / `feat(api)` (user_data 端点) / `feat(web)` (UserData.vue) / `feat(scheduler)` (调度作业/配置/历史) / `feat(cross-seed)` (辅种下载器巡查)。
+Conventional Commits，作用域示例：`feat(crypto)` / `fix(free-seed)` / `docs(req)` / `refactor(sites)` / `feat(sites)` (FR-1.6 站点 userdata) / `feat(db)` (SiteUserData 表) / `feat(api)` (user_data 端点) / `feat(web)` (UserData.vue) / `feat(scheduler)` (调度作业/配置/历史) / `feat(cross-seed)` (辅种下载器巡查) / `feat(checkin)` (FR-3.6 站点每日签到)。
 
 ## 前端测试
 ```bash

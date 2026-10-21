@@ -168,6 +168,34 @@ test('调度作业 - 历史 modal 展示任务步骤', async ({ page }) => {
   await modal.locator('.ant-modal-close').click()
 })
 
+test('调度作业 - 每日签到 (daily_checkin) 出现在作业列表', async ({ page }) => {
+  await login(page)
+  await page.goto('/settings')
+  await page.waitForLoadState('networkidle')
+
+  // daily_checkin 作业行
+  const row = page.locator('.job-item').filter({ hasText: 'daily_checkin' })
+  await expect(row).toBeVisible()
+
+  // 显示中文名 + 说明
+  await expect(row.locator('.job-item__name')).toHaveText('每日签到')
+  await expect(row.locator('.job-item__desc')).toContainText('签到')
+  console.log('  ✓ daily_checkin 作业行渲染（每日签到）')
+
+  // cron 默认 37 8 * * *（错峰：避开所有多 5 分钟的既有作业）
+  const cronText = row.locator('.job-item__cron-text')
+  await expect(cronText).toHaveText('37 8 * * *')
+  console.log('  ✓ daily_checkin cron 默认 37 8 * * *')
+
+  // 「配置」弹框可用（该作业无专属 runtime param）
+  await row.getByRole('button', { name: /配\s*置/ }).click()
+  const modal = page.locator('.ant-modal-content').filter({ hasText: '配置 · 每日签到' })
+  await expect(modal).toBeVisible()
+  await expect(modal.locator('.ant-input-number-input')).toHaveCount(0)
+  console.log('  ✓ daily_checkin modal 无 param (符合预期)')
+  await modal.getByRole('button', { name: /取\s*消/ }).click()
+})
+
 test('调度作业 - 截图', async ({ page }) => {
   await login(page)
   await page.goto('/settings')

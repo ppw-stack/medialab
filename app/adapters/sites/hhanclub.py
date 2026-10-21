@@ -34,6 +34,8 @@ from bs4.element import Tag
 
 from app.adapters.sites.base import (
     BreakerTripped,
+    CheckinResult,
+    CheckinStatus,
     FeedItem,
     SiteAdapter,
     SiteFetchError,
@@ -44,6 +46,7 @@ from app.adapters.sites.base import (
     parse_abs_datetime,
     parse_size_text,
 )
+from app.adapters.sites.parsers import attendance
 from app.adapters.sites.user_data import SiteUserSnapshot
 from app.core.logging import get_logger
 
@@ -579,6 +582,50 @@ class HhanclubAdapter(SiteAdapter):
             raw_html=html,
         )
 
+
+    # ----------------------- FR-3.6 每日签到 -----------------------
+
+    async def checkin(self) -> CheckinResult:
+        """hhanclub 走 ``/attendance.php``（NexusPHP 标准签到端点）。
+
+        实测（2026-10-22）：该站 ``captcha.attendance.enabled = false``，
+        **GET 即完成签到**——响应里有"这是您的第 196 次签到…获得 10 个憨豆"。
+        POST 仅作兜底（万一站点日后开启该配置，GET 不再顺带签到）。
+
+        已签到时 POST 返回 200 + "已经签到过"，**不是错误**。
+        """
+        if not self._cookies:
+            return CheckinResult(CheckinStatus.AUTH_EXPIRED, "缺少 cookies")
+        url = f"{self._base_url()}/attendance.php"
+        try:
+            resp = await self._client.get(url, timeout=self._timeout)
+        except httpx.HTTPError as exc:
+            raise SiteFetchError(f"hhanclub 签到页拉取失败：{exc}") from exc
+        if resp.status_code in (403, 429):
+            raise BreakerTripped(f"hhanclub 签到返回 {resp.status_code}，需熔断")
+        if resp.status_code >= 400:
+            raise SiteFetchError(f"hhanclub 签到返回 HTTP {resp.status_code}")
+
+        result = attendance.parse_checkin_result(resp.text, url=str(resp.url))
+        if result.status in (CheckinStatus.SUCCESS, CheckinStatus.ALREADY):
+            return result
+        if result.status in (CheckinStatus.UNSUPPORTED, CheckinStatus.AUTH_EXPIRED):
+            # 人机验证 / cookie 失效——POST 也不会有结果，不再试
+            return result
+        # GET 没有签到（站点配置变了？）→ POST 一次执行签到
+        return await self._post_checkin(url)
+
+    async def _post_checkin(self, url: str) -> CheckinResult:
+        """POST ``/attendance.php`` 执行签到（兜底路径）。"""
+        try:
+            resp = await self._client.post(url, timeout=self._timeout)
+        except httpx.HTTPError as exc:
+            raise SiteFetchError(f"hhanclub 签到提交失败：{exc}") from exc
+        if resp.status_code in (403, 429):
+            raise BreakerTripped(f"hhanclub 签到返回 {resp.status_code}，需熔断")
+        if resp.status_code >= 400:
+            raise SiteFetchError(f"hhanclub 签到提交返回 HTTP {resp.status_code}")
+        return attendance.parse_checkin_result(resp.text, url=str(resp.url))
 
     # ----------------------- FR-1.6 站点用户数据（精简版） -----------------------
 

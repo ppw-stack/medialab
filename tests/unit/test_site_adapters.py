@@ -276,6 +276,206 @@ async def test_close_is_idempotent(name: None) -> None:
     await adapter.close()
 
 
+# -------------------------------------------------- 契约：每日签到（FR-3.6）
+
+#: 已实现自动签到的 3 站（实测 2026-10-22 可用）
+CHECKIN_ADAPTERS = ("hhanclub", "soulvoice", "hdhome")
+
+#: 未实现签到的站：无此功能（springSunday / mteam）或需人机验证
+#: （audiences / ourbits / hdsky）。**不做验证码绕过**（AGENTS.md 合规红线）。
+NO_CHECKIN_ADAPTERS = tuple(a for a in ALL_ADAPTERS if a not in CHECKIN_ADAPTERS)
+
+
+@pytest.mark.parametrize("name", ALL_ADAPTERS)
+async def test_checkin_returns_checkin_result(name: str) -> None:
+    """签到契约：返回 ``CheckinResult``（不抛）。"""
+    from app.adapters.sites.base import CheckinResult
+
+    adapter = _make(name)
+    try:
+        with _mock_all(name):
+            result = await adapter.checkin()
+            assert isinstance(result, CheckinResult)
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.parametrize("name", NO_CHECKIN_ADAPTERS)
+async def test_unimplemented_sites_return_unsupported(name: str) -> None:
+    """未实现签到的站 → UNSUPPORTED，且**不发请求**。
+
+    不发请求很重要：这些站不该因为加了个签到作业就多打一次站点。
+    """
+    from app.adapters.sites.base import CheckinStatus
+
+    adapter = _make(name)
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            router.route().mock(
+                side_effect=AssertionError("未实现签到的站不该发请求")
+            )
+            result = await adapter.checkin()
+        assert result.status == CheckinStatus.UNSUPPORTED
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.parametrize("name", CHECKIN_ADAPTERS)
+async def test_checkin_detects_success(name: str) -> None:
+    """已实现的 3 站：签到页返回成功文案 → SUCCESS。"""
+    from app.adapters.sites.base import CheckinStatus
+
+    adapter = _make(name)
+    try:
+        with respx.mock(assert_all_mocked=True) as router:
+            router.route().mock(
+                return_value=httpx.Response(
+                    200,
+                    text=(
+                        "<html><body>签到成功 这是您的第 614 次签到，"
+                        "已连续签到 1 天，本次签到获得 10 个魔力值。</body></html>"
+                    ),
+                )
+            )
+            result = await adapter.checkin()
+        assert result.status == CheckinStatus.SUCCESS
+        assert result.total_count == 614
+        assert result.reward == 10
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.parametrize("name", CHECKIN_ADAPTERS)
+async def test_checkin_detects_already(name: str) -> None:
+    """当日已签 → ALREADY（幂等，**不算失败**）。"""
+    from app.adapters.sites.base import CheckinStatus
+
+    adapter = _make(name)
+    try:
+        with respx.mock(assert_all_mocked=True) as router:
+            router.route().mock(
+                return_value=httpx.Response(
+                    200, text="<html><body>您今天已经签到过了，请勿重复刷新。</body></html>"
+                )
+            )
+            result = await adapter.checkin()
+        assert result.status == CheckinStatus.ALREADY
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.parametrize("name", CHECKIN_ADAPTERS)
+async def test_checkin_raises_on_network_error(name: str) -> None:
+    """网络故障必须抛 ``SiteFetchError``——不能吞掉返回"看起来正常"的结果。
+
+    与 ``search_torrents`` 同一条契约（2026-10-21 prod 事故的教训）。
+    """
+    adapter = _make(name)
+    try:
+        with _mock_all_error(
+            httpx.ConnectError("Name or service not known")
+        ), pytest.raises(SiteFetchError):
+            await adapter.checkin()
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.parametrize("name", CHECKIN_ADAPTERS)
+@pytest.mark.parametrize("status", [403, 429])
+async def test_checkin_raises_breaker_on_rate_limit(
+    name: str, status: int
+) -> None:
+    """403/429 → ``BreakerTripped``（限流信号，与拉取路径同一契约）。"""
+    adapter = _make(name)
+    try:
+        with _mock_all_error(
+            httpx.Response(status, text="rate limited")
+        ), pytest.raises(BreakerTripped):
+            await adapter.checkin()
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.parametrize("name", CHECKIN_ADAPTERS)
+async def test_checkin_falls_back_to_post_when_get_did_not_signin(
+    name: str,
+) -> None:
+    """GET 没签到（站点改了配置）→ POST 一次执行签到。
+
+    上游 NexusPHP 的语义：GET 只查状态（除非站点关掉了图形验证码，
+    那时 GET 会顺带签到）。POST 才是「执行签到」动作。
+    """
+    from app.adapters.sites.base import CheckinStatus
+
+    adapter = _make(name)
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            get_route = router.get("https://example.com/attendance.php").mock(
+                return_value=httpx.Response(
+                    200, text="<html><body><p>签到</p><p>???</p></body></html>"
+                )
+            )
+            post_route = router.post("https://example.com/attendance.php").mock(
+                return_value=httpx.Response(
+                    200,
+                    text=(
+                        "<html><body>签到成功 这是您的第 614 次签到，"
+                        "已连续签到 1 天，本次签到获得 10 个魔力值。</body></html>"
+                    ),
+                )
+            )
+            result = await adapter.checkin()
+
+        assert get_route.called, "应该先 GET 查状态"
+        assert post_route.called, "GET 没签到时应该 POST 兜底"
+        assert result.status == CheckinStatus.SUCCESS
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.parametrize("name", CHECKIN_ADAPTERS)
+async def test_checkin_does_not_post_when_captcha_detected(name: str) -> None:
+    """检测到人机验证 → 不 POST（POST 也要验证码，不会更好）。"""
+    from app.adapters.sites.base import CheckinStatus
+
+    adapter = _make(name)
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            get_route = router.get("https://example.com/attendance.php").mock(
+                return_value=httpx.Response(
+                    200, text='<html><body><div class="cf-turnstile"></div></body></html>'
+                )
+            )
+            post_route = router.post("https://example.com/attendance.php").mock(
+                return_value=httpx.Response(200, text="should not be called")
+            )
+            result = await adapter.checkin()
+
+        assert get_route.called
+        assert not post_route.called, "人机验证时不该再 POST"
+        assert result.status == CheckinStatus.UNSUPPORTED
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.parametrize("name", CHECKIN_ADAPTERS)
+async def test_checkin_without_cookies_is_auth_expired(name: str) -> None:
+    """缺 cookies → AUTH_EXPIRED，且不发请求。"""
+    from app.adapters.sites.base import CheckinStatus, SiteProfile
+
+    cls = resolve(name)
+    adapter = cls(SiteProfile(name=name, domain="example.com"))
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            router.route().mock(
+                side_effect=AssertionError("缺 cookies 时不该发请求")
+            )
+            result = await adapter.checkin()
+        assert result.status == CheckinStatus.AUTH_EXPIRED
+    finally:
+        await adapter.close()
+
+
 # ------------------------------------------------------------------ 数据类
 
 def test_feed_item_defaults() -> None:

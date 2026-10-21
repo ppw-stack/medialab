@@ -72,6 +72,10 @@ class AppSettings(BaseSettings):
     monitor_free_window_cron: str = "5,15,25,35,45,55 * * * *"
     #: 辅种下载器巡查 cron (每小时 0/6/12/18 分, 错峰不与 fetch/push/monitor 冲突)
     scan_cross_seed_cron: str = "0 */6 * * *"
+    #: 站点每日签到 cron（默认每天 08:37）。
+    #: 分钟位 37 刻意避开既有多 5 分钟的作业（fetch */10 / push */30 /
+    #: monitor 5,15,25... / drain */5 / scan 0 */6），避免同一分钟并发抢资源。
+    daily_checkin_cron: str = "37 8 * * *"
     #: 距 free_end_at 不足此分钟数且未完成 → 自动暂停下载器任务
     monitor_pre_pause_minutes: int = 10
     #: 限时种剩余时间低于此值不推（小时，默认 6）
