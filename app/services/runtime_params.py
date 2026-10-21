@@ -204,6 +204,23 @@ def init_runtime_params(settings: AppSettings) -> RuntimeParamManager:
     )
 
 
+async def apply_runtime_params(updates: dict[str, int]) -> None:
+    """校验并持久化一组运行时参数，**提交成功后**再更新内存。
+
+    顺序不能反（DB 先、内存后）：内存先变而 DB 写失败，作业会拿到
+    一个重启后就消失的值——用户以为改了参数，实际没存住。
+
+    :raises ValueError: 参数未注册 / 类型不对 / 越界
+    """
+    validate(updates)
+    mgr = get_runtime_params()
+    async with session_scope() as session:
+        await mgr.apply(session, updates)
+    # 事务已提交成功，再更新内存
+    for key, value in updates.items():
+        mgr.set_memory(key, value)
+
+
 #: 全局单例
 _manager: RuntimeParamManager | None = None
 

@@ -25,6 +25,7 @@ import respx
 from app.core.config import AppSettings, set_settings
 from app.db.bootstrap import db_bootstrap
 from app.db.session import dispose_db, reset_db_for_test
+from app.services.factory import AdapterFactory
 from pydantic import SecretStr
 
 
@@ -100,6 +101,26 @@ def no_network() -> Iterator[respx.MockRouter]:
         yield router
 
 
+@pytest.fixture
+def factory() -> Iterator[AdapterFactory]:
+    """初始化全局适配器工厂（服务层测试需要）。
+
+    生产里工厂由 lifespan 的 ``init_factory()`` 建立，是**进程级单例**。
+    服务层会调 ``get_factory()``（如 ``downloader_service._resolve_downloader``）
+    ——工厂没初始化时会抛 ``RuntimeError``。
+
+    这里建一个工厂并挂到全局单例上，用例结束后还原（不让它跨用例
+    泄漏——工厂会缓存适配器实例）。服务层测试要么用假适配器替换方法，
+    要么根本不该触发网络。
+    """
+    import app.services.factory as factory_mod
+
+    prev = factory_mod._factory
+    f = factory_mod.init_factory()
+    yield f
+    factory_mod._factory = prev
+
+
 @pytest.fixture(autouse=True)
 def fast_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     """把退避 sleep 压成 0——测试不该真等 1s/2s/4s。
@@ -110,7 +131,21 @@ def fast_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
 
     背景：拉取路径接回退避重试后，集成测试里的失败用例会各等
     1+2+4 秒，全套从 7s 涨到 24s。
+
+    实现注意：``app.services.feed_fetcher.asyncio`` **就是**全局
+    ``asyncio`` 模块（Python 的模块属性），直接
+    ``monkeypatch.setattr("app.services.feed_fetcher.asyncio.sleep", ...)``
+    等于改全局 ``asyncio.sleep``——**整个测试进程**的 sleep 都会变成 0，
+    连用例里自己写的 ``await asyncio.sleep(1.1)`` 也不睡（跨秒断言会失效）。
+
+    故这里直接改 ``feed_fetcher`` 模块里的 ``asyncio`` 引用：
+    给它一个**代理模块对象**，只有 ``sleep`` 被换成瞬时版，其余属性
+    （``create_task`` / ``wait_for`` / …）照常转发给真 asyncio。
     """
+    import types
+
+    import app.services.feed_fetcher as ff
+
     real_sleep = asyncio.sleep
 
     async def _instant_sleep(delay: float, *args: object, **kw: object) -> None:
@@ -118,4 +153,7 @@ def fast_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
             raise AssertionError(f"退避延迟过大：{delay}s")
         await real_sleep(0, *args, **kw)  # type: ignore[arg-type]
 
-    monkeypatch.setattr("app.services.feed_fetcher.asyncio.sleep", _instant_sleep)
+    proxy = types.ModuleType("asyncio")
+    proxy.__dict__.update(vars(asyncio))
+    proxy.sleep = _instant_sleep  # type: ignore[attr-defined]
+    monkeypatch.setattr(ff, "asyncio", proxy)

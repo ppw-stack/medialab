@@ -385,3 +385,20 @@ class DownloaderDisabled(Exception):
 
 class UnsupportedDownloader(Exception):
     pass
+
+
+#: 适配层异常在此 re-export——API 层只需知道 service 层抛什么，
+#: 不必直接依赖适配层（``from app.adapters...``）。
+__all__ = [
+    "ANOMALY_NO_DATA_FOUND",
+    "ANOMALY_TRACKER_NOT_REGISTERED",
+    "AnomalyItem",
+    "CrossSeedMonitorService",
+    "DownloaderDisabled",
+    "DownloaderError",
+    "DownloaderNotFound",
+    "NotCrossSeed",
+    "ScanResult",
+    "StatsRow",
+    "UnsupportedDownloader",
+]

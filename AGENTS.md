@@ -26,7 +26,7 @@
 uv sync --extra dev         # 装依赖
 uv run ruff check app/ tests/
 uv run mypy app/
-uv run pytest                # 后端测试（382 例）
+uv run pytest                # 后端测试（465 例）
 cd web && npx vue-tsc -b    # 前端类型检查
 cd web && npx oxlint .      # 前端 lint
 cd web && npx vite build    # 前端构建
@@ -40,7 +40,7 @@ ruff + mypy + pytest + vue-tsc + oxlint，全绿才允许合并。
 uv run pytest                        # 全部
 uv run pytest tests/unit             # 只跑单元
 uv run pytest -k "site_adapters"     # 按名字过滤
-uv run pytest --cov=app              # 带覆盖率（当前基线 48%）
+uv run pytest --cov=app              # 带覆盖率（当前基线 53%）
 ```
 
 - 目录：`tests/unit/`（纯函数、无 IO）+ `tests/integration/`（DB / 作业 / API）

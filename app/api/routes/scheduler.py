@@ -20,19 +20,18 @@
 """
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
 
 from app.api.auth import require_session
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.db.models import JobRun
-from app.db.session import session_scope
+from app.services import job_run_service
+from app.services import runtime_params as runtime_params_service
+from app.services.job_run_service import JobRunRow
 from app.services.job_settings import save_enabled_state
 from app.services.runtime_params import (
     PARAM_SPECS,
@@ -182,14 +181,10 @@ async def update_runtime_params(payload: RuntimeParamsUpdateIn) -> RuntimeParams
         validate(updates)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    mgr = get_runtime_params()
-    async with session_scope() as session:
-        await mgr.apply(session, updates)
-    # 事务已提交成功，再更新内存（顺序：DB 先、内存后）
-    for key, value in updates.items():
-        mgr.set_memory(key, value)
+    # 事务由 service 层管理（DB 先、内存后——顺序不能反）
+    await runtime_params_service.apply_runtime_params(updates)
     return RuntimeParamsOut(
-        params=mgr.all(),
+        params=get_runtime_params().all(),
         specs=[
             {
                 "key": spec.key,
@@ -243,8 +238,8 @@ class JobRunItem(BaseModel):
     result: Any | None = None
 
     @classmethod
-    def from_row(cls, r: JobRun, *, parsed_result: Any = None) -> JobRunItem:
-        """从 ORM 行构建（DB 存北京时间字符串，直接使用）。"""
+    def from_row(cls, r: JobRunRow) -> JobRunItem:
+        """从 service 层 DTO 构建（DB 存北京时间字符串，直接使用）。"""
         return cls(
             id=r.id,
             job_name=r.job_name,
@@ -254,7 +249,7 @@ class JobRunItem(BaseModel):
             duration_ms=r.duration_ms,
             ok=r.ok,
             error=r.error,
-            result=parsed_result,
+            result=r.result,
         )
 
 
@@ -276,55 +271,19 @@ async def list_job_runs(
     :param job_name: 可选过滤单个作业。
     :param limit: 上限 200。
     """
-    limit = max(1, min(limit, 200))
-    offset = max(0, offset)
-
-    async with session_scope() as session:
-        base = select(JobRun).order_by(JobRun.started_at.desc())
-        if job_name:
-            base = base.where(JobRun.job_name == job_name)
-
-        total = (
-            await session.execute(
-                select(func.count()).select_from(base.subquery())
-            )
-        ).scalar_one()
-
-        rows = (
-            await session.execute(base.limit(limit).offset(offset))
-        ).scalars().all()
-
-    items: list[JobRunItem] = []
-    for r in rows:
-        parsed: Any = None
-        if r.result_json:
-            try:
-                parsed = json.loads(r.result_json)
-            except (ValueError, TypeError) as exc:
-                # result_json 应是合法 JSON（内部写入），损坏时记日志便于排查
-                logger.warning("JobRun id=%s result_json 解析失败：%s", r.id, exc)
-        items.append(JobRunItem.from_row(r, parsed_result=parsed))
-
-    return JobRunPage(total=total, items=items)
+    page = await job_run_service.list_job_runs(
+        job_name=job_name, limit=limit, offset=offset
+    )
+    return JobRunPage(
+        total=page.total,
+        items=[JobRunItem.from_row(r) for r in page.items],
+    )
 
 
 @router.get("/scheduler/runs/{run_id}", summary="作业执行详情")
 async def get_job_run(run_id: int) -> JobRunItem:
     """单条作业执行详情（含 result JSON 解析）。"""
-    async with session_scope() as session:
-        r = (
-            await session.execute(select(JobRun).where(JobRun.id == run_id))
-        ).scalar_one_or_none()
-        if r is None:
-            raise HTTPException(status_code=404, detail="记录不存在")
-
-    parsed: Any = None
-    if r.result_json:
-        try:
-            parsed = json.loads(r.result_json)
-        except (ValueError, TypeError) as exc:
-            logger.warning("JobRun id=%s result_json 解析失败：%s", r.id, exc)
-    return JobRunItem.from_row(r, parsed_result=parsed)
+    return JobRunItem.from_row(await job_run_service.get_job_run(run_id))
 
 
 @router.get(

@@ -1,23 +1,24 @@
-"""站点管理 API（FR-6.1）。"""
+"""站点管理 API（FR-6.1）。
+
+路由层只做三件事：**参数校验 → 调 service → 结果转换**。
+
+业务逻辑（DB 查询、适配器构造、网络调用）全在
+:mod:`app.services.site_service`。服务层抛
+:class:`app.services.errors.ServiceError`，由全局异常处理器（见
+:mod:`app.api.errors`）转成对应的 HTTP 状态码。
+"""
 
 from __future__ import annotations
 
-import re
+from dataclasses import asdict
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, select
 
-from app.adapters.sites import resolve as resolve_site_adapter
-from app.adapters.sites.base import SiteProfile
 from app.api.auth import require_session
-from app.core.logging import get_logger
-from app.db.models import Site, SiteUserData, TorrentIndex
-from app.db.session import session_scope
-from app.services.factory import get_factory
-
-logger = get_logger(__name__)
+from app.services import site_service
+from app.services.site_service import UNSET
 
 router = APIRouter(prefix="/sites", dependencies=[Depends(require_session)], tags=["sites"])
 
@@ -25,7 +26,7 @@ router = APIRouter(prefix="/sites", dependencies=[Depends(require_session)], tag
 class SiteCreate(BaseModel):
     name: str = Field(..., pattern=r"^[a-zA-Z0-9_-]+$", description="字母/数字/下划线/连字符")
     #: 站点适配器名。合法值由 :mod:`app.adapters.sites._registry` 决定，
-    #: 在 :func:`create_site` 里做运行时校验（**不**用 pydantic Literal——
+    #: 在 service 层做运行时校验（**不**用 pydantic Literal——
     #: 那会让 9 站名单在这里维护第 3 份，漏改不会报错）。
     adapter: str = Field(default="mteam", max_length=64)
     domain: str | None = None
@@ -55,26 +56,12 @@ class SiteDeleteIn(BaseModel):
     id: int = Field(..., ge=1)
 
 
-class AdapterInfo(BaseModel):
+class AdapterInfoOut(BaseModel):
     """前端 dropdown 用的 adapter 展示信息。"""
 
     name: str
     label: str
     domain: str
-
-
-@router.get("/adapters", summary="列出已注册站点 adapter（前端下拉用）")
-async def list_adapters() -> list[AdapterInfo]:
-    """返回所有内置 adapter 的 ``{name, label, domain}``。
-
-    前端 ``/sites`` 页面在 mount 时拉这个端点，构造「新增站点」modal 里
-    的适配器下拉。单一数据源：后端 :mod:`app.adapters.sites._registry`。
-    """
-    from app.adapters.sites._registry import list_meta
-    return [
-        AdapterInfo(name=name, label=meta.label, domain=meta.domain)
-        for name, meta in list_meta()
-    ]
 
 
 class SiteOut(BaseModel):
@@ -90,237 +77,26 @@ class SiteOut(BaseModel):
     updated_at: str
 
 
-@router.get("", summary="站点列表")
-async def list_sites() -> list[SiteOut]:
-    async with session_scope() as session:
-        rows = (await session.execute(select(Site))).scalars().all()
-    return [_to_out(s) for s in rows]
+class SiteUserDataOut(BaseModel):
+    """站点用户数据（FR-1.6 精简版，4 字段）。"""
+
+    site_id: int
+    site_name: str
+    has_data: bool
+    upload: int = 0
+    download: int = 0
+    seeding_count: int = 0
+    leaching_count: int = 0
+    last_seen_at: str | None = None
 
 
-@router.post("/delete", summary="删除站点")
-async def delete_site(payload: SiteDeleteIn) -> dict[str, int]:
-    async with session_scope() as session:
-        site = (
-            await session.execute(select(Site).where(Site.id == payload.id))
-        ).scalar_one_or_none()
-        if site is None:
-            raise HTTPException(status_code=404, detail="站点不存在")
-        # 检查引用：torrent_index 仍依赖 site_id
-        torrent_count = (
-            await session.execute(
-                select(func.count())
-                .select_from(TorrentIndex)
-                .where(TorrentIndex.site_id == payload.id)
-            )
-        ).scalar_one()
-        if torrent_count:
-            raise HTTPException(
-                status_code=409,
-                detail=f"站点下还有 {torrent_count} 条任务，请先清理",
-            )
-        # 级联清理站点用户数据（site_user_data 引用 site_id，
-        # 不删会因 FK 约束抛 IntegrityError → 500）
-        await session.execute(
-            delete(SiteUserData).where(SiteUserData.site_id == payload.id)
-        )
-        await session.delete(site)
-    get_factory().invalidate_site(payload.id)
-    return {"id": payload.id}
+class SiteSelfTestOut(BaseModel):
+    """连通性与窗口解析自检结果。"""
 
-
-def _validate_adapter(adapter: str) -> None:
-    """校验 adapter 名在注册中心里。
-
-    合法名单的**唯一来源**是 :mod:`app.adapters.sites._registry`
-    （``_BUILTIN``）。之前这里用 pydantic ``Literal[...]`` 硬编码了
-    第 3 份名单，漏改不会报错——加站点要改 4 处。
-
-    改用运行时校验后，名单只在注册中心维护 1 份。
-    """
-    from app.adapters.sites._registry import list_available
-
-    if adapter not in list_available():
-        raise HTTPException(
-            status_code=400,
-            detail=f"未注册的站点 adapter：{adapter!r}，可选：{list_available()}",
-        )
-
-
-@router.post("", status_code=201, summary="新增站点")
-async def create_site(payload: SiteCreate) -> SiteOut:
-    _validate_adapter(payload.adapter)
-    async with session_scope() as session:
-        exists = (
-            await session.execute(select(Site.id).where(Site.name == payload.name))
-        ).first()
-        if exists:
-            raise HTTPException(status_code=409, detail=f"站点 {payload.name} 已存在")
-
-        site = Site(
-            name=payload.name,
-            domain=payload.domain or "",
-            adapter=payload.adapter,
-            enabled=payload.enabled,
-            rss_url=payload.rss_url,
-            apikey=payload.apikey,
-            cookies=payload.cookies,
-        )
-        session.add(site)
-        await session.flush()
-        # 凭据可后续通过 update_site 补齐
-        return _to_out(site)
-
-
-@router.post("/update", summary="更新站点")
-async def update_site(payload: SiteUpdate) -> SiteOut:
-    """更新站点配置（id 在 body）。
-
-    ``rss_url`` / ``apikey`` / ``cookies`` 留空字符串 = 清空该项；
-    未提供（None） = 不修改。
-    """
-    if payload.adapter is not None:
-        _validate_adapter(payload.adapter)
-    site_id = payload.id
-    async with session_scope() as session:
-        site = (await session.execute(select(Site).where(Site.id == site_id))).scalar_one_or_none()
-        if site is None:
-            raise HTTPException(status_code=404, detail="站点不存在")
-
-        # 改名撞名预检（避免唯一约束冲突 → 500 + SQL 参数泄漏）
-        if payload.name is not None and payload.name != site.name:
-            dup = (
-                await session.execute(
-                    select(Site.id).where(
-                        Site.name == payload.name, Site.id != site_id
-                    )
-                )
-            ).first()
-            if dup:
-                raise HTTPException(status_code=409, detail=f"站点 {payload.name} 已存在")
-
-        updates = payload.model_dump(
-            exclude={"id", "rss_url", "apikey", "cookies"}, exclude_unset=True
-        )
-        for key, value in updates.items():
-            setattr(site, key, value)
-
-        # 凭据字段：model_fields_set 中显式传了才处理（空串 = 清空）
-        for key in ("rss_url", "apikey", "cookies"):
-            if key in payload.model_fields_set:
-                setattr(site, key, getattr(payload, key) or None)
-        out = _to_out(site)
-    get_factory().invalidate_site(site_id)
-    return out
-
-
-@router.get("/{site_id}", summary="站点详情")
-async def get_site(site_id: int) -> SiteOut:
-    async with session_scope() as session:
-        site = (
-            await session.execute(select(Site).where(Site.id == site_id))
-        ).scalar_one_or_none()
-        if site is None:
-            raise HTTPException(status_code=404, detail="站点不存在")
-        return _to_out(site)
-
-
-# ----------------------- FR-1.6 站点用户数据 API（精简版） -----------------------
-
-
-@router.get("/{site_id}/user-data", summary="站点最近用户数据（4 字段）")
-async def get_site_user_data(site_id: int) -> dict[str, Any]:
-    """取一站最近一次 :class:`SiteUserData` 行（FR-1.6 精简版）。
-
-    字段：upload / download / seeding_count / leeching_count / last_seen_at。
-    """
-    async with session_scope() as session:
-        site = (
-            await session.execute(select(Site).where(Site.id == site_id))
-        ).scalar_one_or_none()
-        if site is None:
-            raise HTTPException(status_code=404, detail="站点不存在")
-        ud = (
-            await session.execute(
-                select(SiteUserData).where(SiteUserData.site_id == site_id)
-            )
-        ).scalar_one_or_none()
-        if ud is None:
-            return {
-                "site_id": site_id,
-                "site_name": site.name,
-                "has_data": False,
-            }
-        return {
-            "site_id": site_id,
-            "site_name": site.name,
-            "has_data": True,
-            "upload": ud.upload,
-            "download": ud.download,
-            "seeding_count": ud.seeding_count,
-            "leeching_count": ud.leeching_count,
-            "last_seen_at": ud.last_seen_at,
-        }
-
-
-@router.post("/{site_id}/user-data/refresh", summary="手动刷新站点用户数据")
-async def refresh_site_user_data(site_id: int) -> dict[str, Any]:
-    """立即调 :meth:`SiteAdapter.get_user_snapshot` → 写 site_user_data。
-
-    短事务模式：避免在 DB 事务内做网络往返导致写锁横跨整个 HTTP 请求
-    （阻塞 cron 与其他写）。
-    """
-    from app.db.session import session_scope
-    from app.services.factory import get_factory
-    from app.services.user_data import refresh_one_site
-
-    factory = get_factory()
-    async with session_scope() as session:
-        site = (
-            await session.execute(select(Site).where(Site.id == site_id))
-        ).scalar_one_or_none()
-        if site is None:
-            raise HTTPException(status_code=404, detail="站点不存在")
-        ok = await refresh_one_site(session, factory, site)
-    return {"ok": ok, "site_id": site_id}
-
-
-@router.post("/{site_id}/test", summary="连通性与窗口解析自检")
-async def test_site(site_id: int) -> dict[str, Any]:
-    async with session_scope() as session:
-        site = (
-            await session.execute(select(Site).where(Site.id == site_id))
-        ).scalar_one_or_none()
-        if site is None:
-            raise HTTPException(status_code=404, detail="站点不存在")
-        profile = SiteProfile(name=site.name, domain=site.domain)
-
-    adapter_cls = resolve_site_adapter(site.adapter)
-    adapter = adapter_cls(profile, cookies=site.cookies, apikey=site.apikey)
-    try:
-        health = await adapter.check_reachability()
-        # 业务层 WindowParser.parse() 自检：用一段"剩余 2 天 6 小时"文案
-        from app.adapters.sites.base import FeedItem
-        from app.services.window_parser import WindowParser
-
-        probe_item = FeedItem(
-            title="[self-test] 剩余 2 天 6 小时",
-            link="",
-            description="剩余 2 天 6 小时",
-        )
-        probe = WindowParser.parse(probe_item)
-        return {
-            "reachable": health.reachable,
-            "logged_in": health.logged_in,
-            "detail": health.detail,
-            "self_test": {
-                "free_type": probe.free_type,
-                "free_end_at": probe.free_end_at,
-                "free_source": probe.free_source,
-                "confidence": probe.confidence,
-            },
-        }
-    finally:
-        await adapter.close()
+    reachable: bool
+    logged_in: bool
+    detail: str
+    self_test: dict[str, Any]
 
 
 class FeedTestResult(BaseModel):
@@ -334,65 +110,116 @@ class FeedTestResult(BaseModel):
     error: str = ""
 
 
+@router.get("/adapters", summary="列出已注册站点 adapter（前端下拉用）")
+async def list_adapters() -> list[AdapterInfoOut]:
+    """返回所有内置 adapter 的 ``{name, label, domain}``。
+
+    前端 ``/sites`` 页面在 mount 时拉这个端点，构造「新增站点」modal 里
+    的适配器下拉。单一数据源：后端 :mod:`app.adapters.sites._registry`。
+    """
+    return [
+        AdapterInfoOut(name=a.name, label=a.label, domain=a.domain)
+        for a in site_service.list_adapters()
+    ]
+
+
+@router.get("", summary="站点列表")
+async def list_sites() -> list[SiteOut]:
+    return [SiteOut(**asdict(s)) for s in await site_service.list_sites()]
+
+
+@router.post("/delete", summary="删除站点")
+async def delete_site(payload: SiteDeleteIn) -> dict[str, int]:
+    return {"id": await site_service.delete_site(payload.id)}
+
+
+@router.post("", status_code=201, summary="新增站点")
+async def create_site(payload: SiteCreate) -> SiteOut:
+    snap = await site_service.create_site(
+        name=payload.name,
+        adapter=payload.adapter,
+        domain=payload.domain,
+        rss_url=payload.rss_url,
+        apikey=payload.apikey,
+        cookies=payload.cookies,
+        enabled=payload.enabled,
+    )
+    return SiteOut(**asdict(snap))
+
+
+@router.post("/update", summary="更新站点")
+async def update_site(payload: SiteUpdate) -> SiteOut:
+    """更新站点配置（id 在 body）。
+
+    ``rss_url`` / ``apikey`` / ``cookies`` 留空字符串 = 清空该项；
+    未提供（None） = 不修改。
+    """
+    fields = payload.model_fields_set
+    snap = await site_service.update_site(
+        payload.id,
+        name=payload.name,
+        domain=payload.domain,
+        rss_url=payload.rss_url if "rss_url" in fields else UNSET,
+        apikey=payload.apikey if "apikey" in fields else UNSET,
+        cookies=payload.cookies if "cookies" in fields else UNSET,
+        enabled=payload.enabled,
+        adapter=payload.adapter,
+    )
+    return SiteOut(**asdict(snap))
+
+
+@router.get("/{site_id}", summary="站点详情")
+async def get_site(site_id: int) -> SiteOut:
+    return SiteOut(**asdict(await site_service.get_site(site_id)))
+
+
+# ----------------------- FR-1.6 站点用户数据 API（精简版） -----------------------
+
+
+@router.get("/{site_id}/user-data", summary="站点最近用户数据（4 字段）")
+async def get_site_user_data(site_id: int) -> SiteUserDataOut:
+    """取一站最近一次 :class:`SiteUserData` 行（FR-1.6 精简版）。
+
+    字段：upload / download / seeding_count / leeching_count / last_seen_at。
+    """
+    return SiteUserDataOut(**asdict(await site_service.get_site_user_data(site_id)))
+
+
+@router.post("/{site_id}/user-data/refresh", summary="手动刷新站点用户数据")
+async def refresh_site_user_data(site_id: int) -> dict[str, Any]:
+    """立即调 :meth:`SiteAdapter.get_user_snapshot` → 写 site_user_data。"""
+    ok = await site_service.refresh_site_user_data(site_id)
+    return {"ok": ok, "site_id": site_id}
+
+
+@router.post("/{site_id}/test", summary="连通性与窗口解析自检")
+async def test_site(site_id: int) -> SiteSelfTestOut:
+    result = await site_service.self_test_site(site_id)
+    return SiteSelfTestOut(
+        reachable=result.reachable,
+        logged_in=result.logged_in,
+        detail=result.detail,
+        self_test={
+            "free_type": result.free_type,
+            "free_end_at": result.free_end_at,
+            "free_source": result.free_source,
+            "confidence": result.confidence,
+        },
+    )
+
+
 @router.get("/{site_id}/feed-test", summary="站点种子列表拉取测试")
 async def test_feed(site_id: int) -> FeedTestResult:
     """测试站点连通性与解析结果（走 adapter.search_torrents）。
 
     **不落库、不触发 cron**——纯诊断，避免用户"测试"操作意外添加任务。
     """
-    from app.services.feed_fetcher import FeedFetcher
-
-    async with session_scope() as session:
-        site = (
-            await session.execute(select(Site).where(Site.id == site_id))
-        ).scalar_one_or_none()
-        if site is None:
-            raise HTTPException(status_code=404, detail="站点不存在")
-
-    factory = get_factory()
-    try:
-        url = factory.site_rss_url(site)
-    except (ValueError, AttributeError, KeyError, TypeError) as exc:
-        logger.warning("站点 %s 凭据解析失败：%s", site.name, exc)
-        return FeedTestResult(ok=False, status="credential_error", error=str(exc))
-    except Exception:
-        logger.exception("站点 %s 站点测试内部异常", site.name)
-        return FeedTestResult(ok=False, status="internal_error", error="站点 URL 生成失败")
-
-    adapter = factory.site(site)
-    fetcher = FeedFetcher(site.name)
-    result = await fetcher.fetch(adapter, url)
+    result = await site_service.test_site_feed(site_id)
     return FeedTestResult(
         ok=result.ok,
-        status=str(result.status),
-        item_count=len(result.items),
+        status=result.status,
+        item_count=result.item_count,
         duration_ms=result.duration_ms,
-        sample_titles=[item.title for item in result.items[:5]],
+        sample_titles=result.sample_titles,
         error=result.error,
-    )
-
-
-def _mask_rss_url(url: str | None) -> str:
-    """掩码 RSS URL 中的凭据参数（passkey/apikey/key/auth），防泄漏到前端。
-
-    注意：``key`` 必须带 ``=`` 才匹配，所以 ``keyword=`` / ``keys=`` 等
-    含 "key" 的正常参数名不会被误伤（正则要求参数名整体等于 key）。
-    """
-    if not url:
-        return ""
-    return re.sub(r"(?i)((?:passkey|apikey|key|auth)=)[^&]+", r"\1***", url)
-
-
-def _to_out(site: Site) -> SiteOut:
-    return SiteOut(
-        id=site.id,
-        name=site.name,
-        domain=site.domain or None,
-        adapter=site.adapter,
-        enabled=site.enabled,
-        rss_url_masked=_mask_rss_url(site.rss_url),
-        has_apikey=bool(site.apikey),
-        has_cookies=bool(site.cookies),
-        created_at=site.created_at or "",
-        updated_at=site.updated_at or "",
     )

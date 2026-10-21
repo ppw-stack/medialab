@@ -2,18 +2,19 @@
 
 - ``GET /api/v1/user-data`` — 所有站最近 4 字段 user_data 列表
 - ``GET /api/v1/user-data/trends`` — 趋势数据（占位，目前只返最新）
+
+查询逻辑在 :mod:`app.services.user_data_query`，路由只做结果转换。
 """
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Any
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
 
 from app.api.auth import require_session
-from app.db.models import Site, SiteUserData
-from app.db.session import session_scope
+from app.services import user_data_query
 
 router = APIRouter(prefix="/user-data", dependencies=[Depends(require_session)])
 
@@ -25,25 +26,7 @@ async def list_user_data() -> list[dict[str, Any]]:
     Returns: ``[{site_id, site_name, adapter, upload, download,
     seeding_count, leeching_count, last_seen_at}, ...]``
     """
-    async with session_scope() as session:
-        rows = (await session.execute(
-            select(SiteUserData, Site.name, Site.adapter)
-            .join(Site, Site.id == SiteUserData.site_id)
-            .order_by(Site.id.asc())
-        )).all()
-        return [
-            {
-                "site_id": ud.site_id,
-                "site_name": site_name,
-                "adapter": adapter,
-                "upload": ud.upload,
-                "download": ud.download,
-                "seeding_count": ud.seeding_count,
-                "leeching_count": ud.leeching_count,
-                "last_seen_at": ud.last_seen_at,
-            }
-            for ud, site_name, adapter in rows
-        ]
+    return [asdict(row) for row in await user_data_query.list_user_data()]
 
 
 @router.get("/trends", summary="所有站 user_data 趋势（最近 N 周期）")
@@ -51,21 +34,4 @@ async def list_user_data_trends() -> list[dict[str, Any]]:
     """占位端点：当前 ORM 只存最新一行（UNIQUE site_id），趋势功能需要
     后续改成 history 表（site_user_data_history）。本端点先返最近一次。
     """
-    async with session_scope() as session:
-        rows = (await session.execute(
-            select(SiteUserData, Site.name)
-            .join(Site, Site.id == SiteUserData.site_id)
-            .order_by(Site.id.asc())
-        )).all()
-        return [
-            {
-                "site_id": ud.site_id,
-                "site_name": site_name,
-                "upload": ud.upload,
-                "download": ud.download,
-                "seeding_count": ud.seeding_count,
-                "leeching_count": ud.leeching_count,
-                "last_seen_at": ud.last_seen_at,
-            }
-            for ud, site_name in rows
-        ]
+    return [asdict(row) for row in await user_data_query.list_user_data_trends()]

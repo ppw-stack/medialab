@@ -17,6 +17,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.adapters.sites.user_data import SiteUserSnapshot
 from app.core.logging import get_logger
 from app.core.timeutils import bj_now
 from app.db.models import Site, SiteUserData
@@ -52,20 +53,7 @@ async def refresh_one_site(
         logger.warning("站点 %s 拉取用户数据失败：%s", site_row.name, exc)
         return False
 
-    payload: dict[str, object] = {"last_seen_at": bj_now()}
-    if snap is not None:
-        payload["upload"] = snap.upload
-        payload["download"] = snap.download
-        payload["seeding_count"] = snap.seeding_count
-        payload["leeching_count"] = snap.leeching_count
-    else:
-        # 抓不到 → 写 0 兜底（让 UI 知道本周期没拉到）
-        payload.update({
-            "upload": 0,
-            "download": 0,
-            "seeding_count": 0,
-            "leeching_count": 0,
-        })
+    payload: dict[str, object] = _snapshot_payload(snap)
 
     stmt = select(SiteUserData).where(SiteUserData.site_id == site_row.id)
     existing = (await session.execute(stmt)).scalar_one_or_none()
@@ -75,6 +63,85 @@ async def refresh_one_site(
         for k, v in payload.items():
             setattr(existing, k, v)
     return True
+
+
+async def refresh_site_by_id(
+    factory: AdapterFactory,
+    site_id: int,
+) -> bool:
+    """刷新单个站点的 user_data（**网络 IO 在事务外**）。
+
+    与 :func:`refresh_one_site` 的区别：后者在**传入的** session 上下文内
+    做网络调用，调用方要自己保证 session 不是长事务写锁；本函数自己
+    管事务——先开短事务读出站点行 → 关闭 → 网络拉取 → 再开短事务写入。
+
+    手动刷新走的是 HTTP 请求路径，写锁横跨网络往返会阻塞 cron 与其他
+    写（``database is locked``），故这里明确拆成两段事务。
+
+    :returns: 是否成功写入。
+    """
+    # 1) 短事务读站点行
+    # 注：``expire_on_commit=False`` → session 关闭后已加载的属性仍可读，
+    # 故 detached 的 site_row 能安全地交给 factory.site()（与
+    # ``site_service.test_site_feed`` 同一模式）。
+    async with session_scope() as session:
+        site_row = (
+            await session.execute(select(Site).where(Site.id == site_id))
+        ).scalar_one_or_none()
+        if site_row is None:
+            return False
+        site_name = site_row.name
+
+    # 2) 网络拉取（无事务）
+    try:
+        sa = factory.site(site_row)
+    except Exception as exc:
+        logger.warning("站点 %s 适配器初始化失败：%s", site_name, exc)
+        return False
+    try:
+        snap = await sa.get_user_snapshot()
+    except Exception as exc:
+        logger.warning("站点 %s 拉取用户数据失败：%s", site_name, exc)
+        return False
+
+    # 3) 短事务 upsert
+    async with session_scope() as session:
+        await _upsert_user_data(session, site_id, _snapshot_payload(snap))
+    return True
+
+
+def _snapshot_payload(snap: SiteUserSnapshot | None) -> dict[str, object]:
+    """把快照转成 upsert 载荷。
+
+    抓不到（``snap is None``）→ 写 0 兜底（让 UI 知道本周期没拉到）。
+    """
+    payload: dict[str, object] = {"last_seen_at": bj_now()}
+    if snap is not None:
+        payload["upload"] = snap.upload
+        payload["download"] = snap.download
+        payload["seeding_count"] = snap.seeding_count
+        payload["leeching_count"] = snap.leeching_count
+    else:
+        payload.update({
+            "upload": 0,
+            "download": 0,
+            "seeding_count": 0,
+            "leeching_count": 0,
+        })
+    return payload
+
+
+async def _upsert_user_data(
+    session: AsyncSession, site_id: int, payload: dict[str, object]
+) -> None:
+    """把载荷 upsert 到 ``site_user_data``（site_id UNIQUE）。"""
+    stmt = select(SiteUserData).where(SiteUserData.site_id == site_id)
+    existing = (await session.execute(stmt)).scalar_one_or_none()
+    if existing is None:
+        session.add(SiteUserData(site_id=site_id, **payload))
+    else:
+        for k, v in payload.items():
+            setattr(existing, k, v)
 
 
 async def refresh_all_sites(factory: AdapterFactory) -> dict[str, object]:

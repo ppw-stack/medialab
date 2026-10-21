@@ -14,12 +14,12 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.adapters.downloaders.base import DownloaderError
 from app.api.auth import require_session
 from app.core.logging import get_logger
 from app.services.cross_seed_monitor import (
     CrossSeedMonitorService,
     DownloaderDisabled,
+    DownloaderError,
     DownloaderNotFound,
     NotCrossSeed,
     UnsupportedDownloader,

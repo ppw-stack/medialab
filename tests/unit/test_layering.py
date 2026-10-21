@@ -129,6 +129,77 @@ def test_adapters_do_not_depend_on_db() -> None:
     assert not offenders, f"adapters 不该依赖 db：{offenders}"
 
 
+def test_api_does_not_depend_on_db_or_adapters() -> None:
+    """API 层不直接碰 DB / 适配层——业务逻辑全在 service 层。
+
+    此前 ``app/api/routes/`` 里有 40 处 ``session_scope`` 直写 SQL，
+    还有 11 处直接构造 / 调用适配器（测连、拉取测试、列任务……）。
+    路由层同时依赖 DB 与网络，无法脱离 IO 单测。
+
+    现在 API 层只依赖 ``api`` / ``core`` / ``services`` 三层。
+    """
+    offenders = [
+        f"{dst}  ({path})"
+        for src, dst, path in _collect_layer_edges()
+        if src == "api" and dst in ("db", "adapters")
+    ]
+    assert not offenders, (
+        "API 层不该直接依赖 db / adapters：\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_api_does_not_use_session_scope() -> None:
+    """API 层不得出现 ``session_scope``——DB 访问一律走 service。"""
+    offenders: list[str] = []
+    for path in sorted(Path("app/api").rglob("*.py")):
+        if "session_scope" in path.read_text(encoding="utf-8"):
+            offenders.append(str(path))
+    assert not offenders, f"API 层不该直接用 session_scope：{offenders}"
+
+
+def test_services_do_not_import_fastapi() -> None:
+    """服务层不 import fastapi——HTTP 是 API 层的事。
+
+    服务层抛 :class:`app.services.errors.ServiceError`（带状态码），
+    由 API 层的全局异常处理器翻译。
+
+    只看**真实的 import 语句**（不看文档字符串——``errors.py`` 的
+    docstring 里提到 fastapi 是解释性的，不是依赖）。
+    """
+    offenders: list[str] = []
+    for path in sorted(Path("app/services").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            else:
+                continue
+            if any(n == "fastapi" or n.startswith("fastapi.") for n in names):
+                offenders.append(str(path))
+                break
+    assert not offenders, f"services 不该 import fastapi：{offenders}"
+
+
+def test_services_do_not_raise_http_exception() -> None:
+    """服务层不得抛 ``HTTPException``——统一用 :class:`ServiceError`。"""
+    offenders: list[str] = []
+    for path in sorted(Path("app/services").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.Import):
+                names = [a.asname or a.name for a in node.names]
+            else:
+                continue
+            if "HTTPException" in names:
+                offenders.append(str(path))
+                break
+    assert not offenders, f"services 不该用 HTTPException：{offenders}"
+
+
 def test_layer_order_is_sane() -> None:
     """层级顺序本身要合理（防止有人改坏了这张表）。"""
     assert list(LAYER_ORDER) == ["domain", "core", "db", "adapters", "services", "api"]

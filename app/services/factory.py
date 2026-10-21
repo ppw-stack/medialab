@@ -191,3 +191,20 @@ def get_factory() -> AdapterFactory:
     if _factory is None:
         raise RuntimeError("适配器工厂未初始化")
     return _factory
+
+
+def invalidate_downloader(downloader_id: int) -> None:
+    """丢弃缓存的下载器适配器实例。
+
+    **工厂未初始化时是 no-op**——配置变更后的缓存失效是「尽力而为」：
+    DB 写入已经提交成功，不该因为找不到工厂就把整个请求变成 500
+    （下次访问时会用新配置重建 anyway）。
+    """
+    if _factory is not None:
+        _factory.invalidate_downloader(downloader_id)
+
+
+def invalidate_site(site_id: int) -> None:
+    """丢弃缓存的站点适配器实例（工厂未初始化时是 no-op，见上）。"""
+    if _factory is not None:
+        _factory.invalidate_site(site_id)

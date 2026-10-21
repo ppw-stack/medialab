@@ -137,7 +137,10 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         )
 
     from app.api.auth import install_static
+    from app.api.errors import install_exception_handlers
+
     _mount_routes(app)
+    install_exception_handlers(app)
     install_static(app, path=str(get_settings().frontend_dist))
     return app
 

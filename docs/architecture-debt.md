@@ -25,9 +25,9 @@ core → db → adapters → services → api
 | 1.6 单写者队列名实不符 | ✅ 已修 | `87fd5bd` |
 | 1.7 db/session.py 混职责 | ✅ 已修 | `87fd5bd` |
 | 2.1 抽站点公共基类 | ❌ **已决定不做** | — |
-| 2.2 default_downloader 零调用 | ⏳ 待做（Phase 2） | — |
-| 2.3 core→db 逆向依赖 | ⏳ 待做（Phase 2） | — |
-| 2.4 API 层漏业务逻辑 | ⏳ 待做（Phase 2） | — |
+| 2.2 default_downloader 零调用 | ✅ 已修 | `194eecb` |
+| 2.3 core→db 逆向依赖 | ✅ 已修 | `b8f86ca` |
+| 2.4 API 层漏业务逻辑 | ✅ 已修 | *(本批)* |
 | 3. 死代码 | ⏳ 待做（Phase 3） | — |
 | 4. 前端类型分散 | ⏳ 待做（Phase 4） | — |
 
@@ -172,11 +172,50 @@ get_user_snapshot   × 7    (7 站 15 行几乎一模一样)
 
 处置：抽 `app/domain/enums.py`，`db/models.py` 与 `core/` 都从那里导入。
 
-### 2.4 API 层漏业务逻辑
+### 2.4 API 层漏业务逻辑 ✅
 
 40 处 `session_scope` 直写 SQL；
 `app/api/routes/torrent_index.py` / `sites.py` 把业务逻辑漏进了路由层
 （`torrent_index.py` 的手推流程就是 1.3 的根因）。
+
+**已修**：路由层下沉为「参数校验 → 调 service → 结果转换」。
+
+新增 7 个 service 模块（每个对应一个路由域）：
+
+| 模块 | 职责 |
+|---|---|
+| `app/services/site_service.py` | 站点 CRUD + 自检 + 拉取测试 + 用户数据 |
+| `app/services/downloader_service.py` | 下载器 CRUD + 测连 + 原生任务操作 |
+| `app/services/dashboard_service.py` | 仪表盘统计（站点/下载器/窗口/索引/在途） |
+| `app/services/index_service.py` | 拉取索引查询 + 统计 + 推送入口 |
+| `app/services/job_run_service.py` | 作业执行历史查询 |
+| `app/services/user_data_query.py` | 站点用户数据列表 / 趋势 |
+| `app/services/errors.py` | `ServiceError`（带 HTTP 状态码的统一业务错误） |
+
+配套机制：
+
+- **服务层不 import fastapi**——抛 `ServiceError`，由
+  `app/api/errors.py` 的全局异常处理器转成 `{"detail": "..."}`
+  （与 FastAPI 默认 `HTTPException` 响应体一致，前端无感）。
+- **路由层不再碰 DB / 适配器**：`app/api/` 现在只依赖
+  `api` / `core` / `services` 三层。
+- 路由总行数 **1913 → 1141**（sites 398→225、downloaders 515→257、
+  torrent_index 294→174、dashboard 189→43、user_data 71→37）。
+
+**约束写成测试**（`tests/unit/test_layering.py`，+4 例）：
+
+- API 层不得依赖 `db` / `adapters`
+- API 层不得出现 `session_scope`
+- 服务层不得 import fastapi / 用 `HTTPException`
+
+**顺带修掉一个测试基础设施 bug**：`fast_backoff` fixture 用
+`monkeypatch.setattr("app.services.feed_fetcher.asyncio.sleep", ...)`
+压退避——但 `feed_fetcher.asyncio` **就是**全局 asyncio 模块，
+于是**整个测试进程的 `asyncio.sleep` 都变成了 0**。后果：断言
+「跨秒」的用例（如 `updated_at` 必须是提交后的新值）永远绿着，
+实际什么也没验证。改成给 `feed_fetcher` 注入**代理模块对象**
+（只换 `sleep`，其余属性转发），并加 `tests/unit/test_test_infra.py`
+守住这条边界。
 
 ---
 
@@ -224,6 +263,7 @@ get_user_snapshot   × 7    (7 站 15 行几乎一模一样)
 | 起点（Phase 0 前） | 0 | 0% |
 | Phase 0 完成 | 276 | 44% |
 | Phase 1 完成 | 382 | 48% |
+| Phase 2 完成 | 465 | 53% |
 
 覆盖率门槛在 `pyproject.toml` 的 `[tool.coverage.report] fail_under`，
 当前 0（不阻断），**只许升不许降**。补测试后逐步抬高。
