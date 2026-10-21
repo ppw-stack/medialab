@@ -45,9 +45,9 @@ async def test_create_all_builds_expected_tables(db: None) -> None:
 
 async def test_create_all_is_idempotent(db: None) -> None:
     """再跑一次建表不能报错（生产每次启动都会跑）。"""
-    from app.db.session import writer
+    from app.db.bootstrap import db_bootstrap
 
-    await writer.create_all()
+    await db_bootstrap.create_all()
 
 
 async def test_torrent_index_unique_site_item(db: None) -> None:
@@ -126,7 +126,7 @@ def test_push_status_values_are_stable() -> None:
 
 async def test_adapter_value_migration_is_idempotent(db: None) -> None:
     """generic → mteam 的值迁移跑两次都安全。"""
-    from app.db.session import migrate_adapter_values
+    from app.db.migrations import migrate_adapter_values
 
     await migrate_adapter_values()
     await migrate_adapter_values()
@@ -138,7 +138,7 @@ async def test_adapter_value_migration_is_idempotent(db: None) -> None:
 
 async def test_backfill_discount_pct_is_idempotent(db: None) -> None:
     """discount_pct 回填跑两次结果一致（不重复覆盖已填值）。"""
-    from app.db.session import _backfill_discount_pct
+    from app.db.migrations import backfill_discount_pct
 
     async with session_scope() as session:
         site = Site(name="s1", domain="d1", adapter="hdsky")
@@ -155,8 +155,8 @@ async def test_backfill_discount_pct_is_idempotent(db: None) -> None:
         )
         await session.flush()
 
-    await _backfill_discount_pct()
-    await _backfill_discount_pct()
+    await backfill_discount_pct()
+    await backfill_discount_pct()
 
     async with session_scope() as session:
         row = (
@@ -167,7 +167,7 @@ async def test_backfill_discount_pct_is_idempotent(db: None) -> None:
 
 async def test_datetime_migration_batches_are_ordered(db: None) -> None:
     """迁移批次必须按序号递增（新批次追加，不改旧批次）。"""
-    from app.db.session import _DATETIME_MIGRATION_BATCHES
+    from app.db.migrations import _DATETIME_MIGRATION_BATCHES
 
     numbers = sorted(_DATETIME_MIGRATION_BATCHES)
     assert numbers == list(range(1, len(numbers) + 1))
@@ -181,6 +181,66 @@ async def test_user_version_marker_written(db: None) -> None:
     async with session_scope() as session:
         ver = (await session.execute(text("PRAGMA user_version"))).scalar_one()
     assert int(ver or 0) >= 1
+
+
+# ------------------------------------------------------------------ 模块拆分
+
+async def test_session_module_has_no_migration_logic(db: None) -> None:
+    """session.py 只管 engine 生命周期——迁移逻辑应在 migrations.py。
+
+    防止后续把迁移又塞回 session.py（那正是这次拆分要解决的问题）。
+    """
+    from pathlib import Path
+
+    src = Path("app/db/session.py").read_text(encoding="utf-8")
+    assert "ALTER TABLE" not in src
+    assert "_DATETIME_MIGRATION_BATCHES" not in src
+    assert "discount_pct" not in src
+
+
+async def test_bootstrap_module_exists_and_exports(db: None) -> None:
+    from app.db.bootstrap import DbBootstrap, db_bootstrap
+
+    assert isinstance(db_bootstrap, DbBootstrap)
+    assert hasattr(db_bootstrap, "create_all")
+    assert hasattr(db_bootstrap, "healthcheck")
+
+
+async def test_bootstrap_create_all_is_idempotent(db: None) -> None:
+    """建表 + 迁移连跑两次不报错。"""
+    from app.db.bootstrap import db_bootstrap
+
+    await db_bootstrap.create_all()
+    await db_bootstrap.create_all()
+
+
+async def test_bootstrap_healthcheck_true(db: None) -> None:
+    from app.db.bootstrap import db_bootstrap
+
+    assert await db_bootstrap.healthcheck() is True
+
+
+async def test_alter_statements_have_kinds(db: None) -> None:
+    """每条 ALTER 必须声明类型——决定失败如何处理。
+
+    之前 22 条 ALTER 全被 suppress(Exception) 包着，真失败也静默。
+    """
+    from app.db.bootstrap import _ALTER_STATEMENTS
+
+    assert _ALTER_STATEMENTS
+    kinds = {kind for kind, _ in _ALTER_STATEMENTS}
+    assert kinds <= {"add_column", "drop_column", "rename_column", "create_index"}
+    for kind, stmt in _ALTER_STATEMENTS:
+        assert kind in kinds
+        assert stmt.startswith("ALTER TABLE") or stmt.startswith("CREATE INDEX")
+
+
+async def test_breaker_until_alter_present(db: None) -> None:
+    """熔断字段的 ALTER 必须还在（拆分时别漏）。"""
+    from app.db.bootstrap import _ALTER_STATEMENTS
+
+    stmts = [s for _, s in _ALTER_STATEMENTS]
+    assert any("ADD COLUMN breaker_until" in s for s in stmts)
 
 
 # ------------------------------------------------------------------ 索引

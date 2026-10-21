@@ -20,7 +20,8 @@ from app.core.auth import hash_password, init_hmac_key
 from app.core.config import AppSettings, get_settings, set_settings
 from app.core.logging import configure_logging, get_logger
 from app.core.metrics import render_metrics, state
-from app.db.session import dispose_db, init_db, writer
+from app.db.bootstrap import db_bootstrap
+from app.db.session import dispose_db, init_db
 from app.services.factory import AdapterFactory, init_factory
 from app.services.job_registry import register_jobs
 from app.services.scheduler import scheduler_center
@@ -58,11 +59,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.warning("密码升级失败：%s", exc)
 
     init_db(settings)
-    await writer.create_all()
-    # FR-1.5 站点 adapter 重构后的轻量数据迁移（幂等）
-    from app.db.session import migrate_adapter_values
-    await migrate_adapter_values()
-    state["db_healthy"].set(1 if await writer.healthcheck() else 0)
+    # 建表 + 全部迁移（幂等）。含 FR-1.5 adapter 值迁移。
+    await db_bootstrap.create_all()
+    state["db_healthy"].set(1 if await db_bootstrap.healthcheck() else 0)
 
     # 运行时参数（DB 持久化的可调设置）必须在 register_jobs 之前初始化，
     # 让作业函数首次运行就能拿到最新值。
@@ -170,7 +169,7 @@ def _mount_routes(app: FastAPI) -> None:
     @app.get("/healthz", tags=["ops"], summary="健康检查（FR-8.2）")
     async def healthz() -> dict[str, object]:
         """容器健康检查端点。数据库异常时返回 unhealthy 以触发重启。"""
-        healthy = await writer.healthcheck()
+        healthy = await db_bootstrap.healthcheck()
         state["db_healthy"].set(1 if healthy else 0)
         return {
             "status": "ok" if healthy else "unhealthy",

@@ -23,7 +23,8 @@ import pytest
 import pytest_asyncio
 import respx
 from app.core.config import AppSettings, set_settings
-from app.db.session import dispose_db, reset_db_for_test, writer
+from app.db.bootstrap import db_bootstrap
+from app.db.session import dispose_db, reset_db_for_test
 from pydantic import SecretStr
 
 
@@ -62,7 +63,7 @@ def app_settings(settings: AppSettings) -> Iterator[AppSettings]:
 async def db(app_settings: AppSettings) -> AsyncIterator[None]:
     """重建 DB engine + 建表（function 级 —— 见模块 docstring）。
 
-    建表走 :meth:`SingleWriterQueue.create_all`（与生产同一条路径），
+    建表走 :meth:`app.db.bootstrap.DbBootstrap.create_all`（与生产同一条路径），
     它还包含 22 条幂等 ALTER 迁移 —— 测试与生产的表结构必须一致，
     否则「测试过了但 prod 崩」这类问题会被漏掉。
 
@@ -72,7 +73,7 @@ async def db(app_settings: AppSettings) -> AsyncIterator[None]:
     """
     _remove_db_files(app_settings)
     await reset_db_for_test(app_settings)
-    await writer.create_all()
+    await db_bootstrap.create_all()
     yield
     await dispose_db()
 
