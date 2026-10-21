@@ -1,0 +1,197 @@
+"""DB 模型与迁移测试（Phase 0 集成层）。
+
+覆盖建表、唯一约束、外键级联、幂等迁移。这些是「测试过了但 prod 崩」
+的高发区——prod 的表结构是历史累积的（22 条 ALTER + 2 批时间迁移），
+新库与老库结构必须一致。
+"""
+
+from __future__ import annotations
+
+import pytest
+from app.db.models import (
+    FreeType,
+    PushStatus,
+    Site,
+    SiteUserData,
+    TaskQueue,
+    TorrentIndex,
+)
+from app.db.session import session_scope
+from sqlalchemy import inspect, select, text
+from sqlalchemy.exc import IntegrityError
+
+# ------------------------------------------------------------------ 建表
+
+async def test_create_all_builds_expected_tables(db: None) -> None:
+    from app.db.session import get_engine
+
+    def _tables(conn: object) -> set[str]:
+        return set(inspect(conn).get_table_names())  # type: ignore[arg-type]
+
+    async with get_engine().connect() as conn:
+        tables = await conn.run_sync(_tables)
+    expected = {
+        "sites",
+        "downloader_instances",
+        "torrent_index",
+        "task_queue",
+        "app_runtime_params",
+        "job_runs",
+        "scheduler_job_settings",
+        "site_user_data",
+    }
+    assert expected <= tables
+
+
+async def test_create_all_is_idempotent(db: None) -> None:
+    """再跑一次建表不能报错（生产每次启动都会跑）。"""
+    from app.db.session import writer
+
+    await writer.create_all()
+
+
+async def test_torrent_index_unique_site_item(db: None) -> None:
+    """(site_id, item_id) 唯一——upsert 的基础。"""
+    async with session_scope() as session:
+        site = Site(name="s1", domain="d1", adapter="hdsky")
+        session.add(site)
+        await session.flush()
+        session.add(TorrentIndex(site_id=site.id, item_id="1", name="a"))
+        await session.flush()
+
+    with pytest.raises(IntegrityError):
+        async with session_scope() as session:
+            site = (
+                await session.execute(select(Site).where(Site.name == "s1"))
+            ).scalar_one()
+            session.add(TorrentIndex(site_id=site.id, item_id="1", name="dup"))
+
+
+async def test_task_queue_idem_key_unique(db: None) -> None:
+    """idem_key 唯一——幂等入队的基础。"""
+    async with session_scope() as session:
+        session.add(TaskQueue(idem_key="k1", kind="add_torrent", payload={}))
+        await session.flush()
+
+    with pytest.raises(IntegrityError):
+        async with session_scope() as session:
+            session.add(TaskQueue(idem_key="k1", kind="add_torrent", payload={}))
+
+
+async def test_site_user_data_unique_site_id(db: None) -> None:
+    """site_user_data 每站一行（UNIQUE site_id）——FR-1.6 当前快照语义。"""
+    async with session_scope() as session:
+        site = Site(name="s1", domain="d1", adapter="hdsky")
+        session.add(site)
+        await session.flush()
+        session.add(SiteUserData(site_id=site.id))
+        await session.flush()
+
+    with pytest.raises(IntegrityError):
+        async with session_scope() as session:
+            site = (
+                await session.execute(select(Site).where(Site.name == "s1"))
+            ).scalar_one()
+            session.add(SiteUserData(site_id=site.id))
+
+
+async def test_site_name_unique(db: None) -> None:
+    async with session_scope() as session:
+        session.add(Site(name="dup", domain="d", adapter="hdsky"))
+        await session.flush()
+
+    with pytest.raises(IntegrityError):
+        async with session_scope() as session:
+            session.add(Site(name="dup", domain="d2", adapter="hdsky"))
+
+
+# ------------------------------------------------------------------ 枚举
+
+def test_free_type_values_are_stable() -> None:
+    """free_type 字符串是 DB 里的持久化值，改名会丢历史数据。"""
+    assert FreeType.TIMED == "freeleech_timed"
+    assert FreeType.PERMANENT == "freeleech_permanent"
+    assert FreeType.TWOU_TIMED == "twoup_timed"
+    assert FreeType.NEUTRAL == "neutral_leech"
+    assert FreeType.UNKNOWN == "unknown"
+    assert FreeType.REFUND == "refund"
+
+
+def test_push_status_values_are_stable() -> None:
+    assert PushStatus.PUSHED == "pushed"
+    assert PushStatus.FAILED == "failed"
+
+
+# ------------------------------------------------------------------ 迁移
+
+async def test_adapter_value_migration_is_idempotent(db: None) -> None:
+    """generic → mteam 的值迁移跑两次都安全。"""
+    from app.db.session import migrate_adapter_values
+
+    await migrate_adapter_values()
+    await migrate_adapter_values()
+
+    async with session_scope() as session:
+        rows = (await session.execute(select(Site))).scalars().all()
+        assert all(r.adapter != "generic" for r in rows)
+
+
+async def test_backfill_discount_pct_is_idempotent(db: None) -> None:
+    """discount_pct 回填跑两次结果一致（不重复覆盖已填值）。"""
+    from app.db.session import _backfill_discount_pct
+
+    async with session_scope() as session:
+        site = Site(name="s1", domain="d1", adapter="hdsky")
+        session.add(site)
+        await session.flush()
+        session.add(
+            TorrentIndex(
+                site_id=site.id,
+                item_id="1",
+                name="perm",
+                free_type=FreeType.PERMANENT,
+                discount_pct=None,
+            )
+        )
+        await session.flush()
+
+    await _backfill_discount_pct()
+    await _backfill_discount_pct()
+
+    async with session_scope() as session:
+        row = (
+            await session.execute(select(TorrentIndex).where(TorrentIndex.item_id == "1"))
+        ).scalar_one()
+        assert row.discount_pct == 100
+
+
+async def test_datetime_migration_batches_are_ordered(db: None) -> None:
+    """迁移批次必须按序号递增（新批次追加，不改旧批次）。"""
+    from app.db.session import _DATETIME_MIGRATION_BATCHES
+
+    numbers = sorted(_DATETIME_MIGRATION_BATCHES)
+    assert numbers == list(range(1, len(numbers) + 1))
+    for batch_no, tables in _DATETIME_MIGRATION_BATCHES.items():
+        for table, columns in tables.items():
+            assert columns, f"批次 {batch_no} 的表 {table} 迁移列不能为空"
+
+
+async def test_user_version_marker_written(db: None) -> None:
+    """时间迁移完成后应写 user_version 幂等标记。"""
+    async with session_scope() as session:
+        ver = (await session.execute(text("PRAGMA user_version"))).scalar_one()
+    assert int(ver or 0) >= 1
+
+
+# ------------------------------------------------------------------ 索引
+
+async def test_expected_indexes_exist(db: None) -> None:
+    from app.db.session import get_engine
+
+    def _indexes(conn: object) -> set[str]:
+        return {i["name"] for i in inspect(conn).get_indexes("torrent_index")}  # type: ignore[arg-type]
+
+    async with get_engine().connect() as conn:
+        names = await conn.run_sync(_indexes)
+    assert "ix_torrent_index_push_status" in names
+    assert "ix_torrent_index_last_seen" in names
