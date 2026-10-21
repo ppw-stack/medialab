@@ -52,14 +52,13 @@ jobs:
         run: uv run mypy app/
 
       - name: Pytest
-        # --cov-fail-under=0：当前覆盖率基线远低于 pyproject 里的 70，
-        # 硬套会让 CI 一上来就红。覆盖率只打印，逐步抬高阈值（只许升不许降）。
+        # 覆盖率阈值在 pyproject 的 [tool.coverage.report] fail_under 里
+        # （当前 0 = 不阻断，基线 44%）。补测试后逐步抬高，只许升不许降。
         run: |
           uv run pytest \
             --cov=app \
             --cov-report=term-missing \
-            --cov-report=xml \
-            --cov-fail-under=0
+            --cov-report=xml
 
       - name: Upload coverage report
         if: always()
