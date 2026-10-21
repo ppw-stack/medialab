@@ -171,13 +171,51 @@ async def test_create_site_duplicate_name_409(client: httpx.AsyncClient) -> None
     assert resp.status_code == 409
 
 
-async def test_create_site_invalid_adapter_422(client: httpx.AsyncClient) -> None:
-    """未注册的 adapter → 422（pydantic Literal 校验）。"""
+async def test_create_site_invalid_adapter_400(client: httpx.AsyncClient) -> None:
+    """未注册的 adapter → 400。
+
+    之前用 pydantic ``Literal`` 校验返回 422，错误信息是「不符合
+    Literal」而非「未注册的站点 adapter」。改为运行时校验后（名单
+    单一源在 ``_registry``），错误信息更明确。
+    """
     resp = await client.post(
         "/api/v1/sites",
         json={"name": "x", "adapter": "nonexistent"},
     )
-    assert resp.status_code == 422
+    assert resp.status_code == 400
+    assert "未注册的站点 adapter" in resp.json()["detail"]
+
+
+async def test_update_site_invalid_adapter_400(client: httpx.AsyncClient) -> None:
+    """更新时传未注册 adapter → 400。"""
+    site_id = await _add_site("s1")
+    resp = await client.post(
+        "/api/v1/sites/update",
+        json={"id": site_id, "adapter": "nonexistent"},
+    )
+    assert resp.status_code == 400
+    assert "未注册的站点 adapter" in resp.json()["detail"]
+
+
+async def test_create_site_valid_adapter_accepted(client: httpx.AsyncClient) -> None:
+    """注册表里的 adapter 都能通过校验。"""
+    for i, adapter in enumerate(("mteam", "hdsky", "ourbits", "soulvoice")):
+        resp = await client.post(
+            "/api/v1/sites",
+            json={"name": f"site{i}", "adapter": adapter},
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["adapter"] == adapter
+
+
+async def test_update_site_valid_adapter_accepted(client: httpx.AsyncClient) -> None:
+    site_id = await _add_site("s1")
+    resp = await client.post(
+        "/api/v1/sites/update",
+        json={"id": site_id, "adapter": "mteam"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["adapter"] == "mteam"
 
 
 async def test_create_site_invalid_name_422(client: httpx.AsyncClient) -> None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -24,10 +24,10 @@ router = APIRouter(prefix="/sites", dependencies=[Depends(require_session)], tag
 
 class SiteCreate(BaseModel):
     name: str = Field(..., pattern=r"^[a-zA-Z0-9_-]+$", description="字母/数字/下划线/连字符")
-    adapter: Literal[
-        "mteam", "hhanclub", "hdsky", "ourbits", "audiences",
-        "springsunday", "hdhome", "hddolby", "soulvoice",
-    ] = "mteam"
+    #: 站点适配器名。合法值由 :mod:`app.adapters.sites._registry` 决定，
+    #: 在 :func:`create_site` 里做运行时校验（**不**用 pydantic Literal——
+    #: 那会让 9 站名单在这里维护第 3 份，漏改不会报错）。
+    adapter: str = Field(default="mteam", max_length=64)
     domain: str | None = None
     rss_url: str | None = None
     apikey: str | None = Field(default=None, max_length=256)
@@ -47,13 +47,8 @@ class SiteUpdate(BaseModel):
     apikey: str | None = None
     cookies: str | None = None
     enabled: bool | None = None
-    adapter: (
-        Literal[
-            "mteam", "hhanclub", "hdsky", "ourbits", "audiences",
-            "springsunday", "hdhome", "hddolby", "soulvoice",
-        ]
-        | None
-    ) = None
+    #: 同 :class:`SiteCreate.adapter`——运行时校验
+    adapter: str | None = Field(default=None, max_length=64)
 
 
 class SiteDeleteIn(BaseModel):
@@ -133,8 +128,27 @@ async def delete_site(payload: SiteDeleteIn) -> dict[str, int]:
     return {"id": payload.id}
 
 
+def _validate_adapter(adapter: str) -> None:
+    """校验 adapter 名在注册中心里。
+
+    合法名单的**唯一来源**是 :mod:`app.adapters.sites._registry`
+    （``_BUILTIN``）。之前这里用 pydantic ``Literal[...]`` 硬编码了
+    第 3 份名单，漏改不会报错——加站点要改 4 处。
+
+    改用运行时校验后，名单只在注册中心维护 1 份。
+    """
+    from app.adapters.sites._registry import list_available
+
+    if adapter not in list_available():
+        raise HTTPException(
+            status_code=400,
+            detail=f"未注册的站点 adapter：{adapter!r}，可选：{list_available()}",
+        )
+
+
 @router.post("", status_code=201, summary="新增站点")
 async def create_site(payload: SiteCreate) -> SiteOut:
+    _validate_adapter(payload.adapter)
     async with session_scope() as session:
         exists = (
             await session.execute(select(Site.id).where(Site.name == payload.name))
@@ -164,6 +178,8 @@ async def update_site(payload: SiteUpdate) -> SiteOut:
     ``rss_url`` / ``apikey`` / ``cookies`` 留空字符串 = 清空该项；
     未提供（None） = 不修改。
     """
+    if payload.adapter is not None:
+        _validate_adapter(payload.adapter)
     site_id = payload.id
     async with session_scope() as session:
         site = (await session.execute(select(Site).where(Site.id == site_id))).scalar_one_or_none()
