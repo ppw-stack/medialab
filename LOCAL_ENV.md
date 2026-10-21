@@ -174,10 +174,13 @@ cron 的**持久化来源是 `.env` / `.env.prod`**（`FETCH_ALL_SITES_CRON` / `
 > `scan_cross_seed` 有 `SCAN_CROSS_SEED_CRON` 配置项，但当前 `.env` / `.env.prod` 未设置，
 > 走 `app/core/config.py` 的默认值 `0 */6 * * *`。
 
-> ⚠️ **作业的启停（enabled）同样不落库**：`JobSpec.enabled` 只存在内存。
+> ✅ **作业的启停（enabled）已持久化**（2026-10-21，commit `6be6a9d`）：
+> 存在 `scheduler_job_settings` 表（`job_name` PK + `enabled`）。
 > `POST /api/v1/scheduler/{job_name}/toggle?enabled=false` 禁用某作业后，
-> **重启容器会自动恢复为启用**（`register_jobs` 用默认 `enabled=True` 重建）。
-> 需要长期禁用，只能改代码或在注册处改默认值。
+> **重启容器保持停用**（启动期 `apply_enabled_overrides()` 回填，
+> 被停用的作业根本不会被安排到 APScheduler）。
+>
+> 仍然**不落库**的是 cron 表达式（见上一条）——改 cron 仍需改 `.env`。
 >
 > 排查小技巧：disable 的请求会出现在容器访问日志里，形如
 > `POST /api/v1/scheduler/push_free_torrents/toggle?enabled=false`，
@@ -205,16 +208,20 @@ cron 的**持久化来源是 `.env` / `.env.prod`**（`FETCH_ALL_SITES_CRON` / `
 > 现在会在 `fetch_all_sites` 结果里如实报 `failed_sites: 1` 并点名
 > `hddolby`，日志出现 `站点拉取失败 1 站：hddolby(...)`。
 
-> ⚠️ `BreakerTripped` 熔断机制目前是**死代码**：`should_pull()` 全仓无人调用，
-> `feeds` 表也不存在（现只有 `sites` / `torrent_index` / `task_queue` /
-> `app_runtime_params` / `job_runs` / `site_user_data`）。
-> 只有 mteam / hdhome 的下载路径会抛 `BreakerTripped`，无处落盘。
+> ⚠️ `BreakerTripped` 熔断机制的**落库部分**从未实现：`feeds` 表不存在，
+> `should_pull()` 等熔断代码已于 2026-10-21（commit `522a47b`）作为死代码删除。
+> 但 `BreakerTripped` 异常类**保留**——mteam / hdhome 的下载路径会抛它，
+> `feed_fetcher` 捕获后直接放弃本次拉取。
+>
+> 现存表：`sites` / `torrent_index` / `task_queue` / `app_runtime_params` /
+> `job_runs` / `site_user_data` / `downloader_instances` /
+> `scheduler_job_settings`（+ 历史遗留的 `torrents` 空表）。
 
 ## 8. 数据与存储
 
 | 项 | 位置 |
 |---|---|
-| dev SQLite | `data-dev/seedhelper.db`（另有 `.bak.*` / `.broken` 历史文件） |
+| dev SQLite | `data-dev/seedhelper.db`（另有 1 个 `.bak.*`） |
 | prod SQLite | 远端 `/mnt/user/appdata/seedhelper/data/` |
 | 日志 | `logs-dev/` / `logs-prod/` |
 | 下载目录 | `/data/torrents`（dev 挂载） |
@@ -224,6 +231,11 @@ cron 的**持久化来源是 `.env` / `.env.prod`**（`FETCH_ALL_SITES_CRON` / `
   部署后应确认 `-wal` / `-shm` 文件已清除。
 - `user_version` 迁移为**批次制**，老库不会重复 +8h，重复执行幂等。
 - 配置目录 `config/` 挂载进容器（`local.yaml` 属本地配置，已 gitignore）。
+- **备份无自动轮转**（按决策不引入新机制）：备份文件靠人工清理。
+  2026-10-21 已清理一轮 —— dev 只留 `seedhelper.db` + 1 个 `.bak.*`；
+  prod 留 3 个（最新两次部署前 + `predeploy` 基线）。
+  清理前务必逐个 `PRAGMA integrity_check` 确认，**损坏的副本没有抢救价值**
+  （`.recover` 早已做过），可直接删。
 
 ## 9. 常用命令
 
