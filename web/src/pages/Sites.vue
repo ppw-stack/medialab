@@ -1,25 +1,15 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
 import { api, errMsg } from '../api'
+import type {
+  AdapterInfo,
+  FeedTestResult,
+  Site,
+  SiteUserDataSummary as UserDataSummary,
+} from '../types'
 import { formatBytes as fmtBytes } from '../utils/format'
 import { message } from 'ant-design-vue'
 import type { FormInstance } from 'ant-design-vue'
-
-interface Site {
-  id: number; name: string; domain: string | null; adapter: string;
-  enabled: boolean;
-  rss_url_masked: string;
-  has_apikey: boolean;
-  has_cookies: boolean;
-  created_at: string;
-  updated_at: string;
-}
-
-interface AdapterInfo {
-  name: string;
-  label: string;
-  domain: string;
-}
 
 // 硬编码 fallback（后端 /sites/adapters 不可用时使用）
 const ADAPTERS_FALLBACK: { value: string; label: string; domain: string }[] = [
@@ -155,14 +145,6 @@ async function onTestRow(s: Site) {
 }
 
 // ---- 拉取测试（feed-test）----
-interface FeedTestResult {
-  ok: boolean
-  status: string
-  item_count: number
-  duration_ms: number
-  sample_titles: string[]
-  error: string
-}
 const feedTestId = ref<number | null>(null)
 const feedTestModalOpen = ref(false)
 const feedTestResult = ref<FeedTestResult | null>(null)
@@ -208,15 +190,6 @@ const columns = [
   { title: '启用', key: 'enabled', width: 80 },
   { title: '', key: 'action', width: 280 },
 ]
-
-interface UserDataSummary {
-  has_data: boolean
-  upload?: number
-  download?: number
-  seeding_count?: number
-  leeching_count?: number
-  last_seen_at?: string
-}
 
 const drawerOpen = ref(false)
 const drawerSite = ref<Site | null>(null)

@@ -1,19 +1,10 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { api, errMsg } from '../api'
+import type { UserData } from '../types'
 import { formatBytes as fmtBytes } from '../utils/format'
 import { message } from 'ant-design-vue'
 
-interface UserData {
-  site_id: number
-  site_name: string
-  adapter: string
-  upload: number
-  download: number
-  seeding_count: number
-  leeching_count: number
-  last_seen_at: string
-}
 
 const data = ref<UserData[]>([])
 const loading = ref(false)

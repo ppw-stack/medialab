@@ -1,43 +1,20 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { api, errMsg } from '../api'
+import type {
+  BatchOpResult,
+  Downloader,
+  DownloaderTorrent,
+  DownloaderTorrentList,
+} from '../types'
 import { formatBytes } from '../utils/format'
 import { message } from 'ant-design-vue'
 
-interface DownloaderInfo {
-  id: number
-  name: string
-  enabled: boolean
-}
 
-interface DownloaderTorrent {
-  hash: string
-  name: string
-  state: string
-  progress: number
-  size: number
-  downloaded: number
-  uploaded: number
-  dlspeed: number
-  upspeed: number
-  ratio: number
-  save_path: string | null
-  category: string | null
-  tags: string[]
-}
 
-interface ListResp {
-  total: number
-  items: DownloaderTorrent[]
-}
 
-interface BatchOpResult {
-  requested: number
-  succeeded: number
-  failed: number
-}
 
-const downloaders = ref<DownloaderInfo[]>([])
+const downloaders = ref<Downloader[]>([])
 const activeTab = ref<number | null>(null)
 const items = ref<DownloaderTorrent[]>([])
 const total = ref(0)
@@ -92,7 +69,7 @@ function stateColor(s: string): string {
 
 async function loadDownloaders() {
   try {
-    const all = await api.get<DownloaderInfo[]>('/downloaders')
+    const all = await api.get<Downloader[]>('/downloaders')
     downloaders.value = all.filter((d) => d.enabled)
     if (downloaders.value.length > 0 && activeTab.value === null) {
       activeTab.value = downloaders.value[0].id
@@ -110,7 +87,7 @@ async function loadItems() {
       params.set('state', filterState.value)
     }
     if (filterCategory.value.trim()) params.set('category', filterCategory.value.trim())
-    const resp = await api.get<ListResp>(
+    const resp = await api.get<DownloaderTorrentList>(
       `/downloaders/${activeTab.value}/torrents?${params.toString()}`,
     )
     items.value = resp.items

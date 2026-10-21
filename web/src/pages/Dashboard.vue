@@ -1,21 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { api } from '../api'
-
-interface DashboardSnap {
-  sites: { total: number; enabled: number }
-  downloaders: { total: number; enabled: number }
-  free_ending_soon?: number
-  free_index_total?: number
-  inflight_torrents?: number
-}
-
-interface SchedulerInfo {
-  enabled: boolean
-  inflight: number
-  accepting_new_work: boolean
-  jobs: { name: string; enabled: boolean; running: boolean; cron: string }[]
-}
+import type { DashboardSnap, SchedulerInfo } from '../types'
 
 const snap = ref<DashboardSnap | null>(null)
 const scheduler = ref<SchedulerInfo | null>(null)

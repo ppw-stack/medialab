@@ -1,48 +1,30 @@
 <script setup lang="ts">
 import { ref, onMounted, watch } from 'vue'
 import { api, errMsg } from '../api'
+import type {
+  CrossSeedDownloader,
+  CrossSeedScanResult,
+  CrossSeedStatsRow,
+} from '../types'
 import { message } from 'ant-design-vue'
 
-interface DownloaderItem {
-  id: number
-  name: string
-  type: string
-  url: string
-  enabled: boolean
-  is_cross_seed: boolean
-}
 
-interface StatsRow {
-  name: string
-  size_gb: number
-  count: number
-  sample_hash: string
-}
 
-interface ScanResult {
-  downloader_id: number
-  downloader_name: string
-  scanned_at: string
-  total_torrents: number
-  anomaly_count: number
-  unique_count: number
-  stats: StatsRow[]
-}
 
-const downloaders = ref<DownloaderItem[]>([])
+const downloaders = ref<CrossSeedDownloader[]>([])
 const selectedId = ref<number | null>(null)
-const scanResult = ref<ScanResult | null>(null)
+const scanResult = ref<CrossSeedScanResult | null>(null)
 const loading = ref(false)
 
 const statsColumns = [
   { title: '原始名称', dataIndex: 'name', key: 'name', ellipsis: true, minWidth: 360 },
-  { title: '大小 (GB)', dataIndex: 'size_gb', key: 'size_gb', width: 120, sorter: (a: StatsRow, b: StatsRow) => a.size_gb - b.size_gb },
-  { title: '出现次数', dataIndex: 'count', key: 'count', width: 120, sorter: (a: StatsRow, b: StatsRow) => a.count - b.count },
+  { title: '大小 (GB)', dataIndex: 'size_gb', key: 'size_gb', width: 120, sorter: (a: CrossSeedStatsRow, b: CrossSeedStatsRow) => a.size_gb - b.size_gb },
+  { title: '出现次数', dataIndex: 'count', key: 'count', width: 120, sorter: (a: CrossSeedStatsRow, b: CrossSeedStatsRow) => a.count - b.count },
 ]
 
 async function loadDownloaders() {
   try {
-    downloaders.value = await api.get<DownloaderItem[]>('/cross-seed-monitor/downloaders')
+    downloaders.value = await api.get<CrossSeedDownloader[]>('/cross-seed-monitor/downloaders')
     if (downloaders.value.length) {
       selectedId.value = downloaders.value[0].id
     }
@@ -58,7 +40,7 @@ async function loadScan(id: number) {
   const seq = ++scanSeq
   loading.value = true
   try {
-    const result = await api.get<ScanResult>(
+    const result = await api.get<CrossSeedScanResult>(
       `/cross-seed-monitor/downloaders/${id}/scan`
     )
     if (seq !== scanSeq) return  // 已有更新的请求，丢弃
@@ -137,7 +119,7 @@ onMounted(async () => {
           <a-table
             :columns="statsColumns"
             :data-source="scanResult.stats"
-            :row-key="(r: StatsRow) => r.name + '|' + r.size_gb"
+            :row-key="(r: CrossSeedStatsRow) => r.name + '|' + r.size_gb"
             :pagination="{ pageSize: 50, showSizeChanger: true }"
             :default-sort-order="{ columnKey: 'count', order: 'descend' }"
             size="middle"
@@ -145,16 +127,16 @@ onMounted(async () => {
           >
             <template #bodyCell="{ column, record }">
               <template v-if="column.key === 'name'">
-                <a-tooltip :title="(record as StatsRow).name">
-                  <span class="name-cell">{{ (record as StatsRow).name }}</span>
+                <a-tooltip :title="(record as CrossSeedStatsRow).name">
+                  <span class="name-cell">{{ (record as CrossSeedStatsRow).name }}</span>
                 </a-tooltip>
               </template>
               <template v-else-if="column.key === 'size_gb'">
-                {{ (record as StatsRow).size_gb }} GB
+                {{ (record as CrossSeedStatsRow).size_gb }} GB
               </template>
               <template v-else-if="column.key === 'count'">
-                <a-tag :color="countColor((record as StatsRow).count)">
-                  {{ (record as StatsRow).count }}
+                <a-tag :color="countColor((record as CrossSeedStatsRow).count)">
+                  {{ (record as CrossSeedStatsRow).count }}
                 </a-tag>
               </template>
             </template>

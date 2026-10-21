@@ -1,23 +1,8 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { api, errMsg } from '../api'
+import type { JobConfig } from '../types'
 import { message } from 'ant-design-vue'
-
-interface ParamSpec {
-  key: string
-  label: string
-  min: number
-  max: number
-  default: number
-}
-
-interface JobConfig {
-  job_name: string
-  cron: string
-  enabled: boolean
-  params: Record<string, number>
-  specs: ParamSpec[]
-}
 
 const props = defineProps<{
   open: boolean

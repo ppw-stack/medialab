@@ -91,6 +91,12 @@ jobs:
         working-directory: web
         run: npx vue-tsc -b
 
+      - name: Type placement check
+        # API 契约类型必须集中在 web/src/types.ts（Phase 4）。
+        # 独立 node 脚本——不依赖 Playwright / 容器。
+        working-directory: web
+        run: node scripts/check-types-placement.mjs
+
       - name: Lint
         working-directory: web
         run: npx oxlint .

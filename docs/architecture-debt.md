@@ -28,8 +28,8 @@ core → db → adapters → services → api
 | 2.2 default_downloader 零调用 | ✅ 已修 | `194eecb` |
 | 2.3 core→db 逆向依赖 | ✅ 已修 | `b8f86ca` |
 | 2.4 API 层漏业务逻辑 | ✅ 已修 | `b99194e` |
-| 3. 死代码 | ✅ 已修 | *(本批)* |
-| 4. 前端类型分散 | ⏳ 待做（Phase 4） | — |
+| 3. 死代码 | ✅ 已修 | `67e1602` |
+| 4. 前端类型分散 | ✅ 已修 | *(本批)* |
 
 ---
 
@@ -248,15 +248,27 @@ get_user_snapshot   × 7    (7 站 15 行几乎一模一样)
 
 ---
 
-## Phase 4：前端
+## Phase 4：前端 ✅
 
-- 20+ 个 `interface` 散落在各 `.vue` 里，无共享 `types.ts`
+- ~~20+ 个 `interface` 散落在各 `.vue` 里，无共享 `types.ts`~~
   （`SchedulerInfo` 等已重复定义）
-- `web/src/api.ts` 有 28 处 `api.get<T>` / `api.post<T>`，类型全靠手写
+- ~~`web/src/api.ts` 有 28 处 `api.get<T>` / `api.post<T>`，类型全靠手写~~
 
-处置：抽 `web/src/types.ts`，页面从那里 import。
+**已修**（`67e1602` 后续批）：
 
----
+- 新增 `web/src/types.ts`——与后端 API 契约绑定的类型全部集中到这里
+  （33 个 interface，按域分组：站点 / 下载器 / 索引 / 调度 / 用户数据 /
+  辅种 / 仪表盘）。命名保持后端的 snake_case，不做 camelCase 转换
+  （省一层映射 bug）。`JobRunItem.result` 从 `unknown` 收紧为
+  `JobRunResult`（`summary` / `steps` 两个通用字段 + 索引签名）。
+- 11 个文件改为从 `types.ts` import（Sites / Downloaders / Torrents /
+  TorrentIndex / CrossSeed / UserData / Dashboard / SchedulerTab /
+  SchedulerConfigModal / SchedulerHistoryModal / JobStepList）。
+- **纯视图内部的类型留在组件里**（`Tile` / `Countdown` /
+  `FormatBytesOptions`）——它们不是 API 契约，放共享文件是噪音。
+- 约束写成检查脚本 `web/scripts/check-types-placement.mjs`
+  （独立 node 脚本，不依赖容器），已加进 CI 的 frontend job。
+  已验证：人为加一处本地 interface → 脚本立刻失败。
 
 ## 顺带记录：Phase 0/1 中修掉的问题
 
@@ -280,6 +292,11 @@ get_user_snapshot   × 7    (7 站 15 行几乎一模一样)
 | Phase 0 完成 | 276 | 44% |
 | Phase 1 完成 | 382 | 48% |
 | Phase 2 完成 | 465 | 53% |
+| Phase 3 完成 | 489 | 53% |
+| Phase 4 完成 | 489 | 53%（前端类型集中，无后端用例变化） |
+
+**Phase 0–4 全部完成。** 遗留（刻意保留，见 Phase 3 表格）：调试用字段
+（`FreeWindow.raw_text`）、DB 列（`value_str`）、适配器协议完整性方法。
 
 覆盖率门槛在 `pyproject.toml` 的 `[tool.coverage.report] fail_under`，
 当前 0（不阻断），**只许升不许降**。补测试后逐步抬高。

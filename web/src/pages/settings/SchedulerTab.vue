@@ -1,49 +1,15 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 import { api, errMsg } from '../../api'
+import type {
+  JobRunItem,
+  JobRunPage,
+  RunResult,
+  SchedulerInfo,
+} from '../../types'
 import { message } from 'ant-design-vue'
 import SchedulerConfigModal from '../../components/SchedulerConfigModal.vue'
 import SchedulerHistoryModal from '../../components/SchedulerHistoryModal.vue'
-
-interface Job {
-  name: string;
-  cron: string;
-  enabled: boolean;
-  running: boolean;
-}
-
-interface SchedulerInfo {
-  enabled: boolean;
-  jobs: Job[];
-  inflight: number;
-  accepting_new_work: boolean;
-}
-
-interface RunResult {
-  ok: boolean;
-  started_at: string;
-  finished_at: string;
-  duration_ms: number;
-  error: string;
-  result?: Record<string, unknown> | null;
-}
-
-interface JobRunItem {
-  id: number;
-  job_name: string;
-  trigger: string;
-  started_at: string;
-  finished_at: string | null;
-  duration_ms: number | null;
-  ok: boolean;
-  error: string | null;
-  result: unknown;
-}
-
-interface JobRunPage {
-  total: number;
-  items: JobRunItem[];
-}
 
 const JOB_LABELS: Record<string, { name: string; desc: string }> = {
   fetch_all_sites:     { name: '站点拉取',     desc: '遍历所有启用站点拉取种子列表（API/HTML），写入 torrent_index 表' },

@@ -29,11 +29,12 @@ uv run mypy app/
 uv run pytest                # 后端测试（465 例）
 cd web && npx vue-tsc -b    # 前端类型检查
 cd web && npx oxlint .      # 前端 lint
+cd web && node scripts/check-types-placement.mjs  # 类型放置约束（API 契约类型集中在 src/types.ts）
 cd web && npx vite build    # 前端构建
 ```
 
 静态检查不通过禁止合并。**CI（`.github/workflows/ci.yml`）会跑上述全部闸门**：
-ruff + mypy + pytest + vue-tsc + oxlint，全绿才允许合并。
+ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集中检查），全绿才允许合并。
 
 ## 后端测试
 ```bash
@@ -62,5 +63,5 @@ cd web && npx playwright test    # 需先起 dev 容器 (localhost:8080)
 新增页面/交互改动必须补 `web/tests/*.spec.ts` 用例。
 
 **注意**：Playwright e2e 连的是**真实下载器与真实站点**，CI 上跑不了也不跑
-（`.github/workflows/ci.yml` 只跑 vue-tsc + oxlint）。e2e 需在本机起 dev 容器后跑。
+（CI 跑 vue-tsc + oxlint + types-placement；不含 Playwright）。e2e 需在本机起 dev 容器后跑。
 

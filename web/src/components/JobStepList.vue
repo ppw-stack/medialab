@@ -1,11 +1,6 @@
 <script setup lang="ts">
 /** 作业步骤卡片列表 + 列表小圆点预览（共用 JobStep 数据结构）。 */
-export interface JobStep {
-  name: string
-  status: 'ok' | 'warn' | 'skip' | 'fail'
-  count: number | null
-  detail: string | null
-}
+import type { JobStep } from '../types'
 
 defineProps<{
   steps: JobStep[]

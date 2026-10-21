@@ -3,19 +3,8 @@ import { ref, watch, computed } from 'vue'
 import { api, errMsg } from '../api'
 import { message } from 'ant-design-vue'
 import HistoryStats from './HistoryStats.vue'
-import JobStepList, { type JobStep } from './JobStepList.vue'
-
-interface RunItem {
-  id: number
-  job_name: string
-  trigger: string
-  started_at: string
-  finished_at: string | null
-  duration_ms: number | null
-  ok: boolean
-  error: string | null
-  result: Record<string, unknown> | null
-}
+import JobStepList from './JobStepList.vue'
+import type { JobRunItem as RunItem, JobStep } from '../types'
 
 const props = defineProps<{
   open: boolean

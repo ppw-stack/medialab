@@ -2,22 +2,8 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { api, errMsg } from '../api'
 import { message } from 'ant-design-vue'
+import type { Downloader, DownloaderTestResult } from '../types'
 
-interface Downloader {
-  id: number
-  name: string
-  type: string
-  url: string
-  username: string | null
-  has_password: boolean
-  save_path: string | null
-  is_default: boolean
-  enabled: boolean
-  verify_tls: boolean
-  is_cross_seed: boolean
-  created_at: string
-  updated_at: string
-}
 
 const TYPES = [
   { value: 'qbittorrent', label: 'qBittorrent', implemented: true },
@@ -39,7 +25,7 @@ const data = ref<Downloader[]>([])
 const editing = ref<Downloader | null>(null)
 const creating = ref(false)
 const testing = ref(false)
-const testResult = ref<{ reachable: boolean; detail: string } | null>(null)
+const testResult = ref<DownloaderTestResult | null>(null)
 const modalOpen = ref(false)
 const saving = ref(false)
 const formRef = ref<{ validate: () => Promise<unknown> } | null>(null)
@@ -159,7 +145,7 @@ async function onTest(record?: Downloader) {
   try {
     if (record) {
       // 列表行测连：测 DB 里已保存的配置
-      const r = await api.post<{ reachable: boolean; detail: string }>(
+      const r = await api.post<DownloaderTestResult>(
         `/downloaders/${record.id}/test`,
         {},
       )
@@ -167,7 +153,7 @@ async function onTest(record?: Downloader) {
     } else {
       // 弹窗测连：用**表单里的值**测（用户可能刚改了 URL/账号/密码），
       // 否则测出来的是旧配置，结果与表单内容矛盾
-      const r = await api.post<{ reachable: boolean; detail: string }>(
+      const r = await api.post<DownloaderTestResult>(
         '/downloaders/test-config',
         {
           id: target.id,

@@ -1,58 +1,21 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { api } from '../api'
+import type {
+  Downloader as DownloaderOpt,
+  PushResponse,
+  SiteOption as SiteOpt,
+  TorrentIndexItem,
+  TorrentIndexPage,
+  TorrentIndexStats,
+} from '../types'
 import { formatBytes } from '../utils/format'
 import { message } from 'ant-design-vue'
 
- interface TorrentIndexItem {
-   id: number
-   site_id: number
-   site_name: string
-   item_id: string | null
-   name: string
-   size: number
-   category: string | null
-   free_type: string
-   free_end_at: string | null
-   free_source: string | null
-   free_confidence: number | null
-   discount_pct: number | null
-   published_at: string | null
-   pushable: boolean
-   push_status: string | null
-   pushed_at: string | null
-   first_seen_at: string
-   last_seen_at: string
- }
 
-interface TorrentIndexPage {
-  total: number
-  items: TorrentIndexItem[]
-}
 
-interface SiteOpt {
-  id: number
-  name: string
-}
 
-interface DownloaderOpt {
-  id: number
-  name: string
-  enabled: boolean
-  is_default: boolean
-}
 
-interface TorrentIndexStats {
-  total: number
-  by_type: Record<string, number>
-}
-
-interface PushResponse {
-  ok: boolean
-  detail: string
-  info_hash: string | null
-  downloader_id: number | null
-}
 
 const FREE_TYPE_LABELS: Record<string, { label: string; color: string }> = {
   freeleech_permanent: { label: '永久免费', color: 'cyan' },
