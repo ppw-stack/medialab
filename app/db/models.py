@@ -235,6 +235,30 @@ class JobRun(Base):
     result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class SchedulerJobSetting(Base):
+    """调度作业的持久化启停状态。
+
+    :class:`~app.services.scheduler.JobSpec.enabled` 只存在于内存，容器重启
+    后作业会被 :func:`~app.services.job_registry.register_jobs` 重新注册为
+    ``enabled=True``——用户在 UI 里手动停用的作业会"复活"。
+
+    本表把开关状态落库，启动期回填，让停用状态跨重启保持。
+
+    只存**用户显式改过**的作业：未在此表出现的作业用注册时的默认值
+    （``enabled=True``），因此新增作业不会被历史行影响。
+    """
+
+    __tablename__ = "scheduler_job_settings"
+
+    #: 作业名（PK），与 :class:`~app.services.scheduler.JobSpec.name` 一致
+    job_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    #: 是否启用（False = 停用，不参与 cron 调度）
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[str] = mapped_column(
+        String(32), default=_bj_now, onupdate=_bj_now
+    )
+
+
 class SiteUserData(Base):
     """站点用户数据快照（FR-1.6 站点用户数据契约·精简版）。
 

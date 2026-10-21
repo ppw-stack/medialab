@@ -96,6 +96,10 @@ class SchedulerCenter:
         # 2) 停机时 drain 会看不到在途的手动作业，进程可能在它还在
         #    写库时就退出。
         self._manual_inflight: set[asyncio.Task[None]] = set()
+        #: DB 持久化的作业启停状态（作业名 → enabled）。启动期由
+        #: :meth:`apply_enabled_overrides` 灌入，:meth:`register` 时应用——
+        #: 被停用的作业根本不会被安排到 APScheduler。
+        self._enabled_overrides: dict[str, bool] = {}
         #: 停机期间置 False：拒绝新作业，只等在途作业收敛（FR-8.2）
         self.accepting_new_work = True
 
@@ -169,7 +173,29 @@ class SchedulerCenter:
         logger.info("调度中心已停止")
 
     # ------------------------------------------------------------ 注册
+    def apply_enabled_overrides(self, states: dict[str, bool]) -> None:
+        """应用 DB 读回的作业启停状态（启动期，在 register_jobs 之前调用）。
+
+        必须在注册作业**之前**调用：:meth:`register` 会按
+        ``spec.enabled`` 决定是否把作业安排到 APScheduler，届时才知道
+        该不该排。
+        """
+        self._enabled_overrides = dict(states)
+        if self._enabled_overrides:
+            disabled = sorted(
+                name for name, on in self._enabled_overrides.items() if not on
+            )
+            logger.info(
+                "已载入作业启停状态：%d 个作业（停用 %s）",
+                len(self._enabled_overrides),
+                ", ".join(disabled) if disabled else "无",
+            )
+
     def register(self, spec: JobSpec) -> None:
+        # DB 状态优先于 spec 自带的默认值——用户手动停用的作业重启后
+        # 不该"复活"。DB 里没有该作业时用 spec 默认值。
+        if spec.name in self._enabled_overrides:
+            spec.enabled = self._enabled_overrides[spec.name]
         self._specs[spec.name] = spec
         if self._scheduler is not None and spec.enabled:
             self._schedule(spec)

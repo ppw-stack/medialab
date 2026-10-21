@@ -33,6 +33,7 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.db.models import JobRun
 from app.db.session import session_scope
+from app.services.job_settings import save_enabled_state
 from app.services.runtime_params import (
     PARAM_SPECS,
     get_runtime_params,
@@ -71,9 +72,21 @@ async def scheduler_status() -> dict[str, Any]:
 
 @router.post("/scheduler/{job_name}/toggle", summary="启停调度作业")
 async def toggle_job(job_name: str, enabled: bool) -> dict[str, Any]:
-    """切换单个作业的启用状态。"""
+    """切换单个作业的启用状态（持久化到 DB，跨重启保持）。
+
+    DB 写失败时返 500：开关在调度中心**已经生效**，但状态没存住，
+    容器重启后会恢复成启用。必须让用户知道，否则会以为停用是永久的。
+    """
     if not scheduler_center.enable(job_name, enabled):
         raise HTTPException(status_code=404, detail=f"作业不存在：{job_name}")
+    try:
+        await save_enabled_state(job_name, enabled)
+    except Exception as exc:
+        logger.exception("作业 %s 启停状态写入 DB 失败", job_name)
+        raise HTTPException(
+            status_code=500,
+            detail="启停状态持久化失败，容器重启后会恢复原状态",
+        ) from exc
     return {"job": job_name, "enabled": enabled}
 
 
