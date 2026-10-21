@@ -1,6 +1,12 @@
 # 部署指南
 
-Docker 单机双环境部署（dev + prod），共享同一镜像但完全独立的数据/配置。SQLite + WAL + bind mount 持久化。
+两套环境**跑在两台不同的机器上**：
+
+- **dev** — 本机（192.168.0.92，arm64），本地 `build` 镜像，端口 8080
+- **prod** — 远端 128（192.168.0.128，Unraid Tower，x86_64），拉 Docker Hub 镜像，端口 8091
+
+镜像由 GitHub Actions 构建并推送到 Docker Hub（`docker.io/ppw111/seedhelper`，public）。
+**CI 只构建推送，不部署** —— 部署是手动两步（见 §4）。
 
 ## 0. 安全声明（先读）
 
@@ -19,25 +25,38 @@ Docker 单机双环境部署（dev + prod），共享同一镜像但完全独立
 
 ## 1. 双环境架构
 
-| 环境 | 端口 | 数据目录 | 凭据文件 | 容器名 |
-|---|---|---|---|---|
-| **dev**  | 8080 | `./data-dev/`  | `.env`      | `seedhelper-dev`  |
-| **prod** | 8091 | `./data-prod/` | `.env.prod` | `seedhelper-prod` |
+| | dev | prod |
+|---|---|---|
+| 位置 | 本机 `192.168.0.92`（arm64） | 远端 `192.168.0.128`（Unraid Tower, x86_64） |
+| 端口 | **8080** | **8091** |
+| 容器名 | `seedhelper-dev` | `seedhelper-prod` |
+| 镜像 | 本地 `docker compose build` | `ppw111/seedhelper:latest`（Docker Hub） |
+| Compose 文件 | `docker-compose.yml` | `docker-compose.prod.128.yml` |
+| 数据目录 | `./data-dev/` | `/mnt/user/appdata/seedhelper/data` |
+| 日志目录 | `./logs-dev/` | `/mnt/user/appdata/seedhelper/logs` |
+| 凭据文件 | `.env` | `.env.prod` |
+| 资源上限 | 512MB / 1 核 | 1GB / 2 核 |
 
-> 注：prod 用 8091 而非 8081 是因为本机 8081 已被 qBittorrent 容器占用。生产服务器无此冲突时改回 8081 也可（修改 `docker-compose.prod.yml` 的 ports）。
+两套**完全独立**：不同机器、不同端口、不同 SQLite DB、不同 Web Token。
+数据不自动同步，需要时手工迁移（见 §7）。
 
-两套**完全独立**：不同端口、不同 SQLite DB、不同 Web Token。**生产从 dev 导入数据**用 `sqlite3 .backup`（见第 7 节）。
+> ⚠️ **prod 的 compose 文件必须同步到 128**——那里不是 git 仓库，
+> `app/` 目录只是放 compose 文件的落点，容器跑的是镜像里的代码。
 
-## 1. 前置条件
+## 2. 前置条件
 
 | 依赖 | 最低版本 | 检查 |
 |---|---|---|
 | Docker Engine | 24.0+ | `docker --version` |
 | Docker Compose v2 | 2.20+ | `docker compose version` |
-| 主机端口 | 8080 空闲 | `lsof -i :8080` |
+| 主机端口 | 8080 空闲（dev） | `lsof -i :8080` |
 | 磁盘 | >= 5 GB 可用 | `df -h .` |
 
-## 2. 准备 `.env`（dev）
+生产机（128）另需 SSH 访问：`ssh mp`（`~/.ssh/config` 别名 → `root@192.168.0.128`）。
+
+## 3. 准备凭据
+
+### dev（`.env`）
 
 ```bash
 cp .env.example .env
@@ -65,165 +84,186 @@ FETCH_ALL_SITES_CRON=*/10 * * * *
 PUSH_FREE_CRON=*/30 * * * *
 ```
 
-## 2.5 准备 `.env.prod`（生产）
+### prod（`.env.prod`）
 
-**生产 Token 必须与 dev 不同**（直接用 `deploy.sh prod` 第一次会引导生成）。
+**生产 Token 必须与 dev 不同。**
 
 ```bash
-# 方式 A：一键脚本自动创建 .env.prod（如果不存在）
-./scripts/deploy.sh prod deploy
-
-# 方式 B：手工
 cp .env.example .env.prod
 # 用上面的 secrets 命令生成 2 个新值，覆盖 .env.prod 里的占位
 ```
 
-**注意**：`.env` 和 `.env.prod` 都已在 `.gitignore`，不会进 git。但应**额外备份到密码管理器**。
+`.env.prod` 需要同步到 128 的 `/mnt/user/appdata/seedhelper/app/`。
 
-## 3. 启动
+> `.env` 和 `.env.prod` 都已在 `.gitignore`，不会进 git。
+> 但应**额外备份到密码管理器**。
 
-### 一键脚本
+## 4. 部署
 
-```bash
-./scripts/deploy.sh                # dev deploy（8080）
-./scripts/deploy.sh prod           # prod deploy（8091）
-./scripts/deploy.sh all deploy     # dev + prod 都 deploy
-```
-
-### 手动
+### dev（本机）
 
 ```bash
-# dev
+# 一键（build + up + 健康检查）
+./scripts/deploy.sh
+
+# 或手动
 docker compose build
 docker compose up -d
-
-# prod
-docker compose -f docker-compose.prod.yml --env-file .env.prod build
-docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
 ```
+
+> `scripts/deploy.sh` **只管 dev**。生产走下面的手动链路。
+
+### prod（128）
+
+三步：
+
+```bash
+# 1) 本机 push 触发 CI 构建（等 CI 绿）
+git push origin main
+
+# 2) 128 上拉新镜像
+ssh mp "docker pull ppw111/seedhelper:latest"
+
+# 3) 128 上重建容器
+ssh mp "cd /mnt/user/appdata/seedhelper/app && TAG=latest docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d"
+```
+
+> ⚠️ **`TAG=latest` 必须显式指定**：compose 里默认值是 `0.1.0`，
+> 而 Docker Hub 上只有 `latest` 和 `main`，`0.1.0` 不存在，直接 `up -d` 会拉取失败。
+>
+> ⚠️ 若容器是旧版本手动创建的（没有 compose label），`up -d` 不会替换它，
+> 需先 `docker stop -t 60 seedhelper-prod && docker rm seedhelper-prod`。
+> 60s 宽限期对应 `stop_grace_period`，让在途作业收尾。
 
 启动后等待 15 秒让 healthcheck 通过。
 
-## 4. 验证
+## 5. 验证
 
 ```bash
-# 健康检查
-curl -fsS http://localhost:8080/healthz  # dev
-curl -fsS http://localhost:8091/healthz  # prod
+# dev
+curl -fsS http://localhost:8080/healthz
 # 期望：{"status":"ok","db":true,"version":"0.1.0"}
+
+# prod（远端）
+ssh mp "curl -fsS http://localhost:8091/healthz"
 
 # 指标端点
 curl -fsS http://localhost:8080/metrics | head
 
 # Web UI
-xdg-open http://localhost:8080  # dev
-xdg-open http://localhost:8091  # prod
+open http://localhost:8080          # dev
+open http://192.168.0.128:8091      # prod
 # 浏览器登录：用户名=WEB_USERNAME、密码=WEB_PASSWORD
 
 # 状态总览
-./scripts/deploy.sh all status
+./scripts/deploy.sh status
 ```
 
-## 5. 升级
+## 6. 升级
 
 ```bash
-# 1) 拉新代码
-git pull
+# 1) 本机提交并推送（CI 自动构建镜像）
+git push origin main
 
-# 2) 改 TAG（默认 0.1.0）—— 一套 .env 改 TAG 即升级对应环境
-echo "TAG=0.1.1" >> .env         # dev
-echo "TAG=0.1.1" >> .env.prod    # prod
-
-# 3) 重新构建 + 滚动重启
-./scripts/deploy.sh              # 仅 dev
-./scripts/deploy.sh prod         # 仅 prod
-./scripts/deploy.sh all deploy   # 两套都升级
+# 2) 128 上拉镜像 + 重建
+ssh mp "docker pull ppw111/seedhelper:latest"
+ssh mp "cd /mnt/user/appdata/seedhelper/app && TAG=latest docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d"
 ```
 
-`stop_grace_period: 60s` 保证 SIGTERM 优雅停机（FR-8.2：等待在途作业收敛）。SQLite WAL 文件在 `./data-{dev,prod}/seedhelper.db*`，**升级不会丢数据**。
+`stop_grace_period: 60s` 保证 SIGTERM 优雅停机（FR-8.2：等待在途作业收敛）。
+SQLite 数据文件在各自的数据目录，**升级不会丢数据**。
 
-## 6. 排错
+## 7. 排错
 
 | 现象 | 排查 |
 |---|---|
-| 容器启动后立即 Exit 1 | `docker logs seedhelper` 看 WEB_PASSWORD / WEB_TOKEN 是否缺失 |
-| `curl /healthz` connection refused | `docker compose ps` 看是否 healthy；`docker logs seedhelper` 看启动日志 |
-| `db: false` in /healthz | SQLite WAL 文件权限：`ls -la ./data/`；`docker exec seedhelper ls -la /app/data` |
+| 容器启动后立即 Exit 1 | `docker logs seedhelper-dev` 看 WEB_PASSWORD / WEB_TOKEN 是否缺失 |
+| `curl /healthz` connection refused | `docker compose ps` 看是否 healthy；`docker logs` 看启动日志 |
+| `db: false` in /healthz | SQLite 文件权限：`ls -la ./data-dev/`；`docker exec seedhelper-dev ls -la /app/data` |
 | 浏览器登录后 session 立即丢失 | 检查浏览器是否禁用第三方 cookie；本机 HTTP 部署下应为同站 cookie，**不会**因 Secure 标志被拒 |
-| 调度作业不执行 | `curl -H "Authorization: Bearer $WEB_TOKEN" http://localhost:8080/api/v1/scheduler` 看 jobs[].enabled；`docker logs seedhelper \| grep "已注册"` |
-| 推送失败 | UI 设置 → 调度作业 → 立即执行 push_free_torrents；查容器日志 |
-| 容器内存超限被 kill | `docker stats seedhelper`；`deploy.resources.limits.memory` 调到 1G |
+| 调度作业不执行 | `curl -H "Authorization: Bearer $WEB_TOKEN" http://localhost:8080/api/v1/scheduler` 看 `jobs[].enabled`；`docker logs seedhelper-dev \| grep "已注册"` |
+| 某作业重启后又启用了 | 启停状态持久化在 `scheduler_job_settings` 表（2026-10-21 起）。用 UI toggle 或 API 改，不要直接改内存 |
+| 推送失败 | UI 设置 → 调度作业 → 立即执行 `push_free_torrents`；查容器日志 |
+| 容器内存超限被 kill | `docker stats seedhelper-dev`；`deploy.resources.limits.memory` 调到 1G |
+| `git push` 报 HTTP2 framing error | 不是网络问题，`git config http.version HTTP/1.1` 后重试 |
+| prod 拉不到镜像 | compose 默认 tag `0.1.0` 不存在，必须显式 `TAG=latest` |
 
-## 7. 数据备份（手工）
+## 8. 数据备份（手工）
 
-虽然本指南不自动备份，但 `seedhelper.db` 需用户自备份：
+不自动备份，`seedhelper.db` 需用户自备份。
 
-```bash
-# 停服（防 SQLite 写中）—— 注意会中断推送/拉取
-docker compose stop  # dev
-docker compose -f docker-compose.prod.yml stop  # prod
-
-# 拷贝
-mkdir -p ./backups/$(date +%Y%m%d)
-cp ./data-dev/seedhelper.db* ./backups/$(date +%Y%m%d)/
-# 或 prod：cp ./data-prod/seedhelper.db* ./backups/$(date +%Y%m%d)/
-
-# 起服
-docker compose start
-```
-
-更安全的方式（无需停服，但依赖 `sqlite3` CLI 在主机上）：
+### dev
 
 ```bash
-# dev
 sqlite3 ./data-dev/seedhelper.db ".backup './backups/$(date +%Y%m%d)/seedhelper.db'"
-# prod
-sqlite3 ./data-prod/seedhelper.db ".backup './backups/$(date +%Y%m%d)/seedhelper-prod.db'"
 ```
 
-**dev → prod 数据迁移**（首次或同步）：
+### prod（远端）
+
+```bash
+ssh mp "cd /mnt/user/appdata/seedhelper/data && \
+  sqlite3 seedhelper.db \".backup './seedhelper.db.bak.\$(date +%Y%m%d_%H%M%S)'\""
+```
+
+> 远程查库时加 `PRAGMA busy_timeout=8000;` 防锁；SQL 里的字符串用**单引号**
+> （双引号会被 SQLite 当成标识符）。
+>
+> 备份**无自动轮转**（按决策不引入新机制），需人工清理。清理前逐个
+> `PRAGMA integrity_check` 确认——损坏的副本没有抢救价值，可直接删。
+
+### dev → prod 数据迁移
 
 ```bash
 # 1) 停 prod 防写中
-docker compose -f docker-compose.prod.yml stop
+ssh mp "cd /mnt/user/appdata/seedhelper/app && docker compose -f docker-compose.prod.128.yml stop"
 
 # 2) 备份式拷贝（保持事务一致）
-sqlite3 ./data-prod/seedhelper.db ".backup './data-prod/seedhelper.db.bak'"
-sqlite3 ./data-dev/seedhelper.db ".backup './data-prod/seedhelper.db'"
+ssh mp "cd /mnt/user/appdata/seedhelper/data && sqlite3 seedhelper.db \".backup './seedhelper.db.bak.migrate'\""
+scp ./data-dev/seedhelper.db mp:/mnt/user/appdata/seedhelper/data/seedhelper.db
 
 # 3) 起 prod
-docker compose -f docker-compose.prod.yml start
+ssh mp "cd /mnt/user/appdata/seedhelper/app && docker compose -f docker-compose.prod.128.yml start"
 ```
 
-## 8. 目录约定
+## 9. 目录约定
+
+### dev（本机仓库根）
 
 ```
-./                      # 仓库根（部署主机）
+./
 ├── .env                # dev 凭据（git 忽略）
-├── .env.prod           # prod 凭据（git 忽略，必须与 .env 不同）
 ├── docker-compose.yml  # dev 配置
-├── docker-compose.prod.yml  # prod 配置
 ├── Dockerfile
-├── data-dev/           # dev SQLite WAL（git 忽略）
-├── data-prod/          # prod SQLite WAL（git 忽略）
+├── data-dev/           # dev SQLite（git 忽略）
 ├── logs-dev/           # dev 日志（git 忽略）
-├── logs-prod/          # prod 日志（git 忽略）
-├── config/             # 配置文件预留
+├── config/             # 配置文件预留（dev compose 挂载点）
 ├── backups/            # 用户自备份（git 忽略）
 └── scripts/
-    └── deploy.sh
+    └── deploy.sh       # 仅 dev
+```
+
+### prod（128）
+
+```
+/mnt/user/appdata/seedhelper/
+├── app/
+│   ├── docker-compose.prod.128.yml   # 手工同步（不是 git 仓库）
+│   └── .env.prod                     # 手工同步
+├── config/     # → 容器 /app/config
+├── data/       # → 容器 /app/data（SQLite）
+└── logs/       # → 容器 /app/logs
 ```
 
 容器内部：
 
 ```
-/app/data/    # 对应 ./data-{dev,prod}
-/app/logs/     # 对应 ./logs-{dev,prod}
-/app/config/  # 对应 ./config
+/app/data/    # SQLite 库文件
+/app/logs/    # 应用日志
+/app/config/  # 配置文件
 /app/web/dist # 前端构建产物（已 bake 进镜像）
 ```
 
-## 9. 资源基线
+## 10. 资源基线
 
 | 资源 | dev | prod |
 |---|---|---|
@@ -232,4 +272,4 @@ docker compose -f docker-compose.prod.yml start
 | CPU limit | 1.0 核 | 2.0 核 |
 | 日志 | 20 MB × 5 = 100 MB | 20 MB × 10 = 200 MB |
 
-实测空闲 ~120 MB RSS、CPU < 3%（非功能 §6）。如需更高并发 / 更大 SQLite 连接池，可调高。**两套同时跑**总资源 ~1.5 GB 内存 / 3 核。
+实测空闲 ~120 MB RSS、CPU < 3%（非功能 §6）。如需更高并发 / 更大 SQLite 连接池，可调高。

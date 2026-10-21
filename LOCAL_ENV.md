@@ -52,20 +52,16 @@
 
 **SSH 访问 prod**：`ssh mp`（`~/.ssh/config` 中的别名 → `root@192.168.0.128`）
 
-> ⚠️ **两个 compose 文件别搞混**：
+> ✅ **只有两个 compose 文件**（2026-10-21 起删掉了重复的本机 prod）：
 >
 > | 文件 | 目标 | 端口 | 数据 | 启动方式 |
 > |---|---|---|---|---|
 > | `docker-compose.yml` | dev（本机） | 8080 | `./data-dev` | `build` 本地构建 |
-> | `docker-compose.prod.yml` | **本机** prod | 8091 | `./data-prod` | `build` 本地构建 |
 > | `docker-compose.prod.128.yml` | **远端** prod（128） | 8091 | `/mnt/user/appdata/seedhelper/data` | 拉 Docker Hub 镜像，无 `build` |
 >
-> `scripts/deploy.sh prod` 用的是 **`docker-compose.prod.yml`**（本机 8091），
-> **不是** 128 那套。部署到 128 要手动用 `docker-compose.prod.128.yml`（见 §9）。
-> 本机当前没有跑 prod 那套（只有 `seedhelper-dev` 在运行）。
->
-> 注：两个 prod 的**宿主端口都是 8091**（容器内都是 8080）——本机与 128
-> 是不同机器，不冲突。8091 是为了避开 8081（本机 qBittorrent 宿主端口）。
+> `scripts/deploy.sh` **只管 dev**（原来还有 `prod` / `all` 分支指向已删除的
+> 本机 prod compose，那个分支会把人引到错误的地方）。
+> 部署到 128 要手动走 `docker-compose.prod.128.yml`（见 §9）。
 
 ## 4. 常用地址与端点
 
@@ -223,7 +219,7 @@ cron 的**持久化来源是 `.env` / `.env.prod`**（`FETCH_ALL_SITES_CRON` / `
 |---|---|
 | dev SQLite | `data-dev/seedhelper.db`（另有 1 个 `.bak.*`） |
 | prod SQLite | 远端 `/mnt/user/appdata/seedhelper/data/` |
-| 日志 | `logs-dev/` / `logs-prod/` |
+| 日志 | `logs-dev/` / 远端 `/mnt/user/appdata/seedhelper/logs/` |
 | 下载目录 | `/data/torrents`（dev 挂载） |
 
 - SQLite 默认走 **WAL**，但 dev / prod compose 都设了 `DB_JOURNAL_MODE=DELETE`
@@ -250,11 +246,10 @@ cd web && npx vite build
 # 前端测试（需先起 dev 容器 localhost:8080）
 cd web && npx playwright test
 
-# 部署
-./scripts/deploy.sh dev deploy      # dev：build + up + healthcheck（本机 8080）
-./scripts/deploy.sh prod deploy     # 本机 prod（8091，非 128！见 §3）
+# 部署（脚本只管 dev；prod 见下方「真实部署链路」）
+./scripts/deploy.sh                 # dev：build + up + healthcheck（本机 8080）
 ./scripts/deploy.sh status          # 查状态
-./scripts/deploy.sh prod logs       # 跟日志
+./scripts/deploy.sh logs            # 跟日志
 
 # 远端操作
 ssh mp "docker ps --filter name=seedhelper"
