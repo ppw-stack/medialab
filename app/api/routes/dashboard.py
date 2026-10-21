@@ -23,8 +23,9 @@ from app.api.auth import require_session
 from app.core.logging import get_logger
 from app.core.simple_cache import TTLCache
 from app.core.timeutils import bj_now_dt, format_bj
-from app.db.models import DownloaderInstance, FreeType, Site, TorrentIndex
+from app.db.models import DownloaderInstance, Site, TorrentIndex
 from app.db.session import session_scope
+from app.domain.enums import FreeType
 
 logger = get_logger(__name__)
 

@@ -22,13 +22,9 @@ from sqlalchemy import or_, select, update
 from app.core.config import AppSettings
 from app.core.logging import get_logger
 from app.core.timeutils import bj_now, bj_now_dt, format_bj
-from app.db.models import (
-    DownloaderInstance,
-    FreeType,
-    PushStatus,
-    TorrentIndex,
-)
+from app.db.models import DownloaderInstance, TorrentIndex
 from app.db.session import session_scope
+from app.domain.enums import FreeType, PushStatus
 from app.services.factory import AdapterFactory
 from app.services.scheduler import JobStep
 

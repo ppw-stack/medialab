@@ -23,7 +23,7 @@ from typing import Any, Final
 from app.adapters.sites.base import FeedItem
 from app.core.timeutils import bj_now_dt, format_bj
 from app.core.windows import FreeWindow
-from app.db.models import FreeSource, FreeType
+from app.domain.enums import FreeSource, FreeType
 
 #: 永久免费标记（出现在 class 或文本中时视为 PERMANENT）
 _PERMANENT_MARKERS: Final = (

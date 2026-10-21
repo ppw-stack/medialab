@@ -24,8 +24,9 @@ from typing import cast
 from sqlalchemy import CursorResult, text
 
 from app.core.logging import get_logger
-from app.db.models import FreeType, TorrentIndex
+from app.db.models import TorrentIndex
 from app.db.session import get_session_factory
+from app.domain.enums import FreeType
 
 logger = get_logger(__name__)
 

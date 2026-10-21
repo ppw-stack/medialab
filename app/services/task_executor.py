@@ -24,13 +24,9 @@ from app.adapters.downloaders.base import AddTorrentPayload, DownloaderError
 from app.adapters.sites._bencode import infohash_from_torrent
 from app.core.logging import get_logger
 from app.core.timeutils import bj_now
-from app.db.models import (
-    DownloaderInstance,
-    PushStatus,
-    Site,
-    TorrentIndex,
-)
+from app.db.models import DownloaderInstance, Site, TorrentIndex
 from app.db.session import session_scope
+from app.domain.enums import PushStatus
 from app.services.task_queue import TaskKind
 
 if TYPE_CHECKING:

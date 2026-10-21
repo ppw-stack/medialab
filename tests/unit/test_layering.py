@@ -1,0 +1,146 @@
+"""分层约束测试（Phase 2）。
+
+依赖矩阵必须是**单向链**：
+
+```
+domain → core → db → adapters → services → api
+```
+
+任何逆向依赖都是架构腐化——比如之前 ``app/core/windows.py`` 从
+``app.db.models`` 导入领域枚举（core 不该依赖 db），导致 core 层
+反向依赖持久化层。
+
+本文件把这条约束写成测试，防止后续重构再引入逆向依赖。
+"""
+
+from __future__ import annotations
+
+import ast
+import collections
+from pathlib import Path
+
+import pytest
+
+#: 各层的名字与合法依赖顺序（数字越小越靠底层）。
+#:
+#: 注意 ``core`` 是**被所有层依赖**的公共设施（日志、配置、时间），
+#: 所以「core → db」才是逆向（core 是更底层），而「adapters → core」
+#: 是正常的向下依赖。
+LAYER_ORDER: dict[str, int] = {
+    "domain": 0,
+    "core": 1,
+    "db": 2,
+    "adapters": 3,
+    "services": 4,
+    "api": 5,
+}
+
+
+def _is_allowed(src: str, dst: str) -> bool:
+    """src 层能否依赖 dst 层。
+
+    层号越小越靠底层（domain=0 最底，api=5 最上）。
+    依赖「同层或更底层」是正常的（services → core、services → db）；
+    依赖「更上层」才是逆向（core → db、adapters → services）。
+    """
+    if src not in LAYER_ORDER or dst not in LAYER_ORDER:
+        return True
+    return LAYER_ORDER[dst] <= LAYER_ORDER[src]
+
+
+def _collect_layer_edges() -> list[tuple[str, str, str]]:
+    """扫描全仓，产出 ``(源层, 目标层, 源文件)`` 列表。"""
+    edges: list[tuple[str, str, str]] = []
+    for path in sorted(Path("app").rglob("*.py")):
+        parts = path.parts
+        if parts[0] != "app":
+            continue
+        src_layer = parts[1] if len(parts) > 2 else "app"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            targets: list[str] = []
+            if isinstance(node, ast.ImportFrom) and node.module:
+                if node.module.startswith("app"):
+                    targets.append(node.module)
+            elif isinstance(node, ast.Import):
+                targets.extend(a.name for a in node.names if a.name.startswith("app"))
+            for tgt in targets:
+                segs = tgt.split(".")
+                if len(segs) < 2:
+                    continue
+                dst_layer = segs[1]
+                edges.append((src_layer, dst_layer, str(path)))
+    return edges
+
+
+@pytest.fixture(scope="module")
+def layer_edges() -> list[tuple[str, str, str]]:
+    return _collect_layer_edges()
+
+
+def test_no_reverse_layer_dependencies(layer_edges) -> None:
+    """任何层都不得依赖**更上层**（逆向依赖 = 架构腐化）。"""
+    violations: list[str] = []
+    for src, dst, path in layer_edges:
+        if not _is_allowed(src, dst):
+            violations.append(f"{src} → {dst}  ({path})")
+    assert not violations, (
+        "发现逆向依赖（上层依赖下层）：\n  " + "\n  ".join(violations)
+    )
+
+
+def test_core_does_not_depend_on_db() -> None:
+    """core 不该依赖 db——这是历史上唯一的逆向依赖，单列一条断言。"""
+    offenders = [
+        path
+        for src, dst, path in _collect_layer_edges()
+        if src == "core" and dst == "db"
+    ]
+    assert not offenders, f"core 依赖了 db：{offenders}"
+
+
+def test_domain_depends_on_nothing() -> None:
+    """domain 层不依赖任何 app 包——它是最底层。"""
+    offenders = [
+        path
+        for src, dst, path in _collect_layer_edges()
+        if src == "domain" and dst != "domain"
+    ]
+    assert not offenders, f"domain 不该依赖其他层：{offenders}"
+
+
+def test_adapters_do_not_depend_on_services_or_api() -> None:
+    """适配层不依赖服务层 / API 层（适配器应可独立单测）。"""
+    offenders = [
+        path
+        for src, dst, path in _collect_layer_edges()
+        if src == "adapters" and dst in ("services", "api")
+    ]
+    assert not offenders, f"adapters 不该依赖 services/api：{offenders}"
+
+
+def test_adapters_do_not_depend_on_db() -> None:
+    """适配层不写数据库（AGENTS.md：适配层可独立单测）。"""
+    offenders = [
+        path
+        for src, dst, path in _collect_layer_edges()
+        if src == "adapters" and dst == "db"
+    ]
+    assert not offenders, f"adapters 不该依赖 db：{offenders}"
+
+
+def test_layer_order_is_sane() -> None:
+    """层级顺序本身要合理（防止有人改坏了这张表）。"""
+    assert list(LAYER_ORDER) == ["domain", "core", "db", "adapters", "services", "api"]
+    assert LAYER_ORDER["domain"] < LAYER_ORDER["core"] < LAYER_ORDER["db"]
+    assert LAYER_ORDER["db"] < LAYER_ORDER["adapters"] < LAYER_ORDER["services"]
+    assert LAYER_ORDER["services"] < LAYER_ORDER["api"]
+
+
+def test_all_layers_have_files() -> None:
+    """每层都要有文件（防止层被误删导致检查失效）。"""
+    counts: collections.Counter[str] = collections.Counter(
+        layer for layer, _, _ in _collect_layer_edges()
+    )
+    for layer in LAYER_ORDER:
+        assert counts[layer] > 0, f"层 {layer} 没有文件"

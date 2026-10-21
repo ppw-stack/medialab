@@ -26,8 +26,9 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 
 from app.core.logging import get_logger
-from app.db.models import DownloaderInstance, PushStatus, Site, TorrentIndex
+from app.db.models import DownloaderInstance, Site, TorrentIndex
 from app.db.session import session_scope
+from app.domain.enums import PushStatus
 from app.services.task_executor import PushItemError, execute_add_torrent
 from app.services.task_queue import TaskKind, TaskQueueService, make_idem_key
 

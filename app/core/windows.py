@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final
 
-from app.db.models import (
+from app.domain.enums import (
     NON_ABORTABLE_FREE_TYPES,
     TYPES_WITHOUT_WINDOW,
     FreeSource,
