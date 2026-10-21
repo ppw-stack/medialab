@@ -52,7 +52,9 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "C4", "SIM", "RUF"]
 ignore = ["S101", "B008", "B027", "B017", "RUF001", "RUF002", "RUF003", "ASYNC230", "ASYNC240"]
 
 [tool.ruff.lint.per-file-ignores]
-"app/db/migrations/**" = ["E501"]
+# 迁移脚本里有超长 SQL 字面量（ALTER TABLE 语句）
+"app/db/migrations.py" = ["E501"]
+"app/db/bootstrap.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"

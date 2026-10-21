@@ -6,7 +6,7 @@
 
 **M1 基础设施 + 核心功能**已落地：
 
-- **M1**：项目骨架、配置中心、SQLite WAL 单写者队列、下载器/站点双适配层、日志与审计、FastAPI 应用 + `/healthz` + `/metrics` + 完整 REST 骨架
+- **M1**：项目骨架、配置中心、SQLite WAL + 短事务约定、下载器/站点双适配层、日志与审计、FastAPI 应用 + `/healthz` + `/metrics` + 完整 REST 骨架
 - **F1 站点拉取**：9 站适配器（mteam / hdsky / hhanclub / audiences / hdhome / hddolby / ourbits / soulvoice / springsunday）拉取免费种 + RSS 清理
 - **F2 免费种窗口**：推送 + 监测 + 中止（push_free_torrents / monitor_free_window / FR-3.5 链路）
 - **FR-1.6 站点用户数据契约**（2026-10-18）：9 站 user_info / seeding_stats / message_count / hr_status 4 方法，刷新作业 `*/30 * * * *`，Vue UI（`/user-data` 列表 + Sites drawer），API 端点 `/api/v1/user-data` 与 `/api/v1/sites/{id}/user-data`
@@ -102,7 +102,7 @@ DownloaderAdapter          SiteAdapter (FR-1.5)
 (qBittorrent/Trans/Deluge/  (GenericSiteAdapter,
  aria2 — 同接口降级)         永久免费优先 R10)
   ↓                          ↓
-SQLite (WAL + 单写者队列, §8)
+SQLite (WAL + 短事务约定, §8)
 ```
 
 下载器与站点的差异全部收拢在适配层，引擎只面向统一接口编程。详见 `app/adapters/`。
@@ -119,7 +119,7 @@ SQLite (WAL + 单写者队列, §8)
 app/
 ├── core/          # 配置、时间、日志、指标、窗口核心
 ├── adapters/      # 下载器 + 站点双适配层（FR-1 / FR-1.5）
-├── db/            # SQLAlchemy 2.0 async + WAL + 单写者
+├── db/            # SQLAlchemy 2.0 async + WAL（session / migrations / bootstrap）
 ├── services/      # 调度中心、业务引擎（M2+）
 ├── api/           # FastAPI 路由
 └── main.py        # 应用入口 + lifespan

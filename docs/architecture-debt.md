@@ -1,7 +1,7 @@
 # 架构债清单
 
-2026-10-21 全代码审查的发现。Phase 0（测试网 + CI 闸门）已完成，
-本清单是 Phase 1~4 的输入。
+2026-10-21 全代码审查的发现。Phase 0（测试网 + CI 闸门）与
+Phase 1（修真缺陷）已完成，本清单是 Phase 2~4 的输入。
 
 **架构本身是对的**：依赖矩阵是干净的单向链，无循环 import：
 
@@ -9,14 +9,33 @@
 core → db → adapters → services → api
 ```
 
-`ruff` + `mypy --strict` 全绿（63 个文件）。问题在**局部实现漂移**，
-不在分层选型。
+`ruff` + `mypy --strict` 全绿。问题在**局部实现漂移**，不在分层选型。
+
+---
+
+## 进度总览
+
+| 项 | 状态 | commit |
+|---|---|---|
+| 1.1 拉取路径无退避/重试 | ✅ 已修 | `4e48619` |
+| 1.2 熔断没人接 | ✅ 已修 | `fddac72` `e8eab3c` `49f81e3` |
+| 1.3 手推/自动推分叉 | ⏳ 待做（Phase 1 末项） | — |
+| 1.4 NEUTRAL 语义矛盾 | ✅ 已修 | `4aeea82` |
+| 1.5 站点名单 4 处 | ✅ 已修 | `69dcc58` |
+| 1.6 单写者队列名实不符 | ✅ 已修 | `87fd5bd` |
+| 1.7 db/session.py 混职责 | ✅ 已修 | `87fd5bd` |
+| 2.1 抽站点公共基类 | ❌ **已决定不做** | — |
+| 2.2 default_downloader 零调用 | ⏳ 待做（Phase 2） | — |
+| 2.3 core→db 逆向依赖 | ⏳ 待做（Phase 2） | — |
+| 2.4 API 层漏业务逻辑 | ⏳ 待做（Phase 2） | — |
+| 3. 死代码 | ⏳ 待做（Phase 3） | — |
+| 4. 前端类型分散 | ⏳ 待做（Phase 4） | — |
 
 ---
 
 ## Phase 1：真缺陷（7 项）
 
-### 1.1 生产拉取路径没有退避 / 重试 / 熔断
+### 1.1 生产拉取路径没有退避 / 重试 / 熔断 ✅
 
 `app/services/feed_fetcher.py` 整套指数退避 + 抖动 + `BreakerTripped`
 熔断机制齐全，但**只被 `/sites/{id}/feed-test` 诊断端点用**。
@@ -26,18 +45,29 @@ core → db → adapters → services → api
 而 `push_free` 反倒有 `push_download_interval_ms` 限频保护——
 **限频层没接进主链路**（R2 账号风险）。
 
-处置：把 `feed_fetcher` 的退避/熔断/限频能力接回主拉取路径，
-或按「单站最小间隔」抽成 runtime param。
+**已修**：`feed_fetcher` 新增 `fetch_pages()`（分页 + 退避重试），
+`jobs.py` 改用它。`fetch()` 保持单页语义不变（诊断端点零影响）。
 
-### 1.2 `BreakerTripped` 抛了没人接
+> **注意**：不复活 `min_interval_minutes`——`2a08bfd` 明确否决过
+> （「用户决定：删掉字段而非接回」）。本改动只在**失败后**重试，
+> 不改变拉取频率。
+
+### 1.2 `BreakerTripped` 抛了没人接 ✅
 
 `app/adapters/sites/mteam.py:294`、`hdhome.py:344` 在 429/403 时抛熔断异常，
 但 `jobs.py` 只 `except Exception` 当普通失败——`base.py` 承诺的
 「熔断 1 小时」从未发生。
 
-处置：`jobs.py` 显式捕获 `BreakerTripped`，该站本轮跳过并记入熔断状态。
+**已修**（三层）：
+1. 8 个 HTML 站的 `search_torrents` 拆出 403/429 → 抛 `BreakerTripped`
+   （此前一律 `>= 400` 抛 `SiteFetchError`，限流与页面变更混为一谈）
+2. `sites` 表加 `breaker_until` 列（熔断是站点级状态，`feeds` 表已下线）
+3. `jobs.py` 捕获熔断 → 写状态、下一轮跳过且不发请求
+   （计入 `skipped_breaker`，**不进 `failed_sites`**——保护性跳过不是故障）
 
-### 1.3 手推 / 自动推两条链路分叉
+熔断时长：429 → 1 小时，403 → 30 分钟（403 可能是 cookie 失效非限流）。
+
+### 1.3 手推 / 自动推两条链路分叉 ⏳
 
 `app/api/routes/torrent_index.py:290-405` 手工重写了一遍
 `task_executor.execute_add_torrent` 的完整流程（下载 → 解 hash →
@@ -67,15 +97,18 @@ add → 标 pushed），连 TOCTOU 防御
 
 处置：API 层改为从 `_registry` 动态生成（`Literal` 改 `str` + 运行时校验）。
 
-### 1.6 「单写者队列」是名义上的
+### 1.6 「单写者队列」是名义上的 ✅
 
 `app/db/session.py` 的 `SingleWriterQueue.write()` **全仓零调用**。
 所有写路径走 `session_scope()`。README / §8 承诺的串行化没落地。
 
-处置：要么让写路径真的走队列，要么把「单写者队列」从文档里删掉
-（当前实际靠「短事务 + 不在事务内做网络 IO」的约定保证安全）。
+**已修**（改文档，不加队列）：SQLite 的单写者限制只在**多进程**下
+才成问题——本项目是单进程单 worker（Dockerfile `--workers 1`），
+真正管写安全的是「短事务 + 不在事务内做网络 IO」的约定。
+`SingleWriterQueue` → `DbBootstrap`（职责收窄为建表 + 迁移编排），
+`write()` 删除，README / DEPLOY.md 的「单写者队列」措辞一并修正。
 
-### 1.7 `app/db/session.py` 579 行混 4 种职责
+### 1.7 `app/db/session.py` 579 行混 4 种职责 ✅
 
 engine 管理 + 22 条裸 `ALTER` + 200 行 datetime→北京时间迁移 +
 discount 回填 + 队列类。
@@ -85,8 +118,14 @@ discount 回填 + 队列类。
 - `pyproject.toml` 的 ruff 配置引用了不存在的 `app/db/migrations/**`
   目录，无 Alembic
 
-处置：拆成 `app/db/engine.py` + `app/db/migrations.py` + `app/db/queue.py`；
-或引入 Alembic。
+**已修**：
+- 拆成 `app/db/session.py`（131 行，只管 engine 生命周期）+
+  `app/db/migrations.py`（383 行，幂等迁移）+
+  `app/db/bootstrap.py`（197 行，建表 + 编排）
+- 22 条 ALTER 按类型分级处理失败（add_column / drop_column /
+  rename_column / create_index），真失败不再静默
+- **不引入 Alembic**（async 适配成本高，现有迁移已跑通；
+  表结构改动超过 10 次再评估）
 
 ---
 
