@@ -22,9 +22,10 @@ from sqlalchemy import or_, select, update
 from app.core.config import AppSettings
 from app.core.logging import get_logger
 from app.core.timeutils import bj_now, bj_now_dt, format_bj
-from app.db.models import DownloaderInstance, TorrentIndex
+from app.db.models import TorrentIndex
 from app.db.session import session_scope
 from app.domain.enums import FreeType, PushStatus
+from app.services.downloader_query import get_default_downloader
 from app.services.factory import AdapterFactory
 from app.services.scheduler import JobStep
 
@@ -68,24 +69,16 @@ class PushFreeService:
     async def run(self) -> PushResult:
         """执行一次推送作业。"""
         # 1) 找默认下载器
-        async with session_scope() as session:
-            default_dl = (
-                await session.execute(
-                    select(DownloaderInstance).where(
-                        DownloaderInstance.is_default.is_(True),
-                        DownloaderInstance.enabled.is_(True),
-                    )
-                )
-            ).scalar_one_or_none()
-            if default_dl is None:
-                logger.warning("push_free: 未配置默认下载器，跳过本次作业")
-                return PushResult(
-                    summary="未配置默认下载器",
-                    steps=(
-                        JobStep("查询默认下载器", "fail", 0, "未配置默认下载器"),
-                    ),
-                )
-            downloader_id = default_dl.id
+        default_dl = await get_default_downloader()
+        if default_dl is None:
+            logger.warning("push_free: 未配置默认下载器，跳过本次作业")
+            return PushResult(
+                summary="未配置默认下载器",
+                steps=(
+                    JobStep("查询默认下载器", "fail", 0, "未配置默认下载器"),
+                ),
+            )
+        downloader_id = default_dl.id
 
         # 2) 选候选
         async with session_scope() as session:

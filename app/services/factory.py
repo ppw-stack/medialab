@@ -140,41 +140,6 @@ class AdapterFactory:
                 return None
             return self.downloader(row)
 
-    async def default_downloader(self) -> DownloaderInstance | None:
-        """取默认下载器：先 is_default=True 且 enabled；否则取第一个 enabled。
-
-        辅种引擎/免费种猎手在没有"站点→下载器"绑定时调用此方法。
-        返回 ``None`` 表示无可用下载器。
-        """
-        from sqlalchemy import select
-
-        from app.db.models import DownloaderInstance
-        from app.db.session import session_scope
-
-        async with session_scope() as s:
-            row = (
-                await s.execute(
-                    select(DownloaderInstance)
-                    .where(
-                        DownloaderInstance.is_default.is_(True),
-                        DownloaderInstance.enabled.is_(True),
-                    )
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
-            if row is not None:
-                return row
-            row = (
-                await s.execute(
-                    select(DownloaderInstance)
-                    .where(DownloaderInstance.enabled.is_(True))
-                    .order_by(DownloaderInstance.id.asc())
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
-            return row
-
-
     # ------------------------------------------------------------ 失效
     def invalidate_downloader(self, downloader_id: int) -> None:
         """丢弃缓存，下次访问时用新配置重建。

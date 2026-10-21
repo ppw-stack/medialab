@@ -29,6 +29,7 @@ from app.core.logging import get_logger
 from app.db.models import DownloaderInstance, Site, TorrentIndex
 from app.db.session import session_scope
 from app.domain.enums import PushStatus
+from app.services.downloader_query import get_default_downloader, get_downloader_by_id
 from app.services.task_executor import PushItemError, execute_add_torrent
 from app.services.task_queue import TaskKind, TaskQueueService, make_idem_key
 
@@ -69,31 +70,17 @@ async def resolve_downloader(
     - 指定了 downloader_id → 用它（不存在 → 404，已禁用 → 400）
     - 未指定 → 用 ``is_default=True`` 且 enabled 的（没有 → 400）
     """
-    async with session_scope() as session:
-        if downloader_id is not None:
-            dl = (
-                await session.execute(
-                    select(DownloaderInstance).where(
-                        DownloaderInstance.id == downloader_id
-                    )
-                )
-            ).scalar_one_or_none()
-            if dl is None:
-                raise PushError("下载器不存在", status=404)
-            if not dl.enabled:
-                raise PushError("下载器已禁用", status=400)
-        else:
-            dl = (
-                await session.execute(
-                    select(DownloaderInstance).where(
-                        DownloaderInstance.is_default.is_(True),
-                        DownloaderInstance.enabled.is_(True),
-                    )
-                )
-            ).scalar_one_or_none()
-            if dl is None:
-                raise PushError("未配置默认下载器", status=400)
+    if downloader_id is not None:
+        dl = await get_downloader_by_id(downloader_id)
+        if dl is None:
+            raise PushError("下载器不存在", status=404)
+        if not dl.enabled:
+            raise PushError("下载器已禁用", status=400)
         return dl
+    dl = await get_default_downloader()
+    if dl is None:
+        raise PushError("未配置默认下载器", status=400)
+    return dl
 
 
 async def push_index_entry(
