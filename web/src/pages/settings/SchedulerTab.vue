@@ -18,7 +18,7 @@ const JOB_LABELS: Record<string, { name: string; desc: string }> = {
   refresh_user_data:   { name: '做种用量',     desc: '拉取 9 站上传/下载/做种数/下载中数 → 写入 site_user_data 表（FR-1.6 站点用户数据契约）' },
   scan_cross_seed:     { name: '辅种巡查',     desc: '扫描 is_cross_seed 下载器, 检测 tracker 未注册/数据丢失 → 自动暂停 (每 6 小时)' },
   drain_task_queue:    { name: '任务队列排空', desc: '回收崩溃残留的僵死任务 + 重试退避到期的推送任务（每 5 分钟）' },
-  daily_checkin:       { name: '每日签到',     desc: '对支持签到的站点自动完成每日签到（hhanclub / soulvoice / hdhome）' },
+  daily_checkin:       { name: '每日签到',     desc: '对支持签到的站点自动完成每日签到（hhanclub / soulvoice / hdhome / hdsky）' },
 }
 
 const data = ref<SchedulerInfo | null>(null)

@@ -271,9 +271,10 @@ class SiteAdapter(ABC):
         语义分层：
 
         - ``SUCCESS`` / ``ALREADY`` —— 正常（今日已签过是幂等结果，不算失败）
-        - ``UNSUPPORTED`` —— 该站无签到功能，或需人机验证（**不做绕过**）
+        - ``UNSUPPORTED`` —— 该站无签到功能，或需人工（Cloudflare Turnstile
+          等人机验证实测无法在服务端环境完成，见 AGENTS.md FR-3.6）
         - ``AUTH_EXPIRED`` —— cookie 失效
-        - ``FAILED`` —— 站点返回了无法识别的页面（改版等）
+        - ``FAILED`` —— 站点返回了无法识别的页面（改版等）或验证码识别失败
         """
         return CheckinResult(CheckinStatus.UNSUPPORTED, "该站未实现自动签到")
 

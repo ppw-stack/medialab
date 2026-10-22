@@ -17,6 +17,8 @@ from app.adapters.sites.base import CheckinStatus
 from app.adapters.sites.parsers.attendance import (
     detect_login_redirect,
     parse_checkin_result,
+    parse_showup_result,
+    parse_showup_sign_state,
 )
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
@@ -214,7 +216,7 @@ def test_unrecognized_checkin_page_is_failed() -> None:
     ],
 )
 def test_captcha_markers_detected(html: str) -> None:
-    """人机验证的各种形态 → UNSUPPORTED（**不做绕过**）。"""
+    """人机验证的各种形态 → UNSUPPORTED（本仓库不实现 Turnstile）。"""
     result = parse_checkin_result(html, url="https://x.test/attendance.php")
     assert result.status == CheckinStatus.UNSUPPORTED
 
@@ -230,3 +232,75 @@ def test_captcha_detection_wins_over_success_marker() -> None:
         url="https://x.test/attendance.php",
     )
     assert result.status == CheckinStatus.UNSUPPORTED
+
+
+# ----------------------------------------------------- hdsky showup 协议
+
+# hdsky 不用 NexusPHP 标准的 /attendance.php（本站 404），而是自建的三段式
+# JSON 协议。**最关键的一点**：服务端对"验证码答错"与"今日已签"返回
+# **不同的 message**——作业靠这个区分"换验证码重试"与"已签到"，两个都当失败
+# 处理会让作业永远显示失败。
+
+
+def test_showup_success() -> None:
+    """签到成功：message 是本次获得的魔力值。"""
+    result = parse_showup_result({"success": True, "message": 10})
+    assert result.status == CheckinStatus.SUCCESS
+    assert result.reward == 10
+    assert "10" in result.message
+
+
+def test_showup_already_signed_is_not_failure() -> None:
+    """``date_unmatch`` = 验证码**答对**但今日已签 → ALREADY（幂等）。"""
+    result = parse_showup_result({"success": False, "message": "date_unmatch"})
+    assert result.status == CheckinStatus.ALREADY
+
+
+def test_showup_invalid_captcha_is_failure() -> None:
+    """``invalid_imagehash`` = 验证码**答错** → FAILED（调用方换图重试）。"""
+    result = parse_showup_result({"success": False, "message": "invalid_imagehash"})
+    assert result.status == CheckinStatus.FAILED
+    assert "验证码" in result.message
+
+
+def test_showup_already_and_wrong_are_distinguishable() -> None:
+    """两个码必须能区分——这是重试逻辑的前提。"""
+    wrong = parse_showup_result({"success": False, "message": "invalid_imagehash"})
+    already = parse_showup_result({"success": False, "message": "date_unmatch"})
+    assert wrong.status is not already.status
+    assert wrong.status == CheckinStatus.FAILED
+    assert already.status == CheckinStatus.ALREADY
+
+
+def test_showup_login_page_is_auth_expired() -> None:
+    """未登录时 showup 返回登录页 HTML（不是 JSON）→ AUTH_EXPIRED。"""
+    result = parse_showup_result("<html><body>登录</body></html>")
+    assert result.status == CheckinStatus.AUTH_EXPIRED
+
+
+def test_showup_unknown_message_is_failure() -> None:
+    """未知 message 也要如实报失败（不静默当成功）。"""
+    result = parse_showup_result({"success": False, "message": "something_new"})
+    assert result.status == CheckinStatus.FAILED
+    assert "something_new" in result.message
+
+
+def test_showup_missing_message_is_failure() -> None:
+    result = parse_showup_result({"success": False})
+    assert result.status == CheckinStatus.FAILED
+
+
+@pytest.mark.parametrize(
+    ("payload", "expect"),
+    [
+        ({"success": True, "sign": False}, False),
+        ({"success": True, "sign": True}, True),
+        ({"success": False, "message": "date_unmatch"}, None),
+        ("<html>登录页</html>", None),
+        ({"success": True}, None),
+        ({"success": True, "sign": "yes"}, None),
+    ],
+)
+def test_showup_sign_state(payload: object, expect: bool | None) -> None:
+    """``{action:check}`` 的签到状态解析；不可解读时返回 None（含 cookie 失效）。"""
+    assert parse_showup_sign_state(payload) is expect

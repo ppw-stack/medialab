@@ -365,3 +365,86 @@ async def test_real_adapter_success(db: None, monkeypatch: pytest.MonkeyPatch) -
 
     assert result["success"] == 1
     assert result["failed"] == 0
+
+
+# ------------------------------------------------- hdsky：真实适配器 + AI 读码
+
+
+async def _hdsky_job(monkeypatch: pytest.MonkeyPatch, *, ai: bool) -> dict[str, object]:
+    """跑一次只有 hdsky 的签到作业，返回作业结果。
+
+    :param ai: 是否配置 AI 读码器。
+    """
+    from urllib.parse import parse_qs
+
+    import httpx
+    import respx
+    from app.adapters.sites.hdsky import HdskyAdapter
+    from app.core.ai import set_ai_reader
+
+    await _add_sites("hdsky_site")
+
+    factory = AdapterFactory()
+
+    def _site(row: Site, *, cookies: str | None = None) -> SiteAdapter:
+        return HdskyAdapter(
+            SiteProfile(name=row.name, domain=row.domain), cookies="uid=1"
+        )
+
+    monkeypatch.setattr(factory, "site", _site)
+
+    class _FakeReader:
+        available = ai
+
+        async def read_captcha(self, image: bytes, *, length: int = 6) -> str:
+            return "ABC123"[:length]
+
+    set_ai_reader(_FakeReader())
+    try:
+        def _showup(request: httpx.Request) -> httpx.Response:
+            action = parse_qs(request.content.decode()).get("action", [""])[0]
+            if action == "check":
+                return httpx.Response(200, json={"success": True, "sign": False})
+            return httpx.Response(200, json={"success": True, "message": 10})
+
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            router.post("https://hdsky_site.test/showup.php").mock(
+                side_effect=_showup
+            )
+            router.post("https://hdsky_site.test/image_code_ajax.php").mock(
+                return_value=httpx.Response(
+                    200, json={"success": True, "code": "a" * 32}
+                )
+            )
+            router.get("https://hdsky_site.test/image.php").mock(
+                return_value=httpx.Response(
+                    200, content=b"\x89PNG\r\n\x1a\n" + b"0" * 32
+                )
+            )
+            return await refresh_all_sites(factory)
+    finally:
+        set_ai_reader(None)
+
+
+async def test_hdsky_counts_as_success_when_ai_configured(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """配置了 AI 读码 → hdsky 走完整签到流程，计入 success。"""
+    result = await _hdsky_job(monkeypatch, ai=True)
+    assert result["success"] == 1
+    assert result["failed"] == 0
+
+
+async def test_hdsky_is_unsupported_without_ai(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未配置 AI → UNSUPPORTED（"需人工"），**不算失败**、作业不变红。
+
+    这是刻意的降级：prod 没配 AI key 时，签到作业仍应正常完成，
+    只是 hdsky 显示为"需人工"。
+    """
+    result = await _hdsky_job(monkeypatch, ai=False)
+    assert result["unsupported"] == 1
+    assert result["failed"] == 0
+    assert result["success"] == 0
+    assert "hdsky_site" in str(result["steps"])

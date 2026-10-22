@@ -29,19 +29,24 @@ HTML 解析成统一的 :class:`~app.adapters.sites.base.CheckinResult`。
 
 .. warning::
 
-   **不做验证码绕过**（合规红线，见 ``AGENTS.md``）：检测到人机验证时
-   返回 ``UNSUPPORTED``（需人工），不做浏览器自动化、不解 Turnstile。
+   **合规边界**（见 ``AGENTS.md`` FR-3.6）：允许对**自有账号**做签到自动化，
+   含 AI 读图形验证码（见 :mod:`app.core.ai`）。Cloudflare Turnstile 等
+   **人机验证**本仓库不实现——实测其挑战无法在服务端环境完成
+   （``TurnstileError 600010``），这类站返回 ``UNSUPPORTED``（需人工）。
 """
 
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from app.adapters.sites.base import CheckinResult, CheckinStatus
 
 __all__ = [
     "detect_login_redirect",
     "parse_checkin_result",
+    "parse_showup_result",
+    "parse_showup_sign_state",
 ]
 
 
@@ -180,3 +185,71 @@ def parse_checkin_result(html: str, *, url: str = "") -> CheckinResult:
             reward=reward,
         )
     return result
+
+
+# ---------------------------------------------------------------- hdsky showup
+# hdsky **不用** NexusPHP 标准的 `/attendance.php`，而是自建的一套三段式
+# （协议来自站点自己的 `common.js`，2026-10-22 实测）：
+#
+#   1. ``POST image_code_ajax.php {action:new}``  → {"success":true,"code":"<32 hex>"}
+#   2. ``GET  image.php?action=regimage&imagehash=<code>`` → 150x40 PNG 图形验证码
+#   3. ``POST showup.php {action:showup, imagehash, imagestring}``
+#
+# 另有 ``POST showup.php {action:check}`` 可**免验证码**查询今日是否已签
+#（该 action 在站点 JS 里是注释掉的，但服务端仍然实现）。
+
+#: hdsky ``showup.php`` 的两种失败码，语义**完全不同**（实测逐条确认）：
+#:
+#: - ``invalid_imagehash`` —— 验证码**答错**（含大小写错误：站点大小写敏感）
+#: - ``date_unmatch``      —— 验证码**答对**，但今日已签到（下一关拦下）
+#:
+#: 靠这个区别，作业能区分"AI 读错码"（该换一张图重试）与"今天已经签了"
+#: （无需重试）。
+_SHOWUP_INVALID_CAPTCHA = "invalid_imagehash"
+_SHOWUP_ALREADY_SIGNED = "date_unmatch"
+
+
+def parse_showup_result(payload: Any) -> CheckinResult:
+    """解析 hdsky ``showup.php`` 的 JSON 响应。
+
+    :param payload: 已解析的 JSON（``dict``）或原始文本（未登录时会返回
+        登录页 HTML，不是 JSON）。
+    """
+    # 未登录：返回登录页 HTML，压根不是 JSON
+    if not isinstance(payload, dict):
+        return CheckinResult(
+            CheckinStatus.AUTH_EXPIRED, "cookie 已失效，需重新登录"
+        )
+
+    if payload.get("success") is True:
+        # message 是本次获得的魔力值（站点 JS 用它算连续天数：
+        # days = (message - 10) / 2 + 1）
+        reward = payload.get("message")
+        reward_int = reward if isinstance(reward, int) else None
+        return CheckinResult(
+            CheckinStatus.SUCCESS,
+            f"签到成功（获得 {reward}）" if reward is not None else "签到成功",
+            reward=reward_int,
+        )
+
+    message = str(payload.get("message") or "")
+    if message == _SHOWUP_ALREADY_SIGNED:
+        # 验证码通过但今日已签 —— 幂等，不算失败
+        return CheckinResult(CheckinStatus.ALREADY, "今日已签到")
+    if message == _SHOWUP_INVALID_CAPTCHA:
+        return CheckinResult(CheckinStatus.FAILED, "验证码识别错误")
+    if not message:
+        return CheckinResult(CheckinStatus.FAILED, "showup 响应缺少 message")
+    return CheckinResult(CheckinStatus.FAILED, f"签到失败：{message}")
+
+
+def parse_showup_sign_state(payload: Any) -> bool | None:
+    """解析 hdsky ``showup.php {action:check}`` 的签到状态。
+
+    :returns: ``True`` = 今日已签；``False`` = 今日未签；
+        ``None`` = 响应不可解读（含 cookie 失效）。
+    """
+    if not isinstance(payload, dict) or payload.get("success") is not True:
+        return None
+    sign = payload.get("sign")
+    return sign if isinstance(sign, bool) else None

@@ -19,6 +19,8 @@ dependencies = [
     "pyyaml>=6.0",
     "beautifulsoup4>=4.12",
     "parsel>=1.9",
+    # 图形验证码放大（FR-3.6 AI 读码）。纯 wheel、无系统依赖。
+    "pillow>=11.0",
 ]
 
 [project.optional-dependencies]

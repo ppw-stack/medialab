@@ -28,6 +28,8 @@ from bs4 import BeautifulSoup
 
 from app.adapters.sites.base import (
     BreakerTripped,
+    CheckinResult,
+    CheckinStatus,
     FeedItem,
     SiteAdapter,
     SiteFetchError,
@@ -39,14 +41,22 @@ from app.adapters.sites.base import (
     parse_publish_time,
     parse_size_from_br,
 )
-from app.adapters.sites.parsers import nexus_php
+from app.adapters.sites.parsers import attendance, nexus_php
 from app.adapters.sites.user_data import SiteUserSnapshot
+from app.core.ai import AIClientError, get_ai_reader
 from app.core.logging import get_logger
+from app.core.metrics import ai_captcha_reads
 
 logger = get_logger(__name__)
 
 #: 单次拉取上限（防止恶意站返回巨大响应撑爆内存）
 _MAX_ITEMS_PER_PULL = 500
+
+#: 签到重试次数（每次重试换一张新验证码）。
+#:
+#: 服务端不限制重试，实测 AI 读码准确率足够高（放大后 12/12），
+#: 3 次是"偶发误读"的兜底，正常一次即成。
+_CHECKIN_MAX_ATTEMPTS = 3
 
 #: ``<img class="pro_XXX">`` → 标准免费 class 映射（供 free_payload 填充）
 _PRO_IMG_MAP: dict[str, str] = {
@@ -482,6 +492,160 @@ class HdskyAdapter(SiteAdapter):
             raw_html=html,
         )
 
+
+    # ----------------------- FR-3.6 每日签到 -----------------------
+
+    async def checkin(self) -> CheckinResult:
+        """hdsky 用自建的 showup 三段式签到（**不是** NexusPHP 标准
+        ``/attendance.php``，后者在本站 404）。
+
+        流程（协议来自站点自己的 ``common.js``，2026-10-22 实测）：
+
+        1. ``POST showup.php {action:check}`` —— **免验证码**查今日是否已签
+        2. 未签 → ``POST image_code_ajax.php {action:new}`` 拿 32 位 code
+        3. ``GET image.php?action=regimage&imagehash=<code>`` 拿 150x40 验证码图
+        4. **AI 读码**（:mod:`app.core.ai`，放大 6 倍后送视觉模型）
+        5. ``POST showup.php {action:showup, imagehash, imagestring}`` 提交
+
+        读错码时**换一张新验证码重试**（服务端不限制重试，实测重试窗口内
+        准确率 100%）。
+
+        未配置 AI 读码时返回 ``UNSUPPORTED``（需人工），而不是让作业变红。
+        """
+        if not self._cookies:
+            return CheckinResult(CheckinStatus.AUTH_EXPIRED, "缺少 cookies")
+
+        reader = get_ai_reader()
+        if not reader.available:
+            logger.info("hdsky 跳过签到：未配置 AI 读码（AI_API_BASE/KEY/MODEL）")
+            return CheckinResult(
+                CheckinStatus.UNSUPPORTED, "未配置 AI 读码，需人工签到"
+            )
+
+        # 1) 免验证码查状态
+        state = await self._fetch_sign_state()
+        if state is None:
+            return CheckinResult(
+                CheckinStatus.AUTH_EXPIRED, "cookie 已失效，需重新登录"
+            )
+        if state:
+            return CheckinResult(CheckinStatus.ALREADY, "今日已签到")
+
+        # 2~5) 申请验证码 → 读码 → 提交（读错则换图重试）
+        last_error = "验证码识别失败"
+        for _ in range(_CHECKIN_MAX_ATTEMPTS):
+            code = await self._new_captcha_hash()
+            if code is None:
+                return CheckinResult(
+                    CheckinStatus.FAILED, "获取验证码失败"
+                )
+            image = await self._fetch_captcha_image(code)
+            if image is None:
+                return CheckinResult(
+                    CheckinStatus.FAILED, "获取验证码图片失败"
+                )
+            try:
+                answer = await reader.read_captcha(image)
+            except AIClientError as exc:
+                ai_captcha_reads.labels(site="hdsky", result="failed").inc()
+                return CheckinResult(
+                    CheckinStatus.FAILED, f"AI 读码失败：{exc}"
+                )
+            ai_captcha_reads.labels(site="hdsky", result="ok").inc()
+
+            result = await self._submit_checkin(code, answer)
+            if result.status is not CheckinStatus.FAILED:
+                return result
+            last_error = result.message
+            logger.info("hdsky 签到未通过（%s），换验证码重试", last_error)
+
+        return CheckinResult(CheckinStatus.FAILED, last_error)
+
+    async def _showup_post(
+        self, data: dict[str, str]
+    ) -> dict[str, object] | str:
+        """POST ``showup.php``，返回解析后的 JSON（非 JSON 时返回原文本）。
+
+        失败一律抛 :class:`SiteFetchError` / :class:`BreakerTripped`——
+        与拉取路径同一契约，不吞异常。
+        """
+        try:
+            resp = await self._client.post(
+                f"{self._base_url()}/showup.php",
+                data=data,
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise SiteFetchError(f"hdsky 签到请求失败：{exc}") from exc
+        if resp.status_code in (403, 429):
+            raise BreakerTripped(f"hdsky 签到返回 {resp.status_code}，需熔断")
+        if resp.status_code >= 400:
+            raise SiteFetchError(f"hdsky 签到返回 HTTP {resp.status_code}")
+        try:
+            payload: dict[str, object] = resp.json()
+        except ValueError:
+            # 未登录时返回登录页 HTML，不是 JSON
+            return resp.text
+        return payload
+
+    async def _fetch_sign_state(self) -> bool | None:
+        """查今日是否已签。``None`` = 响应不可解读（含 cookie 失效）。"""
+        payload = await self._showup_post({"action": "check"})
+        return attendance.parse_showup_sign_state(payload)
+
+    async def _new_captcha_hash(self) -> str | None:
+        """申请一张新验证码，拿 32 位 code。"""
+        try:
+            resp = await self._client.post(
+                f"{self._base_url()}/image_code_ajax.php",
+                data={"action": "new"},
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise SiteFetchError(f"hdsky 申请验证码失败：{exc}") from exc
+        if resp.status_code in (403, 429):
+            raise BreakerTripped(f"hdsky 申请验证码返回 {resp.status_code}，需熔断")
+        if resp.status_code >= 400:
+            raise SiteFetchError(
+                f"hdsky 申请验证码返回 HTTP {resp.status_code}"
+            )
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise SiteFetchError(f"hdsky 验证码响应非 JSON：{exc}") from exc
+        if data.get("success") is not True:
+            return None
+        code = data.get("code")
+        return code if isinstance(code, str) and code else None
+
+    async def _fetch_captcha_image(self, code: str) -> bytes | None:
+        """取验证码图片（站点固定出 150x40，放大交给 AI 侧处理）。"""
+        try:
+            resp = await self._client.get(
+                f"{self._base_url()}/image.php",
+                params={"action": "regimage", "imagehash": code},
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise SiteFetchError(f"hdsky 取验证码图片失败：{exc}") from exc
+        if resp.status_code >= 400:
+            raise SiteFetchError(
+                f"hdsky 取验证码图片返回 HTTP {resp.status_code}"
+            )
+        return resp.content or None
+
+    async def _submit_checkin(
+        self, code: str, answer: str
+    ) -> CheckinResult:
+        """提交签到（code + 识别的字符）。"""
+        payload = await self._showup_post(
+            {
+                "action": "showup",
+                "imagehash": code,
+                "imagestring": answer,
+            }
+        )
+        return attendance.parse_showup_result(payload)
 
     # ----------------------- FR-1.6 站点用户数据（精简版） -----------------------
 
