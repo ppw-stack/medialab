@@ -42,7 +42,7 @@ from app.adapters.sites.base import (
     TorrentBrief,
     TorrentDetail,
 )
-from app.adapters.sites.user_data import SiteUserSnapshot
+from app.adapters.sites.user_data import HourlyBonus, SiteUserSnapshot
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -55,6 +55,51 @@ _DEFAULT_VISIBILITY = 1
 
 #: m-team API 签名密钥（从前端 JS bundle 逆向，公开值）
 _API_SECRET = "HLkPcWmycL57mfJt"
+
+
+def _parse_mteam_hourly_bonus(payload: object) -> HourlyBonus | None:
+    """m-team 时魔（**合计口径**）——从 ``/api/tracker/mybonus`` 响应解析。
+
+    m-team 的「积分商城」页（``kp.m-team.cc/mybonus``）是**纯 SPA 壳**
+    （HTML 里没有数据，页面由 JS 渲染），它要的数据就是这个 API：
+
+        POST /api/tracker/mybonus
+        → {"code":"0","data":{"bonus":{...},"formulaParams":{...}}}
+
+    页面把「每小时获得的魔力值」拆成 6 行（基础 / 官种 / 做种 / 等级 /
+    两步 / 捐赠），**合计列**的值取自 ``formulaParams.finalBs``
+    （该单元格 ``rowSpan=6``，跨全部 6 行）——即每小时总量。
+
+    同行的「数值」列是 ``allBonus``（**基础**部分，不含各项加成），
+    所以只用 allBonus 会少算。
+
+    字段取自站点自己的前端 bundle（``static/js/user.*.chunk.js``）里
+    ``formulaParams`` 的解构与渲染逻辑。
+
+    :param payload: 已解析的 JSON 响应体（或其 ``data`` 部分）。
+    :returns: 时魔；结构不符合预期时返回 ``None``（该站不提供时魔信号，
+        **不是**故障——故障由调用方在 HTTP 层抛 :class:`SiteFetchError`）。
+    """
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    params = data.get("formulaParams")
+    if not isinstance(params, dict):
+        return None
+    raw = params.get("finalBs")
+    if raw is None:
+        return None
+    try:
+        amount = float(raw)
+    except (TypeError, ValueError):
+        return None
+
+    # capped / progress 留 None：m-team 页面**不提供**总进度或封顶提示
+    # （bundle 里没有对应的 i18n 键），`lbonus`（300）虽在响应里但页面
+    # 从未渲染它，无法证实它就是上限 → 不用它推导。
+    return HourlyBonus(amount=amount, unit="魔力值")
 
 
 class MteamAdapter(SiteAdapter):
@@ -507,26 +552,30 @@ class MteamAdapter(SiteAdapter):
     # ----------------------- FR-1.6 站点用户数据（精简版 + 时魔） -----------------------
 
     async def get_user_snapshot(self) -> SiteUserSnapshot | None:
-        """m-team 拉取 4 业务字段，调 2 个端点：
+        """m-team 拉取 4 业务字段 + 时魔，调 3 个端点：
 
         端点 1: ``POST /api/member/profile`` (拿 upload/download)
           - ``data.memberCount.uploaded`` / ``data.memberCount.downloaded``
         端点 2: ``POST /api/tracker/myPeerStatistics`` (拿 seeding/leeching)
           - ``data.seederCount`` / ``data.leecherCount``
+        端点 3: ``POST /api/tracker/mybonus`` (拿时魔)
+          - ``data.formulaParams.finalBs``（**合计**口径 = 每小时魔力值）
 
         路径对齐 PT-depiler mteam.ts 的 userInfo.process 段 (line 369-411)。
 
         异常处理: **失败抛 :class:`SiteFetchError`**（不吞）——service 层
         据此把该站计成 ``failed`` 并保留上次快照，不把故障写成「做种 0」。
-        端点 2 失败同样抛（快照要么完整要么没有）。
+        端点 2 / 3 失败同样抛（快照要么完整要么没有）。
 
-        时魔：**m-team 是 API 站，没有时魔端点**（``memberCount.bonus``
-        是累计魔力值余额，不是每小时收益）→ ``hourly_bonus`` 留 ``None``。
+        时魔：走端点 3。注意 ``data.memberCount.bonus`` 是**累计余额**
+        （百万级），**不是**每小时收益——别拿它当时魔。
 
         实测结构 (2026-10-18 128 prod):
         - data 根下 49 keys (id/username/email/role/memberStatus/...)
         - data.memberCount 子对象 9 keys (uploaded/downloaded/bonus/shareRate/...)
         - 端点 2 返回 6 keys (seederCount/leecherCount/seederSize/leecherSize/...)
+        - 端点 3 返回 data.bonus（各奖励项单价）+ data.formulaParams（公式参数，
+          其中 ``finalBs`` 是每小时合计）
         """
         if not self._apikey or not self._api_base():
             return None
@@ -592,12 +641,35 @@ class MteamAdapter(SiteAdapter):
         seeding_count = int(stat.get("seederCount") or 0)
         leeching_count = int(stat.get("leecherCount") or 0)
 
+        # 端点 3: /api/tracker/mybonus 拿时魔
+        # （m-team 积分商城页 kp.m-team.cc/mybonus 是纯 SPA，数据就来自这里）
+        try:
+            bonus_resp = await self._client.post(
+                f"{self._api_base()}/api/tracker/mybonus",
+                headers=self._auth_headers(),
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            detail = str(exc) or type(exc).__name__
+            raise SiteFetchError(f"mteam mybonus 拉取失败：{detail}") from exc
+        if bonus_resp.status_code >= 400:
+            raise SiteFetchError(f"mteam mybonus 返回 HTTP {bonus_resp.status_code}")
+        try:
+            bonus_data = bonus_resp.json()
+        except (TypeError, ValueError) as exc:
+            raise SiteFetchError("mteam mybonus 返回的不是合法 JSON") from exc
+        if str(bonus_data.get("code")) != "0":
+            raise SiteFetchError(
+                f"mteam mybonus 返回异常 code={bonus_data.get('code')!r}"
+            )
+        hourly_bonus = _parse_mteam_hourly_bonus(bonus_data)
+
         return SiteUserSnapshot(
             upload=upload,
             download=download,
             seeding_count=seeding_count,
             leeching_count=leeching_count,
-            hourly_bonus=None,
+            hourly_bonus=hourly_bonus,
         )
 
 

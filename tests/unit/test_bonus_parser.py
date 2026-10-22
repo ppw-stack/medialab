@@ -13,20 +13,24 @@ hdhome        headline + 额外奖励   92.898              进度条 55.45%（�
 hhanclub      div 网格合计（跨行）  58.711              进度条 37.12%
 audiences     侧栏值（已含加成）   154.0               文案「已达上限」+ 110%
 springsunday  表「每小时茉莉」列   105.571             无 → 上限未知
+m-team        API finalBs（合计）   ~112.1              无 → 上限未知
 ============  ==================  ==================  ==========================
 
-m-team 是 API 站，**没有时魔**（``memberCount.bonus`` 是累计余额，不是
-每小时收益）。
+m-team 是 API 站，时魔走 ``POST /api/tracker/mybonus`` 的
+``data.formulaParams.finalBs``（**合计**口径）。
+⚠️ ``data.memberCount.bonus`` 是**累计余额**（百万级），**不是**每小时收益。
 """
 
 from __future__ import annotations
 
+import json
 import pathlib
 
 import pytest
 from app.adapters.sites import audiences as audiences_mod
 from app.adapters.sites import hdhome as hdhome_mod
 from app.adapters.sites import hhanclub as hhanclub_mod
+from app.adapters.sites import mteam as mteam_mod
 from app.adapters.sites import springsunday as springsunday_mod
 from app.adapters.sites.parsers import nexus_php
 from app.adapters.sites.user_data import HourlyBonus, SiteUserSnapshot
@@ -216,3 +220,79 @@ def test_hourly_bonus_dataclass_defaults() -> None:
     assert bonus.capped is None
     assert bonus.progress is None
     assert SiteUserSnapshot().hourly_bonus is None
+
+
+# -------------------------------------------------------------------- m-team
+
+
+def _read_mteam() -> dict[str, object]:
+    path = FIXTURES / "mteam_mybonus.json"
+    assert path.exists(), f"缺少 fixture：{path}"
+    data: dict[str, object] = json.loads(path.read_text(encoding="utf-8"))
+    return data
+
+
+def test_mteam_parses_hourly_bonus_from_api() -> None:
+    """m-team 时魔 = ``/api/tracker/mybonus`` 的 ``finalBs``（合计口径）。
+
+    m-team 的积分商城页（``kp.m-team.cc/mybonus``）是**纯 SPA 壳**，
+    HTML 里没有数据——页面要的数据就是这个 API 端点。
+
+    期望值从 fixture 里读（``finalBs`` 随做种时长缓慢增长，写死会漂移）。
+    """
+    payload = _read_mteam()
+    params = payload["data"]["formulaParams"]  # type: ignore[index]
+    expected = float(params["finalBs"])  # type: ignore[index]
+
+    bonus = mteam_mod._parse_mteam_hourly_bonus(payload)
+    assert bonus is not None
+    assert bonus.amount == pytest.approx(expected)
+    assert bonus.unit == "魔力值"
+
+
+def test_mteam_bonus_is_total_not_base() -> None:
+    """``finalBs``（合计）必须**大于** ``allBonus``（基础部分）。
+
+    差值是各项加成（官种 / 24h 上传 / 等级 / 做种）。
+    只取 allBonus 会少算——这正是「合计口径」契约要求的。
+    """
+    payload = _read_mteam()
+    params = payload["data"]["formulaParams"]  # type: ignore[index]
+    all_bonus = float(params["allBonus"])  # type: ignore[index]
+    final_bs = float(params["finalBs"])  # type: ignore[index]
+    assert final_bs > all_bonus
+
+    bonus = mteam_mod._parse_mteam_hourly_bonus(payload)
+    assert bonus is not None
+    assert bonus.amount == pytest.approx(final_bs)
+    assert bonus.amount > all_bonus
+
+
+def test_mteam_bonus_has_no_cap_or_progress() -> None:
+    """m-team 页面不提供总进度/封顶信号 → ``capped`` / ``progress`` 留 None。
+
+    契约：``capped=None`` 表示「该站页面不提供上限信号」，**不是**「没封顶」。
+    ``lbonus``（300）虽在响应里，但站点前端从未渲染它，无法证实是上限，
+    故不用它推导。
+    """
+    bonus = mteam_mod._parse_mteam_hourly_bonus(_read_mteam())
+    assert bonus is not None
+    assert bonus.capped is None
+    assert bonus.progress is None
+
+
+def test_mteam_bonus_none_on_missing_fields() -> None:
+    """结构不符 → 返回 None（**不是** 0），且不抛。
+
+    故障由调用方在 HTTP 层抛 ``SiteFetchError``；解析层只认「结构变了」。
+    """
+    assert mteam_mod._parse_mteam_hourly_bonus({}) is None
+    assert mteam_mod._parse_mteam_hourly_bonus({"data": None}) is None
+    assert mteam_mod._parse_mteam_hourly_bonus({"data": {"formulaParams": {}}}) is None
+    assert (
+        mteam_mod._parse_mteam_hourly_bonus(
+            {"data": {"formulaParams": {"finalBs": "not-a-number"}}}
+        )
+        is None
+    )
+    assert mteam_mod._parse_mteam_hourly_bonus("not-a-dict") is None  # type: ignore[arg-type]

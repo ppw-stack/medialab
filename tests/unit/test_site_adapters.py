@@ -772,3 +772,105 @@ def test_torrent_brief_values() -> None:
     assert TorrentBrief.DELETED == "deleted"
     assert TorrentBrief.VIOLATION == "violation"
     assert TorrentBrief.UNKNOWN == "unknown"
+
+
+# ---------------------------------------------- m-team：API 三端点 + 时魔
+
+
+def _mteam_routes(router: respx.MockRouter, *, final_bs: str = "112.146") -> None:
+    """铺 m-team 的 3 个 API 端点。
+
+    m-team 是唯一的 API 站（``x-api-key`` 鉴权、JSON 响应），签到无关，
+    但 user_data 要调 3 个端点：profile / myPeerStatistics / mybonus。
+    """
+    router.post("https://api.example.com/api/member/profile").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": "0",
+                "message": "SUCCESS",
+                "data": {
+                    "id": "123",
+                    "memberCount": {
+                        "uploaded": 1000,
+                        "downloaded": 2000,
+                        "bonus": "1630793.3",  # 累计余额，不是时魔
+                    },
+                },
+            },
+        )
+    )
+    router.post("https://api.example.com/api/tracker/myPeerStatistics").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": "0",
+                "message": "SUCCESS",
+                "data": {"seederCount": 34, "leecherCount": 2},
+            },
+        )
+    )
+    router.post("https://api.example.com/api/tracker/mybonus").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": "0",
+                "message": "SUCCESS",
+                "data": {
+                    "bonus": {"BONUS_UPLOAD_TORRENT": "50"},
+                    "formulaParams": {
+                        "bzeroBonus": "50",
+                        "lbonus": "300",
+                        "allBonus": "53.581",
+                        "callBonus": "53.164",
+                        "h24UpBs": "2.711",
+                        "userClassBs": "2.679",
+                        "finalBs": final_bs,
+                    },
+                },
+            },
+        )
+    )
+
+
+async def test_mteam_snapshot_includes_hourly_bonus() -> None:
+    """m-team 快照：4 业务字段 + 时魔（来自 mybonus 的 finalBs）。"""
+    from app.adapters.sites.user_data import HourlyBonus
+
+    adapter = _make("mteam")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            _mteam_routes(router)
+            snap = await adapter.get_user_snapshot()
+        assert snap is not None
+        assert snap.upload == 1000
+        assert snap.download == 2000
+        assert snap.seeding_count == 34
+        assert snap.leeching_count == 2
+        assert isinstance(snap.hourly_bonus, HourlyBonus)
+        assert snap.hourly_bonus.amount == pytest.approx(112.146)
+        assert snap.hourly_bonus.unit == "魔力值"
+        # 页面不提供上限信号 / 总进度
+        assert snap.hourly_bonus.capped is None
+        assert snap.hourly_bonus.progress is None
+    finally:
+        await adapter.close()
+
+
+async def test_mteam_mybonus_failure_fails_whole_snapshot() -> None:
+    """mybonus 端点失败 → 抛 SiteFetchError（快照要么完整要么没有）。
+
+    降级成 ``hourly_bonus=None`` 会让 upsert 把上次的时魔值**覆盖成 NULL**，
+    UI 上突然空白——所以整个快照作废、保留上次数据。
+    """
+    adapter = _make("mteam")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            _mteam_routes(router)
+            router.post("https://api.example.com/api/tracker/mybonus").mock(
+                return_value=httpx.Response(500, text="boom")
+            )
+            with pytest.raises(SiteFetchError):
+                await adapter.get_user_snapshot()
+    finally:
+        await adapter.close()

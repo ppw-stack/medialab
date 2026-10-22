@@ -285,7 +285,7 @@ POST showup.php {action:showup, imagehash, imagestring} → 提交
 | hhanclub | 憨豆 | div 网格的**跨行单元格**（`row-span-4`） | 进度条 `alt="37.1%"` |
 | audiences | 爆米花 | 侧栏 `mybonus-side__value`（已含 18% 勋章加成） | 文案「已达上限」+ 110% |
 | springsunday | 茉莉 | 表「每小时茉莉」列（我的数据行，含加成系数） | **无** → 上限未知 |
-| mteam | — | API 站**没有时魔**（`memberCount.bonus` 是累计余额） | — |
+| mteam | 魔力值 | API `POST /api/tracker/mybonus` 的 `data.formulaParams.finalBs` | **无** → 上限未知 |
 | hddolby | — | DNS 解析失败（已知间歇故障） | — |
 
 > ⚠️ **进度百分比只认 `alt="NN%"`**：各站 `style` 的单位不同
@@ -294,6 +294,17 @@ POST showup.php {action:showup, imagehash, imagestring} → 提交
 >
 > ⚠️ **进度是站点自有口径**（通常相对**基础**时魔算），而我们存的是
 > **合计**——hhanclub 就是 progress 37% 但合计 58.7。UI 上分开显示。
+
+> ⚠️ **mteam 是 API 站，走的不是 `/mybonus.php`**：
+> 它的积分商城页 `kp.m-team.cc/mybonus` 是**纯 SPA 壳**（HTML 里没有数据，
+> "You need to enable JavaScript to run"），页面要的数据来自
+> `POST /api/tracker/mybonus`（x-api-key 鉴权，**无需新凭据**）。
+> 时魔取 `data.formulaParams.finalBs`（**合计**列，`rowSpan=6` 跨全部 6 个
+> 奖励行）；同行的 `allBonus` 只是**基础**部分。字段语义来自站点自己的前端
+> bundle（`static/js/user.*.chunk.js`）。
+> ⚠️ `data.memberCount.bonus` 是**累计余额**（百万级），**不是**每小时收益。
+> 该端点失败 → 抛 `SiteFetchError`（整个快照作废，保留上次数据），
+> 降级成 `hourly_bonus=None` 会让 upsert 把上次的时魔值**覆盖成 NULL**。
 
 fixture 由脚本抓取（裁剪 + 脱敏 + **裁剪后解析结果必须与整页一致**的自校验）：
 
