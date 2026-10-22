@@ -93,6 +93,12 @@ class AppSettings(BaseSettings):
     push_max_per_run: int = 20
     #: 连续下载 .torrent 文件的间隔（毫秒，默认 2000 = 2 秒），避免触发站点限频
     push_download_interval_ms: int = 2000
+    #: push_free 选种时「同档内」的排序方式（0=按时魔进度升序 1=随机）
+    #:
+    #: 档位（未封顶 / 无信号 / 已封顶）**始终**是主排序；本项只决定同一档内
+    #: 候选怎么排。0 = 按各站时魔进度升序（默认，进度低的站先）；
+    #: 1 = 整个档内随机打乱（含站点顺序）。
+    push_within_bucket_order: int = 0
 
     # -- 优雅停机（FR-8.2）--
     shutdown_grace_seconds: int = 60

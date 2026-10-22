@@ -74,6 +74,14 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         max=30000,
         job="push_free_torrents",
     ),
+    ParamSpec(
+        key="push_within_bucket_order",
+        label="同档内排序（0=按进度升序 1=随机）",
+        default=0,
+        min=0,
+        max=1,
+        job="push_free_torrents",
+    ),
 )
 
 
@@ -150,6 +158,7 @@ def _env_default(settings: AppSettings, key: str) -> int:
         "push_max_per_run": settings.push_max_per_run,
         "monitor_pre_pause_minutes": settings.monitor_pre_pause_minutes,
         "push_download_interval_ms": settings.push_download_interval_ms,
+        "push_within_bucket_order": settings.push_within_bucket_order,
     }
     return mapping[key]
 

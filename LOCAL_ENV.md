@@ -306,6 +306,34 @@ POST showup.php {action:showup, imagehash, imagestring} → 提交
 > 该端点失败 → 抛 `SiteFetchError`（整个快照作废，保留上次数据），
 > 降级成 `hourly_bonus=None` 会让 upsert 把上次的时魔值**覆盖成 NULL**。
 
+> ⚠️ **端点失败必须抛错**（mybonus 端点失败 → 抛 `SiteFetchError`，整个快照作废、
+> 保留上次数据）：降级成 `hourly_bonus=None` 看着无害，但 upsert 会把**上次的
+> 时魔值覆盖成 NULL**——UI 上突然空白，且没有任何错误提示。
+
+#### 时魔也用于 push_free 选种优先级
+
+`push_free_torrents` 按**时魔封顶档**排候选（2026-10-22 加入）：
+
+| 档 | 含义 | 站（prod 实测 2026-10-22） | 候选数 |
+|---|---|---|---|
+| 0 | 明确未封顶 | hdsky 11.7% / hhanclub 36.9% / hdhome 55.5% / soulvoice 94.8% / ourbits 95.4% | 589 |
+| 1 | 无上限信号 | mteam / springsunday / hddolby | 338 |
+| 2 | 已封顶 | audiences 110.2% | 853 |
+
+依据是 NexusPHP 魔力公式 `每小时 = B0 × (1 − e^(−A/B0))`：A 越大越逼近上限，
+**多推一个种子的边际收益越小**，已封顶的站再推也不涨时魔。所以推送名额
+（`push_max_per_run`）优先给「离上限还远」的站——audiences 候选最多（853）却
+被排到最后，首个候选落到第 928 位。
+
+档内排序由运行时参数 **`push_within_bucket_order`** 决定（UI 的「调度 →
+配置」弹框可改）：
+
+- `0`（默认）= 各站时魔进度升序（同进度退化为 `last_seen_at DESC`）
+- `1` = 整个档内随机打乱（含站点顺序）
+
+> ⚠️ 时魔数据来自 `refresh_user_data`（30 分钟一次），最多滞后 30 分钟。
+> 站点没有 `site_user_data` 行 → 落「无信号」档，行为与加此特性前一致。
+
 fixture 由脚本抓取（裁剪 + 脱敏 + **裁剪后解析结果必须与整页一致**的自校验）：
 
 ```bash

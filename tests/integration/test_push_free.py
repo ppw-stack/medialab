@@ -283,3 +283,179 @@ async def test_no_candidates_reports_skip_step(db: None) -> None:
     result = await _service().run()
     assert result.selected == 0
     assert "无新候选" in result.summary
+
+
+# ------------------------------------------------- 时魔封顶档排序（FR-1.6 增补）
+
+
+async def _add_site_with_bonus(
+    name: str,
+    *,
+    capped: bool | None,
+    progress: float | None = None,
+) -> int:
+    """建站 + 写时魔快照（capped=None 表示**没有** site_user_data 行）。"""
+    from app.db.models import Site, SiteUserData
+
+    async with session_scope() as session:
+        s = Site(name=name, domain=f"{name}.test", adapter="hdsky")
+        session.add(s)
+        await session.flush()
+        if capped is not None:
+            session.add(
+                SiteUserData(
+                    site_id=s.id,
+                    hourly_bonus=100.0,
+                    hourly_bonus_unit="魔力值",
+                    hourly_bonus_capped=capped,
+                    hourly_bonus_progress=progress,
+                )
+            )
+        await session.flush()
+        return s.id
+
+
+def _set_order_mode(mode: int) -> None:
+    """改运行时参数「同档内排序」（0=按进度升序 1=随机）。"""
+    from app.services.runtime_params import get_runtime_params
+
+    get_runtime_params().set_memory("push_within_bucket_order", mode)
+
+
+async def _pushed_index_ids() -> list[int]:
+    """按推送顺序返回被推的 index_id（task_queue 行 id 递增 = 入队顺序）。"""
+    from app.db.models import TaskQueue
+
+    async with session_scope() as session:
+        rows = (
+            await session.execute(
+                select(TaskQueue).order_by(TaskQueue.id.asc())
+            )
+        ).scalars().all()
+        return [int(r.payload["index_id"]) for r in rows]
+
+
+async def test_open_bonus_sites_are_pushed_before_capped_ones(db: None) -> None:
+    """时魔未封顶的站优先被推（主排序：未封顶 → 无信号 → 已封顶）。"""
+    await _add_downloader()
+    capped_site = await _add_site_with_bonus("capped_site", capped=True, progress=110.0)
+    open_site = await _add_site_with_bonus("open_site", capped=False, progress=10.0)
+    capped_idx = await _add_torrent(site_id=capped_site, item_id="c1")
+    open_idx = await _add_torrent(site_id=open_site, item_id="o1")
+
+    result = await _service().run()
+    assert result.selected == 2
+    assert await _pushed_index_ids() == [open_idx, capped_idx]
+
+
+async def test_unknown_bonus_site_sits_between_open_and_capped(db: None) -> None:
+    """无上限信号的站排中间（未封顶 → 无信号 → 已封顶）。"""
+    await _add_downloader()
+    open_site = await _add_site_with_bonus("open_site", capped=False, progress=10.0)
+    # capped=None → **不建** site_user_data 行（模拟没抓到时魔）
+    unknown_site = await _add_site_with_bonus("unknown_site", capped=None)
+    capped_site = await _add_site_with_bonus("capped_site", capped=True, progress=110.0)
+
+    open_idx = await _add_torrent(site_id=open_site, item_id="o1")
+    unknown_idx = await _add_torrent(site_id=unknown_site, item_id="u1")
+    capped_idx = await _add_torrent(site_id=capped_site, item_id="c1")
+
+    result = await _service().run()
+    assert result.selected == 3
+    assert await _pushed_index_ids() == [open_idx, unknown_idx, capped_idx]
+
+
+async def test_within_bucket_orders_sites_by_progress_ascending(db: None) -> None:
+    """同档内（都未封顶）按各站时魔进度升序——离上限最远的站先。"""
+    await _add_downloader()
+    # last_seen_at 越晚排越前（默认行为），这里故意让「进度高」的站
+    # last_seen_at 更晚，验证是 progress 而不是 last_seen_at 在决定顺序
+    far = await _add_site_with_bonus("far_site", capped=False, progress=5.0)
+    near = await _add_site_with_bonus("near_site", capped=False, progress=95.0)
+    far_idx = await _add_torrent(site_id=far, item_id="f1")
+    near_idx = await _add_torrent(site_id=near, item_id="n1")
+
+    result = await _service().run()
+    assert result.selected == 2
+    assert await _pushed_index_ids() == [far_idx, near_idx]
+
+
+async def test_capped_site_is_not_pushed_when_budget_is_tight(db: None) -> None:
+    """名额不够时，已封顶站被挤出候选（排在最后）。"""
+    await _add_downloader()
+    capped_site = await _add_site_with_bonus("capped_site", capped=True, progress=110.0)
+    open_site = await _add_site_with_bonus("open_site", capped=False, progress=10.0)
+    await _add_torrent(site_id=capped_site, item_id="c1")
+    await _add_torrent(site_id=open_site, item_id="o1")
+
+    from app.services.runtime_params import get_runtime_params
+
+    get_runtime_params().set_memory("push_max_per_run", 1)
+    result = await _service().run()
+    assert result.selected == 1
+    pushed = await _pushed_index_ids()
+    assert len(pushed) == 1
+
+
+async def test_random_mode_shuffles_within_bucket_but_keeps_bucket_order(
+    db: None,
+) -> None:
+    """随机模式：档内被打乱（含站点顺序），但**档边界不变**。
+
+    档边界是「优先推未封顶站」这个核心行为，随机模式不能破坏它。
+    """
+    import random as _random
+
+    await _add_downloader()
+    open_a = await _add_site_with_bonus("open_a", capped=False, progress=10.0)
+    open_b = await _add_site_with_bonus("open_b", capped=False, progress=50.0)
+    capped = await _add_site_with_bonus("capped_x", capped=True, progress=110.0)
+
+    # 记录每个种子的 index_id → 所属站
+    idx_site: dict[int, int] = {}
+    for i in range(3):
+        idx_site[await _add_torrent(site_id=open_a, item_id=f"a{i}")] = open_a
+        idx_site[await _add_torrent(site_id=open_b, item_id=f"b{i}")] = open_b
+    capped_idx = await _add_torrent(site_id=capped, item_id="c1")
+    idx_site[capped_idx] = capped
+
+    _set_order_mode(1)
+    svc = _service()
+    svc._rng = _random.Random(42)  # type: ignore[attr-defined]
+    result = await svc.run()
+    assert result.selected == 7
+
+    pushed = await _pushed_index_ids()
+    # 档边界：已封顶站必须排最后（档边界是「优先推未封顶站」这个核心行为）
+    assert pushed[-1] == capped_idx
+    # 档内被打乱：未封顶站的 index 不再按站聚在一起
+    order_sites = [idx_site[p] for p in pushed[:-1]]
+    assert len(set(order_sites)) == 2, "档内应混着两个站"
+    assert order_sites != sorted(order_sites), "随机模式应打乱档内站点顺序"
+
+
+async def test_no_bonus_data_behaves_like_before(db: None) -> None:
+    """站点没有时魔数据 → 全部落「无信号」档，行为与改动前一致。"""
+    await _add_downloader()
+    site_id = await _add_site()
+    await _add_torrent(site_id=site_id, item_id="i1")
+
+    result = await _service().run()
+    assert result.selected == 1
+    assert result.pushed == 0  # 没配下载器时不该推
+
+
+async def test_bucket_distribution_is_reported_in_steps(db: None) -> None:
+    """步骤卡片显示三档站点分布（让用户看到排序依据）。"""
+    await _add_downloader()
+    await _add_site_with_bonus("s_open", capped=False, progress=10.0)
+    await _add_site_with_bonus("s_unknown", capped=None)
+    await _add_site_with_bonus("s_capped", capped=True, progress=110.0)
+
+    result = await _service().run()
+    steps = {s.name: s for s in result.steps}
+    assert "按时魔封顶排序" in steps
+    detail = steps["按时魔封顶排序"].detail or ""
+    assert "未封顶 1 站" in detail
+    assert "无信号 1 站" in detail
+    assert "已封顶 1 站" in detail

@@ -130,6 +130,7 @@ class RuntimeParamsUpdateIn(BaseModel):
     push_max_per_run: int | None = None
     monitor_pre_pause_minutes: int | None = None
     push_download_interval_ms: int | None = None
+    push_within_bucket_order: int | None = None
 
 
 def _assert_params_model_covers_specs() -> None:
