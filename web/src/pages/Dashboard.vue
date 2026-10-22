@@ -59,9 +59,10 @@ const JOB_LABELS: Record<string, string> = {
   fetch_all_sites: '站点拉取',
   push_free_torrents: '免费种推送',
   monitor_free_window: '免费窗口监测',
-  refresh_user_data: '做种用量',
+  refresh_user_data: '站点信息获取',
   scan_cross_seed: '辅种巡查',
   drain_task_queue: '队列排空',
+  daily_checkin: '每日签到',
 }
 </script>
 

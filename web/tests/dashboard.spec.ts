@@ -59,12 +59,28 @@ test('总览 - 下载器在途区块在有数据时渲染', async ({ page }) => 
   }
 })
 
-test('总览 - 调度作业列表显示 6 个作业', async ({ page }) => {
+test('总览 - 调度作业列表与 API 一致', async ({ page }) => {
   await login(page)
   await page.goto('/')
   await page.waitForLoadState('networkidle')
 
+  // 作业数会随新作业增加而变（daily_checkin 之后是 7 个）——**别写死数字**，
+  // 跟 API 对齐（API 才是唯一事实源），加作业时不用改测试
+  const resp = await page.request.get('/api/v1/scheduler')
+  const data = await resp.json()
+  const jobs = (data.jobs ?? []) as { name: string }[]
+
   const rows = page.locator('.job-row')
-  await expect(rows).toHaveCount(6)
-  console.log('  ✓ 调度作业 6 行')
+  await expect(rows).toHaveCount(jobs.length)
+  console.log(`  ✓ 调度作业 ${jobs.length} 行（与 API 一致）`)
+
+  // 关键作业都在（漏注册 / 漏渲染能被发现）
+  for (const label of [
+    '站点拉取',
+    '免费种推送',
+    '站点信息获取',
+    '每日签到',
+  ]) {
+    await expect(rows.filter({ hasText: label })).toHaveCount(1)
+  }
 })
