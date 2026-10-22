@@ -118,16 +118,21 @@ docker compose up -d
 三步：
 
 ```bash
-# 1) 本机 push 触发 CI 构建（等 CI 绿）
+# 1) 本机 push 触发 CI（闸门绿 → 自动构建推送镜像）
 git push origin main
 
-# 2) 128 上拉新镜像
+# 2) 等 docker-image workflow 完成（确认镜像已推上去），然后 128 上拉新镜像
 ssh mp "docker pull ppw111/seedhelper:latest"
 
 # 3) 128 上重建容器
 ssh mp "cd /mnt/user/appdata/seedhelper/app && TAG=latest docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d"
 ```
 
+> **CI 是有依赖链的**（2026-10-23 改）：`push` → `ci`（ruff/mypy/pytest/
+> vue-tsc/oxlint 闸门）→ **全绿才** `docker-image`（构建推送）。
+> 闸门红 → **不产出镜像**，第 2 步拉到的还是旧镜像（不会拉到半成品）。
+> 所以第 2 步前先确认 `docker-image` workflow 是 success。
+>
 > ⚠️ **`TAG=latest` 必须显式指定**：compose 里默认值是 `0.1.0`，
 > 而 Docker Hub 上只有 `latest` 和 `main`，`0.1.0` 不存在，直接 `up -d` 会拉取失败。
 >
@@ -162,7 +167,7 @@ open http://192.168.0.128:8091      # prod
 ## 6. 升级
 
 ```bash
-# 1) 本机提交并推送（CI 自动构建镜像）
+# 1) 本机提交并推送（CI 闸门绿后自动构建镜像）
 git push origin main
 
 # 2) 128 上拉镜像 + 重建
@@ -187,6 +192,8 @@ SQLite 数据文件在各自的数据目录，**升级不会丢数据**。
 | 容器内存超限被 kill | `docker stats seedhelper-dev`；`deploy.resources.limits.memory` 调到 1G |
 | `git push` 报 HTTP2 framing error | 不是网络问题，`git config http.version HTTP/1.1` 后重试 |
 | prod 拉不到镜像 | compose 默认 tag `0.1.0` 不存在，必须显式 `TAG=latest` |
+| push 后没有新镜像 | 闸门红了就不构建镜像（2026-10-23 起 CI 有依赖链）。看 `ci` workflow 是否红；或 `docker-image` 被 `workflow_run` 的 job 级 `if` 跳过了（PR 分支不构建） |
+| 镜像 tag 指向错误的 commit | `workflow_run` 下 `github.sha` 是默认分支 HEAD 而非被测 commit。checkout 必须用 `ref: ${{ github.event.workflow_run.head_sha }}`，tag 计算必须自己来（metadata-action 的 `context.sha` 同样不可信） |
 
 ## 8. 数据备份（手工）
 

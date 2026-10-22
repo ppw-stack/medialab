@@ -15,6 +15,10 @@ name: ci
 on:
   push:
     branches: [main]
+    # v* tag 也要跑闸门：docker-image 改为 workflow_run 依赖链后，
+    # 版本发布镜像由「tag push 触发的 ci」通过后才构建（见
+    # docker-image.yml 的 Compute image tags 步骤）。
+    tags: ['v*']
   pull_request:
     branches: [main]
 

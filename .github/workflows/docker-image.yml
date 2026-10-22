@@ -1,11 +1,27 @@
 name: docker-image
 
+# 由 ci.yml 的**成功**结果触发（workflow_run）——镜像构建必须等静态检查
+# 与测试闸门全绿，否则「代码红了但镜像照样推、照样能部署到生产」。
+#
+# 为什么不用 push 触发 + workflow_run 的组合：
+#   · 本 workflow 只保留 workflow_run 一个触发器，**不**再自己响应 push
+#     ——否则会与 workflow_run 路径**重复构建推送**两次
+#   · PR 不构建镜像：PR 代码**永远不会**进入 build job（见 job 级 if），
+#     所以 PR 的不可信代码拿不到 secrets、不会被执行
+#
+# ⚠️ workflow_run 的关键陷阱：此时 github.sha / github.ref 指向**默认
+# 分支的 HEAD**（触发时那次 workflow_run 所属的 run），**不是**被测的
+# 那个 commit。必须显式 checkout ${{ github.event.workflow_run.head_sha }}
+# ——否则会构建出「上一个 commit 的镜像」而 tag 却标成 latest，极难发现。
+#
+# 同理，docker/metadata-action 在本事件下的 context.sha 也是默认分支
+# HEAD（不是被测 commit），context.ref 永远是 refs/heads/main——故
+# type=sha / type=semver 会产出**错误**的 tag。故此处**不用**
+# metadata-action，改为自行计算 tag 与标签（见 Compute image tags 步骤）。
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
-  pull_request:
-    branches: [main]
+  workflow_run:
+    workflows: ['ci']
+    types: [completed]
 
 env:
   REGISTRY: docker.io
@@ -13,52 +29,95 @@ env:
 
 jobs:
   build:
+    # 闸门红 → 整个 job 跳过（不构建、不推送）。
+    #
+    # · conclusion != success：ci 任一 job 失败/被取消 → 不构建
+    # · event != pull_request：PR 的 ci 通过了也不构建——镜像只发 main
+    #   与 v* tag。**这一条同时是安全边界**：PR 代码不可信，不该在持有
+    #   Docker Hub 凭据的 job 里被 checkout + 执行。
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
     concurrency:
-      group: docker-image-${{ github.ref }}
+      group: docker-image-${{ github.event.workflow_run.head_branch || github.ref }}
       cancel-in-progress: true
     steps:
       - name: Checkout
-        # 固定到完整 commit SHA 防止 tag 被劫持后执行恶意代码
+        # ⚠️ 必须用 workflow_run.head_sha，不是默认的 github.sha
+        #    （那会 checkout 到默认分支 HEAD，可能是别的 commit）
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          # fetch-depth 0：拿全历史与 tag，供下面识别 v* semver tag
+          fetch-depth: 0
+
+      - name: Compute image tags
+        id: meta
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        run: |
+          set -euo pipefail
+          SHORT="${HEAD_SHA:0:7}"
+          # v* semver tag → 额外产出版本号 tag（v1.2.3 → 1.2.3 与 1.2）
+          # 仅当该 commit 上确实挂着 v* tag 时才有。
+          #
+          # ⚠️ 必须在写 tags heredoc **之前**算完：heredoc 里的每一行都是
+          #    一个镜像 tag，多写一行提示语就会被当成 tag 推给 Docker Hub。
+          SEMVER=$(git tag --points-at "$HEAD_SHA" \
+            | grep -E '^v[0-9]+\.[0-9]+' | head -1 | sed 's/^v//' || true)
+          {
+            echo "tags<<TAGS_EOF"
+            echo "${IMAGE}:latest"
+            echo "${IMAGE}:main"
+            echo "${IMAGE}:sha-${SHORT}"
+            if [ -n "$SEMVER" ]; then
+              echo "${IMAGE}:${SEMVER}"
+              echo "${IMAGE}:$(echo "$SEMVER" | cut -d. -f1,2)"
+            fi
+            echo "TAGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "labels<<LABELS_EOF"
+            echo "org.opencontainers.image.title=seedhelper"
+            echo "org.opencontainers.image.description=PT 辅种自动化、免费种窗口看护与种子健康度监测"
+            echo "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}"
+            echo "org.opencontainers.image.licenses=MIT"
+            # revision 用**被测 commit**，不是 workflow_run 的 context.sha
+            echo "org.opencontainers.image.revision=${HEAD_SHA}"
+            echo "LABELS_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "被测 commit：${HEAD_SHA}"
+          if [ -n "$SEMVER" ]; then
+            echo "检测到 semver tag：${SEMVER}"
+          else
+            echo "未检测到 v* semver tag（只发 latest/main/sha-*）"
+          fi
+          echo "生成的 tag："
+          # 打印上面写入的 tag（用 awk 而非 sed 的范围语法——heredoc
+          # 标记里的 << 在 sed 正则里需要转义，易错）
+          awk '/^tags<<TAGS_EOF$/{f=1;next} /^TAGS_EOF$/{f=0} f' "$GITHUB_OUTPUT" | sed 's/^/  /'
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
 
       - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=main,enable={{is_default_branch}}
-          labels: |
-            org.opencontainers.image.title=seedhelper
-            org.opencontainers.image.description=PT 辅种自动化、免费种窗口看护与种子健康度监测
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.licenses=MIT
-
       - name: Build and push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
           context: .
           file: ./Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
@@ -67,7 +126,6 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Verify image is publicly pullable
-        if: github.event_name != 'pull_request'
         # 校验镜像**匿名可拉**（128 主机没有 Docker Hub 凭据，靠 public
         # 仓库拉取；私有则 pull 失败 → 生产部署不了）。
         #

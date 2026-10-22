@@ -444,10 +444,37 @@ ssh mp "cd /mnt/user/appdata/seedhelper/app && TAG=latest docker compose -f dock
 
 ## 10. CI
 
-`.github/workflows/docker-image.yml`
+两个 workflow，**有依赖关系**（2026-10-23 改）：
 
-- 触发：`push` 到 `main` 或 `v*` tag；`pull_request` 只构建不推送
-- 产物：`docker.io/ppw111/seedhelper`（public）
+```
+push main ──→ ci（ruff+mypy+pytest / vue-tsc+oxlint）──全绿──→ docker-image（构建+推送）
+                  ↓ 红                                              ↑
+              不构建不推送                                     产出 latest/main/sha-*
+```
+
+`.github/workflows/ci.yml`（闸门）
+
+- 触发：`push` 到 `main` 或 `v*` tag；`pull_request` 也触发
+- 闸门：backend（ruff + mypy + pytest）+ frontend（vue-tsc + types-placement + oxlint）
+- 刻意不含 Playwright e2e：连的是真实下载器与真实站点，CI 上跑不了
+- 不上传 coverage artifact（无 codecov 等消费者，纯堆积）
+
+`.github/workflows/docker-image.yml`（构建推送）
+
+- 触发：**`workflow_run`**（上游 `ci` 完成）——不是 push
+  - 只有 `ci` **全绿**才构建推送；红了**不产出镜像**（闸门真成了闸门）
+  - PR 的 ci 通过了也不构建：PR 代码不可信，不该在持有 Docker Hub 凭据的
+    job 里被 checkout + 执行（**安全边界**）
+- ⚠️ **`workflow_run` 的两个陷阱**（已处理，勿改回去）：
+  1. `github.sha` / `github.ref` 指向**默认分支 HEAD**，不是被测 commit
+     → 必须 `actions/checkout` 用 `ref: ${{ github.event.workflow_run.head_sha }}`
+  2. `docker/metadata-action` 的 `context.sha` 同样是默认分支 HEAD，
+     `context.ref` 永远是 `refs/heads/main` → `type=sha` / `type=semver`
+     会产出**错误**的 tag。故**不用 metadata-action**，改为自算 tag
+     （`Compute image tags` 步骤），OCI `revision` 标签也用被测 commit
+- 产物 tag：`latest` + `main` + `sha-<short>`；命中 `v*` semver tag 时额外
+  产出版本号 tag（`v1.2.3` → `1.2.3` 与 `1.2`）
+- 产物：`docker.io/ppw111/seedhelper`（public，构建后校验匿名可拉）
 - 基镜像：`python:3.12-slim`
 - 缓存：`type=gha`
 - 已硬化（`a82cd10`）：timeout、concurrency、`set -euo pipefail`、jq 安全构造 JWT、凭据不回显
