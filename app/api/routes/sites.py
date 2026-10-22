@@ -78,7 +78,7 @@ class SiteOut(BaseModel):
 
 
 class SiteUserDataOut(BaseModel):
-    """站点用户数据（FR-1.6 精简版，4 字段）。"""
+    """站点用户数据（FR-1.6 精简版，4 字段 + 时魔）。"""
 
     site_id: int
     site_name: str
@@ -87,6 +87,14 @@ class SiteUserDataOut(BaseModel):
     download: int = 0
     seeding_count: int = 0
     leaching_count: int = 0
+    #: 时魔（每小时获得的站点积分·合计口径）
+    hourly_bonus: float | None = None
+    #: 时魔单位（站点自称：魔力值 / 爆米花 / 茉莉 / 憨豆 / 积分）
+    hourly_bonus_unit: str | None = None
+    #: 是否已达该站的获取上限（None = 该站无法判断）
+    hourly_bonus_capped: bool | None = None
+    #: 站点进度百分比
+    hourly_bonus_progress: float | None = None
     last_seen_at: str | None = None
 
 

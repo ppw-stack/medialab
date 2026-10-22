@@ -88,6 +88,14 @@ export interface SiteUserDataSummary {
   download?: number
   seeding_count?: number
   leeching_count?: number
+  /** 时魔：每小时获得的站点积分（合计口径）。 */
+  hourly_bonus?: number | null
+  /** 时魔单位（站点自称：魔力值 / 爆米花 / 茉莉 / 憨豆 / 积分）。 */
+  hourly_bonus_unit?: string | null
+  /** 是否已达该站的获取上限（null = 该站无法判断）。 */
+  hourly_bonus_capped?: boolean | null
+  /** 站点进度百分比（>=100 表示封顶）。 */
+  hourly_bonus_progress?: number | null
   last_seen_at?: string | null
 }
 
@@ -102,6 +110,14 @@ export interface UserData {
   download: number
   seeding_count: number
   leeching_count: number
+  /** 时魔：每小时获得的站点积分（合计口径，含各项加成）。 */
+  hourly_bonus: number | null
+  /** 时魔单位（站点自称：魔力值 / 爆米花 / 茉莉 / 憨豆 / 积分）。 */
+  hourly_bonus_unit: string | null
+  /** 是否已达该站的获取上限（null = 该站无法判断）。 */
+  hourly_bonus_capped: boolean | null
+  /** 站点进度百分比（>=100 表示封顶）。 */
+  hourly_bonus_progress: number | null
   last_seen_at: string | null
 }
 
@@ -116,6 +132,14 @@ export interface UserDataTrend {
   download: number
   seeding_count: number
   leeching_count: number
+  /** 时魔：每小时获得的站点积分（合计口径，含各项加成）。 */
+  hourly_bonus: number | null
+  /** 时魔单位（站点自称：魔力值 / 爆米花 / 茉莉 / 憨豆 / 积分）。 */
+  hourly_bonus_unit: string | null
+  /** 是否已达该站的获取上限（null = 该站无法判断）。 */
+  hourly_bonus_capped: boolean | null
+  /** 站点进度百分比（>=100 表示封顶）。 */
+  hourly_bonus_progress: number | null
   last_seen_at: string | null
 }
 

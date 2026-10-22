@@ -1,0 +1,162 @@
+<!-- navbar -->
+<div id="info_block" style="padding: 4px 10px; line-height: 1.8;">
+ <div style="display: inline-block; width: 66%; width: calc(70% - 20px); text-align: left;">
+ <span>
+ 欢迎回来,
+ <span class="nowrap"><a href="userdetails.php?id=12345"><b><span class="UserClass_Name Elite_Name">TESTUSER</span></b></a></span> [<a href="usercp.php">控制面板</a>]
+ [<a href="torrents.php?inclbookmarked=1&amp;allsec=1&amp;incldead=0">收藏</a>]
+ [<a href="torrents.php?inclbookmarked=3&amp;allsec=1&amp;incldead=0">预订</a>]
+ [<a href="mybonus.php" title="茉莉: 293,623.0">茉莉: 293.6K</a>]
+ [<a href="badges.php">徽章</a>]
+ [<a href="blackjack.php">21点</a>]
+ [<a href="invite.php">邀请: 0</a>]
+ [<a href="myfls.php">免流: 3</a>]
+ [<a href="myrfs.php">返还</a>]
+ <br />
+ <font class="color_ratio">分享率: </font> 1.327 <font class='color_uploaded'>上传量: </font> 682.28 GB <font class='color_downloaded'>下载量: </font> 514.06 GB <font class="color_bonus">做种积分:</font> <span title="388,954.8">389.0K</span>
+ <font class='color_active'>当前活动: </font>
+ <img class="arrowup" alt="TESTUSER seeding" title="当前做种" src="pic/trans.gif" />295 <img class="arrowdown" alt="TESTUSER leeching" title="当前下载" src="pic/trans.gif" />0
+ <font class="color_rank">流量排名:</font>&nbsp;13896 <font class="color_uploaded">&uarr;74</font>
+ </span>
+ </div>
+<!-- 时魔区块 -->
+<table width="100%">
+ <tr>
+ <td class="embedded">
+ 平均分配给用户：分享率低于
+ <select name="ratiocharity">
+ <option value="0.1">0.1</option>
+ <option value="0.2">0.2</option>
+ <option value="0.3" selected="selected">0.3</option>
+ <option value="0.4">0.4</option>
+ <option value="0.5">0.5</option>
+ <option value="0.6">0.6</option>
+ <option value="0.7">0.7</option>
+ <option value="0.8">0.8</option>
+ </select>
+ 且下载量大于 10 GB
+ </td>
+ <td class="embedded">
+ <b>赠送量：</b>
+ <select name="bonuscharity" id="charityselect">
+ <option value="1000">1,000</option>
+ <option value="2000">2,000</option>
+ <option value="3000" selected="selected">3000</option>
+ <option value="5000">5,000</option>
+ <option value="8000">8,000</option>
+ <option value="10000">10,000</option>
+ <option value="20000">20,000</option>
+ <option value="50000">50,000</option>
+ </select>
+ 茉莉
+ </td>
+ </tr>
+ </table> </dd>
+ </td>
+ <td class="rowfollow" align="center">
+ 最少1,000<br>最多50,000 </td>
+ <td class="rowfollow" align="center">
+ <input
+ type="submit"
+ name="submit"
+ value="慈善捐赠"
+ />
+ </td>
+ </tr>
+ </form>
+ <form action="?action=exchange" method="post">
+ <input type="hidden" name="option" value="11" />
+ <tr>
+ <td class="rowfollow" style="text-align: center;"><b>11</b></td>
+ <td class="rowfollow" align="left">
+ <dt>回收1个邀请名额</dt>
+ <dd>
+ 如果有足够的邀请名额，你可以用它来兑换茉莉。交易完成后，你的邀请名额数会减少，茉莉则会增加。 </dd>
+ </td>
+ <td class="rowfollow" align="center">
+ -250,000 </td>
+ <td class="rowfollow" align="center">
+ <input
+ type="submit"
+ name="submit"
+ value="神王及以上方可！"
+ disabled="disabled"
+ />
+ </td>
+ </tr>
+ </form>
+ <form action="?action=exchange" method="post">
+ <input type="hidden" name="option" value="12" />
+ <tr>
+ <td class="rowfollow" style="text-align: center;"><b>12</b></td>
+ <td class="rowfollow" align="left">
+ <dt>3天传说待遇</dt>
+ <dd>
+ 如果有足够的茉莉，你可以用它来换取3天的传说待遇。交易完成后，你的茉莉会减少，同时你的等级将变为传说。 </dd>
+ </td>
+ <td class="rowfollow" align="center">
+ 1,500,000 </td>
+ <td class="rowfollow" align="center">
+ <input
+ type="submit"
+ name="submit"
+ value="需要更多茉莉"
+ disabled="disabled"
+ />
+ </td>
+ </tr>
+ </form>
+ </table>
+ </div></div>
+ <div style="width: 100%"><h2 align="left">积分/茉莉到底是什么玩意儿，我怎样才能得到它？</h2><div class="section-text" style="padding: 10px; text-align: left"> <h3>做种每小时将得到如下的积分/茉莉</h3>
+<ul>
+ <li>
+ 0.4积分 * <i>你的做种数</i> (做种数最多计50个不小于3GB的官种) </li>
+ <li>每小时获得的积分点数由下面的公式给出<p>
+&nbsp;&nbsp;&nbsp;&nbsp;<img src="pic/bonusformulac.svg" height="64" alt="TESTUSER A" title="TESTUSER A"><br />
+&nbsp;&nbsp;&nbsp;&nbsp;<img src="pic/bonusformulad.svg" height="45" alt="TESTUSER B" title="TESTUSER B"></p>
+式中
+<ul>
+<li><b>A</b>为中间变量</li>
+<li><b>Si</b>为第<b>i</b>个种子的大小，单位是GB；<b>f()</b>为大小调节函数，函数定义不公开</li>
+<li><b>Ti</b>为第<b>i</b>个种子的累积做种时间，单位是周</li>
+<li><b>Ni</b>为第<b>i</b>个种子当前的做种者数</li>
+<li><b>N0</b>为参数。<b>N0</b> = 12</li>
+<li><b>B</b>为1小时中用户获得的做种积分点数</li>
+<li><b>E</b>为参数。<b>E</b> = 51.5</li>
+<li><b>D</b>为参数。<b>D</b> = 435</li>
+</ul>
+部分种子不参与A值的计算
+<ul>
+<li>被管理组标记为中性的种子</li>
+<li>被系统根据预定义规则排除的种子</li>
+<li>当前不参与A值计算的种子数: 4 (40.42 GB)</li>
+</ul>
+简言之，为做种人数少、文件体积大的种子做种能获得更多积分。随着做种时间的增加，每小时获得的积分也将相应增长。</li>
+ <li>
+ 茉莉加成系数 (取等级加成、身份加成、官种加成与受邀者加成之和。身份加成最高1.0，官种加成最高1.0，受邀者加成最高1.0) <ul>
+ <li>
+ 等级加成系数: 0.05 </li>
+ <li>
+ 身份加成系数 (取已佩戴徽章的身份加成之和): 0.00 </li>
+ <li>
+ 官种加成系数 (取官种数量加成和体积加成中较小的一个): 0.03 <ul>
+ <li>
+ 官种数量加成系数: 0.06 </li>
+ <li>
+ 官种体积加成系数: 0.03 </li>
+ </ul>
+ </li>
+ <li>
+ 受邀者加成系数 (取受邀者官种数量加成和体积加成中较小的一个): 0.00 <ul>
+ <li>
+ 数量加成系数: 0.00, 官种数量总计: 0 </li>
+ <li>
+ 体积加成系数: 0.00, 官种体积总计: 0.0 GB </li>
+ </ul>
+ </li>
+ </ul>
+ </li>
+</ul>
+<h3>当前每小时能获得的积分/茉莉</h3>
+<table border="1" cellspacing="0" cellpadding="5"><thead><tr class="nowrap"><th class="colhead" align="center"><div style="width: 150px">&nbsp;</div></th><th class="colhead" align="center">做种数量</th><th class="colhead" align="center">做种体积(GB)</th><th class="colhead" align="center">官种数量</th><th class="colhead" align="center">官种体积(GB)</th><th class="colhead" align="center">基础积分</th><th class="colhead" align="center"><div style="width: 75px">A值</div></th><th class="colhead" align="center"><div style="width: 75px">B值</div></th><th class="colhead" align="center">每小时积分(基础积分+B值)</th><th class="colhead" align="center">加成系数</th><th class="colhead" align="center">每小时茉莉</th></tr></thead><tbody><tr class="nowrap"><td class="rowfollow" align="center"><b>我的数据</b></td><td class="rowfollow" align="center">291</td><td class="rowfollow" align="center">5,723.5</td><td class="rowfollow" align="center">127</td><td class="rowfollow" align="center">951.9</td><td class="rowfollow" align="center">20.000</td><td class="rowfollow" align="center">1,531.012</td><td class="rowfollow" align="center">77.683</td><td class="rowfollow" align="center">97.683</td><td class="rowfollow" align="center">1.08</td><td class="rowfollow" align="center">105.587</td></tr><tr class="nowrap"><td class="rowfollow" align="center"><b>全站平均<b/></td><td class="rowfollow" align="center">139</td><td class="rowfollow" align="center">2,492.9</td><td class="rowfollow" align="center">100</td><td class="rowfollow" align="center">1,532.8</td><td class="rowfollow" align="center">9.031</td><td class="rowfollow" align="center">1,648.764</td><td class="rowfollow" align="center">45.845</td><td class="rowfollow" align="center">54.876</td><td class="rowfollow" align="center"></td><td class="rowfollow" align="center"></td></tr><tr class="nowrap"><td class="rowfollow" align="center"><b>全站前5%</b></td><td class="rowfollow" align="center">528</td><td class="rowfollow" align="center">9,294.7</td><td class="rowfollow" align="center">418</td><td class="rowfollow" align="center">5,887.7</td><td class="rowfollow" align="center">20.000</td><td class="rowfollow" align="center">5,874.482</td><td class="rowfollow" align="center">137.735</td><td class="rowfollow" align="center">156.572</td><td class="rowfollow" align="center"></td><td class="rowfollow" align="center"></td></tr></tbody></table>

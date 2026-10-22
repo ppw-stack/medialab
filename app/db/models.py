@@ -257,12 +257,12 @@ class SchedulerJobSetting(Base):
 
 
 class SiteUserData(Base):
-    """站点用户数据快照（FR-1.6 站点用户数据契约·精简版）。
+    """站点用户数据快照（FR-1.6 站点用户数据契约·精简版 + 时魔）。
 
     ``refresh_user_data`` 作业每 30 分钟调一次各适配器的
     :meth:`SiteAdapter.get_user_snapshot`，把 4 业务字段
     upload / download / seeding_count / leeching_count
-    upsert 到本表（``site_id`` UNIQUE）。
+    以及时魔（hourly_bonus 系列）upsert 到本表（``site_id`` UNIQUE）。
 
     字段语义详见 :mod:`app.adapters.sites.user_data`。
     """
@@ -285,6 +285,14 @@ class SiteUserData(Base):
     seeding_count: Mapped[int] = mapped_column(Integer, default=0)
     #: 当前下载/未完成数
     leeching_count: Mapped[int] = mapped_column(Integer, default=0)
+    #: 时魔：每小时获得的站点积分（**合计口径**，含各项加成）
+    hourly_bonus: Mapped[float | None] = mapped_column(Float, nullable=True)
+    #: 时魔单位（站点自称：魔力值 / 爆米花 / 茉莉 / 憨豆 / 积分）
+    hourly_bonus_unit: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    #: 是否已达该站的获取上限（``None`` = 该站页面不提供上限信号）
+    hourly_bonus_capped: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    #: 站点进度百分比（>=100 表示封顶；口径由站点自己定）
+    hourly_bonus_progress: Mapped[float | None] = mapped_column(Float, nullable=True)
     #: 最近一次刷新时间（北京时间）
     last_seen_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
     created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)

@@ -113,6 +113,20 @@ _ALTER_STATEMENTS: tuple[tuple[str, str], ...] = (
         "CREATE INDEX IF NOT EXISTS ix_site_user_data_site_seen "
         "ON site_user_data(site_id, last_seen_at)",
     ),
+    # 时魔字段 (FR-1.6 增补)：每小时获得的站点积分 + 是否封顶
+    ("add_column", "ALTER TABLE site_user_data ADD COLUMN hourly_bonus REAL"),
+    (
+        "add_column",
+        "ALTER TABLE site_user_data ADD COLUMN hourly_bonus_unit VARCHAR(16)",
+    ),
+    (
+        "add_column",
+        "ALTER TABLE site_user_data ADD COLUMN hourly_bonus_capped BOOLEAN",
+    ),
+    (
+        "add_column",
+        "ALTER TABLE site_user_data ADD COLUMN hourly_bonus_progress REAL",
+    ),
 )
 
 #: 独立创建的索引（不随上面的 ALTER 循环走）

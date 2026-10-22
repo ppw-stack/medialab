@@ -70,8 +70,28 @@ const summary = computed(() => {
   const total_leech = data.value.reduce((s, d) => s + d.leeching_count, 0)
   const total_up = data.value.reduce((s, d) => s + d.upload, 0)
   const total_dn = data.value.reduce((s, d) => s + d.download, 0)
-  return { total_seed, total_leech, total_up, total_dn }
+  const total_bonus = data.value.reduce((s, d) => s + (d.hourly_bonus ?? 0), 0)
+  const capped = data.value.filter((d) => d.hourly_bonus_capped === true).length
+  return { total_seed, total_leech, total_up, total_dn, total_bonus, capped }
 })
+
+/** 时魔文案：`92.9 魔力值`；没有时魔的站显示「—」。 */
+function fmtBonus(v: number | null, unit: string | null): string {
+  if (v === null || v === undefined) return '—'
+  return unit ? `${v.toFixed(1)} ${unit}` : v.toFixed(1)
+}
+
+/** 时魔提示：封顶状态 + 站点进度（进度是站点自己的口径）。 */
+function bonusTooltip(d: UserData): string {
+  if (d.hourly_bonus === null || d.hourly_bonus === undefined) return '该站没有时魔数据'
+  const parts: string[] = []
+  if (d.hourly_bonus_capped === true) parts.push('已达获取上限')
+  else if (d.hourly_bonus_capped === false) parts.push('未达上限')
+  if (d.hourly_bonus_progress !== null && d.hourly_bonus_progress !== undefined) {
+    parts.push(`站点进度 ${d.hourly_bonus_progress.toFixed(1)}%`)
+  }
+  return parts.join('，') || '站点未提供上限信息'
+}
 
 onMounted(load)
 
@@ -100,6 +120,12 @@ const columns = computed(() => [
   },
   { title: '做种', dataIndex: 'seeding_count', key: 'seeding_count', width: 80 },
   { title: '下载中', dataIndex: 'leeching_count', key: 'leeching_count', width: 90 },
+  {
+    title: '时魔/小时',
+    dataIndex: 'hourly_bonus',
+    key: 'hourly_bonus',
+    width: 150,
+  },
   {
     title: '刷新于',
     dataIndex: 'last_seen_at',
@@ -136,6 +162,13 @@ const columns = computed(() => [
       <a-card>
         <a-statistic title="总下载" :value="fmtBytes(summary.total_dn)" />
       </a-card>
+      <a-card>
+        <a-statistic
+          title="时魔合计/小时"
+          :value="summary.total_bonus.toFixed(1)"
+          :suffix="summary.capped > 0 ? `${summary.capped} 站已封顶` : ''"
+        />
+      </a-card>
     </div>
 
     <a-table
@@ -143,12 +176,18 @@ const columns = computed(() => [
       :columns="columns"
       :loading="loading"
       :pagination="false"
-      :scroll="{ x: 720 }"
+      :scroll="{ x: 860 }"
       row-key="site_id"
       size="small"
     >
       <template #bodyCell="{ column, record }">
-        <template v-if="column.key === 'actions'">
+        <template v-if="column.key === 'hourly_bonus'">
+          <span :title="bonusTooltip(record)">
+            {{ fmtBonus(record.hourly_bonus, record.hourly_bonus_unit) }}
+          </span>
+          <a-tag v-if="record.hourly_bonus_capped === true" color="orange">已封顶</a-tag>
+        </template>
+        <template v-else-if="column.key === 'actions'">
           <a-button size="small" :loading="refreshingSite === record.site_id"
             @click="refreshOne(record.site_id)">
             刷新

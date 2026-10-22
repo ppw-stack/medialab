@@ -31,6 +31,14 @@ class UserDataRow:
     download: int
     seeding_count: int
     leeching_count: int
+    #: 时魔（每小时获得的站点积分·合计口径）
+    hourly_bonus: float | None
+    #: 时魔单位（站点自称：魔力值 / 爆米花 / 茉莉 / 憨豆 / 积分）
+    hourly_bonus_unit: str | None
+    #: 是否已达该站的获取上限（None = 该站无法判断）
+    hourly_bonus_capped: bool | None
+    #: 站点进度百分比
+    hourly_bonus_progress: float | None
     last_seen_at: str | None
 
 
@@ -44,6 +52,10 @@ class UserDataTrendRow:
     download: int
     seeding_count: int
     leeching_count: int
+    hourly_bonus: float | None
+    hourly_bonus_unit: str | None
+    hourly_bonus_capped: bool | None
+    hourly_bonus_progress: float | None
     last_seen_at: str | None
 
 
@@ -64,6 +76,10 @@ async def list_user_data() -> list[UserDataRow]:
             download=ud.download,
             seeding_count=ud.seeding_count,
             leeching_count=ud.leeching_count,
+            hourly_bonus=ud.hourly_bonus,
+            hourly_bonus_unit=ud.hourly_bonus_unit,
+            hourly_bonus_capped=ud.hourly_bonus_capped,
+            hourly_bonus_progress=ud.hourly_bonus_progress,
             last_seen_at=ud.last_seen_at,
         )
         for ud, site_name, adapter in rows
@@ -90,6 +106,10 @@ async def list_user_data_trends() -> list[UserDataTrendRow]:
             download=ud.download,
             seeding_count=ud.seeding_count,
             leeching_count=ud.leeching_count,
+            hourly_bonus=ud.hourly_bonus,
+            hourly_bonus_unit=ud.hourly_bonus_unit,
+            hourly_bonus_capped=ud.hourly_bonus_capped,
+            hourly_bonus_progress=ud.hourly_bonus_progress,
             last_seen_at=ud.last_seen_at,
         )
         for ud, site_name in rows

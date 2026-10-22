@@ -46,8 +46,8 @@ from app.adapters.sites.base import (
     parse_abs_datetime,
     parse_size_text,
 )
-from app.adapters.sites.parsers import attendance
-from app.adapters.sites.user_data import SiteUserSnapshot
+from app.adapters.sites.parsers import attendance, nexus_php
+from app.adapters.sites.user_data import HourlyBonus, SiteUserSnapshot
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -133,6 +133,56 @@ def _parse_hhanclub_snapshot(html: str) -> SiteUserSnapshot | None:
         seeding_count=seeding_count,
         leeching_count=leeching_count,
     )
+
+
+def _parse_hhanclub_hourly_bonus(html: str) -> HourlyBonus | None:
+    """hhanclub 时魔（**合计口径**）。
+
+    hhanclub（HH v2 fork）的「每小时获得的合计憨豆」用 **div 网格**渲染
+    （不是 table），合计值在数据网格里那个跨行的单元格::
+
+        <div id="bonus-table" class="grid ...">
+            奖励类型 数量 体积 A 值 基础憨豆 系数 获得憨豆 合计</div>
+        <div class='grid grid-cols-[...] ...'>
+          <div class="pl-[30%]">基本奖励</div> <div>167</div> ... <div>18.436</div>
+          <div class='w-[15%] ... row-span-4 flex items-center'>58.339</div>  ← 合计
+          <div class="pl-[30%]">官种加成</div> ... <div>32.294</div>
+          <div class="pl-[30%]">后宫加成</div> ... <div>0.000</div>
+          <div class="pl-[30%]">勋章加成</div> ... <div>7.609</div>
+        </div>
+
+    headline（「你当前每小时能获取18.44个积分」）只是**基础**值，不含
+    官种 / 后宫 / 勋章加成 → 合计才是「每小时实际能拿到的总数」。
+
+    进度条在 headline 下方：``<img class="loadbaryellow !rounded-lg "
+    style="width: 36.88%;" alt="36.88%" />``（class 后面跟 Tailwind 工具类，
+    只能靠 class **包含** loadbar 来圈，style 的单位各站不同）。
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    amount: float | None = None
+
+    anchor = soup.find(id="bonus-table")
+    if anchor is not None:
+        grid = anchor.find_next_sibling("div")
+        if grid is not None:
+            for cell in grid.find_all("div"):
+                classes = " ".join(cell.get("class") or [])
+                if "row-span" not in classes:
+                    continue
+                amount = nexus_php.parse_number(cell.get_text(" ", strip=True))
+                if amount is not None:
+                    break
+    if amount is None:
+        headline = nexus_php.parse_bonus_headline(html)
+        if headline is None:
+            return None
+        amount = headline[0]
+
+    progress = nexus_php.parse_progress_percent(html)
+    capped: bool | None = None
+    if progress is not None:
+        capped = progress >= 100.0
+    return HourlyBonus(amount=amount, unit="憨豆", capped=capped, progress=progress)
 
 
 class HhanclubAdapter(SiteAdapter):
@@ -627,10 +677,28 @@ class HhanclubAdapter(SiteAdapter):
             raise SiteFetchError(f"hhanclub 签到提交返回 HTTP {resp.status_code}")
         return attendance.parse_checkin_result(resp.text, url=str(resp.url))
 
-    # ----------------------- FR-1.6 站点用户数据（精简版） -----------------------
+    # ----------------------- FR-1.6 站点用户数据（精简版 + 时魔） -----------------------
+
+    async def _fetch_page(self, path: str) -> str:
+        """GET 一个页面并返回 HTML。失败抛 :class:`SiteFetchError`。
+
+        拉取失败**不吞**（不返回空串 / None）：service 层据此把该站计成
+        ``failed``，避免把故障伪装成「上传 0 / 做种 0」。
+        """
+        url = f"{self._base_url()}{path}"
+        try:
+            resp = await self._client.get(url, timeout=self._timeout)
+        except httpx.HTTPError as exc:
+            # httpx 的 ConnectError 消息常为空（原因在 __cause__），
+            # 空消息在作业 summary 里看不出所以然
+            detail = str(exc) or type(exc).__name__
+            raise SiteFetchError(f"hhanclub {path} 拉取失败：{detail}") from exc
+        if resp.status_code >= 400:
+            raise SiteFetchError(f"hhanclub {path} 返回 HTTP {resp.status_code}")
+        return resp.text
 
     async def get_user_snapshot(self) -> SiteUserSnapshot | None:
-        """hhanclub 走 ``/userdetails.php``。
+        """hhanclub 走 ``/mybonus.php``。
 
         hhanclub (HH v2 fork) navbar 模板跟标准 NexusPHP 1.5 不同：
         用 ``<img alt="上传">`` / ``<img alt="下载">`` / ``<img alt="做种数">``
@@ -638,20 +706,28 @@ class HhanclubAdapter(SiteAdapter):
 
         不用 nexus_php.parse_user_snapshot（标准 NexusPHP 模板匹配不上），
         这里用 :func:`_parse_hhanclub_snapshot` 单点适配。
+
+        ``/mybonus.php`` 的 navbar 与 ``/userdetails.php`` 同一套（stdhead
+        渲染），一页同时拿到 4 业务字段 + 时魔（合计口径）。
         """
         if not self._cookies:
             return None
-        try:
-            resp = await self._client.get(
-                f"{self._base_url()}/userdetails.php",
-                timeout=self._timeout,
+        bonus_html = await self._fetch_page("/mybonus.php")
+        snap = _parse_hhanclub_snapshot(bonus_html)
+        if snap is None:
+            snap = _parse_hhanclub_snapshot(
+                await self._fetch_page("/userdetails.php")
             )
-        except httpx.HTTPError as exc:
-            logger.warning("hhanclub get_user_snapshot HTTP 失败：%s", exc)
-            return None
-        if resp.status_code >= 400:
-            return None
-        return _parse_hhanclub_snapshot(resp.text)
+            if snap is None:
+                raise SiteFetchError("hhanclub 用户数据解析失败：4 个业务字段均未取到")
+        bonus = _parse_hhanclub_hourly_bonus(bonus_html)
+        return SiteUserSnapshot(
+            upload=snap.upload,
+            download=snap.download,
+            seeding_count=snap.seeding_count,
+            leeching_count=snap.leeching_count,
+            hourly_bonus=bonus,
+        )
 
 
 

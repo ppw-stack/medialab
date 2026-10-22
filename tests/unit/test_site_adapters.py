@@ -219,15 +219,34 @@ async def test_check_reachability_returns_site_health(name: str) -> None:
 
 
 @pytest.mark.parametrize("name", ALL_ADAPTERS)
-async def test_get_user_snapshot_returns_snapshot_or_none(name: str) -> None:
-    """user_data 契约：失败返回 None（不抛），由 service 层隔离。"""
-    from app.adapters.sites.user_data import SiteUserSnapshot
+async def test_get_user_snapshot_raises_on_failure(name: str) -> None:
+    """user_data 契约：拉取/解析失败**必须抛 SiteFetchError**。
 
+    | 返回              | 语义                     | 上层处理     |
+    |-------------------|--------------------------|--------------|
+    | ``None``          | 该站不支持 / 无凭据      | 跳过         |
+    | 抛 ``SiteFetchError`` | 故障（网络/HTTP/解析）  | 计入失败站   |
+
+    之前各 adapter 把失败吞掉返回 ``None``，service 层又写 0 兜底——
+    故障被伪装成「上传 0 / 做种 0」，前端完全看不出哪站挂了
+    （2026-10-21 prod 事故同款问题）。
+    """
     adapter = _make(name)
     try:
-        with _mock_all(name):
-            snap = await adapter.get_user_snapshot()
-            assert snap is None or isinstance(snap, SiteUserSnapshot)
+        # 200 + 空 HTML → 4 个业务字段解析不出来 → 必须抛错
+        with _mock_all(name), pytest.raises(SiteFetchError):
+            await adapter.get_user_snapshot()
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.parametrize("name", ALL_ADAPTERS)
+async def test_get_user_snapshot_raises_on_network_error(name: str) -> None:
+    """网络故障（连接失败）同样必须抛 :class:`SiteFetchError`。"""
+    adapter = _make(name)
+    try:
+        with _mock_all_error(httpx.ConnectError("boom")), pytest.raises(SiteFetchError):
+            await adapter.get_user_snapshot()
     finally:
         await adapter.close()
 

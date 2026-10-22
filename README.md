@@ -9,7 +9,7 @@
 - **M1**：项目骨架、配置中心、SQLite WAL + 短事务约定、下载器/站点双适配层、日志与审计、FastAPI 应用 + `/healthz` + `/metrics` + 完整 REST 骨架
 - **F1 站点拉取**：9 站适配器（mteam / hdsky / hhanclub / audiences / hdhome / hddolby / ourbits / soulvoice / springsunday）拉取免费种 + RSS 清理
 - **F2 免费种窗口**：推送 + 监测 + 中止（push_free_torrents / monitor_free_window / FR-3.5 链路）
-- **FR-1.6 站点用户数据契约**（2026-10-18）：9 站 user_info / seeding_stats / message_count / hr_status 4 方法，刷新作业 `*/30 * * * *`，Vue UI（`/user-data` 列表 + Sites drawer），API 端点 `/api/v1/user-data` 与 `/api/v1/sites/{id}/user-data`
+- **FR-1.6 站点用户数据契约**（2026-10-18，2026-10-22 加时魔）：单方法 `get_user_snapshot` 拉 4 业务字段（上传/下载/做种数/下载中数）+ **时魔**（每小时获得的站点积分·合计口径，含是否封顶），刷新作业 `*/30 * * * *`（并发抓取，失败计入 failed 不写 0），Vue UI（`/user-data` 列表 + Sites drawer），API 端点 `/api/v1/user-data` 与 `/api/v1/sites/{id}/user-data`
 - **FR-3.6 站点每日签到**（2026-10-22）：`daily_checkin` 作业（cron `37 8 * * *`）对 hhanclub / soulvoice / hdhome 三站自动签到（NexusPHP `/attendance.php`）。其余 6 站不支持（无此功能或需人机验证，**不做绕过**）
 
 `F2 辅种引擎` / `F4 巡检` / `F5 清理` 自 **M2** 起实施。

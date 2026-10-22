@@ -45,7 +45,7 @@ from app.adapters.sites.base import (
     parse_abs_datetime,
 )
 from app.adapters.sites.parsers import attendance, nexus_php
-from app.adapters.sites.user_data import SiteUserSnapshot
+from app.adapters.sites.user_data import HourlyBonus, SiteUserSnapshot
 from app.core.logging import get_logger
 
 
@@ -97,6 +97,46 @@ def _parse_cookies(raw: str | None) -> dict[str, str]:
             k, v = part.split("=", 1)
             out[k.strip()] = v.strip()
     return out
+
+
+#: hdhome 页面上的额外奖励项：「黄星时魔奖励（0）」/「…额外奖励（4.181）」
+#:
+#: 只认「奖励（数字）」这种形状——headline 自己的括号块里是
+#: 「（做种少于10人官种数量：1 / A = 1832.6 / 保种标签： 0）」，不是纯数字，
+#: 匹配不上。
+_EXTRA_BONUS_RE = re.compile(r"奖励[（(]([\d.]+)[）)]")
+
+
+def _parse_hdhome_hourly_bonus(html: str) -> HourlyBonus | None:
+    """hdhome 时魔（**合计口径**）。
+
+    hdhome 的 headline 是**基础时魔**（页面自己标了「【基础时魔/做种积分】」），
+    各项额外奖励在下面单列::
+
+        你当前每小时能获取88.756个魔力值
+        (做种少于10人官种数量：1 / A = 1832.6 / 保种标签： 0 )【基础时魔/做种积分】
+        黄星时魔奖励（0）
+        保种体积大于1TB且做种满24小时非零魔种子额外奖励（4.181）（超964 GB）
+
+    合计 = 基础时魔 + Σ 各项额外奖励。
+
+    进度条有 **3 根**：第 1 根是总进度（对应基础时魔），后 2 根是分项
+    （黄星 / 保种额外）——取第 1 根。
+    """
+    headline = nexus_php.parse_bonus_headline(html)
+    if headline is None:
+        return None
+    amount = headline[0]
+    for m in _EXTRA_BONUS_RE.finditer(html):
+        extra = nexus_php.parse_number(m.group(1))
+        if extra is not None:
+            amount += extra
+
+    progress = nexus_php.parse_progress_percent(html)
+    capped: bool | None = None
+    if progress is not None:
+        capped = progress >= 100.0
+    return HourlyBonus(amount=amount, unit="魔力值", capped=capped, progress=progress)
 
 
 class HdhomeAdapter(SiteAdapter):
@@ -516,23 +556,54 @@ class HdhomeAdapter(SiteAdapter):
             raise SiteFetchError(f"hdhome 签到提交返回 HTTP {resp.status_code}")
         return attendance.parse_checkin_result(resp.text, url=str(resp.url))
 
-    # ----------------------- FR-1.6 站点用户数据（精简版） -----------------------
+    # ----------------------- FR-1.6 站点用户数据（精简版 + 时魔） -----------------------
+
+    async def _fetch_page(self, path: str) -> str:
+        """GET 一个页面并返回 HTML。失败抛 :class:`SiteFetchError`。
+
+        拉取失败**不吞**（不返回空串 / None）：service 层据此把该站计成
+        ``failed``，避免把故障伪装成「上传 0 / 做种 0」。
+        """
+        url = f"{self._base_url()}{path}"
+        try:
+            resp = await self._client.get(url, timeout=self._timeout)
+        except httpx.HTTPError as exc:
+            # httpx 的 ConnectError 消息常为空（原因在 __cause__），
+            # 空消息在作业 summary 里看不出所以然
+            detail = str(exc) or type(exc).__name__
+            raise SiteFetchError(f"hdhome {path} 拉取失败：{detail}") from exc
+        if resp.status_code >= 400:
+            raise SiteFetchError(f"hdhome {path} 返回 HTTP {resp.status_code}")
+        return resp.text
 
     async def get_user_snapshot(self) -> SiteUserSnapshot | None:
-        """hdhome 走 ``/userdetails.php``（NexusPHP 模板）。"""
+        """hdhome 走 ``/mybonus.php``（NexusPHP 模板）。
+
+        该页 navbar（``stdhead()`` 渲染，每个登录页都有）带 4 业务字段，
+        页面下半部分带时魔——**一页拿全**，不额外发请求。navbar 解析不出
+        4 字段时回退 ``/userdetails.php``。
+
+        hdhome 的 headline 是基础时魔，合计还要加上各项额外奖励
+        （见 :func:`_parse_hdhome_hourly_bonus`）。
+        """
         if not self._cookies:
             return None
-        try:
-            resp = await self._client.get(
-                f"{self._base_url()}/userdetails.php",
-                timeout=self._timeout,
+        bonus_html = await self._fetch_page("/mybonus.php")
+        snap = nexus_php.parse_user_snapshot(bonus_html)
+        if snap is None:
+            snap = nexus_php.parse_user_snapshot(
+                await self._fetch_page("/userdetails.php")
             )
-        except httpx.HTTPError as exc:
-            logger.warning("hdhome get_user_snapshot HTTP 失败：%s", exc)
-            return None
-        if resp.status_code >= 400:
-            return None
-        return nexus_php.parse_user_snapshot(resp.text)
+            if snap is None:
+                raise SiteFetchError("hdhome 用户数据解析失败：4 个业务字段均未取到")
+        bonus = _parse_hdhome_hourly_bonus(bonus_html)
+        return SiteUserSnapshot(
+            upload=snap.upload,
+            download=snap.download,
+            seeding_count=snap.seeding_count,
+            leeching_count=snap.leeching_count,
+            hourly_bonus=bonus,
+        )
 
 
 

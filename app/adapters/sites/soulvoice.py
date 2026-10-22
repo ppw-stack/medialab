@@ -542,23 +542,54 @@ class SoulvoiceAdapter(SiteAdapter):
             raise SiteFetchError(f"soulvoice 签到提交返回 HTTP {resp.status_code}")
         return attendance.parse_checkin_result(resp.text, url=str(resp.url))
 
-    # ----------------------- FR-1.6 站点用户数据（精简版） -----------------------
+    # ----------------------- FR-1.6 站点用户数据（精简版 + 时魔） -----------------------
+
+    async def _fetch_page(self, path: str) -> str:
+        """GET 一个页面并返回 HTML。失败抛 :class:`SiteFetchError`。
+
+        拉取失败**不吞**（不返回空串 / None）：service 层据此把该站计成
+        ``failed``，避免把故障伪装成「上传 0 / 做种 0」。
+        """
+        url = f"{self._base_url()}{path}"
+        try:
+            resp = await self._client.get(url, timeout=self._timeout)
+        except httpx.HTTPError as exc:
+            # httpx 的 ConnectError 消息常为空（原因在 __cause__），
+            # 空消息在作业 summary 里看不出所以然
+            detail = str(exc) or type(exc).__name__
+            raise SiteFetchError(f"soulvoice {path} 拉取失败：{detail}") from exc
+        if resp.status_code >= 400:
+            raise SiteFetchError(f"soulvoice {path} 返回 HTTP {resp.status_code}")
+        return resp.text
 
     async def get_user_snapshot(self) -> SiteUserSnapshot | None:
-        """soulvoice 走 ``/userdetails.php``（NexusPHP 模板）。"""
+        """soulvoice 走 ``/mybonus.php``（NexusPHP 1.9 模板）。
+
+        该页 navbar（``stdhead()`` 渲染，每个登录页都有）带 4 业务字段，
+        页面下半部分带时魔——**一页拿全**，不额外发请求。navbar 解析不出
+        4 字段时回退 ``/userdetails.php``。
+
+        soulvoice 有「每小时获得的合计魔力值」表——时魔取**合计列**
+        （含官种加成），不是 headline。
+        """
         if not self._cookies:
             return None
-        try:
-            resp = await self._client.get(
-                f"{self._base_url()}/userdetails.php",
-                timeout=self._timeout,
+        bonus_html = await self._fetch_page("/mybonus.php")
+        snap = nexus_php.parse_user_snapshot(bonus_html)
+        if snap is None:
+            snap = nexus_php.parse_user_snapshot(
+                await self._fetch_page("/userdetails.php")
             )
-        except httpx.HTTPError as exc:
-            logger.warning("soulvoice get_user_snapshot HTTP 失败：%s", exc)
-            return None
-        if resp.status_code >= 400:
-            return None
-        return nexus_php.parse_user_snapshot(resp.text)
+            if snap is None:
+                raise SiteFetchError("soulvoice 用户数据解析失败：4 个业务字段均未取到")
+        bonus = nexus_php.parse_hourly_bonus(bonus_html, unit="魔力值")
+        return SiteUserSnapshot(
+            upload=snap.upload,
+            download=snap.download,
+            seeding_count=snap.seeding_count,
+            leeching_count=snap.leeching_count,
+            hourly_bonus=bonus,
+        )
 
 
 

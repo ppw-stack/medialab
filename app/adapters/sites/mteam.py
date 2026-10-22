@@ -504,7 +504,7 @@ class MteamAdapter(SiteAdapter):
     async def close(self) -> None:
         await self._client.aclose()
 
-    # ----------------------- FR-1.6 站点用户数据（精简版） -----------------------
+    # ----------------------- FR-1.6 站点用户数据（精简版 + 时魔） -----------------------
 
     async def get_user_snapshot(self) -> SiteUserSnapshot | None:
         """m-team 拉取 4 业务字段，调 2 个端点：
@@ -516,7 +516,12 @@ class MteamAdapter(SiteAdapter):
 
         路径对齐 PT-depiler mteam.ts 的 userInfo.process 段 (line 369-411)。
 
-        异常处理: 端点 2 失败不阻塞端点 1 数据 (seeding/leeching 写 0)。
+        异常处理: **失败抛 :class:`SiteFetchError`**（不吞）——service 层
+        据此把该站计成 ``failed`` 并保留上次快照，不把故障写成「做种 0」。
+        端点 2 失败同样抛（快照要么完整要么没有）。
+
+        时魔：**m-team 是 API 站，没有时魔端点**（``memberCount.bonus``
+        是累计魔力值余额，不是每小时收益）→ ``hourly_bonus`` 留 ``None``。
 
         实测结构 (2026-10-18 128 prod):
         - data 根下 49 keys (id/username/email/role/memberStatus/...)
@@ -532,50 +537,67 @@ class MteamAdapter(SiteAdapter):
                 timeout=self._timeout,
             )
         except httpx.HTTPError as exc:
-            logger.warning("mteam get_user_snapshot HTTP 失败：%s", exc)
-            return None
+            detail = str(exc) or type(exc).__name__
+            raise SiteFetchError(f"mteam member/profile 拉取失败：{detail}") from exc
         if resp.status_code >= 400:
-            return None
+            raise SiteFetchError(f"mteam member/profile 返回 HTTP {resp.status_code}")
         try:
             data = resp.json()
-        except (TypeError, ValueError):
-            return None
+        except (TypeError, ValueError) as exc:
+            raise SiteFetchError("mteam member/profile 返回的不是合法 JSON") from exc
         if str(data.get("code")) != "0" or not data.get("data"):
-            return None
+            raise SiteFetchError(
+                f"mteam member/profile 返回异常 code={data.get('code')!r}"
+            )
         d = data["data"]
         if not isinstance(d, dict):
-            return None
+            raise SiteFetchError("mteam member/profile 的 data 不是对象")
         # 端点 1: /api/member/profile 拿 upload/download（路径对齐 PT-depiler）
         mc = d.get("memberCount")
-        if not isinstance(mc, dict):
-            mc = {}
+        if not isinstance(mc, dict) or "uploaded" not in mc or "downloaded" not in mc:
+            # 正常响应必有 memberCount{uploaded, downloaded}——缺了说明
+            # 返回结构变了，写 0 兜底等于把故障伪装成「上传 0」
+            raise SiteFetchError("mteam member/profile 的 memberCount 字段缺失")
         upload = int(mc.get("uploaded") or 0)
         download = int(mc.get("downloaded") or 0)
 
         # 端点 2: /api/tracker/myPeerStatistics 拿 seeding/leeching
         # (PT-depiler mteam.ts 端点 2)
-        seeding_count = 0
-        leeching_count = 0
         try:
             stat_resp = await self._client.post(
                 f"{self._api_base()}/api/tracker/myPeerStatistics",
                 headers=self._auth_headers(),
                 timeout=self._timeout,
             )
-            if stat_resp.status_code < 400:
-                stat_data = stat_resp.json()
-                stat = stat_data.get("data") or {}
-                seeding_count = int(stat.get("seederCount") or 0)
-                leeching_count = int(stat.get("leecherCount") or 0)
-        except (httpx.HTTPError, ValueError, TypeError) as exc:
-            # 端点 2 失败不阻塞端点 1 数据
-            logger.warning("mteam get_user_snapshot myPeerStatistics 失败：%s", exc)
+        except httpx.HTTPError as exc:
+            detail = str(exc) or type(exc).__name__
+            raise SiteFetchError(
+                f"mteam myPeerStatistics 拉取失败：{detail}"
+            ) from exc
+        if stat_resp.status_code >= 400:
+            raise SiteFetchError(
+                f"mteam myPeerStatistics 返回 HTTP {stat_resp.status_code}"
+            )
+        try:
+            stat_data = stat_resp.json()
+        except (TypeError, ValueError) as exc:
+            raise SiteFetchError("mteam myPeerStatistics 返回的不是合法 JSON") from exc
+        if str(stat_data.get("code")) != "0":
+            raise SiteFetchError(
+                f"mteam myPeerStatistics 返回异常 code={stat_data.get('code')!r}"
+            )
+        stat = stat_data.get("data")
+        if not isinstance(stat, dict) or "seederCount" not in stat:
+            raise SiteFetchError("mteam myPeerStatistics 的 data 字段缺失")
+        seeding_count = int(stat.get("seederCount") or 0)
+        leeching_count = int(stat.get("leecherCount") or 0)
 
         return SiteUserSnapshot(
             upload=upload,
             download=download,
             seeding_count=seeding_count,
             leeching_count=leeching_count,
+            hourly_bonus=None,
         )
 
 

@@ -245,11 +245,19 @@ class SiteAdapter(ABC):
     # ----------------------- FR-1.6 站点用户数据契约（精简版） -----------------------
 
     async def get_user_snapshot(self) -> SiteUserSnapshot | None:
-        """7. 拉取 4 业务字段（upload/download/seeding/leeching）。
+        """7. 拉取 4 业务字段（upload/download/seeding/leeching）+ 时魔。
 
-        默认实现：返回 ``None``（未实现）。各适配器按需 override。
-        失败（鉴权失效/解析失败）也应返回 ``None``，由 service 层跳过本周期。
-        NexusPHP 站可复用 :mod:`app.adapters.sites.parsers.nexus_php` helper。
+        默认实现：返回 ``None``——**仅表示「该站不支持 / 无凭据」**
+        （service 层记为 ``skipped``）。
+
+        **失败（网络 / HTTP / 解析）必须抛 :class:`SiteFetchError`**，
+        不能吞掉返回 ``None``：返回 ``None`` 代表「该站没有这个功能」，
+        与「站点挂了」是两回事——混用会让作业统计报「全部成功」而实际
+        漏掉故障站（参见 2026-10-21 prod 事故的教训）。
+
+        解析规则用**真实页面**固化成 fixture（``tests/fixtures/*_mybonus.html``），
+        不要手写最小 HTML——真实文案里常有意外（各站时魔叫法不同、
+        进度条 class 带工具类、合计值在跨行单元格里）。
         """
         return None
 

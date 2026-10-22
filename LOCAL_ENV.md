@@ -245,6 +245,45 @@ cron 的**持久化来源是 `.env` / `.env.prod`**（`FETCH_ALL_SITES_CRON` / `
 > （含 `summary` + `steps`），前端「调度 → 历史」直接可见。
 > 解析规则用真实页面固化成 fixture：`tests/fixtures/*_attendance.html`。
 
+### 7.2 时魔抓取（FR-1.6 增补，2026-10-22）
+
+`refresh_user_data` 作业现在抓 **时魔**（每小时获得的站点积分）。
+数据在 NexusPHP 的 `/mybonus.php`——**该页 navbar 与 `/userdetails.php`
+同一套**（`stdhead()` 渲染），所以 4 业务字段 + 时魔**一页拿全**，
+每站仍是 1 次请求（navbar 解析不出 4 字段时才回退 `/userdetails.php`）。
+
+**时魔 = "合计"口径**（含官种/勋章/后宫等各项加成），不是"基础时魔"。
+各站实测（2026-10-22，dev 真实 cookie）：
+
+| 站点 | 站点叫法 | 合计取法 | 上限信号 |
+|---|---|---|---|
+| hdsky | 魔力值 | headline（无合计表） | 进度条 `alt="11.8%"` |
+| ourbits | 魔力值 | headline（无合计表） | 进度条 `alt="95.3%"` |
+| soulvoice | 魔力值 | 合计表「合计」列 | 进度条 `alt="94.7%"` |
+| hdhome | 魔力值 | headline **+ 额外奖励**（黄星/保种） | 进度条 `alt="55.4%"`（共 3 根，第 1 根是总进度） |
+| hhanclub | 憨豆 | div 网格的**跨行单元格**（`row-span-4`） | 进度条 `alt="37.1%"` |
+| audiences | 爆米花 | 侧栏 `mybonus-side__value`（已含 18% 勋章加成） | 文案「已达上限」+ 110% |
+| springsunday | 茉莉 | 表「每小时茉莉」列（我的数据行，含加成系数） | **无** → 上限未知 |
+| mteam | — | API 站**没有时魔**（`memberCount.bonus` 是累计余额） | — |
+| hddolby | — | DNS 解析失败（已知间歇故障） | — |
+
+> ⚠️ **进度百分比只认 `alt="NN%"`**：各站 `style` 的单位不同
+> （hdsky / ourbits / soulvoice 用 px，hhanclub 用 %），且 hhanclub 的
+> `class` 后面还跟 Tailwind 工具类（`loadbaryellow !rounded-lg`）。
+>
+> ⚠️ **进度是站点自有口径**（通常相对**基础**时魔算），而我们存的是
+> **合计**——hhanclub 就是 progress 37% 但合计 58.7。UI 上分开显示。
+
+fixture 由脚本抓取（裁剪 + 脱敏 + **裁剪后解析结果必须与整页一致**的自校验）：
+
+```bash
+uv run python scripts/capture_mybonus_fixtures.py --db <dev 库路径>
+```
+
+> ⚠️ 抓取脚本必须**先整页脱敏+裁剪再抽片段**：反过来（先抽片段再裁剪）会让
+> 片段从标签中间截断，裁剪正则把半个标签当属性吃掉——hhanclub 的 headline
+> 曾整段丢失（解析出 0 个时魔却不报错）。
+
 ## 8. 数据与存储
 
 | 项 | 位置 |

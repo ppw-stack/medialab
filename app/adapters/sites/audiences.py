@@ -50,7 +50,7 @@ from app.adapters.sites.base import (
     parse_size_from_br,
 )
 from app.adapters.sites.parsers import nexus_php
-from app.adapters.sites.user_data import SiteUserSnapshot
+from app.adapters.sites.user_data import HourlyBonus, SiteUserSnapshot
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -82,6 +82,62 @@ _ABS_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 #: 登录态检测
 _LOGGED_IN_RE = re.compile(r"(userdetails\.php|logout\.php|takelogout\.php)", re.IGNORECASE)
 _LOGIN_REDIRECT_RE = re.compile(r"login\.php", re.IGNORECASE)
+
+#: audiences 侧栏进度百分比：「每小时获取进度 110%」
+_PROGRESS_PCT_RE = re.compile(r"([\d.]+)%")
+
+
+def _parse_audiences_hourly_bonus(html: str) -> HourlyBonus | None:
+    """audiences 时魔（**合计口径**）。
+
+    audiences 是 Vue SPA，魔力页（``/mybonus.php``）的收益信息在右侧栏::
+
+        <div class="mybonus-side__label">你当前每小时能获取</div>
+        <div class="mybonus-side__value"><i class="fal fa-popcorn"></i>
+            154.0<span>爆米花</span></div>
+        <div class="mybonus-side__progress-head">
+            <span>每小时获取进度</span><strong class="loadbargreen">110%</strong></div>
+        <div class="mybonus-side__progress-track">
+            <div class="mybonus-side__progress-fill loadbargreen"
+                 style="width: 100%;"></div></div>
+        <div class="mybonus-side__progress-hint">已达上限</div>
+
+    侧栏那个数**已含**勋章加成（官组 94.7 + 普通 25.9 + 做种 10 → ×1.18），
+    即合计口径。
+
+    audiences 没有 NexusPHP 那种 ``<img class="loadbar…" alt="NN%">`` 进度条，
+    进度读的是 ``mybonus-side__progress-head`` 里的百分比文本。
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    value_node = soup.find(class_="mybonus-side__value")
+    if value_node is None:
+        return None
+    amount = nexus_php.parse_number(value_node.get_text(" ", strip=True))
+    if amount is None:
+        return None
+
+    unit: str | None = None
+    span = value_node.find("span")
+    if span is not None:
+        unit = span.get_text(" ", strip=True) or None
+
+    progress: float | None = None
+    head = soup.find(class_="mybonus-side__progress-head")
+    if head is not None:
+        m = _PROGRESS_PCT_RE.search(head.get_text(" ", strip=True))
+        if m is not None:
+            progress = float(m.group(1))
+
+    text = soup.get_text(" ", strip=True)
+    capped: bool | None = None
+    if progress is not None:
+        capped = progress >= 100.0
+    if "已达上限" in text:
+        capped = True
+
+    return HourlyBonus(
+        amount=amount, unit=unit or "爆米花", capped=capped, progress=progress
+    )
 
 
 class AudiencesAdapter(SiteAdapter):
@@ -461,23 +517,53 @@ class AudiencesAdapter(SiteAdapter):
         )
 
 
-    # ----------------------- FR-1.6 站点用户数据（精简版） -----------------------
+    # ----------------------- FR-1.6 站点用户数据（精简版 + 时魔） -----------------------
+
+    async def _fetch_page(self, path: str) -> str:
+        """GET 一个页面并返回 HTML。失败抛 :class:`SiteFetchError`。
+
+        拉取失败**不吞**（不返回空串 / None）：service 层据此把该站计成
+        ``failed``，避免把故障伪装成「上传 0 / 做种 0」。
+        """
+        url = f"{self._base_url()}{path}"
+        try:
+            resp = await self._client.get(url, timeout=self._timeout)
+        except httpx.HTTPError as exc:
+            # httpx 的 ConnectError 消息常为空（原因在 __cause__），
+            # 空消息在作业 summary 里看不出所以然
+            detail = str(exc) or type(exc).__name__
+            raise SiteFetchError(f"audiences {path} 拉取失败：{detail}") from exc
+        if resp.status_code >= 400:
+            raise SiteFetchError(f"audiences {path} 返回 HTTP {resp.status_code}")
+        return resp.text
 
     async def get_user_snapshot(self) -> SiteUserSnapshot | None:
-        """audiences 走 ``/userdetails.php``（NexusPHP 模板）。"""
+        """audiences 走 ``/mybonus.php``（NexusPHP 模板）。
+
+        audiences 是 SPA，navbar 数据在 SSR 的 ``data-uploader-stats``
+        属性里（JSON），``parse_user_snapshot`` 的 JSON 模式能吃下；
+        ``/mybonus.php`` 的侧栏另有时魔——**一页拿全**。
+
+        navbar 解析不出 4 字段时回退 ``/userdetails.php``。
+        """
         if not self._cookies:
             return None
-        try:
-            resp = await self._client.get(
-                f"{self._base_url()}/userdetails.php",
-                timeout=self._timeout,
+        bonus_html = await self._fetch_page("/mybonus.php")
+        snap = nexus_php.parse_user_snapshot(bonus_html)
+        if snap is None:
+            snap = nexus_php.parse_user_snapshot(
+                await self._fetch_page("/userdetails.php")
             )
-        except httpx.HTTPError as exc:
-            logger.warning("audiences get_user_snapshot HTTP 失败：%s", exc)
-            return None
-        if resp.status_code >= 400:
-            return None
-        return nexus_php.parse_user_snapshot(resp.text)
+            if snap is None:
+                raise SiteFetchError("audiences 用户数据解析失败：4 个业务字段均未取到")
+        bonus = _parse_audiences_hourly_bonus(bonus_html)
+        return SiteUserSnapshot(
+            upload=snap.upload,
+            download=snap.download,
+            seeding_count=snap.seeding_count,
+            leeching_count=snap.leeching_count,
+            hourly_bonus=bonus,
+        )
 
 
 

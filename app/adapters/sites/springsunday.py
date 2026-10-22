@@ -47,7 +47,7 @@ from app.adapters.sites.base import (
     parse_publish_time,
 )
 from app.adapters.sites.parsers import nexus_php
-from app.adapters.sites.user_data import SiteUserSnapshot
+from app.adapters.sites.user_data import HourlyBonus, SiteUserSnapshot
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -102,6 +102,49 @@ _ABS_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 _LOGGED_IN_RE = re.compile(r"(userdetails\.php|logout\.php|takelogout\.php)", re.IGNORECASE)
 _LOGIN_REDIRECT_RE = re.compile(r"login\.php", re.IGNORECASE)
 _REFUND_RE = re.compile(r"torrent-pro-(?:refund-left|refund-right)")
+
+
+def _parse_springsunday_hourly_bonus(html: str) -> HourlyBonus | None:
+    """springsunday 时魔（**合计口径**）。
+
+    springsunday 是自定义模板，收益在表「当前每小时能获得的积分/茉莉」里::
+
+        做种数量 | 做种体积(GB) | 官种数量 | 官种体积(GB) | 基础积分 | A值 | B值
+        | 每小时积分(基础积分+B值) | 加成系数 | 每小时茉莉
+        我的数据 | 291 | 5,723.5 | 127 | 951.9 | 20.000 | 1,529.665 | 77.648
+                | 97.648 | 1.08 | 105.548
+        全站平均 | ...
+        全站前5% | ...
+
+    「每小时茉莉」列 = 含加成系数的总额（合计口径）；「每小时积分」列是
+    无加成的部分（= 做种积分）。取「我的数据」行。
+
+    springsunday 没有进度指示 → 上限无法判断（``capped=None``）。
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    for table in soup.find_all("table"):
+        trs = table.find_all("tr")
+        col = -1
+        header_at = -1
+        for i, tr in enumerate(trs):
+            cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "th"])]
+            if "每小时茉莉" in cells:
+                col = cells.index("每小时茉莉")
+                header_at = i
+                break
+        if header_at < 0:
+            continue
+        for tr in trs[header_at + 1:]:
+            cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "th"])]
+            if not cells or cells[0].strip() != "我的数据":
+                continue
+            if 0 <= col < len(cells):
+                amount = nexus_php.parse_number(cells[col])
+                if amount is not None:
+                    return HourlyBonus(
+                        amount=amount, unit="茉莉", capped=None, progress=None
+                    )
+    return None
 
 
 class SpringsundayAdapter(SiteAdapter):
@@ -551,23 +594,51 @@ class SpringsundayAdapter(SiteAdapter):
         )
 
 
-    # ----------------------- FR-1.6 站点用户数据（精简版） -----------------------
+    # ----------------------- FR-1.6 站点用户数据（精简版 + 时魔） -----------------------
+
+    async def _fetch_page(self, path: str) -> str:
+        """GET 一个页面并返回 HTML。失败抛 :class:`SiteFetchError`。
+
+        拉取失败**不吞**（不返回空串 / None）：service 层据此把该站计成
+        ``failed``，避免把故障伪装成「上传 0 / 做种 0」。
+        """
+        url = f"{self._base_url()}{path}"
+        try:
+            resp = await self._client.get(url, timeout=self._timeout)
+        except httpx.HTTPError as exc:
+            # httpx 的 ConnectError 消息常为空（原因在 __cause__），
+            # 空消息在作业 summary 里看不出所以然
+            detail = str(exc) or type(exc).__name__
+            raise SiteFetchError(f"springsunday {path} 拉取失败：{detail}") from exc
+        if resp.status_code >= 400:
+            raise SiteFetchError(f"springsunday {path} 返回 HTTP {resp.status_code}")
+        return resp.text
 
     async def get_user_snapshot(self) -> SiteUserSnapshot | None:
-        """springsunday 走 ``/userdetails.php``（NexusPHP 模板）。"""
+        """springsunday 走 ``/mybonus.php``（NexusPHP 模板）。
+
+        该页 navbar（``stdhead()`` 渲染，每个登录页都有）带 4 业务字段，
+        页面下半部分带时魔表——**一页拿全**，不额外发请求。navbar 解析不出
+        4 字段时回退 ``/userdetails.php``。
+        """
         if not self._cookies:
             return None
-        try:
-            resp = await self._client.get(
-                f"{self._base_url()}/userdetails.php",
-                timeout=self._timeout,
+        bonus_html = await self._fetch_page("/mybonus.php")
+        snap = nexus_php.parse_user_snapshot(bonus_html)
+        if snap is None:
+            snap = nexus_php.parse_user_snapshot(
+                await self._fetch_page("/userdetails.php")
             )
-        except httpx.HTTPError as exc:
-            logger.warning("springsunday get_user_snapshot HTTP 失败：%s", exc)
-            return None
-        if resp.status_code >= 400:
-            return None
-        return nexus_php.parse_user_snapshot(resp.text)
+            if snap is None:
+                raise SiteFetchError("springsunday 用户数据解析失败：4 个业务字段均未取到")
+        bonus = _parse_springsunday_hourly_bonus(bonus_html)
+        return SiteUserSnapshot(
+            upload=snap.upload,
+            download=snap.download,
+            seeding_count=snap.seeding_count,
+            leeching_count=snap.leeching_count,
+            hourly_bonus=bonus,
+        )
 
 
 

@@ -11,12 +11,21 @@
 - 站点适配层改动后用真实站点（测试环境 cookie）拉取验证，不使用 mock 数据测试。
 - 不引入未文档化的反爬对抗 / 验证码绕过（R2 / 合规性）。
 - **站点适配层保持 9 站独立文件**（2026-10-21 决定）：不抽公共基类，各站独立实现。重复代码接受现状。
-- **FR-1.6 站点用户数据契约**（2026-10-18 加入，2026-10-18 精简为单方法）：
-  - 不抽 9 站 user_data 基类；NexusPHP 7 站共用 `app/adapters/sites/parsers/nexus_php.py` module-level helper（`parse_user_snapshot`）
+- **FR-1.6 站点用户数据契约**（2026-10-18 加入，2026-10-18 精简为单方法，2026-10-22 加时魔）：
+  - 不抽 9 站 user_data 基类；NexusPHP 7 站共用 `app/adapters/sites/parsers/nexus_php.py` module-level helper（`parse_user_snapshot` / `parse_hourly_bonus`）
   - `SiteUserData` 表是**当前快照**（UNIQUE site_id），不做历史；如需时间序列需先建 `site_user_data_history` 表再迁
-  - 适配器单方法默认实现 `get_user_snapshot → None`（未实现 / 拉取失败都返回 None），单站失败由 service 隔离
+  - 适配器单方法 `get_user_snapshot`：**返回 `None` 只表示"该站不支持 / 无凭据"**（service 记 skipped）；**拉取/解析失败必须抛 `SiteFetchError`**（service 记 failed 并点名，**不写 0 兜底**——写 0 等于把故障伪装成"上传 0 / 做种 0"）
+  - 抓取页用 `/mybonus.php`（navbar 带 4 业务字段 + 时魔，**一页拿全**）；navbar 解析不出 4 字段时回退 `/userdetails.php`
   - `refresh_user_data` cron `*/30 * * * *`（与 `push_free_torrents` 同分钟位错峰不冲突）
+  - **网络 IO 在事务外**：短事务读站点 → 并发抓取（上限 5）→ 短事务批量 upsert；写锁不能横跨网络往返
   - 暂不接告警推送；只落库 + UI 展示
+- **时魔（每小时获得的站点积分，2026-10-22 加入）**：
+  - 各站叫法不同（魔力值 / 爆米花 / 茉莉 / 憨豆 / 积分），统一 `HourlyBonus{amount, unit, capped, progress}`
+  - **取"合计"口径**（含官种/勋章/后宫等各项加成），不是"基础时魔"——hhanclub 两者差 3 倍
+  - `capped=None` 表示"该站页面不提供上限信号"（**不是**"没封顶"）；`progress` 是站点自有口径（通常相对基础时魔算）
+  - m-team 是 API 站**没有时魔**（`memberCount.bonus` 是累计余额，不是每小时收益）→ 恒为 None
+  - 解析规则用**真实页面**固化成 fixture（`tests/fixtures/*_mybonus.html`），由 `scripts/capture_mybonus_fixtures.py` 抓取（裁剪 + 脱敏 + 自校验）
+  - 契约由 `tests/unit/test_bonus_parser.py` + `tests/integration/test_user_data_job.py` 固化
 - **站点拉取失败必须抛错**（2026-10-21 prod 事故后确立）：
   - `search_torrents` 返回 `[]` = 站点确实没种子；抛 `SiteFetchError` = 故障（DNS / 连接 / HTTP）
   - 两者混用会让作业统计报"全部成功"而实际漏掉故障站（prod 的 hddolby DNS 失败就是这样被掩盖的）
@@ -36,7 +45,7 @@
 uv sync --extra dev         # 装依赖
 uv run ruff check app/ tests/
 uv run mypy app/
-uv run pytest                # 后端测试（555 例）
+uv run pytest                # 后端测试（599 例）
 cd web && npx vue-tsc -b    # 前端类型检查
 cd web && npx oxlint .      # 前端 lint
 cd web && node scripts/check-types-placement.mjs  # 类型放置约束（API 契约类型集中在 src/types.ts）
@@ -64,7 +73,7 @@ uv run pytest --cov=app              # 带覆盖率（当前基线 53%）
 
 
 ## 提交信息格式
-Conventional Commits，作用域示例：`feat(crypto)` / `fix(free-seed)` / `docs(req)` / `refactor(sites)` / `feat(sites)` (FR-1.6 站点 userdata) / `feat(db)` (SiteUserData 表) / `feat(api)` (user_data 端点) / `feat(web)` (UserData.vue) / `feat(scheduler)` (调度作业/配置/历史) / `feat(cross-seed)` (辅种下载器巡查) / `feat(checkin)` (FR-3.6 站点每日签到)。
+Conventional Commits，作用域示例：`feat(crypto)` / `fix(free-seed)` / `docs(req)` / `refactor(sites)` / `feat(sites)` (FR-1.6 站点 userdata) / `feat(db)` (SiteUserData 表) / `feat(api)` (user_data 端点) / `feat(web)` (UserData.vue) / `feat(scheduler)` (调度作业/配置/历史) / `feat(cross-seed)` (辅种下载器巡查) / `feat(checkin)` (FR-3.6 站点每日签到) / `feat(bonus)` (站点时魔抓取)。
 
 ## 前端测试
 ```bash

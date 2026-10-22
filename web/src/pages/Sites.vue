@@ -341,6 +341,14 @@ async function openUserDataDrawer(s: Site) {
             <a-descriptions-item label="下载">{{ fmtBytes(drawerData.download || 0) }}</a-descriptions-item>
             <a-descriptions-item label="做种">{{ drawerData.seeding_count }}</a-descriptions-item>
             <a-descriptions-item label="下载中">{{ drawerData.leeching_count }}</a-descriptions-item>
+            <a-descriptions-item label="时魔/小时">
+              <span v-if="drawerData.hourly_bonus !== null && drawerData.hourly_bonus !== undefined">
+                {{ drawerData.hourly_bonus.toFixed(1) }}
+                {{ drawerData.hourly_bonus_unit || '' }}
+                <a-tag v-if="drawerData.hourly_bonus_capped === true" color="orange">已封顶</a-tag>
+              </span>
+              <span v-else>—</span>
+            </a-descriptions-item>
             <a-descriptions-item label="刷新于">{{ drawerData.last_seen_at }}</a-descriptions-item>
           </a-descriptions>
           <div style="margin-top: 16px">
