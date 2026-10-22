@@ -425,10 +425,14 @@ ssh mp "cd /mnt/user/appdata/seedhelper/app && TAG=latest docker compose -f dock
 > ```
 > 备份后用 `PRAGMA integrity_check;` 确认（损坏的副本没有抢救价值）。
 >
-> ⚠️ **CI 的 "Set Docker Hub repo visibility to public" 步骤失败会让整个
-> workflow 显示为 failed**，但那一步是 `continue-on-error: true`——
-> **镜像其实已经推送成功**（`Build and push` 步骤是成功的）。
-> 判断镜像有没有推上去要看 Docker Hub 的 tag `last_updated`，
+> ⚠️ **CI 的镜像可见性校验**（2026-10-23 改）：原先有个
+> "Set Docker Hub repo visibility to public" 步骤去 PATCH Docker Hub API，
+> 但那个接口现在对 JWT 认证返回 **403**（连续 3 次 CI 全 403，从未成功过），
+> 已删除。改成只读的 "Verify image is publicly pullable"——用**匿名** token
+> 拉 manifest，200 = public 可拉（128 主机没有 Docker Hub 凭据，靠 public 拉）。
+> 该步骤失败 = 镜像真拉不动，此时 workflow 会变红，是真问题。
+>
+> 判断镜像有没有推上去仍要看 Docker Hub 的 tag `last_updated`，
 > 不要只看 workflow 的红绿灯。
 
 > ⚠️ 128 上的 `/mnt/user/appdata/seedhelper/app/` **不是 git 仓库**，且代码副本已陈旧

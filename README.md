@@ -51,7 +51,7 @@ uv run mypy app/
 
 # 后端测试
 uv run pytest
-uv run pytest --cov=app          # 带覆盖率（当前基线 44%）
+uv run pytest --cov=app          # 带覆盖率（当前基线 58%）
 ```
 
 ### 测试

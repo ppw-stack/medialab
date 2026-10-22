@@ -43,7 +43,6 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
-            type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
@@ -67,61 +66,46 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Set Docker Hub repo visibility to public
+      - name: Verify image is publicly pullable
         if: github.event_name != 'pull_request'
-        # 非关键步骤：镜像已构建推送成功，这步失败只导致镜像保持私有
-        #（128 主机 pull 会失败）。
+        # 校验镜像**匿名可拉**（128 主机没有 Docker Hub 凭据，靠 public
+        # 仓库拉取；私有则 pull 失败 → 生产部署不了）。
         #
-        # continue-on-error 的语义：步骤失败**不会**让 job 变红，GitHub 也不
-        # 会为它渲染注解（`::error::` 会被吞掉）。所以下面在 run 里用
-        # `::warning::` 显式打一条注解——这样"镜像可能不可拉取"会在
-        # workflow 页面直接可见，而不是只躺在步骤日志里。
-        continue-on-error: true
+        # 为什么不用「调 Docker Hub API 设 is_private=false」：那个接口现在
+        # 对 JWT 认证的 PATCH 返回 **403**（实测 2026-10-22 起连续 3 次 CI
+        # 全部 403）。仓库早已是 public，那步从未成功过，纯死步骤。
+        #
+        # 这里改成**只读校验**：用匿名 token 拉 manifest，200 = public 可拉。
+        # 失败即视为真问题（生产会拉不动），让 workflow 变红。
+        #
+        # 注意两处路径**不带 registry host**（实测带 host 会 401）：
+        #   scope=repository:${IMAGE_NAME}:pull   ← 不含 docker.io/
+        #   /v2/${IMAGE_NAME}/manifests/latest    ← 不含 docker.io/
         env:
-          DH_NAMESPACE: ppw111
-          DH_REPO: seedhelper
-          DH_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
         run: |
           set -euo pipefail
-          JWT=""
-          for i in 1 2 3 4 5; do
-            PAYLOAD=$(jq -nc --arg u "$DH_USERNAME" --arg p "$DH_TOKEN" '{username:$u,password:$p}')
-            LOGIN_RESP=$(curl -sS -X POST \
-              -H "Content-Type: application/json" \
-              --data "$PAYLOAD" \
-              -w "\nHTTP=%{http_code}" \
-              "https://hub.docker.com/v2/users/login/")
-            HTTP=$(printf '%s\n' "$LOGIN_RESP" | tail -n1 | sed 's/HTTP=//')
-            BODY=$(printf '%s\n' "$LOGIN_RESP" | head -n-1)
-            # 响应体含 JWT / 凭据回显, 只输出 HTTP 状态码
-            echo "login attempt=$i http=$HTTP"
-            JWT=$(printf '%s' "$BODY" | jq -r '.token // empty' 2>/dev/null || true)
-            if [ -n "$JWT" ]; then
-              echo "✓ got JWT (len=${#JWT})"
-              break
-            fi
-            sleep 3
-          done
-          if [ -z "$JWT" ]; then
-            echo "::warning::无法获取 Docker Hub JWT（重试 5 次失败），镜像可能保持私有，128 主机 pull 会失败"
+          TOKEN=$(curl -fsS \
+            "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${IMAGE_NAME}:pull" \
+            | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+          if [ -z "$TOKEN" ]; then
+            echo "::error::取匿名 pull token 失败"
             exit 1
           fi
-          for i in 1 2 3 4 5; do
-            RESP=$(curl -sS -X PATCH \
-              -H "Authorization: JWT ${JWT}" \
-              -H "Content-Type: application/json" \
-              --data '{"is_private":false}' \
-              -w "\n%{http_code}" \
-              "https://hub.docker.com/v2/repositories/${DH_NAMESPACE}/${DH_REPO}/")
-            HTTP_CODE=$(printf '%s\n' "$RESP" | tail -n1)
-            BODY=$(printf '%s\n' "$RESP" | head -n-1)
-            echo "patch attempt=$i http_code=$HTTP_CODE"
-            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "204" ]; then
-              echo "✓ ${DH_NAMESPACE}/${DH_REPO} set to public"
-              exit 0
-            fi
-            sleep 3
-          done
-          echo "::warning::设置 ${DH_NAMESPACE}/${DH_REPO} 为 public 失败，镜像可能保持私有，128 主机 pull 会失败"
-          exit 1
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.index.v1+json" \
+            "https://registry-1.docker.io/v2/${IMAGE_NAME}/manifests/latest")
+          echo "匿名拉取 manifest: HTTP=${CODE}"
+          # 429 = 触发 Docker Hub 匿名拉取限流（100 次/小时/IP，共享
+          # runner IP 可能撞上）。那是基础设施抖动、不是可见性问题，
+          # 不该拦住发布——警告后放行。
+          if [ "$CODE" = "429" ]; then
+            echo "::warning::Docker Hub 匿名拉取被限流（429），跳过可见性校验（镜像应仍为 public）"
+            exit 0
+          fi
+          if [ "$CODE" != "200" ]; then
+            echo "::error::${IMAGE_NAME} 匿名拉取失败（HTTP=${CODE}）——仓库可能不是 public，128 主机 pull 会失败"
+            exit 1
+          fi
+          echo "✓ ${IMAGE_NAME} 匿名可拉（public）"

@@ -86,7 +86,7 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
 uv run pytest                        # 全部
 uv run pytest tests/unit             # 只跑单元
 uv run pytest -k "site_adapters"     # 按名字过滤
-uv run pytest --cov=app              # 带覆盖率（当前基线 53%）
+uv run pytest --cov=app              # 带覆盖率（当前基线 58%）
 ```
 
 - 目录：`tests/unit/`（纯函数、无 IO）+ `tests/integration/`（DB / 作业 / API）
