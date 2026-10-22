@@ -57,3 +57,41 @@ test('站点 - 表格无「间隔」列', async ({ page }) => {
   await expect(header.getByText('间隔')).toHaveCount(0)
   console.log('  ✓ 无「间隔」列')
 })
+
+/**
+ * 删除站点的二次确认文案（2026-10-23）。
+ *
+ * 删站点现在会**级联**删掉该站的拉取索引 / 用户数据 / 推送队列记录
+ * （原先是 409「请先清理」的死胡同）。删数据不可恢复 → 确认弹窗必须
+ * 说清楚会删什么（AGENTS.md「前端删除需确认」）。
+ *
+ * 注意：**不点确认**——e2e 连的是真实 dev 容器 + 真实站点配置，
+ * 点了就把真站删了。只验证弹窗文案，然后取消。
+ */
+test('站点 - 删除二次确认说明会连带删除哪些数据', async ({ page }) => {
+  await login(page)
+  await page.goto('/sites')
+  await page.waitForLoadState('networkidle')
+
+  const firstRow = page.locator('.ant-table-tbody tr').first()
+  await firstRow.getByRole('button', { name: '删除' }).click()
+
+  // 确认弹窗出现，且说明文字点明级联删除范围
+  // （description 渲染在 .ant-popconfirm-description 里——别假设整块文本，
+  //   antd 把 title 和 description 分开渲染）
+  const popconfirm = page.locator('.ant-popconfirm').filter({ hasText: '确认删除该站点' })
+  await expect(popconfirm).toBeVisible()
+
+  const desc = popconfirm.locator('.ant-popconfirm-description')
+  await expect(desc).toContainText('拉取索引')
+  await expect(desc).toContainText('用户数据')
+  await expect(desc).toContainText('不可恢复')
+  console.log('  ✓ 删除确认弹窗说明了级联删除范围')
+
+  // 取消——不删真实站点
+  // 注意：antd 的 autoInsertSpace 会在两个汉字之间插空格（"取消" → "取 消"），
+  // 所以用正则而不是精确文本匹配。
+  await popconfirm.getByRole('button', { name: /取\s*消/ }).click()
+  await expect(popconfirm).toBeHidden()
+  console.log('  ✓ 已取消，未删除真实站点')
+})

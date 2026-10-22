@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator
 import httpx
 import pytest_asyncio
 from app.core.config import AppSettings
-from app.db.models import Site
+from app.db.models import Site, SiteUserData, TorrentIndex
 from app.db.session import session_scope
 from app.main import create_app
 from sqlalchemy import select
@@ -239,6 +239,30 @@ async def test_delete_site(client: httpx.AsyncClient) -> None:
     async with session_scope() as session:
         rows = (await session.execute(select(Site))).scalars().all()
         assert rows == []
+
+
+async def test_delete_site_with_index_rows_succeeds(
+    client: httpx.AsyncClient,
+) -> None:
+    """站点下有拉取索引行时删除**成功**（级联删，不再 409）。
+
+    2026-10-23：原实现是「站点下还有 N 条任务，请先清理」→ 409。但那是
+    死胡同——``torrent_index`` 是可重建的拉取快照，全仓没有删除它的
+    入口，且 ``fetch_all_sites`` 每 10 分钟就重新灌满。
+    """
+    site_id = await _add_site("hasindex")
+    async with session_scope() as session:
+        session.add(TorrentIndex(site_id=site_id, item_id="i1", name="t"))
+        session.add(SiteUserData(site_id=site_id, upload=1, download=2))
+        await session.flush()
+
+    resp = await client.post("/api/v1/sites/delete", json={"id": site_id})
+    assert resp.status_code == 200
+
+    async with session_scope() as session:
+        assert (await session.execute(select(Site))).scalars().all() == []
+        assert (await session.execute(select(TorrentIndex))).scalars().all() == []
+        assert (await session.execute(select(SiteUserData))).scalars().all() == []
 
 
 async def test_list_adapters(client: httpx.AsyncClient) -> None:

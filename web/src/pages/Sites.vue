@@ -287,7 +287,14 @@ async function openUserDataDrawer(s: Site) {
                 拉取测试
               </a-button>
               <a-button size="small" type="link" @click="onEdit(record)">编辑</a-button>
-              <a-popconfirm title="确认删除？" @confirm="onDelete(record.id)">
+              <a-popconfirm
+                title="确认删除该站点？"
+                description="该站点的拉取索引、用户数据快照与推送队列记录将一并删除，不可恢复。"
+                ok-text="删除"
+                cancel-text="取消"
+                ok-type="danger"
+                @confirm="onDelete(record.id)"
+              >
                 <a-button size="small" type="link" danger>删除</a-button>
               </a-popconfirm>
             </a-space>

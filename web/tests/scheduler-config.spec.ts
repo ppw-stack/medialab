@@ -8,7 +8,7 @@ async function login(page: any) {
   await page.waitForURL((url) => !url.pathname.startsWith('/login'), { timeout: 10000 })
 }
 
-test('调度作业 - 配置 modal (push_free_torrents 3 params)', async ({ page }) => {
+test('调度作业 - 配置 modal (push_free_torrents params)', async ({ page }) => {
   await login(page)
   await page.goto('/settings')
   await page.waitForLoadState('networkidle')
@@ -22,10 +22,16 @@ test('调度作业 - 配置 modal (push_free_torrents 3 params)', async ({ page 
   const modal = page.locator('.ant-modal-content').filter({ hasText: '配置 · 免费种推送' })
   await expect(modal).toBeVisible()
 
-  // 3 个 param input-number (限时种最少剩余/单次推送上限/下载间隔)
+  // param 数量**跟 API 对齐**，别写死个数
+  // （push_within_bucket_order 加入后是 4 个——写死会在加参数时误报失败。
+  //   同 dashboard.spec.ts 的做法：API 才是唯一事实源。）
+  const resp = await page.request.get('/api/v1/scheduler/push_free_torrents/config')
+  const data = await resp.json()
+  const specs = (data.specs ?? []) as { key: string }[]
+
   const numbers = modal.locator('.ant-input-number-input')
-  await expect(numbers).toHaveCount(3)
-  console.log('  ✓ push_free_torrents modal 渲染 3 个 param')
+  await expect(numbers).toHaveCount(specs.length)
+  console.log(`  ✓ push_free_torrents modal 渲染 ${specs.length} 个 param`)
 
   // cron 输入
   const cronInput = modal.locator('input[placeholder="*/10 * * * *"]')

@@ -24,7 +24,7 @@ from app.db.models import Site, TorrentIndex
 from app.db.session import session_scope
 from app.services.factory import AdapterFactory
 from app.services.jobs import fetch_all_sites
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 
 class _FakeAdapter(SiteAdapter):
@@ -469,6 +469,61 @@ async def test_disabled_site_is_skipped(db: None, factory_with) -> None:
 
 
 # ------------------------------------------------- 真实适配器 + respx 冒烟
+
+async def test_fetch_upsert_after_site_deleted_is_skipped_not_crashed(
+    db: None, factory_with, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """站点被删后，正在拉取的 fetch 回来 upsert → 跳过，不崩、不留脏数据。
+
+    场景：``fetch_all_sites`` 已读完站点列表、在做网络 IO；此时用户删了
+    该站（``delete_site`` 级联清了 ``torrent_index``）。fetch 回来后
+    upsert 会撞 FK（``torrent_index.site_id → sites.id``）。
+
+    期望：FK 拒绝孤儿行写入 → ``_upsert_site_items`` 的 savepoint 兜住
+    → 只记 debug + 计一次写失败，**作业不崩**、**不留孤儿行**。
+
+    （FK 在 WAL + ``foreign_keys=ON`` 下确实会拒绝孤儿行——已实测。）
+    """
+    await _add_sites("s1")
+    factory = factory_with({"s1": "ok"})
+
+    # 模拟"网络 IO 期间站点被删"：拦下 upsert，在此刻删站
+    from app.services import jobs as jobs_mod
+
+    orig_upsert = jobs_mod._upsert_site_items
+    state = {"deleted": False}
+
+    async def _upsert_then_delete(row: Site, feed_items: list[FeedItem]):
+        if not state["deleted"]:
+            state["deleted"] = True
+            # 站点被删（级联清 torrent_index）——但本站的 row 对象还在手上
+            from app.services import site_service
+
+            await site_service.delete_site(row.id)
+        return await orig_upsert(row, feed_items)
+
+    monkeypatch.setattr(jobs_mod, "_upsert_site_items", _upsert_then_delete)
+
+    result = await fetch_all_sites(factory)
+
+    # 作业没崩
+    assert result["scanned_sites"] == 1
+    # 没有写入成功（FK 拒了）
+    assert result["total_written"] == 0
+    # 且没有留下孤儿行
+    async with session_scope() as session:
+        rows = (await session.execute(select(TorrentIndex))).scalars().all()
+        assert rows == []
+        orphan = (
+            await session.execute(
+                select(func.count())
+                .select_from(TorrentIndex)
+                .outerjoin(Site, Site.id == TorrentIndex.site_id)
+                .where(Site.id.is_(None))
+            )
+        ).scalar_one()
+        assert orphan == 0
+
 
 async def test_real_adapter_dns_failure_surfaces_as_failed_site(
     db: None, monkeypatch: pytest.MonkeyPatch

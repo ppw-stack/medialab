@@ -24,7 +24,13 @@ from app.adapters.downloaders.base import (
     TorrentInfo,
     TorrentState,
 )
-from app.db.models import DownloaderInstance, Site, SiteUserData, TorrentIndex
+from app.db.models import (
+    DownloaderInstance,
+    Site,
+    SiteUserData,
+    TaskQueue,
+    TorrentIndex,
+)
 from app.db.session import session_scope
 from app.services import (
     dashboard_service,
@@ -114,16 +120,94 @@ async def test_site_delete_cascades_user_data(db: None, factory: AdapterFactory)
         assert rows == []
 
 
-async def test_site_delete_blocked_by_torrent_index_409(db: None, factory: AdapterFactory) -> None:
-    """站点下还有 torrent_index 引用 → 409（不静默删）。"""
+async def test_site_delete_cascades_torrent_index(db: None, factory: AdapterFactory) -> None:
+    """删站点要级联删 torrent_index（否则 FK 约束 → IntegrityError → 500）。
+
+    2026-10-23：原实现是「站点下还有 N 条任务，请先清理」→ 409。但那是
+    死胡同——``torrent_index`` 是可重建的拉取快照（全仓没有删除它的
+    入口），且 ``fetch_all_sites`` 每 10 分钟就重新灌满。改为级联删。
+    """
     site_id = await _add_site("s1")
     async with session_scope() as session:
         session.add(TorrentIndex(site_id=site_id, item_id="i1", name="t"))
         await session.flush()
 
-    with pytest.raises(ServiceError) as exc:
-        await site_service.delete_site(site_id)
-    assert exc.value.status == 409
+    await site_service.delete_site(site_id)
+
+    async with session_scope() as session:
+        rows = (await session.execute(select(TorrentIndex))).scalars().all()
+        assert rows == []
+        assert (await session.execute(select(Site))).scalars().all() == []
+
+
+async def test_site_delete_cascades_task_queue(db: None, factory: AdapterFactory) -> None:
+    """删站点要级联删该站的推送队列行（idem_key 前缀含 site_id）。
+
+    SQLite 删行后会**复用 id**——新建站点可能拿到旧站的 id，若 item_id
+    撞上（m-team 是站内数字 id），老队列行会让推送被误判成"已推过"而
+    永久跳过。
+    """
+    site_id = await _add_site("s1")
+    other_id = await _add_site("s2")
+    async with session_scope() as session:
+        session.add_all([
+            TaskQueue(
+                idem_key=f"add_torrent|{site_id}|123|dl=1",
+                kind="add_torrent",
+                payload={"index_id": 1, "downloader_id": 1},
+                status="done",
+            ),
+            TaskQueue(
+                idem_key=f"add_torrent|{other_id}|123|dl=1",
+                kind="add_torrent",
+                payload={"index_id": 2, "downloader_id": 1},
+                status="done",
+            ),
+        ])
+        await session.flush()
+
+    await site_service.delete_site(site_id)
+
+    async with session_scope() as session:
+        rows = (await session.execute(select(TaskQueue))).scalars().all()
+        # 本站的删了，其他站的保留
+        assert [r.idem_key for r in rows] == [f"add_torrent|{other_id}|123|dl=1"]
+
+
+async def test_site_delete_queue_prefix_not_ambiguous(
+    db: None, factory: AdapterFactory
+) -> None:
+    """删 site_id=1 不能误删 site_id=11 的队列行。
+
+    前缀是 ``add_torrent|{site_id}|``——**必须带结尾的 ``|``**，否则
+    ``add_torrent|11|...`` 会被 ``add_torrent|1`` 前缀误伤。
+    """
+    site_1 = await _add_site("s1")
+    site_11 = await _add_site("s11")
+    assert site_11 != site_1
+    async with session_scope() as session:
+        session.add_all([
+            TaskQueue(
+                idem_key=f"add_torrent|{site_1}|555|dl=1",
+                kind="add_torrent",
+                payload={"index_id": 1, "downloader_id": 1},
+                status="done",
+            ),
+            TaskQueue(
+                idem_key=f"add_torrent|{site_11}|555|dl=1",
+                kind="add_torrent",
+                payload={"index_id": 2, "downloader_id": 1},
+                status="done",
+            ),
+        ])
+        await session.flush()
+
+    await site_service.delete_site(site_1)
+
+    async with session_scope() as session:
+        rows = (await session.execute(select(TaskQueue))).scalars().all()
+        # 只剩 site_id=11 那条
+        assert [r.idem_key for r in rows] == [f"add_torrent|{site_11}|555|dl=1"]
 
 
 # ------------------------------------------------------- 更新的三态语义

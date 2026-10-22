@@ -21,18 +21,19 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Final, cast
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import CursorResult, delete, select
 
 from app.adapters.sites import resolve as resolve_site_adapter
 from app.adapters.sites.base import FeedItem, SiteHealth, SiteProfile
 from app.core.logging import get_logger
-from app.db.models import Site, SiteUserData, TorrentIndex
+from app.db.models import Site, SiteUserData, TaskQueue, TorrentIndex
 from app.db.session import session_scope
 from app.services.errors import ServiceError
 from app.services.factory import AdapterFactory, get_factory, invalidate_site
 from app.services.feed_fetcher import FeedFetcher
+from app.services.task_queue import TaskKind
 from app.services.window_parser import WindowParser
 
 logger = get_logger(__name__)
@@ -358,9 +359,49 @@ async def update_site(
 
 
 async def delete_site(site_id: int) -> int:
-    """删除站点（连带清理级联数据）。
+    """删除站点（**级联清理**全部关联数据）。
 
-    :raises ServiceError: 404（站点不存在）/ 409（仍有 torrent_index 引用）
+    关联数据三张表，全在**同一事务**里删（顺序：先子表后父表）：
+
+    - ``torrent_index`` —— 该站的**拉取快照**（种子列表缓存）
+    - ``site_user_data`` —— 该站的用户数据快照
+    - ``task_queue`` —— 该站遗留的推送队列行（见下）
+
+    **为什么级联而不是 409 拦住**（2026-10-23 改）：
+
+    原实现是「站点下还有 N 条任务，请先清理」→ 409。这是个死胡同：
+
+    1. ``torrent_index`` **不是任务表**，是 ``fetch_all_sites`` 每 10 分钟
+       upsert 的**可重建缓存**（"任务"是旧实现遗留的误称——那时拦的是
+       已下线的 ``Torrent`` / ``FreeCandidate`` 真任务表）
+    2. 全仓**没有**删除 ``torrent_index`` 行的入口（索引页无删除按钮、
+       ``index_service`` 零 delete、API 也没有）→ "请先清理"做不到
+    3. 就算手动清了，``fetch_all_sites`` 下一轮（10 分钟内）又灌满
+       → 该 409 对**任何被拉取过**的站点都是永久性的
+
+    同一个 bug 在下载器那边已修过（``7fff1d0``："删除下载器的引用计数
+    检查删除 …… 原检查统计的是全局已推送数，导致任何下载器都删不掉"），
+    站点这边是同一类"引用计数拦住了不该拦的删除"。
+
+    **误删风险评估**：``torrent_index`` 100% 可由拉取作业重建。唯一丢失
+    的是该站 ``push_status=pushed`` 标记，影响面是优雅降级——
+    ``push_free`` 不再给该站产候选；``monitor.py`` 按 hash 匹配不到这些
+    种子 → 计入 ``skipped_unmatched``（跳过，不是误暂停）。
+
+    **并发 fetch 竞态**：删站瞬间若有一个 fetch 已读完站点列表、还在网络
+    拉取，它回来 upsert 时会撞 FK → ``IntegrityError``。已实测 WAL +
+    ``foreign_keys=ON`` 下 FK 会**拒绝**孤儿行写入（不会泄漏脏数据），
+    该失败被 ``_upsert_site_items`` 的 savepoint 兜住（只记 debug + 计
+    一次写失败），下一轮就干净了。
+
+    **task_queue 为什么一起删**：``idem_key`` 格式是
+    ``add_torrent|{site_id}|{item_id}|dl={dl}``。SQLite 删行后**会复用
+    id**——新建站点可能拿到旧站的 id，若 item_id 撞上（m-team 是站内
+    数字 id），老队列行会让推送被误判成"已推过"而永久跳过。删除时一并
+    清掉该站的队列行，消除这个隐患（这些行 7 天后本来也会被
+    ``drain_task_queue`` 的 ``purge_finished`` 回收）。
+
+    :raises ServiceError: 404（站点不存在）
     """
     async with session_scope() as session:
         site = (
@@ -368,25 +409,55 @@ async def delete_site(site_id: int) -> int:
         ).scalar_one_or_none()
         if site is None:
             raise ServiceError("站点不存在", status=404)
-        # 检查引用：torrent_index 仍依赖 site_id
-        torrent_count = (
-            await session.execute(
-                select(func.count())
-                .select_from(TorrentIndex)
-                .where(TorrentIndex.site_id == site_id)
-            )
-        ).scalar_one()
-        if torrent_count:
-            raise ServiceError(
-                f"站点下还有 {torrent_count} 条任务，请先清理",
-                status=409,
-            )
-        # 级联清理站点用户数据（site_user_data 引用 site_id，
-        # 不删会因 FK 约束抛 IntegrityError → 500）
-        await session.execute(
-            delete(SiteUserData).where(SiteUserData.site_id == site_id)
+        site_name = site.name
+
+        # 1) 拉取快照（torrent_index.site_id → sites.id，无 ON DELETE CASCADE）
+        index_count = int(
+            cast(
+                CursorResult[object],
+                await session.execute(
+                    delete(TorrentIndex).where(TorrentIndex.site_id == site_id)
+                ),
+            ).rowcount
+            or 0
         )
+
+        # 2) 用户数据快照（site_user_data.site_id → sites.id，UNIQUE）
+        ud_count = int(
+            cast(
+                CursorResult[object],
+                await session.execute(
+                    delete(SiteUserData).where(SiteUserData.site_id == site_id)
+                ),
+            ).rowcount
+            or 0
+        )
+
+        # 3) 该站的推送队列行（idem_key 前缀 = "add_torrent|{site_id}|"）
+        #    payload 里的 index_id 不是外键，但 idem_key 里的 site_id 是
+        #    ——SQLite 会复用被删行的 id，留着会让新站误命中老幂等键。
+        #    前缀用 TaskKind.ADD_TORRENT 常量而非字面量（落库的持久化值）。
+        queue_prefix = f"{TaskKind.ADD_TORRENT}|{site_id}|"
+        queue_count = int(
+            cast(
+                CursorResult[object],
+                await session.execute(
+                    delete(TaskQueue).where(
+                        TaskQueue.idem_key.startswith(queue_prefix)
+                    )
+                ),
+            ).rowcount
+            or 0
+        )
+
+        # 4) 父行（子行已清空 → FK 不会拦）
         await session.delete(site)
+
+    # 审计：删数据不可恢复，记站点名 + 各表删除行数（AGENTS.md 要求）
+    logger.warning(
+        "删除站点 %s（id=%d）：拉取索引 %d 条、用户数据 %d 条、队列任务 %d 条",
+        site_name, site_id, index_count, ud_count, queue_count,
+    )
     invalidate_site(site_id)
     return site_id
 
