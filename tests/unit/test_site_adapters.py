@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import parse_qs
+
 import httpx
 import pytest
 import respx
@@ -297,17 +299,63 @@ async def test_close_is_idempotent(name: None) -> None:
 
 # -------------------------------------------------- 契约：每日签到（FR-3.6）
 
-#: 已实现自动签到的 3 站（实测 2026-10-22 可用）
-CHECKIN_ADAPTERS = ("hhanclub", "soulvoice", "hdhome")
+#: 已实现自动签到的 4 站（实测 2026-10-22 可用）
+#: - hhanclub / soulvoice / hdhome：NexusPHP 标准 /attendance.php，GET 即签到
+#: - hdsky：自建 showup.php 三段式，图形验证码走 AI 读码
+CHECKIN_ADAPTERS = ("hhanclub", "soulvoice", "hdhome", "hdsky")
 
-#: 未实现签到的站：无此功能（springSunday / mteam）或需人机验证
-#: （audiences / ourbits / hdsky）。**不做验证码绕过**（AGENTS.md 合规红线）。
+#: 未实现签到的站：无此功能（springSunday / mteam）或需 Cloudflare Turnstile
+#: （audiences / ourbits）。Turnstile 实测服务端环境无法完成
+#: （TurnstileError 600010），本仓库不实现。
 NO_CHECKIN_ADAPTERS = tuple(a for a in ALL_ADAPTERS if a not in CHECKIN_ADAPTERS)
+
+#: 走 AI 读码流程的站（签到需要图形验证码）
+AI_CHECKIN_ADAPTERS = ("hdsky",)
+
+#: 走 NexusPHP 标准 /attendance.php 的站（无验证码，GET 即签到）
+HTML_CHECKIN_ADAPTERS = ("hhanclub", "soulvoice", "hdhome")
+
+
+@pytest.fixture
+def fake_reader():
+    """注入一个"永远读对"的假读码器。
+
+    用 ``set_ai_reader`` 替换 core 级单例（适配器通过 ``get_ai_reader()`` 取），
+    用完复位——避免污染其它用例。
+
+    用鸭子类型而非继承：测试只需要 ``available`` 与 ``read_captcha`` 两个成员。
+    """
+    from app.core.ai import set_ai_reader
+
+    class _FakeReader:
+        available = True
+        calls = 0
+
+        async def read_captcha(self, image: bytes, *, length: int = 6) -> str:
+            self.calls += 1
+            return "ABC123"[:length]
+
+    set_ai_reader(_FakeReader())
+    yield
+    set_ai_reader(None)
+
+
+@pytest.fixture
+def no_reader():
+    """把读码器置为「未配置」状态。"""
+    from app.core.ai import set_ai_reader
+
+    set_ai_reader(None)
+    yield
+    set_ai_reader(None)
 
 
 @pytest.mark.parametrize("name", ALL_ADAPTERS)
-async def test_checkin_returns_checkin_result(name: str) -> None:
-    """签到契约：返回 ``CheckinResult``（不抛）。"""
+async def test_checkin_returns_checkin_result(name: str, no_reader: None) -> None:
+    """签到契约：返回 ``CheckinResult``（不抛）。
+
+    ``no_reader`` 保证未配置 AI 时 hdsky 也走降级路径而非发请求。
+    """
     from app.adapters.sites.base import CheckinResult
 
     adapter = _make(name)
@@ -339,9 +387,9 @@ async def test_unimplemented_sites_return_unsupported(name: str) -> None:
         await adapter.close()
 
 
-@pytest.mark.parametrize("name", CHECKIN_ADAPTERS)
+@pytest.mark.parametrize("name", HTML_CHECKIN_ADAPTERS)
 async def test_checkin_detects_success(name: str) -> None:
-    """已实现的 3 站：签到页返回成功文案 → SUCCESS。"""
+    """已实现的 3 个 HTML 站：签到页返回成功文案 → SUCCESS。"""
     from app.adapters.sites.base import CheckinStatus
 
     adapter = _make(name)
@@ -364,7 +412,7 @@ async def test_checkin_detects_success(name: str) -> None:
         await adapter.close()
 
 
-@pytest.mark.parametrize("name", CHECKIN_ADAPTERS)
+@pytest.mark.parametrize("name", HTML_CHECKIN_ADAPTERS)
 async def test_checkin_detects_already(name: str) -> None:
     """当日已签 → ALREADY（幂等，**不算失败**）。"""
     from app.adapters.sites.base import CheckinStatus
@@ -383,7 +431,7 @@ async def test_checkin_detects_already(name: str) -> None:
         await adapter.close()
 
 
-@pytest.mark.parametrize("name", CHECKIN_ADAPTERS)
+@pytest.mark.parametrize("name", HTML_CHECKIN_ADAPTERS)
 async def test_checkin_raises_on_network_error(name: str) -> None:
     """网络故障必须抛 ``SiteFetchError``——不能吞掉返回"看起来正常"的结果。
 
@@ -402,7 +450,7 @@ async def test_checkin_raises_on_network_error(name: str) -> None:
 @pytest.mark.parametrize("name", CHECKIN_ADAPTERS)
 @pytest.mark.parametrize("status", [403, 429])
 async def test_checkin_raises_breaker_on_rate_limit(
-    name: str, status: int
+    name: str, status: int, fake_reader: None
 ) -> None:
     """403/429 → ``BreakerTripped``（限流信号，与拉取路径同一契约）。"""
     adapter = _make(name)
@@ -415,7 +463,7 @@ async def test_checkin_raises_breaker_on_rate_limit(
         await adapter.close()
 
 
-@pytest.mark.parametrize("name", CHECKIN_ADAPTERS)
+@pytest.mark.parametrize("name", HTML_CHECKIN_ADAPTERS)
 async def test_checkin_falls_back_to_post_when_get_did_not_signin(
     name: str,
 ) -> None:
@@ -452,7 +500,7 @@ async def test_checkin_falls_back_to_post_when_get_did_not_signin(
         await adapter.close()
 
 
-@pytest.mark.parametrize("name", CHECKIN_ADAPTERS)
+@pytest.mark.parametrize("name", HTML_CHECKIN_ADAPTERS)
 async def test_checkin_does_not_post_when_captcha_detected(name: str) -> None:
     """检测到人机验证 → 不 POST（POST 也要验证码，不会更好）。"""
     from app.adapters.sites.base import CheckinStatus
@@ -477,7 +525,7 @@ async def test_checkin_does_not_post_when_captcha_detected(name: str) -> None:
         await adapter.close()
 
 
-@pytest.mark.parametrize("name", CHECKIN_ADAPTERS)
+@pytest.mark.parametrize("name", HTML_CHECKIN_ADAPTERS)
 async def test_checkin_without_cookies_is_auth_expired(name: str) -> None:
     """缺 cookies → AUTH_EXPIRED，且不发请求。"""
     from app.adapters.sites.base import CheckinStatus, SiteProfile
@@ -491,6 +539,216 @@ async def test_checkin_without_cookies_is_auth_expired(name: str) -> None:
             )
             result = await adapter.checkin()
         assert result.status == CheckinStatus.AUTH_EXPIRED
+    finally:
+        await adapter.close()
+
+
+# --------------------------------------- hdsky：showup 三段式 + AI 读码
+
+#: hdsky 的签到端点（与其它站的 /attendance.php 不同）
+_HD_CHECK = "https://example.com/showup.php"
+_HD_NEW_CODE = "https://example.com/image_code_ajax.php"
+_HD_IMAGE = "https://example.com/image.php"
+
+#: 一张最小"验证码图"（内容无关，AI 读码器在测试里是假的）
+_FAKE_PNG = httpx.Response(
+    200, content=b"\x89PNG\r\n\x1a\n" + b"0" * 64, headers={"content-type": "image/png"}
+).content
+
+
+def _mock_hdsky_flow(
+    router: respx.MockRouter,
+    *,
+    sign: bool = False,
+    submits: list[object] | None = None,
+) -> dict[str, object]:
+    """铺 hdsky 签到流程的路由。
+
+    ``{action:check}`` 与 ``{action:showup}`` **打的是同一个 URL**，
+    respx 只能按 URL 匹配，所以用一个回调按请求体里的 ``action`` 分派。
+
+    :param sign: ``{action:check}`` 返回的今日签到状态。
+    :param submits: 每次 ``showup`` 提交依次返回的 JSON（默认永远成功）。
+
+    :returns: 路由引用，测试用它断言"申请了几次验证码"等。
+    """
+    queue = list(submits) if submits else None
+
+    def _showup(request: httpx.Request) -> httpx.Response:
+        action = parse_qs(request.content.decode()).get("action", [""])[0]
+        if action == "check":
+            return httpx.Response(
+                200, json={"success": True, "message": "", "sign": sign}
+            )
+        payload = queue.pop(0) if queue else {"success": True, "message": 10}
+        return httpx.Response(200, json=payload)
+
+    showup = router.post(_HD_CHECK).mock(side_effect=_showup)
+    new_code = router.post(_HD_NEW_CODE).mock(
+        return_value=httpx.Response(200, json={"success": True, "code": "a" * 32})
+    )
+    image = router.get(_HD_IMAGE).mock(
+        return_value=httpx.Response(200, content=_FAKE_PNG)
+    )
+    return {"showup": showup, "new_code": new_code, "image": image}
+
+
+async def test_hdsky_checkin_success(fake_reader: None) -> None:
+    """完整三段式：查状态 → 申请验证码 → AI 读码 → 提交 → SUCCESS。"""
+    from app.adapters.sites.base import CheckinStatus
+
+    adapter = _make("hdsky")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            _mock_hdsky_flow(router, submits=[{"success": True, "message": 12}])
+            result = await adapter.checkin()
+        assert result.status == CheckinStatus.SUCCESS
+        assert result.reward == 12
+    finally:
+        await adapter.close()
+
+
+async def test_hdsky_checkin_already_skips_captcha(fake_reader: None) -> None:
+    """今日已签 → 直接 ALREADY，**不申请验证码**（省一次 AI 调用）。"""
+    from app.adapters.sites.base import CheckinStatus
+
+    adapter = _make("hdsky")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            routes = _mock_hdsky_flow(router, sign=True)
+            result = await adapter.checkin()
+            assert not routes["new_code"].called, "已签到时不该申请验证码"
+            assert not routes["image"].called, "已签到时不该取验证码"
+        assert result.status == CheckinStatus.ALREADY
+    finally:
+        await adapter.close()
+
+
+async def test_hdsky_unsupported_without_ai(no_reader: None) -> None:
+    """未配置 AI 读码 → UNSUPPORTED，且**不发任何请求**（作业不该因此变红）。"""
+    from app.adapters.sites.base import CheckinStatus
+
+    adapter = _make("hdsky")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            router.route().mock(side_effect=AssertionError("未配置 AI 时不该发请求"))
+            result = await adapter.checkin()
+        assert result.status == CheckinStatus.UNSUPPORTED
+    finally:
+        await adapter.close()
+
+
+async def test_hdsky_auth_expired_when_showup_not_json(fake_reader: None) -> None:
+    """showup 返回登录页（cookie 失效）→ AUTH_EXPIRED。"""
+    from app.adapters.sites.base import CheckinStatus
+
+    adapter = _make("hdsky")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            router.post(_HD_CHECK).mock(
+                return_value=httpx.Response(200, text="<html>登录</html>")
+            )
+            result = await adapter.checkin()
+        assert result.status == CheckinStatus.AUTH_EXPIRED
+    finally:
+        await adapter.close()
+
+
+async def test_hdsky_retries_with_new_captcha_on_wrong_answer(fake_reader: None) -> None:
+    """验证码答错 → 换一张新图重试，最终成功。
+
+    服务端用 ``invalid_imagehash``（答错）与 ``date_unmatch``（已签）
+    区分两种情况——作业必须靠这个决定"重试"还是"收工"。
+    """
+    from app.adapters.sites.base import CheckinStatus
+
+    adapter = _make("hdsky")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            router.post(_HD_CHECK).mock(
+                return_value=httpx.Response(
+                    200, json={"success": True, "message": "", "sign": False}
+                )
+            )
+            router.post(_HD_NEW_CODE).mock(
+                return_value=httpx.Response(
+                    200, json={"success": True, "code": "a" * 32}
+                )
+            )
+            router.get(_HD_IMAGE).mock(
+                return_value=httpx.Response(200, content=_FAKE_PNG)
+            )
+            # 第一次提交答错，第二次成功
+            routes = _mock_hdsky_flow(router, submits=[
+                {"success": False, "message": "invalid_imagehash"},
+                {"success": True, "message": 12},
+            ])
+            result = await adapter.checkin()
+        assert result.status == CheckinStatus.SUCCESS
+        assert routes["new_code"].call_count == 2, "答错应换验证码重试"
+    finally:
+        await adapter.close()
+
+
+async def test_hdsky_ai_error_is_failed_not_crash() -> None:
+    """AI 读码抛错（429 / 网络 / 输出不可用）→ FAILED，不往上抛。
+
+    适配器要把它变成一次**可统计的失败**，让作业继续跑完其它站点，
+    而不是整个作业异常退出。实测网关会返回 429 限流。
+    """
+    from app.adapters.sites.base import CheckinStatus
+    from app.core.ai import AIClientError, set_ai_reader
+
+    class _BrokenReader:
+        available = True
+
+        async def read_captcha(self, image: bytes, *, length: int = 6) -> str:
+            raise AIClientError("AI 读码 HTTP 429")
+
+    set_ai_reader(_BrokenReader())
+    adapter = _make("hdsky")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            _mock_hdsky_flow(router)
+            result = await adapter.checkin()
+        assert result.status == CheckinStatus.FAILED
+        assert "429" in result.message
+    finally:
+        await adapter.close()
+        set_ai_reader(None)
+
+
+async def test_hdsky_gives_up_after_max_attempts(fake_reader: None) -> None:
+    """连续答错到上限 → FAILED（不是 UNSUPPORTED，也不是误报成功）。"""
+    from app.adapters.sites.base import CheckinStatus
+
+    adapter = _make("hdsky")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            routes = _mock_hdsky_flow(
+                router,
+                submits=[{"success": False, "message": "invalid_imagehash"}] * 5,
+            )
+            result = await adapter.checkin()
+        assert result.status == CheckinStatus.FAILED
+        assert routes["new_code"].call_count == 3, "重试次数应封顶"
+    finally:
+        await adapter.close()
+
+
+async def test_hdsky_already_on_submit_stops_retrying(fake_reader: None) -> None:
+    """提交时返回 ``date_unmatch``（今日已签）→ ALREADY，**不再重试**。"""
+    from app.adapters.sites.base import CheckinStatus
+
+    adapter = _make("hdsky")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            routes = _mock_hdsky_flow(
+                router, submits=[{"success": False, "message": "date_unmatch"}] * 5
+            )
+            result = await adapter.checkin()
+        assert result.status == CheckinStatus.ALREADY
+        assert routes["new_code"].call_count == 1, "已签到不该继续重试"
     finally:
         await adapter.close()
 

@@ -219,22 +219,43 @@ cron 的**持久化来源是 `.env` / `.env.prod`**（`FETCH_ALL_SITES_CRON` / `
 ### 7.1 每日签到（FR-3.6，2026-10-22）
 
 `daily_checkin` 作业（cron `37 8 * * *`）逐站调用
-`SiteAdapter.checkin()`。**9 站里只有 3 站实测可自动签到**：
+`SiteAdapter.checkin()`。**9 站里 4 站实测可自动签到**：
 
 | 站点 | 端点 | 状态 |
 |---|---|---|
 | hhanclub | `GET/POST /attendance.php` | ✅ 已实现（签到得憨豆） |
 | soulvoice | `GET/POST /attendance.php` | ✅ 已实现（签到得魔力值） |
 | hdhome | `GET/POST /attendance.php` | ✅ 已实现（签到得魔力值） |
-| audiences | `GET /attendance.php` | ❌ Cloudflare Turnstile 人机验证 |
+| **hdsky** | 自建 `showup.php` 三段式 + 图形验证码 | ✅ **已实现（AI 读码）** |
+| audiences | `GET /attendance.php` | ❌ Cloudflare Turnstile（`TurnstileError 600010`） |
 | ourbits | `GET /attendance.php` | ❌ Turnstile + `form#attendance` |
-| hdsky | `GET /showup.php` | ❌ 图形验证码（`invalid_imagehash`） |
 | springsunday | — | ❌ 无签到功能（只有论坛"签到帖"） |
 | mteam | — | ❌ mTorrent API 无签到端点 |
-| hddolby | — | ❌ 未实现（SSL 握手失败，未验证） |
+| hddolby | — | ❌ 未实现（SSL/DNS 失败，未验证） |
 
-> ⚠️ **不做验证码绕过**（AGENTS.md R2 合规红线）：需人机验证的站一律
-> 返回 `UNSUPPORTED`（"需人工签到"），不引入浏览器自动化、不解 Turnstile。
+hdsky 的签到不是 NexusPHP 标准的 `/attendance.php`（本站 404），而是自建三段式：
+
+```
+POST showup.php {action:check}                    → {"success":true,"sign":bool}   免验证码查状态
+POST image_code_ajax.php {action:new}             → {"success":true,"code":"<32hex>"}
+GET  image.php?action=regimage&imagehash=<code>   → 150x40 PNG 图形验证码
+POST showup.php {action:showup, imagehash, imagestring} → 提交
+```
+
+服务端对两种失败返回**不同错误码**（这是重试逻辑的前提）：
+
+- `invalid_imagehash` —— 验证码**答错**（含大小写：站点大小写敏感）→ 换图重试
+- `date_unmatch` —— 验证码**答对**但今日已签 → 幂等，不重试
+
+> ⚠️ hdsky 的 AI 读码需要 prod `.env.prod` 配 `AI_API_BASE` / `AI_API_KEY` /
+> `AI_MODEL` 三项。**未配置时该站降级为「需人工签到」，作业不会变红。**
+> 端点须 prod 可直连（实测 `llmapi.banstack.top` 与 `api.minimaxi.com` 均可达；
+> OpenAI 直连不可达）。详见 AGENTS.md「FR-3.6 AI 读码」。
+
+> ⚠️ **Cloudflare Turnstile 本仓库不实现**：audiences / ourbits 的挑战在
+> 服务端环境**无法完成**（实测 `TurnstileError 600010`：headless / 有头真实
+> Chrome、反自动化参数、关代理、把 `brunhild.challenges.cloudflare.com`
+> 映射到 IPv4 anycast、先访问首页 — 全部无效）。这两站返回 `UNSUPPORTED`。
 >
 > 上游语义（`xiaomlove/nexusphp` 的 `public/attendance.php`）：**GET 只查状态**，
 > 仅当站点 `captcha.attendance.enabled = false` 时才顺带执行签到；**POST 才是

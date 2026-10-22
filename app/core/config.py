@@ -76,6 +76,15 @@ class AppSettings(BaseSettings):
     #: 分钟位 37 刻意避开既有多 5 分钟的作业（fetch */10 / push */30 /
     #: monitor 5,15,25... / drain */5 / scan 0 */6），避免同一分钟并发抢资源。
     daily_checkin_cron: str = "37 8 * * *"
+
+    # -- AI 读码（FR-3.6 站点签到的图形验证码）--
+    # 三项**全为空则视为未配置**，需人工识别的站点会降级为 UNSUPPORTED
+    # 而不是让作业变红。走 OpenAI 兼容协议（/v1/chat/completions）。
+    ai_api_base: str = ""
+    ai_api_key: SecretStr | None = None
+    #: 必须是**视觉**模型（能吃 image_url 内容块）。纯文本模型读不了验证码。
+    ai_model: str = ""
+    ai_timeout_seconds: float = 60.0
     #: 距 free_end_at 不足此分钟数且未完成 → 自动暂停下载器任务
     monitor_pre_pause_minutes: int = 10
     #: 限时种剩余时间低于此值不推（小时，默认 6）
