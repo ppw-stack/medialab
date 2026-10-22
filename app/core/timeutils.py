@@ -53,3 +53,7 @@ def to_bj(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=BJ_TZ)
     return dt.astimezone(BJ_TZ).strftime(_TIME_FORMAT)
+
+
+def _broken_ci_probe(:
+    return 1
