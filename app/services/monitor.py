@@ -1,4 +1,4 @@
-"""免费窗口监测作业（FR-3.4 巡检 + 临近截止自动暂停）。
+"""免费窗口监测作业（FR-3.4 巡检 + 临近截止自动暂停 / 删除）。
 
 流程：
 1. 拉默认下载器全量任务（``adapter.list_torrents()``）—— 拉下载器是权威
@@ -6,8 +6,23 @@
 3. 遍历下载器中的每个种子：若 db 命中 ``push_status=pushed`` → 按 db 当前
    ``free_type`` 判断处理：
    - 当前是限时种（TIMED/TWOU_TIMED）→ 应用窗口规则
-   - 当前是永久种（PERMANENT）→ 永不暂停
-   - 当前是非免费（neutral_leech / unknown / 其他）→ 立即暂停
+   - 当前是永久种（PERMANENT）→ 永不处理
+   - 当前是非免费（neutral_leech / unknown / 其他）→ 立即处理
+
+**动作由运行参数 ``monitor_delete_expired`` 决定**（0=仅暂停，默认；
+1=删任务 + 删磁盘数据）。两种动作的**判定范围完全一致**——
+「该暂停的」就是「该删的」，差别只在执行动作。
+
+删除模式的三条约束：
+
+1. **只删正在跑的**：已完成（``progress >= 1.0``）与已暂停的任务**跳过**
+   （沿用暂停路径的跳过逻辑）。已完成的种子数据已下完，删掉是净损失。
+2. **保留 ``torrent_index`` 行**：删除只作用于下载器侧，索引行与
+   ``push_status=pushed`` 保持不变。``push_free`` 的候选条件要求
+   ``push_status IS NULL OR != pushed``，故该种**不会**被重新推送
+   ——否则「推送 → 删除 → 再推送」会无限循环。
+3. **删磁盘数据不可逆**：走 ``delete_data=True``，且必须记审计日志
+   （AGENTS.md：删磁盘数据单独开关并记审计日志）。
 
 不写 DB。``torrent_index`` 中已推送但不在下载器中的种子不用管
 （可能 qB 自动删除 / 用户手动删，不强制标记）。
@@ -48,6 +63,9 @@ class MonitorResult:
     skipped_permanent: int = 0
     skipped_refund: int = 0
     pre_paused: int = 0
+    #: 命中条件后被**删除**的任务数（``monitor_delete_expired=1`` 时）。
+    #: 为 0 表示本次没有删除——两种模式下它都是 0（暂停模式）。
+    deleted: int = 0
     failed: int = 0
     errors: tuple[str, ...] = ()
     #: 人话摘要（前端直接展示，避免前端硬编码字段名）
@@ -57,15 +75,49 @@ class MonitorResult:
 
 
 class MonitorFreeWindowService:
-    """免费窗口巡检 + 临近截止自动暂停。
+    """免费窗口巡检 + 临近截止自动暂停 / 删除。
 
     提前暂停分钟数从 :class:`app.services.runtime_params.RuntimeParamManager`
     实时读取，DB 改完下次作业生效。构造参数只用于首次 run 之前的占位。
+
+    命中条件后的动作由 ``monitor_delete_expired`` 决定（0=仅暂停，默认；
+    1=删任务 + 删磁盘数据）。见模块 docstring 的约束说明。
     """
 
     def __init__(self, factory: AdapterFactory) -> None:
         self._factory = factory
         self._pre_pause = timedelta(minutes=10)  # 占位，run() 内从 runtime_params 覆盖
+
+    @staticmethod
+    async def _act(
+        adapter: Any, hash_: str, delete_mode: bool
+    ) -> tuple[str, str | None]:
+        """对单个种子执行动作（暂停或删除）。
+
+        :param adapter: 下载器适配器。
+        :param hash_: 种子 infohash（40 位 hex，由适配器校验）。
+        :param delete_mode: True=删任务 + 删磁盘数据；False=仅暂停。
+        :return: ``(动作名, 错误信息)``。动作名为 ``"deleted"`` /
+            ``"set_pause"``；错误信息为 None 表示成功，否则是异常文本
+            （调用方据此计入 failed）。
+        """
+        if delete_mode:
+            # 删磁盘数据不可逆 → 必须记审计日志（AGENTS.md：删磁盘数据
+            # 单独开关并记审计日志）。审计的取证价值在于能定位"删了什么"，
+            # 故记 hash（单条，无批量截断问题）。
+            logger.warning(
+                "monitor 删除下载器任务并删除磁盘数据：hash=%s", hash_
+            )
+            try:
+                await adapter.remove([hash_], delete_data=True)
+            except Exception as exc:
+                return "remove", str(exc)
+            return "deleted", None
+        try:
+            await adapter.set_pause([hash_], paused=True)
+        except Exception as exc:
+            return "set_pause", str(exc)
+        return "set_pause", None
 
     async def run(self) -> MonitorResult:
         """执行一次监测作业。"""
@@ -174,8 +226,14 @@ class MonitorFreeWindowService:
         skipped_permanent = 0
         skipped_refund = 0
         pre_paused = 0
+        deleted = 0
         failed = 0
         errors: list[str] = []
+
+        # 动作模式（0=仅暂停 / 1=删任务+删数据），作业开始时读一次——
+        # 一次巡检内保持同一动作，避免中途改参数导致同一批种子一半暂停
+        # 一半删除。
+        delete_mode = get_runtime_params().get_int("monitor_delete_expired") == 1
 
         for info in infos:
             hash_key = (info.hash or "").lower()
@@ -199,20 +257,21 @@ class MonitorFreeWindowService:
             fea = row.free_end_at
 
             if ft == FreeType.PERMANENT:
-                # 永久免费：用户全程做种赚积分，永不暂停
+                # 永久免费：用户全程做种赚积分，永不处理
                 skipped_permanent += 1
                 continue
 
             if ft == FreeType.REFUND:
                 # 退还种（springsunday "1d 退还"）：上传者已撤种
-                # 用户规则"当前非免费种直接暂停"——与 NEUTRAL/UNKNOWN 走相同路径
+                # 用户规则"当前非免费种直接处理"——与 NEUTRAL/UNKNOWN 走相同路径
                 # 单独计数便于统计退还种规模
                 skipped_refund += 1
-                try:
-                    await adapter.set_pause([info.hash], paused=True)
-                except Exception as exc:
+                action, err = await self._act(adapter, info.hash or "", delete_mode)
+                if err is not None:
                     failed += 1
-                    errors.append(f"hash={hash_key} set_pause: {exc}")
+                    errors.append(f"hash={hash_key} {action}: {err}")
+                elif action == "deleted":
+                    deleted += 1
                 else:
                     pre_paused += 1
                 continue
@@ -220,35 +279,38 @@ class MonitorFreeWindowService:
             if ft in (FreeType.TIMED, FreeType.TWOU_TIMED):
                 # 限时种（含 2X 限时）：窗口判断
                 if fea is None:
-                    # 异常：限时种无 end_at → 保守暂停
-                    try:
-                        await adapter.set_pause([info.hash], paused=True)
-                    except Exception as exc:
+                    # 异常：限时种无 end_at → 保守处理
+                    action, err = await self._act(adapter, info.hash or "", delete_mode)
+                    if err is not None:
                         failed += 1
-                        errors.append(f"hash={hash_key} set_pause: {exc}")
+                        errors.append(f"hash={hash_key} {action}: {err}")
+                    elif action == "deleted":
+                        deleted += 1
                     else:
                         pre_paused += 1
                     continue
                 if fea > threshold:
                     skipped_far += 1
                     continue
-                # 即将到期 / 已过期 → 暂停
-                try:
-                    await adapter.set_pause([info.hash], paused=True)
-                except Exception as exc:
+                # 即将到期 / 已过期 → 处理
+                action, err = await self._act(adapter, info.hash or "", delete_mode)
+                if err is not None:
                     failed += 1
-                    errors.append(f"hash={hash_key} set_pause: {exc}")
+                    errors.append(f"hash={hash_key} {action}: {err}")
+                elif action == "deleted":
+                    deleted += 1
                 else:
                     pre_paused += 1
                 continue
 
-            # 其他 free_type（neutral_leech / unknown / 任何非免费）→ 直接暂停
-            # 用户规则："当前不是免费种，直接暂停"
-            try:
-                await adapter.set_pause([info.hash], paused=True)
-            except Exception as exc:
+            # 其他 free_type（neutral_leech / unknown / 任何非免费）→ 直接处理
+            # 用户规则："当前不是免费种，直接处理"
+            action, err = await self._act(adapter, info.hash or "", delete_mode)
+            if err is not None:
                 failed += 1
-                errors.append(f"hash={hash_key} set_pause: {exc}")
+                errors.append(f"hash={hash_key} {action}: {err}")
+            elif action == "deleted":
+                deleted += 1
             else:
                 pre_paused += 1
 
@@ -262,10 +324,15 @@ class MonitorFreeWindowService:
             skipped_permanent=skipped_permanent,
             skipped_refund=skipped_refund,
             pre_paused=pre_paused,
+            deleted=deleted,
             failed=failed,
             errors=tuple(errors[:10]),
             summary=(
-                f"扫描 {scanned}，命中 {matched}，暂停 {pre_paused}"
+                (
+                    f"扫描 {scanned}，命中 {matched}，删除 {deleted}（含磁盘数据）"
+                    if delete_mode
+                    else f"扫描 {scanned}，命中 {matched}，暂停 {pre_paused}"
+                )
                 + (f"，{failed} 失败" if failed else "")
             ),
             steps=(
@@ -280,21 +347,27 @@ class MonitorFreeWindowService:
                 JobStep(
                     "判断免费窗口",
                     "ok",
-                    pre_paused,
-                    f"距截止 < {int(self._pre_pause.total_seconds() // 60)}min 需暂停",
+                    pre_paused + deleted,
+                    f"距截止 < {int(self._pre_pause.total_seconds() // 60)}min 需处理",
                 ),
                 JobStep(
-                    "自动暂停",
+                    "自动删除" if delete_mode else "自动暂停",
                     "warn" if failed else "ok",
-                    pre_paused,
-                    f"已暂停 {pre_paused} 个，{failed} 失败",
+                    deleted if delete_mode else pre_paused,
+                    (
+                        f"已删除 {deleted} 个（含磁盘数据），{failed} 失败"
+                        if delete_mode
+                        else f"已暂停 {pre_paused} 个，{failed} 失败"
+                    ),
                 ),
             ),
         )
         logger.info(
-            "monitor: 下载器 %d，命中 %d，触发暂停 %d，"
+            "monitor: 下载器 %d，命中 %d，触发%s %d，"
             "跳过(无关/远/已完成/已暂停/永久/退还) %d/%d/%d/%d/%d/%d，失败 %d",
-            result.scanned, result.matched, result.pre_paused,
+            result.scanned, result.matched,
+            "删除" if delete_mode else "暂停",
+            result.deleted if delete_mode else result.pre_paused,
             result.skipped_unmatched, result.skipped_far_from_window,
             result.skipped_already_completed, result.skipped_already_paused,
             result.skipped_permanent, result.skipped_refund,

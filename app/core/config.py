@@ -87,6 +87,12 @@ class AppSettings(BaseSettings):
     ai_timeout_seconds: float = 60.0
     #: 距 free_end_at 不足此分钟数且未完成 → 自动暂停下载器任务
     monitor_pre_pause_minutes: int = 10
+    #: monitor 命中条件后的动作（0=仅暂停，1=删任务 + 删磁盘数据）
+    #:
+    #: 1 = **不可逆**（磁盘数据一起删）。默认 0（只暂停）——删除是用户
+    #: 显式开启的行为，不是默认路径。运行期改这个值走
+    #: :mod:`app.services.runtime_params`（DB 持久化 + UI 可调）。
+    monitor_delete_expired: int = 0
     #: 限时种剩余时间低于此值不推（小时，默认 6）
     push_min_remaining_hours: int = 6
     #: 每次推送最多 N 个（避免下载器瞬时过载）

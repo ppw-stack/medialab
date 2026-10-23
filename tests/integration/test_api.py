@@ -360,6 +360,51 @@ async def test_runtime_params_view(client: httpx.AsyncClient) -> None:
     assert "specs" in data
 
 
+async def test_runtime_params_monitor_delete_expired_roundtrip(
+    client: httpx.AsyncClient,
+) -> None:
+    """monitor_delete_expired 参数：归属正确 → 可改 → 持久化 → 越界被拒。
+
+    这个参数控制"命中条件时删除种子（含磁盘数据）"——不可逆操作，
+    故必须能通过 API 改，且值域被限制在 0/1（1=开删除，0=仅暂停）。
+    """
+    # 1) 归属 monitor_free_window 作业（前端按 job 渲染配置弹窗）
+    from app.services.runtime_params import specs_for_job
+
+    keys = [s.key for s in specs_for_job("monitor_free_window")]
+    assert "monitor_delete_expired" in keys
+
+    # 2) 默认值是 0（仅暂停）
+    resp = await client.get("/api/v1/scheduler/runtime-params")
+    assert resp.status_code == 200
+    data = resp.json()
+    params = data["params"]
+    assert params["monitor_delete_expired"] == 0
+
+    # 3) spec 带不可逆风险提示（前端渲染成警告行）
+    spec = next(s for s in data["specs"] if s["key"] == "monitor_delete_expired")
+    assert spec["note"], "删除模式必须提示不可恢复"
+
+    # 4) 可改为 1 并持久化
+    resp = await client.put(
+        "/api/v1/scheduler/runtime-params", json={"monitor_delete_expired": 1}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["params"]["monitor_delete_expired"] == 1
+
+    # 5) 越界值被拒（400）
+    resp = await client.put(
+        "/api/v1/scheduler/runtime-params", json={"monitor_delete_expired": 2}
+    )
+    assert resp.status_code == 400
+
+    # 6) 改回 0，避免污染后续用例
+    resp = await client.put(
+        "/api/v1/scheduler/runtime-params", json={"monitor_delete_expired": 0}
+    )
+    assert resp.status_code == 200
+
+
 async def test_job_runs_empty(client: httpx.AsyncClient) -> None:
     resp = await client.get("/api/v1/scheduler/runs")
     assert resp.status_code == 200

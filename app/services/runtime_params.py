@@ -39,6 +39,9 @@ class ParamSpec:
     #: 归属作业名（None = 未归属/全局）。决定该参数出现在哪个作业的
     #: 「配置」弹框里（见 :func:`specs_for_job`）。
     job: str | None = None
+    #: 补充说明（前端渲染在参数下方）。用于提示**不可逆**之类的关键
+    #: 风险——取值语义放在 label 里放不下时用它补充。None = 无补充说明。
+    note: str | None = None
 
 
 PARAM_SPECS: tuple[ParamSpec, ...] = (
@@ -65,6 +68,15 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         min=1,
         max=120,
         job="monitor_free_window",
+    ),
+    ParamSpec(
+        key="monitor_delete_expired",
+        label="命中条件时删除（0=暂停 1=删除）",
+        default=0,
+        min=0,
+        max=1,
+        job="monitor_free_window",
+        note="1 = 删任务并删磁盘数据（不可恢复）",
     ),
     ParamSpec(
         key="push_download_interval_ms",
@@ -157,6 +169,7 @@ def _env_default(settings: AppSettings, key: str) -> int:
         "push_min_remaining_hours": settings.push_min_remaining_hours,
         "push_max_per_run": settings.push_max_per_run,
         "monitor_pre_pause_minutes": settings.monitor_pre_pause_minutes,
+        "monitor_delete_expired": settings.monitor_delete_expired,
         "push_download_interval_ms": settings.push_download_interval_ms,
         "push_within_bucket_order": settings.push_within_bucket_order,
     }

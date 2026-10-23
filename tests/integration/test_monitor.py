@@ -31,12 +31,14 @@ from app.services.runtime_params import (
     RuntimeParamManager,
     set_runtime_params,
 )
+from sqlalchemy import select
 
 
 @pytest.fixture(autouse=True)
 def _runtime_params() -> None:
     mgr = RuntimeParamManager()
     mgr.set_memory("monitor_pre_pause_minutes", 10)
+    mgr.set_memory("monitor_delete_expired", 0)
     mgr.set_memory("push_min_remaining_hours", 6)
     mgr.set_memory("push_max_per_run", 20)
     mgr.set_memory("push_download_interval_ms", 0)
@@ -46,17 +48,23 @@ def _runtime_params() -> None:
 
 
 class _FakeDownloader:
-    """记录 set_pause 调用的假下载器。"""
+    """记录 set_pause / remove 调用的假下载器。"""
 
     def __init__(self, torrents: list[TorrentInfo]) -> None:
         self._torrents = torrents
         self.paused: list[list[str]] = []
+        #: 每次 remove 调用的 (hashes, delete_data)
+        self.removed: list[tuple[list[str], bool]] = []
 
     async def list_torrents(self, filt: object = None) -> list[TorrentInfo]:
         return self._torrents
 
     async def set_pause(self, hashes: list[str], paused: bool) -> bool:
         self.paused.append(list(hashes))
+        return True
+
+    async def remove(self, hashes: list[str], *, delete_data: bool) -> bool:
+        self.removed.append((list(hashes), delete_data))
         return True
 
     async def close(self) -> None:
@@ -246,3 +254,150 @@ async def test_unmatched_torrent_is_skipped(db: None) -> None:
     result = await _run(fake)
     assert fake.paused == []
     assert result.skipped_unmatched == 1
+
+
+# ==================================================================== 删除模式
+#
+# monitor_delete_expired=1 时，命中条件的种子被**删除**（任务 + 磁盘数据）
+# 而非暂停。判定范围与暂停**完全一致**，差别只在执行动作。
+#
+# 关键约束（AGENTS.md + 循环风险）：
+# - 只删正在跑的：已完成 / 已暂停仍跳过
+# - 永久免费永不处理
+# - 保留 torrent_index 行且 push_status 仍是 pushed → push_free 不会重推
+
+
+def _enable_delete_mode() -> None:
+    """把 monitor_delete_expired 设为 1（删除模式）。"""
+    mgr = RuntimeParamManager()
+    mgr.set_memory("monitor_pre_pause_minutes", 10)
+    mgr.set_memory("monitor_delete_expired", 1)
+    mgr.set_memory("push_min_remaining_hours", 6)
+    mgr.set_memory("push_max_per_run", 20)
+    mgr.set_memory("push_download_interval_ms", 0)
+    set_runtime_params(mgr)
+
+
+async def test_delete_mode_removes_task_with_disk_data(db: None) -> None:
+    """删除模式：NEUTRAL → 删任务 + 删磁盘数据（不暂停）。"""
+    _enable_delete_mode()
+    fake = await _setup(free_type=FreeType.NEUTRAL)
+    result = await _run(fake)
+    assert fake.removed == [(["a" * 40], True)], "应删任务且连带删磁盘数据"
+    assert fake.paused == [], "删除模式不应再调 set_pause"
+    assert result.deleted == 1
+    assert result.pre_paused == 0
+
+
+async def test_delete_mode_removes_refund(db: None) -> None:
+    """删除模式：REFUND（退还种）→ 删除（与暂停同路径）。"""
+    _enable_delete_mode()
+    fake = await _setup(free_type=FreeType.REFUND)
+    result = await _run(fake)
+    assert fake.removed == [(["a" * 40], True)]
+    assert result.deleted == 1
+    assert result.skipped_refund == 1
+
+
+async def test_delete_mode_removes_timed_without_end_at(db: None) -> None:
+    """删除模式：TIMED 但无 free_end_at（异常 → 保守处理）→ 删除。"""
+    _enable_delete_mode()
+    fake = await _setup(free_type=FreeType.TIMED, free_end_at=None)
+    result = await _run(fake)
+    assert fake.removed == [(["a" * 40], True)]
+    assert result.deleted == 1
+
+
+async def test_delete_mode_removes_expired_timed(db: None) -> None:
+    """删除模式：TIMED 窗口已过期 → 删除。"""
+    _enable_delete_mode()
+    end = format_bj(bj_now_dt() - timedelta(hours=1))
+    fake = await _setup(free_type=FreeType.TIMED, free_end_at=end)
+    result = await _run(fake)
+    assert fake.removed == [(["a" * 40], True)]
+    assert result.deleted == 1
+
+
+async def test_delete_mode_removes_unknown(db: None) -> None:
+    """删除模式：UNKNOWN（非免费种）→ 删除。"""
+    _enable_delete_mode()
+    fake = await _setup(free_type=FreeType.UNKNOWN)
+    result = await _run(fake)
+    assert fake.removed == [(["a" * 40], True)]
+    assert result.deleted == 1
+
+
+async def test_delete_mode_never_deletes_permanent_free(db: None) -> None:
+    """删除模式：永久免费仍**永不处理**（语义不能破）。"""
+    _enable_delete_mode()
+    fake = await _setup(free_type=FreeType.PERMANENT)
+    result = await _run(fake)
+    assert fake.removed == []
+    assert fake.paused == []
+    assert result.skipped_permanent == 1
+    assert result.deleted == 0
+
+
+async def test_delete_mode_skips_completed(db: None) -> None:
+    """删除模式：已完成（progress=1）的任务跳过（不删）。
+
+    已完成的种子数据已下完，删掉是净损失——沿用暂停路径的跳过逻辑。
+    """
+    _enable_delete_mode()
+    fake = await _setup(free_type=FreeType.NEUTRAL, progress=1.0)
+    result = await _run(fake)
+    assert fake.removed == []
+    assert result.skipped_already_completed == 1
+
+
+async def test_delete_mode_skips_already_paused(db: None) -> None:
+    """删除模式：已暂停的任务跳过（不删）。"""
+    _enable_delete_mode()
+    fake = await _setup(
+        free_type=FreeType.NEUTRAL, state=TorrentState.PAUSED_DL
+    )
+    result = await _run(fake)
+    assert fake.removed == []
+    assert result.skipped_already_paused == 1
+
+
+async def test_delete_mode_keeps_index_row_pushed(db: None) -> None:
+    """删除模式：**保留 torrent_index 行**且 push_status 仍是 pushed。
+
+    这是防「推送 → 删除 → 再推送」无限循环的关键：push_free 的候选
+    条件要求 push_status IS NULL OR != pushed，保留 pushed 状态即
+    天然不被重推。
+    """
+    _enable_delete_mode()
+    fake = await _setup(free_type=FreeType.NEUTRAL)
+    await _run(fake)
+
+    async with session_scope() as session:
+        row = (await session.execute(select(TorrentIndex))).scalars().one()
+        assert row.push_status == PushStatus.PUSHED, "push_status 必须保持 pushed"
+        assert row.site_id == 1, "索引行不能被删"
+
+
+async def test_pause_mode_never_calls_remove(db: None) -> None:
+    """默认模式（monitor_delete_expired=0）：只暂停，**绝不调 remove**。
+
+    这是默认行为的回归保护——生产库升级后该参数自动落库为 0，行为不变。
+    """
+    fake = await _setup(free_type=FreeType.NEUTRAL)
+    result = await _run(fake)
+    assert fake.paused == [["a" * 40]]
+    assert fake.removed == [], "默认模式不应删除任何任务"
+    assert result.pre_paused == 1
+    assert result.deleted == 0
+
+
+async def test_delete_mode_summary_reports_deletion(db: None) -> None:
+    """删除模式的 summary / 步骤要明确写出"删除"，便于事后追溯。"""
+    _enable_delete_mode()
+    fake = await _setup(free_type=FreeType.NEUTRAL)
+    result = await _run(fake)
+    assert "删除 1" in result.summary
+    assert "磁盘数据" in result.summary
+    step_names = [s.name for s in result.steps]
+    assert "自动删除" in step_names
+    assert "自动暂停" not in step_names

@@ -129,6 +129,7 @@ class RuntimeParamsUpdateIn(BaseModel):
     push_min_remaining_hours: int | None = None
     push_max_per_run: int | None = None
     monitor_pre_pause_minutes: int | None = None
+    monitor_delete_expired: int | None = None
     push_download_interval_ms: int | None = None
     push_within_bucket_order: int | None = None
 
@@ -163,6 +164,7 @@ async def get_runtime_params_view() -> RuntimeParamsOut:
                 "min": spec.min,
                 "max": spec.max,
                 "default": spec.default,
+                "note": spec.note,
             }
             for spec in PARAM_SPECS
         ],
@@ -193,6 +195,7 @@ async def update_runtime_params(payload: RuntimeParamsUpdateIn) -> RuntimeParams
                 "min": spec.min,
                 "max": spec.max,
                 "default": spec.default,
+                "note": spec.note,
             }
             for spec in PARAM_SPECS
         ],
@@ -314,6 +317,7 @@ async def get_job_config(job_name: str) -> dict[str, Any]:
                 "min": s.min,
                 "max": s.max,
                 "default": s.default,
+                "note": s.note,
             }
             for s in job_specs
         ],

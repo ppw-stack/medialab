@@ -38,6 +38,8 @@ export interface ParamSpec {
   min: number
   max: number
   default: number
+  /** 补充说明（如「不可恢复」这类风险提示）。无则不渲染。 */
+  note?: string | null
 }
 
 // ==================================================================== 站点

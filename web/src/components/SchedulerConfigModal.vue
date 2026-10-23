@@ -154,6 +154,11 @@ function onCancel() {
             style="width: 140px"
           />
           <span class="config-hint">范围 {{ spec.min }}–{{ spec.max }} (默认 {{ spec.default }})</span>
+          <!-- 风险提示（如删除不可恢复）——单独一行，避免挤在 hint 里 -->
+          <div v-if="spec.note" class="config-note">
+            <span class="config-note__icon">⚠</span>
+            {{ spec.note }}
+          </div>
         </div>
       </section>
 
@@ -199,6 +204,8 @@ function onCancel() {
 .config-row {
   display: flex;
   align-items: center;
+  /* 允许换行：风险提示（.config-note）要独占一行 */
+  flex-wrap: wrap;
   gap: var(--sp-3);
   margin-bottom: var(--sp-2);
 }
@@ -211,6 +218,16 @@ function onCancel() {
   color: var(--text-tertiary);
   font-size: var(--text-xs);
   font-family: var(--font-mono, monospace);
+}
+/* 风险提示（不可逆操作等）——独占一行，紧跟在其参数下方 */
+.config-note {
+  flex: 1 0 100%;
+  color: var(--warning-text, #d97706);
+  font-size: var(--text-xs);
+}
+.config-note__icon {
+  margin-right: var(--sp-1);
+  font-weight: 700;
 }
 .config-actions {
   display: flex;
