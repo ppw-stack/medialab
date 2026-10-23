@@ -349,6 +349,14 @@ const columns = [
     </section>
 
     <section class="section">
+      <a-alert
+        v-if="stats.total === 0 && !loading"
+        type="info"
+        show-icon
+        message="信号池为空"
+        description="尚未拉取到免费种。请先在「站点」页配置并启用站点，fetch_all_sites 作业（每 10 分钟）会自动灌入索引。"
+        style="margin-bottom: var(--sp-3)"
+      />
       <div class="panel">
       <div class="filter-row">
         <a-select

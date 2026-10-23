@@ -205,7 +205,7 @@ function onCancel() {
 .config-label {
   flex: 0 0 200px;
   font-size: var(--text-sm);
-  color: var(--text);
+  color: var(--text-primary);
 }
 .config-hint {
   color: var(--text-tertiary);

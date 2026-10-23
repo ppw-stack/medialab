@@ -88,7 +88,7 @@ function stepClass(s: string): string {
 
 .step-name {
   font-weight: 500;
-  color: var(--text);
+  color: var(--text-primary);
   flex: 0 0 auto;
 }
 .step-count {

@@ -213,7 +213,15 @@ const columns = [
     <hr class="divider-hairline" style="margin: 0" />
 
     <section class="section">
-      <div class="panel">
+      <a-alert
+        v-if="data.length === 0"
+        type="info"
+        show-icon
+        message="暂未配置下载器"
+        description="点击右上角「新增下载器」添加 qBittorrent 或 Transmission 实例。"
+        style="margin-bottom: var(--sp-3)"
+      />
+      <div v-if="data.length > 0" class="panel">
       <a-table :data-source="data" :columns="columns" row-key="id" :pagination="{ pageSize: 20 }">
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'name'">

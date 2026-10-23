@@ -186,7 +186,6 @@ const columns = [
   { title: '适配器', key: 'adapter' },
   { title: '域名', key: 'domain' },
   { title: '凭据', key: 'credentials' },
-  { title: '用户数据', key: 'userdata', width: 100 },
   { title: '启用', key: 'enabled', width: 80 },
   { title: '', key: 'action', width: 280 },
 ]
@@ -250,11 +249,6 @@ async function openUserDataDrawer(s: Site) {
               <a-tag v-if="!record.rss_url_masked && !record.has_apikey && !record.has_cookies">—</a-tag>
             </a-space>
           </template>
-          <template v-else-if="column.key === 'userdata'">
-            <a-button size="small" type="link" @click="openUserDataDrawer(record)">
-              查看
-            </a-button>
-          </template>
           <template v-else-if="column.key === 'enabled'">
             <a-switch
               :checked="record.enabled"
@@ -264,6 +258,9 @@ async function openUserDataDrawer(s: Site) {
           </template>
           <template v-else-if="column.key === 'action'">
             <a-space :size="4" align="center">
+              <a-button size="small" type="link" @click="openUserDataDrawer(record)">
+                数据
+              </a-button>
               <a-button
                 size="small"
                 type="link"

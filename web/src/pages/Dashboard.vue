@@ -8,16 +8,31 @@ const scheduler = ref<SchedulerInfo | null>(null)
 const now = ref(new Date())
 let timer: ReturnType<typeof setInterval> | null = null
 
+// 失联检测：后端不可达时旧数据仍展示（不 blank），但顶部 banner 点名"已失联 +
+// 上次成功 N 秒前"。原先两处 catch {} 静默吞错，会让仪表盘冻在陈旧数据上
+// 而 live-dot 照常闪，对运维面板是最危险的盲区。
+const connected = ref(true)
+const lastOkAt = ref<Date | null>(null)
+
 async function load() {
+  let ok = false
   try {
     snap.value = await api.get<DashboardSnap>('/dashboard')
+    ok = true
   } catch {
-    /* ignore */
+    /* 落到下方统一标记失联 */
   }
   try {
     scheduler.value = await api.get<SchedulerInfo>('/scheduler')
+    ok = true
   } catch {
-    /* ignore */
+    /* 同上 */
+  }
+  if (ok) {
+    connected.value = true
+    lastOkAt.value = new Date()
+  } else {
+    connected.value = false
   }
 }
 
@@ -55,6 +70,11 @@ const inflightTorrents = computed(() => snap.value?.inflight_torrents ?? null)
 const inflightJobs = computed(() => scheduler.value?.inflight ?? 0)
 const accepting = computed(() => scheduler.value?.accepting_new_work ?? false)
 
+const staleSeconds = computed(() => {
+  if (!lastOkAt.value) return null
+  return Math.floor((now.value.getTime() - lastOkAt.value.getTime()) / 1000)
+})
+
 const JOB_LABELS: Record<string, string> = {
   fetch_all_sites: '站点拉取',
   push_free_torrents: '免费种推送',
@@ -83,6 +103,15 @@ const JOB_LABELS: Record<string, string> = {
     </header>
 
     <hr class="divider-hairline" style="margin: 0" />
+
+    <a-alert
+      v-if="!connected"
+      type="warning"
+      show-icon
+      banner
+      :message="`与后端失联 · 数据可能过期${staleSeconds !== null ? ` · 上次成功 ${staleSeconds} 秒前` : ''}`"
+      description="面板每 5 秒重试，恢复后自动刷新。"
+    />
 
     <section class="section">
       <div class="label-caps" style="margin-bottom: var(--sp-3)">实时信号 · LIVE</div>

@@ -84,6 +84,9 @@ onMounted(async () => {
       </div>
     </header>
 
+    <hr class="divider-hairline" style="margin: 0" />
+
+    <section class="section">
     <a-empty
       v-if="!downloaders.length"
       description="暂无 is_cross_seed 标记的下载器。在「下载器」页将需要的实例勾选 is_cross_seed 后, 回到此页查看统计。"
@@ -144,41 +147,16 @@ onMounted(async () => {
         </div>
       </a-tab-pane>
     </a-tabs>
+    </section>
   </div>
 </template>
 
 <style scoped>
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: var(--sp-4);
-}
-
-.page-header__eyebrow {
-  font-size: var(--text-2xs);
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--text-tertiary);
-  margin-bottom: 4px;
-}
-
-.page-header__title {
-  font-size: var(--text-2xl);
-  font-weight: 600;
-  margin: 0 0 6px;
-  color: var(--text);
-}
-
-.page-header__sub {
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
-}
-
 .content-tabs {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-hairline);
   border-radius: var(--r-md);
+  box-shadow: var(--shadow-sm);
   padding: var(--sp-4);
   min-height: 400px;
 }
