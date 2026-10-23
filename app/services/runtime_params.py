@@ -42,6 +42,11 @@ class ParamSpec:
     #: 补充说明（前端渲染在参数下方）。用于提示**不可逆**之类的关键
     #: 风险——取值语义放在 label 里放不下时用它补充。None = 无补充说明。
     note: str | None = None
+    #: 枚举取值（值 → 显示名）。非 None 时前端渲染**单选按钮组**而非
+    #: 数字输入框——0/1 这类参数是「在几个具名行为间二选一」，不是
+    #: 「调一个数值」，用数字输入框反直觉（且看不出 0 和 1 各是什么）。
+    #: None = 连续数值参数（分钟数 / 个数 / 毫秒等，用数字输入框）。
+    options: tuple[tuple[int, str], ...] | None = None
 
 
 PARAM_SPECS: tuple[ParamSpec, ...] = (
@@ -71,12 +76,13 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
     ),
     ParamSpec(
         key="monitor_delete_expired",
-        label="命中条件时删除（0=暂停 1=删除）",
+        label="命中条件时删除",
         default=0,
         min=0,
         max=1,
         job="monitor_free_window",
-        note="1 = 删任务并删磁盘数据（不可恢复）",
+        options=((0, "仅暂停"), (1, "删除任务+删数据")),
+        note="选择删除会连带删掉磁盘数据（不可恢复）",
     ),
     ParamSpec(
         key="push_download_interval_ms",
@@ -88,11 +94,13 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
     ),
     ParamSpec(
         key="push_within_bucket_order",
-        label="同档内排序（0=按进度升序 1=随机）",
+        label="同档内排序",
         default=0,
         min=0,
         max=1,
         job="push_free_torrents",
+        options=((0, "按进度升序"), (1, "随机")),
+        note="档位（未封顶/无信号/已封顶）始终是主排序，本项只决定同档内怎么排",
     ),
 )
 
@@ -109,6 +117,38 @@ def lookup_spec(key: str) -> ParamSpec | None:
     return next((s for s in PARAM_SPECS if s.key == key), None)
 
 
+def _assert_enum_options_consistent() -> None:
+    """校验枚举参数的 options 与 min/max 一致（**导入时执行**）。
+
+    options 是前端渲染单选按钮组的唯一依据——写错会导致：
+    - 选项值越界：用户选了 min/max 之外的值 → 后端 :func:`validate` 拒绝，
+      但前端已经显示"已选中"，用户一脸茫然
+    - 默认值不在选项里：radio 渲染不出选中项
+    - 选项值重复：两个选项同值，用户选了哪个都说不清
+
+    故在导入时炸掉，而不是等到用户点错才发现。
+    """
+    for spec in PARAM_SPECS:
+        if spec.options is None:
+            continue
+        values = [v for v, _ in spec.options]
+        if len(values) != len(set(values)):
+            raise RuntimeError(f"{spec.key} 的 options 取值重复：{values}")
+        for value in values:
+            if not (spec.min <= value <= spec.max):
+                raise RuntimeError(
+                    f"{spec.key} 的 options 取值 {value} 超出范围 "
+                    f"{spec.min}–{spec.max}"
+                )
+        if spec.default not in values:
+            raise RuntimeError(
+                f"{spec.key} 的默认值 {spec.default} 不在 options {values} 里"
+            )
+
+
+_assert_enum_options_consistent()
+
+
 def validate(updates: dict[str, int]) -> None:
     """校验一组参数值，失败抛 :class:`ValueError`。"""
     for key, value in updates.items():
@@ -121,6 +161,14 @@ def validate(updates: dict[str, int]) -> None:
             raise ValueError(
                 f"{spec.label} 必须在 {spec.min}–{spec.max} 之间（当前 {value}）"
             )
+        # 枚举参数：值必须在 options 里（前端只能选到这些值，
+        # 越界值说明是绕过 UI 的直接调用）
+        if spec.options is not None:
+            allowed = [v for v, _ in spec.options]
+            if value not in allowed:
+                raise ValueError(
+                    f"{spec.label} 只能取 {allowed} 之一（当前 {value}）"
+                )
 
 
 class RuntimeParamManager:

@@ -146,7 +146,24 @@ function onCancel() {
           class="config-row"
         >
           <label class="config-label">{{ spec.label }}</label>
+          <!-- 枚举参数：单选按钮组（每个选项有名字，一眼可见） -->
+          <a-radio-group
+            v-if="spec.options"
+            v-model:value="paramDraft[spec.key]"
+            size="small"
+            class="config-enum"
+          >
+            <a-radio-button
+              v-for="[val, text] in spec.options"
+              :key="val"
+              :value="val"
+            >
+              {{ text }}
+            </a-radio-button>
+          </a-radio-group>
+          <!-- 连续数值参数：数字输入框 -->
           <a-input-number
+            v-else
             v-model:value="paramDraft[spec.key]"
             :min="spec.min"
             :max="spec.max"
@@ -218,6 +235,10 @@ function onCancel() {
   color: var(--text-tertiary);
   font-size: var(--text-xs);
   font-family: var(--font-mono, monospace);
+}
+/* 枚举参数的单选组——占满剩余宽度，选项文案不被挤 */
+.config-enum {
+  flex: 0 1 auto;
 }
 /* 风险提示（不可逆操作等）——独占一行，紧跟在其参数下方 */
 .config-note {

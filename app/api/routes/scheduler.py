@@ -45,6 +45,17 @@ logger = get_logger(__name__)
 router = APIRouter(dependencies=[Depends(require_session)], tags=["scheduler"])
 
 
+def _spec_options(spec: object) -> list[list[object]] | None:
+    """把 spec 的枚举取值转成 JSON 友好结构（``[[值, 显示名], ...]``）。
+
+    连续数值参数没有枚举取值 → 返回 None（前端渲染数字输入框）。
+    """
+    options = getattr(spec, "options", None)
+    if not options:
+        return None
+    return [[value, text] for value, text in options]
+
+
 class RunJobResult(BaseModel):
     """手动触发作业响应（对齐 :class:`RunResult`）。"""
 
@@ -165,6 +176,7 @@ async def get_runtime_params_view() -> RuntimeParamsOut:
                 "max": spec.max,
                 "default": spec.default,
                 "note": spec.note,
+                "options": _spec_options(spec),
             }
             for spec in PARAM_SPECS
         ],
@@ -196,6 +208,7 @@ async def update_runtime_params(payload: RuntimeParamsUpdateIn) -> RuntimeParams
                 "max": spec.max,
                 "default": spec.default,
                 "note": spec.note,
+                "options": _spec_options(spec),
             }
             for spec in PARAM_SPECS
         ],
@@ -318,6 +331,7 @@ async def get_job_config(job_name: str) -> dict[str, Any]:
                 "max": s.max,
                 "default": s.default,
                 "note": s.note,
+                "options": _spec_options(s),
             }
             for s in job_specs
         ],

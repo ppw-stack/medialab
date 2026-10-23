@@ -360,6 +360,29 @@ async def test_runtime_params_view(client: httpx.AsyncClient) -> None:
     assert "specs" in data
 
 
+async def test_runtime_params_exposes_enum_options(
+    client: httpx.AsyncClient,
+) -> None:
+    """枚举参数的 options 要透出到 API（前端靠它渲染单选按钮组）。
+
+    - 枚举参数 → options 非 null，且是 [[值, 显示名], ...]
+    - 连续数值参数 → options 为 null（前端渲染数字输入框）
+    """
+    resp = await client.get("/api/v1/scheduler/runtime-params")
+    assert resp.status_code == 200
+    specs = {s["key"]: s for s in resp.json()["specs"]}
+
+    # 枚举参数
+    enum_spec = specs["monitor_delete_expired"]
+    assert enum_spec["options"] == [[0, "仅暂停"], [1, "删除任务+删数据"]]
+    # 显示名非空（空名 radio 渲染出来用户看不懂）
+    assert all(text.strip() for _, text in enum_spec["options"])
+
+    # 连续数值参数没有 options
+    assert specs["push_min_remaining_hours"]["options"] is None
+    assert specs["monitor_pre_pause_minutes"]["options"] is None
+
+
 async def test_runtime_params_monitor_delete_expired_roundtrip(
     client: httpx.AsyncClient,
 ) -> None:
