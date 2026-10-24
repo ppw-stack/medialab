@@ -29,6 +29,7 @@ from app.domain.enums import FreeType
 
 __all__ = [
     "Base",
+    "CrossSeedSnapshot",
     "DownloaderInstance",
     "JobRun",
     "SchedulerJobSetting",
@@ -251,6 +252,59 @@ class SchedulerJobSetting(Base):
     job_name: Mapped[str] = mapped_column(String(64), primary_key=True)
     #: 是否启用（False = 停用，不参与 cron 调度）
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[str] = mapped_column(
+        String(32), default=_bj_now, onupdate=_bj_now
+    )
+
+
+class CrossSeedSnapshot(Base):
+    """辅种下载器扫描快照（定时抓取结果）。
+
+    ``scan_cross_seed`` 作业（cron ``2,32 * * * *``）定时拉取
+    ``is_cross_seed=True`` 的下载器全量种子，把统计结果 upsert 到本表
+    ——**每个辅种下载器一行**（``downloader_id`` UNIQUE）。
+
+    为什么落库：辅种下载器的种子量大（实测 3000+ 个），实时调下载器
+    接口要 20s+。前端每次打开辅种页面都打一次实时接口既慢又给下载器
+    加压。故改为「定时抓取 + 读快照」。
+
+    与 :class:`SiteUserData` 同构：**当前快照**，不做历史（需要时间序列
+    时再建 ``cross_seed_snapshot_history`` 表再迁）。
+
+    **FK 不带 ``ON DELETE CASCADE``**——故意让它当守卫：删下载器时必须
+    显式删快照行，漏了会 IntegrityError（宁可失败也不留孤儿行）。
+    删除逻辑见 :func:`app.services.downloader_service.delete_downloader`。
+    """
+
+    __tablename__ = "cross_seed_snapshot"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: 关联辅种下载器（一站一行）
+    downloader_id: Mapped[int] = mapped_column(
+        ForeignKey("downloader_instances.id"), unique=True, index=True
+    )
+    #: 下载器名（冗余存一份：列表展示免 JOIN，且下载器改名后仍看得到历史名）
+    downloader_name: Mapped[str] = mapped_column(String(64), default="")
+    #: 扫描时刻（北京时间字符串）
+    scanned_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
+    #: 种子总数
+    total_torrents: Mapped[int] = mapped_column(Integer, default=0)
+    #: 唯一分组数（按 name + size 精确分组）
+    unique_count: Mapped[int] = mapped_column(Integer, default=0)
+    #: 异常种子数（tracker 未注册 / 数据丢失）
+    anomaly_count: Mapped[int] = mapped_column(Integer, default=0)
+    #: 在途任务数（非暂停、非致命错误；口径见 ``TorrentState.is_inflight``）
+    inflight_count: Mapped[int] = mapped_column(Integer, default=0)
+    #: 本次**实际**发出暂停指令的种子数（不含已暂停被跳过的）
+    paused_count: Mapped[int] = mapped_column(Integer, default=0)
+    #: 暂停失败的种子数
+    pause_failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    #: 分组统计明细（JSON 数组：``[{name, size_gb, count, sample_hash}]``）
+    stats: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
+    #: 异常种子明细（JSON 数组：``[{id, hash, name, size_gb, status,
+    #: anomaly_type, error_code, error_string}]``）
+    anomalies: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
+    created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
     updated_at: Mapped[str] = mapped_column(
         String(32), default=_bj_now, onupdate=_bj_now
     )

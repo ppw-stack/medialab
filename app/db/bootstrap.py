@@ -127,6 +127,16 @@ _ALTER_STATEMENTS: tuple[tuple[str, str], ...] = (
         "add_column",
         "ALTER TABLE site_user_data ADD COLUMN hourly_bonus_progress REAL",
     ),
+    # 辅种快照的暂停计数 (2026-10-24)：实际暂停数 ≠ 异常数
+    # （已暂停的被跳过、失败的不算）——不存这两个字段前端只能说谎。
+    (
+        "add_column",
+        "ALTER TABLE cross_seed_snapshot ADD COLUMN paused_count INTEGER DEFAULT 0",
+    ),
+    (
+        "add_column",
+        "ALTER TABLE cross_seed_snapshot ADD COLUMN pause_failed_count INTEGER DEFAULT 0",
+    ),
 )
 
 #: 独立创建的索引（不随上面的 ALTER 循环走）

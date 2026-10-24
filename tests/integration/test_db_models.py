@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import pytest
 from app.db.models import (
+    CrossSeedSnapshot,
+    DownloaderInstance,
     Site,
     SiteUserData,
     TaskQueue,
@@ -38,6 +40,7 @@ async def test_create_all_builds_expected_tables(db: None) -> None:
         "job_runs",
         "scheduler_job_settings",
         "site_user_data",
+        "cross_seed_snapshot",
     }
     assert expected <= tables
 
@@ -102,6 +105,77 @@ async def test_site_name_unique(db: None) -> None:
     with pytest.raises(IntegrityError):
         async with session_scope() as session:
             session.add(Site(name="dup", domain="d2", adapter="hdsky"))
+
+
+# ------------------------------------------------------- 辅种快照 cross_seed
+
+async def test_cross_seed_snapshot_unique_downloader_id(db: None) -> None:
+    """辅种快照每下载器一行（UNIQUE downloader_id）——当前快照语义。"""
+    async with session_scope() as session:
+        dl = DownloaderInstance(
+            name="dl1", type="qbittorrent", url="http://x", is_cross_seed=True
+        )
+        session.add(dl)
+        await session.flush()
+        session.add(CrossSeedSnapshot(downloader_id=dl.id))
+        await session.flush()
+
+    with pytest.raises(IntegrityError):
+        async with session_scope() as session:
+            dl = (
+                await session.execute(
+                    select(DownloaderInstance).where(
+                        DownloaderInstance.name == "dl1"
+                    )
+                )
+            ).scalar_one()
+            session.add(CrossSeedSnapshot(downloader_id=dl.id))
+
+
+async def test_deleting_downloader_cascades_snapshot(db: None) -> None:
+    """删下载器 → 同事务删掉辅种快照（不留孤儿行）。
+
+    FK 故意**不**带 ON DELETE CASCADE 当守卫——漏删会 IntegrityError，
+    故删除流程必须显式清理。
+    """
+    from app.services.downloader_service import delete_downloader
+
+    async with session_scope() as session:
+        dl = DownloaderInstance(
+            name="dl1", type="qbittorrent", url="http://x", is_cross_seed=True
+        )
+        session.add(dl)
+        await session.flush()
+        dl_id = dl.id
+        session.add(CrossSeedSnapshot(downloader_id=dl_id))
+        await session.flush()
+
+    await delete_downloader(dl_id)
+
+    async with session_scope() as session:
+        rows = (await session.execute(select(CrossSeedSnapshot))).scalars().all()
+        assert rows == [], "删下载器后不该留下孤儿快照行"
+
+
+async def test_unmarking_cross_seed_deletes_snapshot(db: None) -> None:
+    """取消辅种标记 → 删掉快照（不再是辅种，快照无意义）。"""
+    from app.services.downloader_service import update_downloader
+
+    async with session_scope() as session:
+        dl = DownloaderInstance(
+            name="dl1", type="qbittorrent", url="http://x", is_cross_seed=True
+        )
+        session.add(dl)
+        await session.flush()
+        dl_id = dl.id
+        session.add(CrossSeedSnapshot(downloader_id=dl_id))
+        await session.flush()
+
+    await update_downloader(dl_id, is_cross_seed=False)
+
+    async with session_scope() as session:
+        rows = (await session.execute(select(CrossSeedSnapshot))).scalars().all()
+        assert rows == []
 
 
 # ------------------------------------------------------------------ 枚举

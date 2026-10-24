@@ -66,6 +66,19 @@ const totalDownloaders = computed(() => snap.value?.downloaders.total ?? 0)
 const freeEndingSoon = computed(() => snap.value?.free_ending_soon ?? null)
 const freeIndexTotal = computed(() => snap.value?.free_index_total ?? null)
 const inflightTorrents = computed(() => snap.value?.inflight_torrents ?? null)
+const inflightSnapshotAt = computed(() => snap.value?.inflight_snapshot_at ?? null)
+
+/** 在途数据的新鲜度提示（辅种部分来自定时快照，不是实时的）。 */
+const inflightHint = computed(() => {
+  const at = inflightSnapshotAt.value
+  if (!at) return '跨所有下载器合计'
+  const d = new Date(at.replace(' ', 'T') + '+08:00')
+  const diff = (Date.now() - d.getTime()) / 1000
+  if (!Number.isFinite(diff)) return '跨所有下载器合计'
+  if (diff < 60) return `辅种部分来自 ${Math.floor(diff)} 秒前的抓取`
+  if (diff < 3600) return `辅种部分来自 ${Math.floor(diff / 60)} 分钟前的抓取`
+  return `辅种部分来自 ${Math.floor(diff / 3600)} 小时前的抓取`
+})
 
 const inflightJobs = computed(() => scheduler.value?.inflight ?? 0)
 const accepting = computed(() => scheduler.value?.accepting_new_work ?? false)
@@ -202,7 +215,7 @@ const JOB_LABELS: Record<string, string> = {
       <div class="stat-tile" style="max-width: 280px">
         <div class="stat-tile__label">当前下载任务</div>
         <div class="stat-tile__value">{{ inflightTorrents }}</div>
-        <div class="stat-tile__hint">跨所有下载器合计</div>
+        <div class="stat-tile__hint">{{ inflightHint }}</div>
       </div>
     </section>
   </div>

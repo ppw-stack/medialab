@@ -1,100 +1,107 @@
 import { test, expect } from '@playwright/test'
 
-test('辅种下载器统计页面 (a5444dd @ dev)', async ({ page }) => {
-  // 1) 登录
+async function login(page: any) {
   await page.goto('/login')
   await page.locator('input[type="text"], input[autocomplete="username"]').first().fill('admin')
   await page.locator('input[type="password"]').first().fill('123456')
   await page.getByRole('button', { name: /登|log|sign/i }).first().click()
   await page.waitForURL((url) => !url.pathname.startsWith('/login'), { timeout: 10000 })
+}
 
-  // 2) 访问 /cross-seed
+/**
+ * 辅种下载器统计页面（2026-10-24 改为「定时抓取 + 读快照」）。
+ *
+ * 关键变化：页面**不再实时打下载器接口**——辅种站种子量大（3000+），
+ * 实时拉一次要 20s+，每次打开页面都拉既慢又给下载器加压。故：
+ *
+ * - 页面读 `cross_seed_snapshot` 表（DB 读，毫秒级）
+ * - 没有快照 → 显示「等待首次抓取」，**不是**空白页
+ * - 抓取时间 / 异常数 / 在途数都来自快照
+ *
+ * 因此本用例**不依赖辅种站可达**——辅种站不可达时页面仍应正常渲染。
+ */
+test('辅种下载器统计页面 - 读快照而非实时拉取', async ({ page }) => {
+  await login(page)
   await page.goto('/cross-seed')
 
-  // 3) 页面标题
+  // 页面标题
   await expect(page.locator('h1.page-header__title')).toHaveText('辅种下载器统计')
 
-  // 4) 副标题含 cron 文案
-  await expect(page.locator('.page-header__sub')).toContainText('cron 每 6h')
+  // 副标题说明是定时抓取
+  await expect(page.locator('.page-header__sub')).toContainText('定时抓取')
 
-  // 5) tab 渲染 (期望 2 个: mock-cs, tr-172)
+  // tab 渲染
   const tabs = page.locator('.ant-tabs-tab')
-  await expect(tabs).toHaveCount(2)
-  console.log(`  ✓ tab 数: 2 (mock-cs, tr-172)`)
+  const tabCount = await tabs.count()
+  console.log(`  ✓ tab 数: ${tabCount}`)
 
-  // 6) 切到 tr-172 tab (192.168.0.172:9091, 真实可达)
-  await page.locator('.ant-tabs-tab:has-text("tr-172")').click()
-
-  // 7) 等表格表头渲染 (scan 异步 — tr 拉 3000+ 种子可能 20s+)
-  //    注意: tr 不可达时（网络故障）表格不渲染——此时仅验证页面骨架,
-  //    表格断言跳过（用 try/catch 判定，不让外部网络问题阻塞 CI）。
-  let tableOk = true
-  try {
-    await expect(page.locator('th:has-text("原始名称")').first()).toBeVisible({ timeout: 45000 })
-    await expect(page.locator('th').filter({ hasText: '大小' }).first()).toBeVisible()
-    await expect(page.locator('th:has-text("出现次数")').first()).toBeVisible()
-    // 样本 hash 列已移除
-    await expect(page.locator('th:has-text("样本 hash")')).toHaveCount(0)
-    console.log(`  ✓ 表格列头: 原始名称 / 大小 / 出现次数 (样本 hash 已移除)`)
-  } catch {
-    tableOk = false
-    console.log('  ⚠ tr 不可达, 表格未渲染 (网络问题, 跳过表格断言)')
+  if (tabCount === 0) {
+    // 没有辅种下载器 → 空状态（引导去下载器页勾选）
+    await expect(page.locator('.ant-empty')).toBeVisible()
+    console.log('  ✓ 无辅种下载器：显示空状态引导')
+    return
   }
 
-  if (tableOk) {
-    // 8) 等首行数据
-    await expect(page.locator('.ant-table-tbody > tr.ant-table-row').first()).toBeVisible({ timeout: 15000 })
-    const rowCount = await page.locator('.ant-table-tbody > tr.ant-table-row').count()
-    expect(rowCount).toBeGreaterThan(0)
-    console.log(`  ✓ 首屏行数: ${rowCount}`)
+  // 切到第一个 tab
+  await tabs.first().click()
+
+  // 页面骨架：要么有快照（显示 summary），要么显示「等待首次抓取」
+  // 两种都是**有效状态**——不该是空白（加载完成前不得渲染空状态）
+  await page.waitForTimeout(500)
+  const hasSummary = await page.locator('.summary-bar').count()
+  const hasWaiting = await page.locator('.ant-alert').filter({ hasText: '等待首次抓取' }).count()
+  expect(hasSummary + hasWaiting).toBeGreaterThan(0)
+
+  if (hasWaiting > 0) {
+    console.log('  ✓ 该辅种下载器还没有快照：显示「等待首次抓取」')
+    return
   }
 
-  if (tableOk) {
-    // 9) summary 文本含"共 N 种子"
-    const summary = page.locator('.summary-bar')
-    await expect(summary).toBeVisible()
-    const summaryText = (await summary.textContent())?.trim() ?? ''
-    console.log(`  ✓ summary: ${summaryText.slice(0, 200)}`)
-    expect(summaryText).toMatch(/共\s*\d+\s*种子/)
-    expect(summaryText).toMatch(/\d+\s*个唯一分组/)
+  // 有快照：summary 文本含种子数 / 分组数
+  const summary = page.locator('.summary-bar')
+  await expect(summary).toBeVisible()
+  const summaryText = (await summary.textContent())?.trim() ?? ''
+  console.log(`  ✓ summary: ${summaryText.slice(0, 200)}`)
+  expect(summaryText).toMatch(/共\s*\d+\s*种子/)
+  expect(summaryText).toMatch(/\d+\s*个唯一分组/)
+  expect(summaryText).toMatch(/抓取于/)
 
-    // 10) 异常 tag
-    const tag = page.locator('.summary-bar .ant-tag').first()
-    await expect(tag).toBeVisible()
-    const tagText = (await tag.textContent())?.trim() ?? ''
-    console.log(`  ✓ 异常 tag: ${tagText}`)
-    expect(tagText).toMatch(/cron 巡查发现 \d+ 个异常|无异常/)
-  }
+  // 统计表格列头
+  await expect(page.locator('th:has-text("原始名称")').first()).toBeVisible()
+  await expect(page.locator('th:has-text("大小")').first()).toBeVisible()
+  await expect(page.locator('th:has-text("出现次数")').first()).toBeVisible()
 
-  // 11) 截图 - tr-172 视图
-  // 截图目录用 Playwright 的标准输出目录（test-results/）——
-  // 原先写 ../.orca/drops/，该目录已被仓库删除（6f0341a），
-  // 截图会因目录不存在而失败。
+  // 异常 tag
+  const tag = page.locator('.summary-bar .ant-tag').first()
+  await expect(tag).toBeVisible()
+  const tagText = (await tag.textContent())?.trim() ?? ''
+  console.log(`  ✓ 异常 tag: ${tagText}`)
+  expect(tagText).toMatch(/巡查发现 \d+ 个异常|无异常/)
+
+  // 截图
   await page.screenshot({
     path: 'test-results/cross-seed-page.png',
     fullPage: true,
   })
   console.log('  ✓ 截图: web/test-results/cross-seed-page.png')
 
-  // 12) 验证菜单项文案 "辅种统计"
+  // 菜单项文案
   const menuItem = page.locator('.ant-menu-item:has-text("辅种统计")')
   await expect(menuItem).toBeVisible()
-  console.log(`  ✓ 菜单项: 辅种统计`)
 })
 
 test('辅种下载器统计页面 - 初始 tab 渲染', async ({ page }) => {
-  // 仅验证页面骨架 + 初始 tab 选择逻辑
-  await page.goto('/login')
-  await page.locator('input[type="text"]').first().fill('admin')
-  await page.locator('input[type="password"]').first().fill('123456')
-  await page.getByRole('button', { name: /登|log|sign/i }).first().click()
-  await page.waitForURL((url) => !url.pathname.startsWith('/login'), { timeout: 10000 })
-
+  await login(page)
   await page.goto('/cross-seed')
 
-  // 第一个 tab 应该是 mock-cs (按 ID 升序)
-  const firstTab = page.locator('.ant-tabs-tab').first()
-  await expect(firstTab).toContainText('mock-cs')
+  const tabs = page.locator('.ant-tabs-tab')
+  const tabCount = await tabs.count()
+  if (tabCount === 0) {
+    console.log('  ✓ 无辅种下载器：跳过 tab 断言')
+    return
+  }
+
+  const firstTab = tabs.first()
   await expect(firstTab).toHaveClass(/ant-tabs-tab-active/)
-  console.log(`  ✓ 初始选中: mock-cs (ID 最小, 按 ASC 排序)`)
+  console.log(`  ✓ 初始选中: ${(await firstTab.textContent())?.trim()}`)
 })

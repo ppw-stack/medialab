@@ -314,6 +314,166 @@ async def test_list_user_data_with_row(client: httpx.AsyncClient) -> None:
     assert data[0]["seeding_count"] == 10
 
 
+# ------------------------------------------------------------------ 辅种快照
+
+async def _add_cross_seed_downloader(name: str = "dl1") -> int:
+    """加一个辅种下载器（is_cross_seed=True）."""
+    from app.db.models import DownloaderInstance
+
+    async with session_scope() as session:
+        row = DownloaderInstance(
+            name=name,
+            type="qbittorrent",
+            url="http://localhost:8081",
+            is_cross_seed=True,
+            enabled=True,
+        )
+        session.add(row)
+        await session.flush()
+        return row.id
+
+
+async def test_cross_seed_downloaders_list(client: httpx.AsyncClient) -> None:
+    dl_id = await _add_cross_seed_downloader("dl1")
+    resp = await client.get("/api/v1/cross-seed-monitor/downloaders")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["id"] == dl_id
+    assert data[0]["is_cross_seed"] is True
+
+
+async def test_cross_seed_snapshots_empty(client: httpx.AsyncClient) -> None:
+    """没有快照 → 返回空列表 + pending（等首次抓取）。"""
+    await _add_cross_seed_downloader("dl1")
+    resp = await client.get("/api/v1/cross-seed-monitor/snapshots")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["snapshots"] == []
+    assert len(data["pending"]) == 1
+    assert data["pending"][0]["name"] == "dl1"
+
+
+async def test_cross_seed_snapshots_with_row(client: httpx.AsyncClient) -> None:
+    from app.db.models import CrossSeedSnapshot
+
+    dl_id = await _add_cross_seed_downloader("dl1")
+    async with session_scope() as session:
+        session.add(
+            CrossSeedSnapshot(
+                downloader_id=dl_id,
+                downloader_name="dl1",
+                scanned_at="2026-10-24 12:00:00",
+                total_torrents=3000,
+                unique_count=120,
+                anomaly_count=2,
+                inflight_count=2900,
+                stats=[{"name": "X", "size_gb": 1.0, "count": 3, "sample_hash": "aaa"}],
+                anomalies=[
+                    {
+                        "id": 1,
+                        "hash": "a" * 40,
+                        "name": "Bad",
+                        "size_gb": 1.0,
+                        "status": 6,
+                        "anomaly_type": "tracker_not_registered",
+                        "error_code": 2,
+                        "error_string": "Tracker not registered",
+                        "paused": False,
+                    }
+                ],
+            )
+        )
+        await session.flush()
+
+    resp = await client.get("/api/v1/cross-seed-monitor/snapshots")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["snapshots"]) == 1
+    snap = data["snapshots"][0]
+    assert snap["downloader_id"] == dl_id
+    assert snap["total_torrents"] == 3000
+    assert snap["anomaly_count"] == 2
+    assert snap["inflight_count"] == 2900
+    # 已抓过 → 不在 pending 里
+    assert data["pending"] == []
+
+
+async def test_cross_seed_snapshot_detail(client: httpx.AsyncClient) -> None:
+    from app.db.models import CrossSeedSnapshot
+
+    dl_id = await _add_cross_seed_downloader("dl1")
+    async with session_scope() as session:
+        session.add(
+            CrossSeedSnapshot(
+                downloader_id=dl_id,
+                downloader_name="dl1",
+                total_torrents=2,
+                unique_count=1,
+                anomaly_count=1,
+                stats=[{"name": "X", "size_gb": 1.0, "count": 2, "sample_hash": "aaa"}],
+                anomalies=[
+                    {
+                        "id": 1,
+                        "hash": "b" * 40,
+                        "name": "Bad",
+                        "size_gb": 1.0,
+                        "status": 6,
+                        "anomaly_type": "no_data_found",
+                        "error_code": 3,
+                        "error_string": "No data found",
+                        "paused": True,
+                    }
+                ],
+            )
+        )
+        await session.flush()
+
+    resp = await client.get(f"/api/v1/cross-seed-monitor/downloaders/{dl_id}/snapshot")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_torrents"] == 2
+    assert len(data["stats"]) == 1
+    assert len(data["anomalies"]) == 1
+    assert data["anomalies"][0]["anomaly_type"] == "no_data_found"
+
+
+async def test_cross_seed_snapshot_detail_404_when_missing(
+    client: httpx.AsyncClient,
+) -> None:
+    """还没抓过 → 404（前端据此显示「等待首次抓取」）。"""
+    dl_id = await _add_cross_seed_downloader("dl1")
+    resp = await client.get(f"/api/v1/cross-seed-monitor/downloaders/{dl_id}/snapshot")
+    assert resp.status_code == 404
+
+
+async def test_cross_seed_refresh_non_cross_seed_400(
+    client: httpx.AsyncClient,
+) -> None:
+    """非辅种下载器 → 400（不是 500）。"""
+    from app.db.models import DownloaderInstance
+
+    async with session_scope() as session:
+        row = DownloaderInstance(
+            name="plain", type="qbittorrent", url="http://x", is_cross_seed=False
+        )
+        session.add(row)
+        await session.flush()
+        plain_id = row.id
+
+    resp = await client.post(
+        f"/api/v1/cross-seed-monitor/downloaders/{plain_id}/refresh"
+    )
+    assert resp.status_code == 400
+
+
+async def test_cross_seed_refresh_unknown_downloader_404(
+    client: httpx.AsyncClient,
+) -> None:
+    resp = await client.post("/api/v1/cross-seed-monitor/downloaders/9999/refresh")
+    assert resp.status_code == 404
+
+
 # ------------------------------------------------------------------ 调度
 
 async def test_scheduler_status(client: httpx.AsyncClient) -> None:

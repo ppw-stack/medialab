@@ -93,7 +93,10 @@
 | `/api/v1/scheduler/{job_name}/toggle` | 启停作业 |
 | `/api/v1/scheduler/{job_name}/cron` | 运行时改 cron（**不落库**，见 §6） |
 | `/api/v1/cross-seed-monitor/downloaders` | 辅种下载器列表 |
-| `/api/v1/cross-seed-monitor/downloaders/{id}/scan` | 扫描单个辅种下载器 |
+| `/api/v1/cross-seed-monitor/snapshots` | 辅种快照列表 + 未抓过的下载器 |
+| `/api/v1/cross-seed-monitor/downloaders/{id}/snapshot` | 单个辅种下载器快照详情 |
+| `/api/v1/cross-seed-monitor/downloaders/{id}/refresh` | 手动抓取单个辅种下载器（await 完整抓取） |
+| `/api/v1/cross-seed-monitor/downloaders/{id}/scan` | 实时扫描单个辅种下载器（调试用，不落库） |
 | `/api/v1/sites` | 站点列表 |
 | `/api/v1/sites/{site_id}/feed-test` | 站点拉取测试 |
 | `/api/v1/sites/{site_id}/user-data` | 站点用户数据 |
@@ -150,7 +153,7 @@ curl -H "Authorization: Bearer $WEB_TOKEN" http://localhost:8080/api/v1/schedule
 | `push_free_torrents` | `*/30 * * * *` | 免费种推送（走 TaskQueue） |
 | `monitor_free_window` | `5,15,25,35,45,55 * * * *` | 免费窗口看护 |
 | `refresh_user_data` | `*/30 * * * *` | FR-1.6 用户数据刷新 |
-| `scan_cross_seed` | `0 */6 * * *` | 辅种巡查 |
+| `scan_cross_seed` | `2,32 * * * *` | 辅种巡查（定时抓取 → 落库快照 + 暂停异常） |
 | `drain_task_queue` | `*/5 * * * *` | 任务队列排空 |
 | `daily_checkin` | `37 8 * * *` | 站点每日签到（FR-3.6，仅 3 站） |
 
@@ -169,7 +172,10 @@ cron 的**持久化来源是 `.env` / `.env.prod`**（`FETCH_ALL_SITES_CRON` / `
 > `refresh_user_data`（`*/30 * * * *`）与 `drain_task_queue`（`*/5 * * * *`）的 cron
 > 目前是代码里硬编码的，没有对应的 env 变量。
 > `scan_cross_seed` 有 `SCAN_CROSS_SEED_CRON` 配置项，但当前 `.env` / `.env.prod` 未设置，
-> 走 `app/core/config.py` 的默认值 `0 */6 * * *`。
+> 走 `app/core/config.py` 的默认值 `2,32 * * * *`（每 30 分钟）。
+> 2026-10-24 起该作业改为**定时抓取 → 落库 `cross_seed_snapshot` 表**，
+> 辅种页与仪表盘「在途任务」都读快照，**不再实时打下载器接口**
+> （辅种站 3000+ 种子实时拉一次要 20s+，会把连接长期占住）。
 > `daily_checkin` 有 `DAILY_CHECKIN_CRON` 配置项，默认 `37 8 * * *`
 > （分钟位 37 避开所有既有多 5 分钟作业）。
 

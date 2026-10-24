@@ -10,6 +10,7 @@
 - **F1 站点拉取**：9 站适配器（mteam / hdsky / hhanclub / audiences / hdhome / hddolby / ourbits / soulvoice / springsunday）拉取免费种 + RSS 清理
 - **F2 免费种窗口**：推送 + 监测 + 中止（push_free_torrents / monitor_free_window / FR-3.5 链路）
 - **FR-1.6 站点用户数据契约**（2026-10-18，2026-10-22 加时魔）：单方法 `get_user_snapshot` 拉 4 业务字段（上传/下载/做种数/下载中数）+ **时魔**（每小时获得的站点积分·合计口径，含是否封顶），刷新作业 `*/30 * * * *`（并发抓取，失败计入 failed 不写 0），Vue UI（`/user-data` 列表 + Sites drawer），API 端点 `/api/v1/user-data` 与 `/api/v1/sites/{id}/user-data`
+- **辅种快照**（2026-10-24）：辅种下载器种子量大（实测 3000+ 个），实时拉一次要 20s+ → 改为 `scan_cross_seed` 作业（cron `2,32 * * * *`）**定时抓取 → 落库 `cross_seed_snapshot` 表**，前端读快照而不打下载器接口。异常种子（tracker 未注册 / 数据丢失）**批量**暂停（按 100 个一批，不再逐个发指令）
 - **FR-3.6 站点每日签到**（2026-10-22）：`daily_checkin` 作业（cron `37 8 * * *`）对 **4 站**自动签到 —— hhanclub / soulvoice / hdhome（NexusPHP `/attendance.php`）+ hdsky（自建 `showup.php`，**图形验证码走 AI 读码**，`app/core/ai.py`）。其余 5 站不支持（无此功能或需 Cloudflare Turnstile，后者实测服务端无法完成）
 
 `F2 辅种引擎` / `F4 巡检` / `F5 清理` 自 **M2** 起实施。
@@ -114,6 +115,7 @@ SQLite (WAL + 短事务约定, §8)
 - **数据安全第一**：删除 hash 必须是 40 位 hex（拒绝 `all` / 通配），前端二次确认，删磁盘数据独立开关并记审计日志。
 - **monitor 命中后可删可停**：`monitor_delete_expired` 运行参数（0=仅暂停，默认；1=删任务+删磁盘数据）。两种动作判定范围**完全一致**；删除模式仍跳过已完成与已暂停的任务，并保留 `torrent_index` 行以防重推循环。
 - **枚举参数用单选按钮组**：0/1 这类「在几个具名行为间二选一」的运行参数，前端渲染单选按钮组而非数字输入框（`ParamSpec.options` 声明取值）。
+- **辅种数据走定时快照**：辅种页与仪表盘的「在途任务」都读 `cross_seed_snapshot` 表（定时作业写入），**不实时打下载器接口**——辅种站 3000+ 种子实时拉要 20s+，会把连接长期占住。抓取失败**保留上一次的快照**（不写 0 兜底），且失败站要在作业摘要里点名。
 - **删站点 = 级联删关联数据**：拉取索引（`torrent_index`，可重建）+ 用户数据（`site_user_data`）+ 该站推送队列行（`task_queue`）在同一事务里删完再删站点行。不用"引用计数 > 0 就拦住"——拉取快照每 10 分钟就重新灌满，拦住等于永久删不掉。
 - **永久免费绝不挂看护**：识别为 `freeleech_permanent` 的任务直接转辅种池（R10）。
 

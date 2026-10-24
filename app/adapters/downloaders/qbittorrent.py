@@ -193,6 +193,7 @@ class QbittorrentAdapter(DownloaderAdapter):
         映射到统一契约：
         - ``error_code`` 0 = 无错；1 = tracker 警告；2 = tracker 错误；3 = 数据丢失
         - ``error_string`` 人类可读描述
+        - ``state`` 归一化的 :class:`TorrentState` 值（巡查据此判定是否已暂停）
 
         注意：qB ``/torrents/info`` **不返回** tracker 字段，故不能从 row
         直接取 tracker 错误文案。如需 tracker 级别详情，需按 hash 单独调
@@ -224,6 +225,8 @@ class QbittorrentAdapter(DownloaderAdapter):
                 "status": _QB_STATUS_CODE.get(state, -1),
                 "error_code": error_code,
                 "error_string": error_string,
+                # 归一化状态（巡查判定「是否已暂停」用）
+                "state": _STATE_MAP.get(state, TorrentState.UNKNOWN).value,
             })
         return out
 

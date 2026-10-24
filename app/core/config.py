@@ -70,8 +70,15 @@ class AppSettings(BaseSettings):
     push_free_cron: str = "*/30 * * * *"
     #: 免费窗口巡检 cron（5/15/25/... 错峰 fetch 0/10/20/30 与 push 0/30）
     monitor_free_window_cron: str = "5,15,25,35,45,55 * * * *"
-    #: 辅种下载器巡查 cron (每小时 0/6/12/18 分, 错峰不与 fetch/push/monitor 冲突)
-    scan_cross_seed_cron: str = "0 */6 * * *"
+    #: 辅种下载器巡查 cron（默认 2/32 分各一次 = 每 30 分钟）
+    #:
+    #: 分钟位刻意错开既有多 5 分钟的作业（fetch */10 / push */30 /
+    #: monitor 5,15,25... / drain */5 / refresh_user_data */30 /
+    #: checkin 37 8），避免同一分钟并发抢资源。
+    #:
+    #: 辅种下载器种子量大（实测 3000+ 个），单次抓取 20s+ → 用定时
+    #: 抓取 + 落库快照，前端读快照而不实时打下载器接口（2026-10-24）。
+    scan_cross_seed_cron: str = "2,32 * * * *"
     #: 站点每日签到 cron（默认每天 08:37）。
     #: 分钟位 37 刻意避开既有多 5 分钟的作业（fetch */10 / push */30 /
     #: monitor 5,15,25... / drain */5 / scan 0 */6），避免同一分钟并发抢资源。

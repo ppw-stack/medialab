@@ -1,15 +1,22 @@
 """辅种下载器巡查 service (FR 辅种下载器).
 
 功能:
-- 实时拉取 is_cross_seed=True 下载器的所有种子
+- **定时抓取** is_cross_seed=True 下载器的所有种子 → 落库快照
 - 检测两类异常: tracker_not_registered / no_data_found
 - 暂停异常种子 (而非删除, 保留数据文件)
 - 按 (原始 name, size) 精确聚合用于"统计"页
 
 设计:
-- 不落库: 实时统计, 刷新即新
+- **定时抓取 + 落库**: 辅种下载器的种子量大 (实测 3000+ 个), 实时调
+  下载器接口要 20s+。前端每次打开辅种页面都打一次实时接口既慢又给
+  下载器加压。故作业定时抓取并把结果写入 ``cross_seed_snapshot``
+  (一个辅种下载器一行), 前端读快照。
+- **网络 IO 在事务外**: 短事务读下载器 → 抓取 → 短事务批量 upsert →
+  批量暂停 (网络 IO 也在事务外)。写锁不能横跨网络往返。
+- **失败不写 0 兜底**: 抓取失败计入 failed 并点名, **保留上一次的
+  快照**。写 0 等于把故障伪装成"没有种子"。
 - 只暂停不删除: 保留数据文件, 用户可自行恢复
-- 写操作前校验 hash 为 40 位 hex（拒绝 all/通配）
+- 写操作前校验 hash 为 40 位 hex (拒绝 all/通配)
 
 下载器支持: 通过 adapter 的公开方法
 :meth:`DownloaderAdapter.list_torrents_with_errors` 取数——Transmission 与
@@ -17,15 +24,16 @@ qBittorrent 均已实现（错误码/错误描述由 adapter 归一到统一契�
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy import select
 
-from app.adapters.downloaders.base import DownloaderError
+from app.adapters.downloaders.base import DownloaderError, TorrentState
 from app.core.logging import get_logger
 from app.core.timeutils import bj_now
-from app.db.models import DownloaderInstance
+from app.db.models import CrossSeedSnapshot, DownloaderInstance
 from app.db.session import session_scope
 from app.services.factory import get_factory
 from app.services.scheduler import JobStep
@@ -50,6 +58,24 @@ def _detect_anomaly(error_string: str) -> str | None:
     return None
 
 
+# ============================================================ 批量暂停参数
+#: 单次 set_pause 调用的 hash 上限。
+#:
+#: 异常种子动辄数百个（辅种站 477 个），**逐个**调 ``set_pause([hash])``
+#: 就是 477 次下载器 API 往返——慢且给下载器加压。adapter 的 ``set_pause``
+#: 本就接受 hash 列表（qB 拼 ``|`` 分隔串、TR 传 ids 数组），故批量发。
+#:
+#: 上限 100 是权衡：qB 的 URL 长度有限（几百个 hash 拼一起可能超限），
+#: TR 的 ids 数组过大也会让响应变慢。
+PAUSE_BATCH_SIZE = 100
+
+#: 同时抓取的辅种下载器数上限。
+#:
+#: 辅种站单次拉取 20s+，并发能压住总墙钟时间；但并发太大会同时占满
+#: 下载器的连接/IO 资源。上限 3 与 user_data 作业的 5 同量级。
+_FETCH_CONCURRENCY = 3
+
+
 # ============================================================ 数据模型
 @dataclass(slots=True)
 class AnomalyItem:
@@ -63,6 +89,21 @@ class AnomalyItem:
     anomaly_type: str
     error_code: int
     error_string: str
+    #: 抓取时该种子是否**已处于暂停态**（跳过重复暂停用）
+    paused: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "hash": self.hash,
+            "name": self.name,
+            "size_gb": self.size_gb,
+            "status": self.status,
+            "anomaly_type": self.anomaly_type,
+            "error_code": self.error_code,
+            "error_string": self.error_string,
+            "paused": self.paused,
+        }
 
 
 @dataclass(slots=True)
@@ -74,6 +115,14 @@ class StatsRow:
     count: int
     sample_hash: str
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "size_gb": self.size_gb,
+            "count": self.count,
+            "sample_hash": self.sample_hash,
+        }
+
 
 @dataclass(slots=True)
 class ScanResult:
@@ -83,8 +132,13 @@ class ScanResult:
     downloader_name: str
     scanned_at: str
     total_torrents: int
+    inflight_count: int
     anomalies: list[AnomalyItem] = field(default_factory=list)
     stats: list[StatsRow] = field(default_factory=list)
+    #: 本次**实际**发出暂停指令的种子数（不含已暂停被跳过的）
+    paused_count: int = 0
+    #: 暂停失败的种子数
+    pause_failed_count: int = 0
 
     @property
     def anomaly_count(self) -> int:
@@ -100,36 +154,49 @@ class ScanResult:
             "downloader_name": self.downloader_name,
             "scanned_at": self.scanned_at,
             "total_torrents": self.total_torrents,
+            "inflight_count": self.inflight_count,
             "anomaly_count": self.anomaly_count,
             "unique_count": self.unique_count,
-            "anomalies": [
-                {
-                    "id": a.id,
-                    "hash": a.hash,
-                    "name": a.name,
-                    "size_gb": a.size_gb,
-                    "status": a.status,
-                    "anomaly_type": a.anomaly_type,
-                    "error_code": a.error_code,
-                    "error_string": a.error_string,
-                }
-                for a in self.anomalies
-            ],
-            "stats": [
-                {
-                    "name": s.name,
-                    "size_gb": s.size_gb,
-                    "count": s.count,
-                    "sample_hash": s.sample_hash,
-                }
-                for s in self.stats
-            ],
+            "paused_count": self.paused_count,
+            "pause_failed_count": self.pause_failed_count,
+            "anomalies": [a.to_dict() for a in self.anomalies],
+            "stats": [s.to_dict() for s in self.stats],
+        }
+
+
+@dataclass(slots=True)
+class SnapshotHeader:
+    """快照头部（列表视图用；不含 stats / anomalies 大字段)."""
+
+    downloader_id: int
+    downloader_name: str
+    scanned_at: str
+    total_torrents: int
+    unique_count: int
+    anomaly_count: int
+    inflight_count: int
+    #: 本次**实际**发出暂停指令的种子数（不含已暂停被跳过的）
+    paused_count: int = 0
+    #: 暂停失败的种子数
+    pause_failed_count: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "downloader_id": self.downloader_id,
+            "downloader_name": self.downloader_name,
+            "scanned_at": self.scanned_at,
+            "total_torrents": self.total_torrents,
+            "unique_count": self.unique_count,
+            "anomaly_count": self.anomaly_count,
+            "inflight_count": self.inflight_count,
+            "paused_count": self.paused_count,
+            "pause_failed_count": self.pause_failed_count,
         }
 
 
 # ============================================================ Service
 class CrossSeedMonitorService:
-    """巡查 service: 实时拉 + 实时检测 + 实时暂停."""
+    """巡查 service: 定时抓取 + 落库快照 + 批量暂停异常."""
 
     def __init__(self) -> None:
         self._factory = get_factory()
@@ -171,7 +238,11 @@ class CrossSeedMonitorService:
             return row
 
     async def scan_one(self, downloader_id: int) -> ScanResult:
-        """扫描单个下载器, 返回完整 ScanResult (anomalies + stats)."""
+        """扫描单个下载器, 返回完整 ScanResult (anomalies + stats).
+
+        **不落库**——实时扫描（调试 / 应急用）。落库走
+        :meth:`refresh_downloader`.
+        """
         row = await self._resolve_downloader(downloader_id)
         adapter = self._factory.downloader(row)
         try:
@@ -183,97 +254,270 @@ class CrossSeedMonitorService:
             raise
         return self._build_result(row, torrents)
 
-    async def scan_all(self) -> tuple[list[ScanResult], list[dict[str, Any]]]:
-        """扫描所有 is_cross_seed=True 的下载器.
+    # ---------------------------------------------------------- 快照读写
+    async def list_snapshot_headers(self) -> list[SnapshotHeader]:
+        """所有辅种下载器的快照头部（按下载器 id 升序).
 
-        返回 ``(成功的结果列表, 失败列表)``——失败的下载器不静默吞掉,
-        由调用方（作业/UI）决定如何呈现。
+        **没有快照行的辅种下载器不在返回里**——调用方（API 层）用
+        下载器列表做全集，比对两者得出"哪些还没抓过".
+        """
+        async with session_scope() as session:
+            rows = (
+                await session.execute(
+                    select(CrossSeedSnapshot).order_by(
+                        CrossSeedSnapshot.downloader_id.asc()
+                    )
+                )
+            ).scalars().all()
+        return [
+            SnapshotHeader(
+                downloader_id=r.downloader_id,
+                downloader_name=r.downloader_name,
+                scanned_at=r.scanned_at,
+                total_torrents=r.total_torrents,
+                unique_count=r.unique_count,
+                anomaly_count=r.anomaly_count,
+                inflight_count=r.inflight_count,
+                paused_count=r.paused_count,
+                pause_failed_count=r.pause_failed_count,
+            )
+            for r in rows
+        ]
+
+    async def get_snapshot(self, downloader_id: int) -> dict[str, Any] | None:
+        """取单个下载器的快照详情（含 stats / anomalies）.
+
+        返回 ``None`` = 该下载器还没有快照（尚未抓过）.
+        """
+        async with session_scope() as session:
+            row = (
+                await session.execute(
+                    select(CrossSeedSnapshot).where(
+                        CrossSeedSnapshot.downloader_id == downloader_id
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            return {
+                **SnapshotHeader(
+                    downloader_id=row.downloader_id,
+                    downloader_name=row.downloader_name,
+                    scanned_at=row.scanned_at,
+                    total_torrents=row.total_torrents,
+                    unique_count=row.unique_count,
+                    anomaly_count=row.anomaly_count,
+                    inflight_count=row.inflight_count,
+                    paused_count=row.paused_count,
+                    pause_failed_count=row.pause_failed_count,
+                ).to_dict(),
+                "stats": list(row.stats or []),
+                "anomalies": list(row.anomalies or []),
+            }
+
+    async def _upsert_snapshot(
+        self, downloader_id: int, result: ScanResult
+    ) -> None:
+        """把扫描结果 upsert 到 ``cross_seed_snapshot``（短事务）."""
+        payload: dict[str, Any] = {
+            "downloader_name": result.downloader_name,
+            "scanned_at": result.scanned_at,
+            "total_torrents": result.total_torrents,
+            "unique_count": result.unique_count,
+            "anomaly_count": result.anomaly_count,
+            "inflight_count": result.inflight_count,
+            "paused_count": result.paused_count,
+            "pause_failed_count": result.pause_failed_count,
+            "stats": [s.to_dict() for s in result.stats],
+            "anomalies": [a.to_dict() for a in result.anomalies],
+        }
+        async with session_scope() as session:
+            row = (
+                await session.execute(
+                    select(CrossSeedSnapshot).where(
+                        CrossSeedSnapshot.downloader_id == downloader_id
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                session.add(
+                    CrossSeedSnapshot(downloader_id=downloader_id, **payload)
+                )
+            else:
+                for k, v in payload.items():
+                    setattr(row, k, v)
+
+    # ---------------------------------------------------------- 刷新
+    async def refresh_downloader(self, downloader_id: int) -> ScanResult:
+        """抓取单个辅种下载器 → 落库快照 → 批量暂停异常种子.
+
+        作业与手动刷新端点**共用这一个方法**（语义完全一致）.
+
+        **网络 IO 在事务外**：抓取 → 短事务 upsert → 批量暂停.
+
+        :raises DownloaderNotFound: 下载器不存在
+        :raises NotCrossSeed: 未标记为辅种
+        :raises DownloaderDisabled: 已禁用
+        :raises UnsupportedDownloader: 适配器不支持该方法
+        :raises DownloaderError: 抓取失败（**不写库**，保留上一次的快照）
+        """
+        row = await self._resolve_downloader(downloader_id)
+        adapter = self._factory.downloader(row)
+        try:
+            torrents = await adapter.list_torrents_with_errors()
+        except NotImplementedError as exc:
+            raise UnsupportedDownloader(str(exc)) from exc
+        except DownloaderError as exc:
+            logger.warning("辅种下载器 %s 拉取失败: %s", row.name, exc)
+            raise
+
+        result = self._build_result(row, torrents)
+        # **先暂停再落库**：快照里的 ``paused_count`` / ``pause_failed_count``
+        # 是本次抓取**实际**的动作结果。先落库再暂停的话，这两列会停留在
+        # 上一轮的值（前端据此显示「已暂停 N 个」会撒谎）。
+        #
+        # 暂停失败不会丢快照：:meth:`_pause_anomalies` 逐批捕获异常并计数，
+        # 不向上抛（只有 CancelledError 会传播，那是应当中断的信号）。
+        stopped, failed = await self._pause_anomalies(adapter, result.anomalies)
+        result.paused_count = stopped
+        result.pause_failed_count = failed
+        await self._upsert_snapshot(row.id, result)
+        return result
+
+    async def _pause_anomalies(
+        self, adapter: Any, anomalies: list[AnomalyItem]
+    ) -> tuple[int, int]:
+        """批量暂停异常种子.
+
+        返回 ``(已暂停数, 失败数)``.
+
+        - **跳过已暂停的**：异常种子在上一轮已被暂停过（qB ``pausedUP``
+          / TR ``status=0``），再发一次暂停是白费 API 调用。
+        - **分批发送**：按 :data:`PAUSE_BATCH_SIZE` 切批，一次
+          ``set_pause([...])`` 发一批。
+        """
+        pending = [a for a in anomalies if not a.paused]
+        if not pending:
+            return 0, 0
+
+        stopped = 0
+        failed = 0
+        for i in range(0, len(pending), PAUSE_BATCH_SIZE):
+            batch = pending[i : i + PAUSE_BATCH_SIZE]
+            hashes = [a.hash for a in batch if a.hash]
+            if not hashes:
+                continue
+            try:
+                await adapter.set_pause(hashes, paused=True)
+                stopped += len(hashes)
+                logger.info(
+                    "已暂停辅种异常 %d 个（downloader=%s）: %s",
+                    len(hashes),
+                    getattr(adapter, "name", "?"),
+                    ",".join(hashes[:5]) + ("…" if len(hashes) > 5 else ""),
+                )
+            except Exception as exc:
+                failed += len(hashes)
+                logger.warning(
+                    "批量暂停辅种异常失败 downloader=%s 数量=%d: %s",
+                    getattr(adapter, "name", "?"), len(hashes), exc,
+                )
+        return stopped, failed
+
+    # ---------------------------------------------------------- 作业
+    async def run_scan_job(self) -> dict[str, Any]:
+        """作业入口: 扫描所有辅种下载器, 落库快照 + 暂停异常.
+
+        三段式：**短事务读下载器 → 并发抓取（网络 IO 在事务外）→
+        短事务批量 upsert → 批量暂停（网络 IO 也在事务外）**.
         """
         rows = await self.list_cross_seed_downloaders()
+        total_downloaders = len(rows)
+        if not rows:
+            return {
+                "scanned_downloaders": 0,
+                "failed_downloaders": 0,
+                "total_torrents": 0,
+                "total_anomalies": 0,
+                "stopped": 0,
+                "summary": "无辅种下载器",
+                "results": [],
+                "failures": [],
+                "steps": [
+                    JobStep("查询辅种下载器", "skip", 0, "无辅种下载器"),
+                ],
+            }
+
+        semaphore = asyncio.Semaphore(_FETCH_CONCURRENCY)
+
+        async def _one(row: DownloaderInstance) -> tuple[ScanResult | None, str | None]:
+            async with semaphore:
+                try:
+                    result = await self.refresh_downloader(row.id)
+                    return result, None
+                except (NotCrossSeed, DownloaderDisabled, DownloaderNotFound) as exc:
+                    # 配置错误：该下载器不再是辅种 / 已禁用 / 已删除
+                    logger.info(
+                        "辅种下载器 %s (id=%d) 跳过：%s", row.name, row.id, exc
+                    )
+                    return None, None
+                except Exception as exc:
+                    logger.warning(
+                        "辅种下载器 %s (id=%d) 扫描失败: %s",
+                        row.name, row.id, exc,
+                    )
+                    return None, str(exc)
+
+        outcomes = await asyncio.gather(*(_one(row) for row in rows))
+
         results: list[ScanResult] = []
         failures: list[dict[str, Any]] = []
-        for row in rows:
-            try:
-                results.append(await self.scan_one(row.id))
-            except (NotCrossSeed, DownloaderDisabled) as exc:
-                # 配置错误：该下载器不再是辅种或已禁用，跳过（非运行时失败）
-                logger.info("辅种下载器 %s (id=%d) 跳过：%s", row.name, row.id, exc)
-            except DownloaderNotFound as exc:
-                # 配置已被删除：跳过
-                logger.info("辅种下载器 id=%d 已删除：%s", row.id, exc)
-            except Exception as exc:
-                logger.warning(
-                    "辅种下载器 %s (id=%d) 扫描失败: %s",
-                    row.name, row.id, exc,
-                )
+        for row, (result, error) in zip(rows, outcomes, strict=True):
+            if result is not None:
+                results.append(result)
+            elif error is not None:
                 failures.append({
                     "downloader_id": row.id,
                     "downloader_name": row.name,
-                    "error": str(exc),
+                    "error": error,
                 })
-        return results, failures
 
-    async def run_scan_job(self) -> dict[str, Any]:
-        """作业入口: 扫描所有辅种下载器, 暂停异常 (与 cron 调用方对齐)."""
-        results, failures = await self.scan_all()
         total_anomalies = sum(r.anomaly_count for r in results)
         total_torrents = sum(r.total_torrents for r in results)
+        total_paused = sum(r.paused_count for r in results)
+        total_pause_failed = sum(r.pause_failed_count for r in results)
+        total_skipped = total_anomalies - total_paused - total_pause_failed
         anomaly_types: dict[str, int] = {}
         for r in results:
             for a in r.anomalies:
                 anomaly_types[a.anomaly_type] = anomaly_types.get(a.anomaly_type, 0) + 1
 
-        # 自动暂停（后台作业无人值守；只暂停不删数据，hash 已由 adapter 校验）
-        # 每个下载器只解析一次 adapter（原先每 hash 都查一次 DB + 取 factory，
-        # 3,000 个 hash 时是 3,000 次无用查询）
-        stopped = 0
-        stop_failed = 0
-        adapters: dict[int, Any] = {}
-        for r in results:
-            adapter = adapters.get(r.downloader_id)
-            if adapter is None:
-                try:
-                    row = await self._resolve_downloader(r.downloader_id)
-                    adapter = self._factory.downloader(row)
-                    adapters[r.downloader_id] = adapter
-                except Exception as exc:
-                    logger.warning(
-                        "取下载器 %d 适配器失败: %s", r.downloader_id, exc
-                    )
-                    adapter = None
-            if adapter is None:
-                stop_failed += len(r.anomalies)
-                continue
-            for a in r.anomalies:
-                try:
-                    await adapter.set_pause([a.hash], paused=True)
-                    stopped += 1
-                    logger.info(
-                        "已暂停辅种异常 downloader=%d hash=%s type=%s",
-                        r.downloader_id, a.hash, a.anomaly_type,
-                    )
-                except Exception as exc:
-                    stop_failed += 1
-                    logger.warning(
-                        "自动暂停失败 downloader=%d hash=%s: %s",
-                        r.downloader_id, a.hash, exc,
-                    )
-
         tracker_count = anomaly_types.get(ANOMALY_TRACKER_NOT_REGISTERED, 0)
         no_data_count = anomaly_types.get(ANOMALY_NO_DATA_FOUND, 0)
-        total_downloaders = len(results) + len(failures)
+        # 失败必须**点名**——只说"1 个失败"用户不知道是哪台（AGENTS.md
+        # 契约：故障不能被伪装成正常）。
         fail_detail = (
-            f"，{len(failures)} 个失败" if failures else ""
+            f"，{len(failures)} 个失败（{', '.join(f['downloader_name'] for f in failures)}）"
+            if failures
+            else ""
+        )
+        # 异常数 ≠ 实际暂停数：已暂停的被跳过（不重复发指令），失败的不算。
+        # 说"31 异常已暂停"而实际只暂停了 4 个 = 谎报。
+        pause_detail = (
+            f"，暂停 {total_paused} 个"
+            + (f"（{total_pause_failed} 失败）" if total_pause_failed else "")
+            + (f"，{total_skipped} 个此前已暂停" if total_skipped > 0 else "")
         )
         return {
             "scanned_downloaders": len(results),
             "failed_downloaders": len(failures),
             "total_torrents": total_torrents,
             "total_anomalies": total_anomalies,
-            "stopped": stopped,
+            "paused": total_paused,
+            "pause_failed": total_pause_failed,
             "summary": (
                 f"{len(results)}/{total_downloaders} 个下载器，{total_torrents} 种子，"
-                f"{total_anomalies} 异常已暂停 {stopped}{fail_detail}"
+                f"{total_anomalies} 异常{pause_detail}{fail_detail}"
             ),
             "results": [r.to_dict() for r in results],
             "failures": failures,
@@ -284,6 +528,12 @@ class CrossSeedMonitorService:
                     len(results),
                     f"{len(results)}/{total_downloaders} 个实例成功"
                     + (f"，{len(failures)} 个失败" if failures else ""),
+                ),
+                JobStep(
+                    "写入快照",
+                    "ok" if results else "skip",
+                    len(results),
+                    f"{len(results)} 行 cross_seed_snapshot",
                 ),
                 JobStep(
                     "统计种子总数",
@@ -299,9 +549,11 @@ class CrossSeedMonitorService:
                 ),
                 JobStep(
                     "自动暂停",
-                    "warn" if stop_failed else ("ok" if stopped else "skip"),
-                    stopped,
-                    f"已暂停 {stopped} 个，{stop_failed} 失败",
+                    "warn" if total_pause_failed else ("ok" if total_paused else "skip"),
+                    total_paused,
+                    f"已暂停 {total_paused} 个"
+                    + (f"，{total_pause_failed} 失败" if total_pause_failed else "")
+                    + (f"，{total_skipped} 个此前已暂停（跳过）" if total_skipped > 0 else ""),
                 ),
             ],
         }
@@ -314,12 +566,13 @@ class CrossSeedMonitorService:
 
         入参字段契约见
         :meth:`app.adapters.downloaders.base.DownloaderAdapter.list_torrents_with_errors`:
-        id / hash / name / size / status / error_code / error_string。
+        id / hash / name / size / status / error_code / error_string / state。
         """
         scanned_at = bj_now()
         anomalies: list[AnomalyItem] = []
         # 统计: 按 (原始 name, size_bytes) 精确匹配, 不归一
         groups: dict[tuple[str, int], dict[str, Any]] = {}
+        inflight = 0
 
         for t in torrents:
             t_hash = str(t.get("hash") or "")
@@ -328,6 +581,11 @@ class CrossSeedMonitorService:
             t_status = int(t.get("status", -1))
             err_code = int(t.get("error_code") or 0)
             err_str = str(t.get("error_string") or "")
+
+            # 在途计数：非暂停、非致命错误（口径见 TorrentState.is_inflight）
+            state = _parse_state(t.get("state"))
+            if state.is_inflight:
+                inflight += 1
 
             # 异常检测
             anom = _detect_anomaly(err_str)
@@ -341,6 +599,11 @@ class CrossSeedMonitorService:
                     anomaly_type=anom,
                     error_code=err_code,
                     error_string=err_str[:500],
+                    # 归一化状态判「是否已暂停」——**不能**用 status==0：
+                    # qB 把 error / missingFiles 也映射成 0（无原生 status
+                    # 码），用它判会把「数据丢失」的种子误当成已暂停而
+                    # 跳过暂停（那正是最该暂停的一类）。
+                    paused=state.is_paused,
                 ))
 
             # 统计: 按 (原始 name, size_bytes) — 保留集数/分辨率/制作组差异
@@ -365,9 +628,21 @@ class CrossSeedMonitorService:
             downloader_name=row.name,
             scanned_at=scanned_at,
             total_torrents=len(torrents),
+            inflight_count=inflight,
             anomalies=anomalies,
             stats=stats,
         )
+
+
+# ============================================================ 内部工具
+def _parse_state(raw: object) -> TorrentState:
+    """解析 adapter 给的归一化状态（缺失 / 非法 → UNKNOWN）."""
+    if not isinstance(raw, str) or not raw:
+        return TorrentState.UNKNOWN
+    try:
+        return TorrentState.parse(raw)
+    except ValueError:
+        return TorrentState.UNKNOWN
 
 
 # ============================================================ 异常
@@ -392,6 +667,7 @@ class UnsupportedDownloader(Exception):
 __all__ = [
     "ANOMALY_NO_DATA_FOUND",
     "ANOMALY_TRACKER_NOT_REGISTERED",
+    "PAUSE_BATCH_SIZE",
     "AnomalyItem",
     "CrossSeedMonitorService",
     "DownloaderDisabled",
@@ -399,6 +675,7 @@ __all__ = [
     "DownloaderNotFound",
     "NotCrossSeed",
     "ScanResult",
+    "SnapshotHeader",
     "StatsRow",
     "UnsupportedDownloader",
 ]

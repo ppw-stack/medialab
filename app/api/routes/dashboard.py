@@ -33,6 +33,7 @@ async def dashboard() -> dict[str, Any]:
     free_ending_soon = await dashboard_service.count_free_ending_soon()
     free_index_total = await dashboard_service.count_index_total()
     inflight_torrents = await dashboard_service.count_inflight_torrents()
+    inflight_freshness = await dashboard_service.snapshot_freshness()
 
     return {
         "sites": {"total": site_total, "enabled": site_enabled},
@@ -40,4 +41,7 @@ async def dashboard() -> dict[str, Any]:
         "free_ending_soon": free_ending_soon,
         "free_index_total": free_index_total,
         "inflight_torrents": inflight_torrents,
+        # 在途数据的抓取时刻（辅种部分来自定时快照）——前端据此显示
+        # "数据来自 X 分钟前"，避免用户以为是实时的。
+        "inflight_snapshot_at": inflight_freshness,
     }

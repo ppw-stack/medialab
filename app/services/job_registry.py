@@ -10,7 +10,7 @@
 - ``push_free_torrents`` — 选免费种自动推到默认下载器（经 task_queue 幂等入队）
 - ``monitor_free_window`` — 巡检已推免费种，临近窗口截止自动暂停
 - ``refresh_user_data`` — 拉取 9 站用户数据（上传/下载/做种数）
-- ``scan_cross_seed`` — 巡查辅种下载器，暂停 tracker 未注册 / 数据丢失的种子
+- ``scan_cross_seed`` — 定时抓取辅种下载器，落库快照 + 暂停 tracker 未注册 / 数据丢失的种子
 - ``drain_task_queue`` — 排空任务队列：崩溃恢复（僵死 running 回收）+ 退避重试
 - ``daily_checkin`` — 对支持签到的站点执行每日签到（hhanclub / soulvoice / hdhome）
 """
@@ -92,7 +92,7 @@ def register_jobs(
         )
     )
     logger.info(
-        "已注册辅种巡查作业：scan_cross_seed cron=%r",
+        "已注册辅种巡查作业：scan_cross_seed cron=%r（定时抓取 + 落库快照）",
         cfg.scan_cross_seed_cron,
     )
 
@@ -172,7 +172,7 @@ async def _run_refresh_user_data(factory: AdapterFactory) -> dict[str, object]:
 
 
 async def _run_scan_cross_seed() -> dict[str, object]:
-    """执行辅种巡查（扫描 + 暂停异常种子）。"""
+    """执行辅种巡查（定时抓取 + 落库快照 + 暂停异常种子）。"""
     from app.services.cross_seed_monitor import CrossSeedMonitorService
 
     svc = CrossSeedMonitorService()

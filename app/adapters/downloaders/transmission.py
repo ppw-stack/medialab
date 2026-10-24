@@ -64,6 +64,10 @@ _FIELDS_ALL: tuple[str, ...] = (
 )
 
 #: list_torrents_with_errors 一次拉取的字段（含 error/errorString）
+#:
+#: ``percentDone`` / ``rateUpload`` 是为了把 TR 原生 status 码换算成
+#: 归一化的 :class:`TorrentState`（巡查据此判定「是否已暂停」）。
+#: 缺这两个字段时 status=6 只能粗判成 SEEDING，无法区分 UPLOADING。
 _FIELDS_WITH_ERRORS: tuple[str, ...] = (
     "id",
     "hashString",
@@ -72,6 +76,8 @@ _FIELDS_WITH_ERRORS: tuple[str, ...] = (
     "sizeWhenDone",
     "error",           # 0=OK 1=tracker警告 2=tracker错误 3=本地数据丢失
     "errorString",     # 人类可读错误描述
+    "percentDone",
+    "rateUpload",
 )
 
 
@@ -383,20 +389,35 @@ class TransmissionAdapter(DownloaderAdapter):
         return True
 
     async def list_torrents_with_errors(self) -> list[dict[str, Any]]:
-        """拉取全量种子，保留 TR 原生 error / errorString（巡查用）。"""
+        """拉取全量种子，保留 TR 原生 error / errorString（巡查用）。
+
+        额外给出归一化的 ``state``（:class:`TorrentState` 值）——巡查
+        判定「是否已暂停」时要用。注意 TR 的 ``errorString`` 表示
+        tracker 报错，种子的**传输状态**仍由 ``status`` 决定（两者是
+        正交的），故 state 只按 status 换算，不被 errorString 覆盖。
+        """
         resp = await self._rpc(
             "torrent-get", {"fields": list(_FIELDS_WITH_ERRORS)}
         )
         out: list[dict[str, Any]] = []
         for row in resp.get("torrents") or []:
+            raw_status = row.get("status")
+            status = int(raw_status) if raw_status is not None else -1
+            state = self._status_to_state(
+                status,
+                float(row.get("percentDone") or 0),
+                int(row.get("rateUpload") or 0),
+            )
             out.append({
                 "id": int(row.get("id") or 0),
                 "hash": str(row.get("hashString") or ""),
                 "name": str(row.get("name") or ""),
                 "size": int(row.get("sizeWhenDone") or row.get("totalSize") or 0),
-                "status": int(row.get("status") if row.get("status") is not None else -1),
+                "status": status,
                 "error_code": int(row.get("error") or 0),
                 "error_string": str(row.get("errorString") or ""),
+                # 归一化状态（巡查判定「是否已暂停」用）
+                "state": state.value,
             })
         return out
 

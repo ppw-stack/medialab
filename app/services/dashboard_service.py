@@ -27,7 +27,7 @@ from app.adapters.downloaders.base import TorrentState
 from app.core.logging import get_logger
 from app.core.simple_cache import TTLCache
 from app.core.timeutils import bj_now_dt, format_bj
-from app.db.models import DownloaderInstance, Site, TorrentIndex
+from app.db.models import CrossSeedSnapshot, DownloaderInstance, Site, TorrentIndex
 from app.db.session import session_scope
 from app.domain.enums import FreeType
 from app.services.factory import get_factory
@@ -39,6 +39,7 @@ __all__ = [
     "count_free_ending_soon",
     "count_index_total",
     "count_inflight_torrents",
+    "count_inflight_torrents_with_freshness",
     "site_and_downloader_counts",
 ]
 
@@ -131,8 +132,16 @@ async def count_inflight_torrents() -> int | None:
     刻意不排除"已完成"：PT 辅种场景下做种（seeding）正是主要活跃状态，
     排除它会让该指标恒为 0。
 
+    **辅种下载器读快照，不实时拉**（2026-10-24）：辅种站的种子量大
+    （实测 3000+ 个），实时拉一次要 20s+——仪表盘每 30 秒轮询一次，
+    会把辅种站的连接长期占住，反而拖慢辅种页自己的手动刷新。故辅种
+    部分取 ``cross_seed_snapshot.inflight_count``（定时作业写入的快照）。
+
+    非辅种下载器维持实时拉——它们种子少，毫秒级完成。
+
     任一下载器不可达 → 整体返回 ``None``（前端显示 ``—``），避免用不完整
-    的数据误导用户。
+    的数据误导用户。**辅种下载器没有快照行时同样返回 ``None``**——
+    不是 0（"还没抓过" ≠ "没有在途任务"）。
     """
     try:
         return await _inflight_cache.get_or_set(_load_inflight_torrents)
@@ -141,8 +150,43 @@ async def count_inflight_torrents() -> int | None:
         return None
 
 
+async def count_inflight_torrents_with_freshness() -> tuple[int | None, str | None]:
+    """在途任务数 + 数据新鲜度（辅种快照的最旧抓取时刻）。
+
+    新鲜度取**辅种快照里最旧**的 ``scanned_at``——最旧的那个才是
+    "整体数据有多新"的上界。前端据此显示"数据来自 X 分钟前"。
+
+    非辅种下载器是实时拉的，不影响新鲜度（取辅种快照的最旧值即可）。
+    """
+    total = await count_inflight_torrents()
+    freshness = await snapshot_freshness()
+    return total, freshness
+
+
+async def snapshot_freshness() -> str | None:
+    """辅种快照里最旧的抓取时刻（无快照 → None）.
+
+    取**最旧**而非最新：辅种快照各自独立刷新，最旧的那个才是"整体
+    数据有多新"的上界。
+    """
+    try:
+        async with session_scope() as session:
+            row = (
+                await session.execute(
+                    select(func.min(CrossSeedSnapshot.scanned_at))
+                )
+            ).scalar_one()
+        return str(row) if row else None
+    except Exception as exc:
+        logger.warning("仪表盘统计（快照新鲜度）查询失败：%s", exc)
+        return None
+
+
 async def _load_inflight_torrents() -> int | None:
-    """实际拉取各下载器任务并计数（缓存 loader）。"""
+    """实际统计各下载器在途任务数（缓存 loader）。
+
+    辅种下载器走快照（DB 读），非辅种下载器走实时拉取。
+    """
     async with session_scope() as session:
         rows = list(
             (
@@ -153,13 +197,32 @@ async def _load_inflight_torrents() -> int | None:
                 )
             ).scalars().all()
         )
+        snapshot_rows = (
+            await session.execute(select(CrossSeedSnapshot))
+        ).scalars().all()
 
     if not rows:
         return 0
 
+    # 辅种下载器的在途数来自快照
+    snapshot_inflight: dict[int, int] = {
+        s.downloader_id: s.inflight_count for s in snapshot_rows
+    }
+
     factory = get_factory()
     total = 0
     for row in rows:
+        if row.is_cross_seed:
+            # 辅种下载器：读快照。没有快照行 → 整体降级为 None
+            # （"还没抓过" ≠ "0 个在途任务"）。
+            inflight = snapshot_inflight.get(row.id)
+            if inflight is None:
+                logger.info(
+                    "仪表盘统计：辅种下载器 %s 还没有快照，在途数不可用", row.name
+                )
+                return None
+            total += inflight
+            continue
         try:
             # 复用工厂缓存的适配器实例（连接池复用，见 factory 模块说明）
             adapter = factory.downloader(row)
@@ -174,8 +237,12 @@ async def _load_inflight_torrents() -> int | None:
 
 
 def _is_inflight(info: Any) -> bool:
-    """是否为"在途"任务：非暂停、非致命错误。"""
+    """是否为"在途"任务：非暂停、非致命错误。
+
+    口径与 :attr:`TorrentState.is_inflight` 一致（单一来源，避免两处
+    各写一份判定而漂移）。
+    """
     state = info.state
     if not isinstance(state, TorrentState):
         return False
-    return not (state.is_paused or state.is_fatal)
+    return state.is_inflight

@@ -27,7 +27,7 @@ from app.adapters.downloaders.base import (
     TorrentState,
 )
 from app.core.logging import get_logger
-from app.db.models import DownloaderInstance
+from app.db.models import CrossSeedSnapshot, DownloaderInstance
 from app.db.session import session_scope
 from app.services.errors import ServiceError
 from app.services.factory import get_factory, invalidate_downloader
@@ -305,6 +305,15 @@ async def update_downloader(
             row.verify_tls = verify_tls
         if is_cross_seed is not None:
             row.is_cross_seed = is_cross_seed
+            if not is_cross_seed:
+                # 取消辅种标记 → 该下载器不再被巡查，快照失去意义，
+                # 留着会让辅种页显示一个"已不是辅种"的陈旧数据。
+                # 与删除同一条清理路径。
+                await session.execute(
+                    delete(CrossSeedSnapshot).where(
+                        CrossSeedSnapshot.downloader_id == downloader_id
+                    )
+                )
         # 用 model_fields_set 区分"未提供"与"显式清空"：空串允许清掉密码
         if password is not None:
             row.password = password or None
@@ -320,12 +329,20 @@ async def update_downloader(
 
 
 async def delete_downloader(downloader_id: int) -> int:
-    """删除下载器配置。
+    """删除下载器配置（**级联清理**辅种快照）。
 
-    删除下载器实例配置仅是 DB 层操作——``TorrentIndex`` 没有
-    ``downloader_id`` 列（推送状态记录的是"种子级"而非"下载器级"），
-    故无法按下载器维度做引用计数。已在下载器里运行的种子由用户在
-    下载器控制台自行清理，删除配置不阻塞于历史推送。
+    关联数据一张表：``cross_seed_snapshot``（辅种扫描快照，
+    ``downloader_id`` FK → ``downloader_instances.id``，无
+    ``ON DELETE CASCADE``）。
+
+    **为什么必须级联删**（而不是让 FK 报错拦住）：
+    快照行是该下载器的**当前状态**，下载器没了它就是孤儿数据。
+    FK 故意不带 CASCADE 就是当守卫——漏删会 IntegrityError，
+    宁可失败也不留孤儿行。故删除流程在同一事务里先删快照再删父行。
+
+    ``TorrentIndex`` 没有 ``downloader_id`` 列（推送状态记录的是"种子级"
+    而非"下载器级"），故无法按下载器维度做引用计数。已在下载器里运行的
+    种子由用户在下载器控制台自行清理，删除配置不阻塞于历史推送。
 
     :raises ServiceError: 404（下载器不存在）
     """
@@ -337,6 +354,12 @@ async def delete_downloader(downloader_id: int) -> int:
         ).scalar_one_or_none()
         if row is None:
             raise ServiceError("下载器不存在", status=404)
+        # 先删子表（FK 守卫：cross_seed_snapshot.downloader_id → 本表）
+        await session.execute(
+            delete(CrossSeedSnapshot).where(
+                CrossSeedSnapshot.downloader_id == downloader_id
+            )
+        )
         await session.execute(
             delete(DownloaderInstance).where(DownloaderInstance.id == downloader_id)
         )

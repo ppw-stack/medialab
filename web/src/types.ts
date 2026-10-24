@@ -219,7 +219,7 @@ export interface CrossSeedDownloader {
   is_cross_seed: boolean
 }
 
-/** 辅种统计行。 */
+/** 辅种统计行（快照里的分组明细）。 */
 export interface CrossSeedStatsRow {
   name: string
   size_gb: number
@@ -227,15 +227,46 @@ export interface CrossSeedStatsRow {
   sample_hash: string
 }
 
-/** 辅种扫描结果（`GET /cross-seed-monitor/downloaders/{id}/scan`）。 */
-export interface CrossSeedScanResult {
+/** 辅种异常种子（快照里的异常明细）。 */
+export interface CrossSeedAnomaly {
+  id: number
+  hash: string
+  name: string
+  size_gb: number
+  status: number
+  anomaly_type: string
+  error_code: number
+  error_string: string
+  /** 抓取时该种子是否已处于暂停态（跳过重复暂停用）。 */
+  paused: boolean
+}
+
+/** 辅种快照头部（`GET /cross-seed-monitor/snapshots` 列表项）。 */
+export interface CrossSeedSnapshotHeader {
   downloader_id: number
   downloader_name: string
   scanned_at: string
   total_torrents: number
-  anomaly_count: number
   unique_count: number
+  anomaly_count: number
+  inflight_count: number
+  /** 本次**实际**发出暂停指令的种子数（不含已暂停被跳过的）。 */
+  paused_count: number
+  /** 暂停失败的种子数。 */
+  pause_failed_count: number
+}
+
+/** 辅种快照详情（含明细；`GET .../snapshot` 与 `POST .../refresh`）。 */
+export interface CrossSeedSnapshot extends CrossSeedSnapshotHeader {
   stats: CrossSeedStatsRow[]
+  anomalies: CrossSeedAnomaly[]
+}
+
+/** 辅种快照列表（`GET /cross-seed-monitor/snapshots`）。 */
+export interface CrossSeedSnapshotList {
+  snapshots: CrossSeedSnapshotHeader[]
+  /** 是辅种但还没抓过快照的下载器——前端显示「等待首次抓取」。 */
+  pending: CrossSeedDownloader[]
 }
 
 // ==================================================================== 拉取索引
@@ -373,4 +404,10 @@ export interface DashboardSnap {
   free_ending_soon: number | null
   free_index_total: number | null
   inflight_torrents: number | null
+  /**
+   * 在途数据的抓取时刻（辅种部分来自定时快照，非实时）。
+   *
+   * null = 还没有辅种快照（辅种下载器未被标记或尚未抓过）。
+   */
+  inflight_snapshot_at: string | null
 }

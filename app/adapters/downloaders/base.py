@@ -116,6 +116,21 @@ class TorrentState(StrEnum):
         """FR-3.4 表：不等窗口，立即中止。"""
         return self in {TorrentState.ERROR, TorrentState.MISSING_FILES}
 
+    @property
+    def is_inflight(self) -> bool:
+        """「在途」= 正在参与的任务：做种 / 下载 / 检查 / 停滞。
+
+        **排除**已暂停（PAUSED_DL / PAUSED_UP）与致命错误（ERROR /
+        MISSING_FILES）——这两类不参与传输。
+
+        刻意**不排除**"已完成"（SEEDING / UPLOADING）：PT 辅种场景下
+        做种正是主要活跃状态，排除它会让该指标恒为 0。
+
+        口径单一来源：仪表盘的「在途任务」统计与辅种快照的
+        ``inflight_count`` 都用它，避免两处各写一份判定而漂移。
+        """
+        return not (self.is_paused or self.is_fatal)
+
 
 @dataclass(frozen=True, slots=True)
 class TorrentInfo:
@@ -228,7 +243,7 @@ class DownloaderAdapter(ABC):
         """5. 批量暂停/恢复。"""
 
     async def list_torrents_with_errors(self) -> list[dict[str, Any]]:
-        """6. 拉取全量种子，附带**规范化**的错误信息（辅种巡查用）。
+        """6. 拉取全量种子，附带**规范化**的错误信息与状态（辅种巡查用）。
 
         返回的每项至少含：
 
@@ -239,10 +254,14 @@ class DownloaderAdapter(ABC):
         - ``status``: int（下载器原生 status 码）
         - ``error_code``: int（0 = 无错；非 0 见下载器语义）
         - ``error_string``: str（人类可读错误描述，空串表示无错）
+        - ``state``: str（**归一化**的 :class:`TorrentState` 值，如
+          ``seeding`` / ``pausedUP`` / ``error``；未知状态给
+          ``unknown``）
 
-        与 :meth:`list_torrents` 的区别：本方法**不做状态归一**，
-        保留下载器原生的错误码/错误描述，供巡查逻辑按具体错误类型
-        （tracker 未注册 / 数据丢失等）判定。
+        与 :meth:`list_torrents` 的区别：本方法**不做状态归一**（保留
+        下载器原生的错误码/错误描述，供巡查逻辑按具体错误类型判定），
+        但**额外**给出归一化的 ``state``——巡查需要它来判定「是否已
+        暂停」（避免对已暂停的种子重复发暂停指令）。
 
         不支持时抛 :class:`NotImplementedError`。
         """
