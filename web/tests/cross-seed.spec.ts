@@ -105,3 +105,71 @@ test('辅种下载器统计页面 - 初始 tab 渲染', async ({ page }) => {
   await expect(firstTab).toHaveClass(/ant-tabs-tab-active/)
   console.log(`  ✓ 初始选中: ${(await firstTab.textContent())?.trim()}`)
 })
+
+/**
+ * 辅种空间占用区块（2026-10-24）。
+ *
+ * 数据来自定时抓取的快照（`cross_seed_snapshot` 的空间列）——
+ * 辅种实际占用 / 磁盘剩余 / 磁盘总量 / 按目录分布。
+ *
+ * qBittorrent 拿不到磁盘总量（`total_bytes` 为 NULL）→ 前端不画进度条
+ * （画出来会误导成「磁盘已满」）。
+ */
+test('辅种统计页 - 空间占用区块', async ({ page }) => {
+  await login(page)
+  await page.goto('/cross-seed')
+
+  const tabs = page.locator('.ant-tabs-tab')
+  // 下载器列表是异步加载的——等它渲染出来再判断
+  await expect(tabs.first()).toBeVisible({ timeout: 15000 }).catch(() => { /* 无下载器 */ })
+  if ((await tabs.count()) === 0) {
+    console.log('  ✓ 无辅种下载器：跳过空间区块断言')
+    return
+  }
+
+  // 逐个 tab 找**有快照**的那个（没快照的 tab 显示「等待首次抓取」，
+  // 没有空间区块可断言）。
+  // ⚠️ 详情是**异步**加载的——用 expect 轮询等它出现（isVisible 不轮询，
+  // 会在数据到达前就返回 false → 误判成「没有快照」）。
+  const tabCount = await tabs.count()
+  let pane = page.locator('.ant-tabs-tabpane-active')
+  let found = false
+  for (let i = 0; i < tabCount; i++) {
+    await tabs.nth(i).click()
+    pane = page.locator('.ant-tabs-tabpane-active')
+    // 空间区块出现 = 该 tab 有快照（含空间数据）
+    try {
+      await expect(pane.locator('.space-block')).toBeVisible({ timeout: 5000 })
+      found = true
+      break
+    } catch {
+      // 该 tab 没快照 → 试下一个
+    }
+  }
+  if (!found) {
+    console.log('  ✓ 还没有快照（含空间数据）：跳过空间区块断言')
+    return
+  }
+
+  // 空间区块（4 张卡片）
+  const spaceBlock = pane.locator('.space-block')
+  await expect(spaceBlock).toBeVisible()
+  await expect(spaceBlock.locator('.space-tile')).toHaveCount(4)
+  console.log('  ✓ 空间卡片: 实际占用 / 总大小 / 磁盘剩余 / 磁盘总量')
+
+  // 总量未知时不画进度条（qB）
+  const hasProgress = await spaceBlock.locator('.space-progress').count()
+  const totalTile = spaceBlock.locator('.space-tile').nth(3)
+  const totalText = (await totalTile.locator('.space-tile__value').textContent())?.trim()
+  if (totalText === '—') {
+    expect(hasProgress).toBe(0)
+    console.log('  ✓ 磁盘总量未知 → 不画进度条')
+  } else {
+    expect(hasProgress).toBe(1)
+    console.log('  ✓ 磁盘总量已知 → 画进度条')
+  }
+
+  // 目录分布表（有目录信息时）
+  const dirRows = await spaceBlock.locator('.ant-table-tbody tr.ant-table-row').count()
+  console.log(`  ✓ 目录分布行数: ${dirRows}`)
+})

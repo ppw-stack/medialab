@@ -214,6 +214,35 @@ class DownloaderError(RuntimeError):
         self.transient = transient
 
 
+@dataclass(frozen=True, slots=True)
+class DiskSpace:
+    """下载器所在磁盘的空间信息。
+
+    ``total_bytes`` 可为 ``None``——qBittorrent 的 ``sync/maindata`` 只给
+    ``free_space_on_disk``（剩余空间），拿不到总量。**不猜、不填 0**：
+    0 会被前端画成「磁盘已满」，NULL 才能表达"不知道"。
+    """
+
+    #: 剩余空间（字节）
+    free_bytes: int
+    #: 磁盘总量（字节）；None = 该下载器不提供
+    total_bytes: int | None = None
+
+    @property
+    def used_bytes(self) -> int | None:
+        """已用空间（总量 - 剩余）。总量未知时返回 None。"""
+        if self.total_bytes is None:
+            return None
+        return max(self.total_bytes - self.free_bytes, 0)
+
+    @property
+    def used_ratio(self) -> float | None:
+        """已用占比（0.0–1.0）。总量未知时返回 None。"""
+        if not self.total_bytes:
+            return None
+        return self.used_bytes / self.total_bytes if self.used_bytes else 0.0
+
+
 class DownloaderAdapter(ABC):
     """下载器统一接口（FR-1）。"""
 
@@ -257,6 +286,9 @@ class DownloaderAdapter(ABC):
         - ``state``: str（**归一化**的 :class:`TorrentState` 值，如
           ``seeding`` / ``pausedUP`` / ``error``；未知状态给
           ``unknown``）
+        - ``completed_bytes``: int（**已校验有效**的字节数——磁盘实际
+          占用。qB 取 ``completed``、TR 取 ``haveValid``）
+        - ``save_path``: str | None（下载目录，用于按目录统计占用）
 
         与 :meth:`list_torrents` 的区别：本方法**不做状态归一**（保留
         下载器原生的错误码/错误描述，供巡查逻辑按具体错误类型判定），
@@ -267,6 +299,21 @@ class DownloaderAdapter(ABC):
         """
         raise NotImplementedError(
             f"{self.client_type} 适配器暂不支持 list_torrents_with_errors"
+        )
+
+    async def get_disk_space(self, path: str | None = None) -> DiskSpace:
+        """7. 查询下载器所在磁盘的空间信息（辅种空间统计用）。
+
+        :param path: 参考目录——用于定位**哪个分区**（同一个盘上不同
+            挂载点可能不同）。None = 用下载器默认位置。
+
+        :returns: :class:`DiskSpace`（``total_bytes`` 可能为 None——
+            qBittorrent 只提供剩余空间）。
+
+        不支持时抛 :class:`NotImplementedError`。
+        """
+        raise NotImplementedError(
+            f"{self.client_type} 适配器暂不支持 get_disk_space"
         )
 
     async def close(self) -> None:

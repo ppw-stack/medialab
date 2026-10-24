@@ -11,6 +11,7 @@ from typing import Any
 
 from app.adapters.downloaders.base import (
     AddTorrentPayload,
+    DiskSpace,
     DownloaderAdapter,
     DownloaderError,
     TorrentFilter,
@@ -227,8 +228,36 @@ class QbittorrentAdapter(DownloaderAdapter):
                 "error_string": error_string,
                 # 归一化状态（巡查判定「是否已暂停」用）
                 "state": _STATE_MAP.get(state, TorrentState.UNKNOWN).value,
+                # 已校验有效的字节数（辅种空间统计用）。
+                # ⚠️ qB 的 ``completed`` 是 libtorrent 的
+                # ``total_wanted_done``——**不含** unwanted 文件与冗余块，
+                # 故它会**小于**磁盘上的真实占用。TR 的 haveValid 才是
+                # 精确口径。两者不可直接横向比较。
+                "completed_bytes": int(row.get("completed") or 0),
+                # 下载目录（按目录统计占用用）
+                "save_path": row.get("save_path") or None,
             })
         return out
+
+    async def get_disk_space(self, path: str | None = None) -> DiskSpace:
+        """查询磁盘剩余空间（辅种空间统计用）。
+
+        qBittorrent 的 ``sync/maindata`` 里 ``server_state`` 带
+        ``free_space_on_disk``——**只有剩余空间，没有总量**。
+
+        故 ``total_bytes`` 返回 None（前端据此不画进度条，而不是画成
+        「磁盘已满」）。
+
+        注：``sync/maindata`` 的响应体含全部种子信息（较大），但它只
+        请求一次、可复用 rid 做增量同步，开销可接受。
+        """
+        try:
+            data = await self._qb.get_main_data()
+        except Qb5ApiError as exc:
+            raise DownloaderError(str(exc), transient=exc.transient) from exc
+        state = data.get("server_state") or {}
+        free_bytes = int(state.get("free_space_on_disk") or 0)
+        return DiskSpace(free_bytes=free_bytes, total_bytes=None)
 
     async def add_torrent(self, payload: AddTorrentPayload) -> TorrentHandle:
         """附录 A：``urls`` / ``category`` / ``tags`` / ``skip_checking``。

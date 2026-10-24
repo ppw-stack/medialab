@@ -241,6 +241,18 @@ export interface CrossSeedAnomaly {
   paused: boolean
 }
 
+/** 单个下载目录的占用（快照里的空间分布明细）。 */
+export interface CrossSeedDirUsage {
+  /** 下载目录（下载器视角的路径）。 */
+  dir: string
+  /** 该目录下的种子数。 */
+  count: number
+  /** 实际占用字节数。 */
+  bytes: number
+  /** 种子总大小字节数（理论值）。 */
+  total_bytes: number
+}
+
 /** 辅种快照头部（`GET /cross-seed-monitor/snapshots` 列表项）。 */
 export interface CrossSeedSnapshotHeader {
   downloader_id: number
@@ -254,12 +266,46 @@ export interface CrossSeedSnapshotHeader {
   paused_count: number
   /** 暂停失败的种子数。 */
   pause_failed_count: number
+  /**
+   * 磁盘剩余空间（字节）。null = 没取到。
+   *
+   * qBittorrent 只提供剩余空间（拿不到总量），Transmission 两者都有。
+   */
+  disk_free_bytes: number | null
+  /** 磁盘总量（字节）。null = 该下载器不提供（qBittorrent）。 */
+  disk_total_bytes: number | null
+  /** 辅种实际占用字节数（各种子 `completed_bytes` 求和）。 */
+  used_bytes: number
+  /** 辅种总大小字节数（理论值）。 */
+  total_size_bytes: number
 }
 
 /** 辅种快照详情（含明细；`GET .../snapshot` 与 `POST .../refresh`）。 */
 export interface CrossSeedSnapshot extends CrossSeedSnapshotHeader {
   stats: CrossSeedStatsRow[]
   anomalies: CrossSeedAnomaly[]
+  /** 按下载目录的占用分布（按占用降序）。 */
+  by_dir: CrossSeedDirUsage[]
+}
+
+/** 辅种空间汇总（`GET /cross-seed-monitor/space`）。 */
+export interface CrossSeedSpace {
+  summary: {
+    downloaders: number
+    used_bytes: number
+    total_size_bytes: number
+    disk_free_bytes: number | null
+    disk_total_bytes: number | null
+  }
+  downloaders: Array<{
+    downloader_id: number
+    downloader_name: string
+    scanned_at: string
+    used_bytes: number
+    total_size_bytes: number
+    disk_free_bytes: number | null
+    disk_total_bytes: number | null
+  }>
 }
 
 /** 辅种快照列表（`GET /cross-seed-monitor/snapshots`）。 */

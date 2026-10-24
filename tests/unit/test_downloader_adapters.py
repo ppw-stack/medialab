@@ -197,6 +197,35 @@ def _tr_side_effect(rows: list[dict[str, Any]]) -> Any:
 _TR_REQUESTED_FIELDS: list[list[str]] = []
 
 
+def _tr_free_space_side_effect(payload: dict[str, Any]) -> Any:
+    """构造只响应 ``free-space`` 的 TR RPC 处理器。"""
+
+    async def _handler(request: Any) -> Any:
+        import json
+
+        body = json.loads(request.content)
+        method = body.get("method")
+        if method == "session-get":
+            if request.headers.get("X-Transmission-Session-Id"):
+                return httpx_response({"result": "success", "tag": "seedhelper"})
+            return httpx_response(
+                {},
+                status=409,
+                headers={"X-Transmission-Session-Id": "sid-1"},
+            )
+        if method == "free-space":
+            return httpx_response(
+                {
+                    "result": "success",
+                    "tag": "seedhelper",
+                    "arguments": payload,
+                }
+            )
+        raise AssertionError(f"意外调用 {method}")
+
+    return _handler
+
+
 def httpx_response(
     payload: Any, *, status: int = 200, headers: dict[str, str] | None = None
 ) -> Any:
@@ -260,3 +289,92 @@ async def test_tr_checking_status_maps_to_checking() -> None:
         infos = await adapter.list_torrents()
 
     assert [i.state for i in infos] == [TorrentState.CHECKING] * 2
+
+
+# ================================================================ 空间统计字段
+
+
+@pytest.mark.asyncio
+async def test_qb_list_with_errors_returns_space_fields() -> None:
+    """qB：``list_torrents_with_errors`` 必须带 ``completed_bytes`` / ``save_path``。
+
+    辅种空间统计靠这两个字段算实际占用与目录分布——缺了就只能算个空。
+    """
+    from app.adapters.downloaders.qbittorrent import QbittorrentAdapter
+
+    with respx.mock(assert_all_mocked=False) as router:
+        router.get(f"{QB_URL}/api/v2/torrents/info").mock(
+            return_value=httpx_response(
+                [_qb_row(completed=500, size=1000, save_path="/downloads/aux")]
+            )
+        )
+        adapter = QbittorrentAdapter("qb", QB_URL, "u", "p")
+        rows = await adapter.list_torrents_with_errors()
+
+    assert len(rows) == 1
+    assert rows[0]["completed_bytes"] == 500
+    assert rows[0]["save_path"] == "/downloads/aux"
+
+
+@pytest.mark.asyncio
+async def test_tr_list_with_errors_returns_space_fields() -> None:
+    """TR：``list_torrents_with_errors`` 必须带 ``completed_bytes`` / ``save_path``。
+
+    TR 的 ``haveValid`` 是**精确**的磁盘占用口径。
+    """
+    from app.adapters.downloaders.transmission import TransmissionAdapter
+
+    _TR_REQUESTED_FIELDS.clear()
+    with respx.mock(assert_all_mocked=False) as router:
+        router.post(TR_URL).mock(
+            side_effect=_tr_side_effect(
+                [_tr_row(haveValid=500, totalSize=1000, downloadDir="/dl/aux")]
+            )
+        )
+        adapter = TransmissionAdapter("tr", TR_BASE_URL, "u", "p")
+        rows = await adapter.list_torrents_with_errors()
+
+    assert len(rows) == 1
+    assert rows[0]["completed_bytes"] == 500
+    assert rows[0]["save_path"] == "/dl/aux"
+    # 请求的字段里必须带上这两个
+    assert "haveValid" in _TR_REQUESTED_FIELDS[0]
+    assert "downloadDir" in _TR_REQUESTED_FIELDS[0]
+
+
+@pytest.mark.asyncio
+async def test_qb_get_disk_space_has_no_total() -> None:
+    """qB：只给剩余空间，**总量为 None**（不是 0——0 会被画成「磁盘已满」）。"""
+    from app.adapters.downloaders.qbittorrent import QbittorrentAdapter
+
+    with respx.mock(assert_all_mocked=False) as router:
+        router.get(f"{QB_URL}/api/v2/sync/maindata").mock(
+            return_value=httpx_response(
+                {"rid": 0, "server_state": {"free_space_on_disk": 123456}}
+            )
+        )
+        adapter = QbittorrentAdapter("qb", QB_URL, "u", "p")
+        space = await adapter.get_disk_space()
+
+    assert space.free_bytes == 123456
+    assert space.total_bytes is None
+    assert space.used_bytes is None
+
+
+@pytest.mark.asyncio
+async def test_tr_get_disk_space_returns_free_and_total() -> None:
+    """TR：``free-space`` 返回剩余 + 总量。"""
+    from app.adapters.downloaders.transmission import TransmissionAdapter
+
+    with respx.mock(assert_all_mocked=False) as router:
+        router.post(TR_URL).mock(
+            side_effect=_tr_free_space_side_effect(
+                {"path": "/dl", "size-bytes": 400, "total_size": 1000}
+            )
+        )
+        adapter = TransmissionAdapter("tr", TR_BASE_URL, "u", "p")
+        space = await adapter.get_disk_space("/dl")
+
+    assert space.free_bytes == 400
+    assert space.total_bytes == 1000
+    assert space.used_bytes == 600

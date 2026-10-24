@@ -94,6 +94,7 @@
 | `/api/v1/scheduler/{job_name}/cron` | 改 cron（**落库**，跨重启保持，见 §6） |
 | `/api/v1/cross-seed-monitor/downloaders` | 辅种下载器列表 |
 | `/api/v1/cross-seed-monitor/snapshots` | 辅种快照列表 + 未抓过的下载器 |
+| `/api/v1/cross-seed-monitor/space` | 辅种空间汇总（磁盘剩余 / 辅种占用） |
 | `/api/v1/cross-seed-monitor/downloaders/{id}/snapshot` | 单个辅种下载器快照详情 |
 | `/api/v1/cross-seed-monitor/downloaders/{id}/refresh` | 手动抓取单个辅种下载器（await 完整抓取） |
 | `/api/v1/cross-seed-monitor/downloaders/{id}/scan` | 实时扫描单个辅种下载器（调试用，不落库） |

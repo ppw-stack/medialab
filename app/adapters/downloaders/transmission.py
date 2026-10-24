@@ -20,6 +20,7 @@ import httpx
 
 from app.adapters.downloaders.base import (
     AddTorrentPayload,
+    DiskSpace,
     DownloaderAdapter,
     DownloaderError,
     TorrentFilter,
@@ -68,6 +69,9 @@ _FIELDS_ALL: tuple[str, ...] = (
 #: ``percentDone`` / ``rateUpload`` 是为了把 TR 原生 status 码换算成
 #: 归一化的 :class:`TorrentState`（巡查据此判定「是否已暂停」）。
 #: 缺这两个字段时 status=6 只能粗判成 SEEDING，无法区分 UPLOADING。
+#:
+#: ``haveValid`` / ``downloadDir`` 用于辅种空间统计（实际占用 + 按目录
+#: 分布）——与 :meth:`list_torrents` 的 ``_FIELDS_ALL`` 口径一致。
 _FIELDS_WITH_ERRORS: tuple[str, ...] = (
     "id",
     "hashString",
@@ -78,6 +82,8 @@ _FIELDS_WITH_ERRORS: tuple[str, ...] = (
     "errorString",     # 人类可读错误描述
     "percentDone",
     "rateUpload",
+    "haveValid",       # 已校验有效的字节数（= 磁盘实际占用）
+    "downloadDir",     # 下载目录（按目录统计占用用）
 )
 
 
@@ -418,8 +424,32 @@ class TransmissionAdapter(DownloaderAdapter):
                 "error_string": str(row.get("errorString") or ""),
                 # 归一化状态（巡查判定「是否已暂停」用）
                 "state": state.value,
+                # 已校验有效的字节数（= 磁盘实际占用，TR 口径精确）
+                "completed_bytes": int(row.get("haveValid") or 0),
+                # 下载目录（按目录统计占用用）
+                "save_path": row.get("downloadDir") or None,
             })
         return out
+
+    async def get_disk_space(self, path: str | None = None) -> DiskSpace:
+        """查询磁盘剩余空间（辅种空间统计用）。
+
+        TR 的 ``free-space`` RPC 需要一个**存在的目录**——它返回该目录
+        所在**分区**的剩余/总量。
+
+        :param path: 参考目录。None 时用 ``/``（根分区）。传辅种种子的
+            ``downloadDir`` 更准确（能定位到辅种数据实际所在的那个分区）。
+        """
+        target = path or "/"
+        try:
+            resp = await self._rpc("free-space", {"path": target})
+        except DownloaderError as exc:
+            raise DownloaderError(
+                f"TR free-space 失败（{target}）：{exc}", transient=exc.transient
+            ) from exc
+        free_bytes = int(resp.get("size-bytes") or 0)
+        total_bytes = int(resp.get("total_size") or 0) or None
+        return DiskSpace(free_bytes=free_bytes, total_bytes=total_bytes)
 
     async def close(self) -> None:
         await self._client.aclose()

@@ -3,12 +3,14 @@ import { ref, onMounted, watch, computed } from 'vue'
 import { api, errMsg } from '../api'
 import type {
   CrossSeedAnomaly,
+  CrossSeedDirUsage,
   CrossSeedDownloader,
   CrossSeedSnapshot,
   CrossSeedSnapshotHeader,
   CrossSeedSnapshotList,
   CrossSeedStatsRow,
 } from '../types'
+import { formatBytes as fmtBytes } from '../utils/format'
 import { message } from 'ant-design-vue'
 
 
@@ -40,6 +42,13 @@ const anomalyColumns = [
   { title: '异常类型', dataIndex: 'anomaly_type', key: 'anomaly_type', width: 180 },
   { title: '错误描述', dataIndex: 'error_string', key: 'error_string', ellipsis: true, minWidth: 220 },
   { title: '状态', key: 'paused', width: 100 },
+]
+
+const dirColumns = [
+  { title: '下载目录', dataIndex: 'dir', key: 'dir', ellipsis: true, minWidth: 320 },
+  { title: '种子数', dataIndex: 'count', key: 'count', width: 100 },
+  { title: '实际占用', dataIndex: 'bytes', key: 'bytes', width: 140 },
+  { title: '总大小', dataIndex: 'total_bytes', key: 'total_bytes', width: 140 },
 ]
 
 async function loadDownloaders() {
@@ -149,6 +158,21 @@ const currentHeader = computed(() =>
 /** 当前 tab 是否有快照。 */
 const hasSnapshot = computed(() => currentHeader.value !== undefined)
 
+/** 磁盘已用字节数（总量未知时为 null）。 */
+const diskUsedBytes = computed<number | null>(() => {
+  const s = snapshot.value
+  if (!s || s.disk_total_bytes === null || s.disk_free_bytes === null) return null
+  return Math.max(s.disk_total_bytes - s.disk_free_bytes, 0)
+})
+
+/** 磁盘已用占比（0–1）。总量未知时为 null——**不画进度条**。 */
+const diskUsagePercent = computed<number | null>(() => {
+  const s = snapshot.value
+  if (!s || !s.disk_total_bytes) return null
+  const used = diskUsedBytes.value ?? 0
+  return Math.min(used / s.disk_total_bytes, 1)
+})
+
 /** 快照的新鲜度文案。 */
 function freshnessText(scannedAt: string): string {
   if (!scannedAt) return '—'
@@ -246,6 +270,78 @@ onMounted(async () => {
             </a-tag>
             <a-tag v-else color="green">无异常</a-tag>
           </div>
+
+          <!-- 空间占用 -->
+          <section class="space-block">
+            <div class="label-caps" style="margin-bottom: var(--sp-2)">
+              空间占用 · SPACE
+            </div>
+            <div class="space-tiles">
+              <div class="space-tile">
+                <div class="space-tile__label">辅种实际占用</div>
+                <div class="space-tile__value">{{ fmtBytes(snapshot.used_bytes) }}</div>
+                <div class="space-tile__hint">磁盘上实际占用的字节数</div>
+              </div>
+              <div class="space-tile">
+                <div class="space-tile__label">辅种总大小</div>
+                <div class="space-tile__value">{{ fmtBytes(snapshot.total_size_bytes) }}</div>
+                <div class="space-tile__hint">种子理论总大小</div>
+              </div>
+              <div class="space-tile">
+                <div class="space-tile__label">磁盘剩余</div>
+                <div class="space-tile__value">
+                  {{ snapshot.disk_free_bytes === null ? '—' : fmtBytes(snapshot.disk_free_bytes) }}
+                </div>
+                <div class="space-tile__hint">
+                  {{ snapshot.disk_total_bytes === null ? '该下载器不提供总量' : '所在分区可用空间' }}
+                </div>
+              </div>
+              <div class="space-tile">
+                <div class="space-tile__label">磁盘总量</div>
+                <div class="space-tile__value">
+                  {{ snapshot.disk_total_bytes === null ? '—' : fmtBytes(snapshot.disk_total_bytes) }}
+                </div>
+                <div class="space-tile__hint">
+                  {{ snapshot.disk_total_bytes === null ? 'qBittorrent 不提供总量' : '所在分区总容量' }}
+                </div>
+              </div>
+            </div>
+
+            <!-- 占用进度条（总量未知时不画——画出来会误导成「磁盘已满」） -->
+            <div v-if="diskUsagePercent !== null" class="space-progress">
+              <div class="space-progress__header">
+                <span>磁盘已用 {{ fmtBytes(diskUsedBytes) }}</span>
+                <span class="dim">{{ (diskUsagePercent * 100).toFixed(1) }}%</span>
+              </div>
+              <a-progress :percent="diskUsagePercent * 100" :show-info="false" />
+            </div>
+
+            <!-- 按目录分布 -->
+            <a-table
+              v-if="snapshot.by_dir.length"
+              :columns="dirColumns"
+              :data-source="snapshot.by_dir"
+              :row-key="(r: CrossSeedDirUsage) => r.dir"
+              :pagination="false"
+              size="small"
+              style="margin-top: var(--sp-3)"
+            >
+              <template #bodyCell="{ column, record }">
+                <template v-if="column.key === 'dir'">
+                  <a-tooltip :title="(record as CrossSeedDirUsage).dir">
+                    <span class="name-cell mono">{{ (record as CrossSeedDirUsage).dir }}</span>
+                  </a-tooltip>
+                </template>
+                <template v-else-if="column.key === 'bytes'">
+                  {{ fmtBytes((record as CrossSeedDirUsage).bytes) }}
+                </template>
+                <template v-else-if="column.key === 'total_bytes'">
+                  {{ fmtBytes((record as CrossSeedDirUsage).total_bytes) }}
+                </template>
+              </template>
+            </a-table>
+          </section>
+
           <a-alert
             type="info"
             show-icon
@@ -366,6 +462,52 @@ onMounted(async () => {
 
 .anomaly-header {
   font-weight: 500;
+}
+
+/* 空间占用区块 */
+.space-block {
+  margin-bottom: var(--sp-3);
+  padding: var(--sp-3);
+  background: var(--bg-inset);
+  border-radius: var(--r-sm);
+}
+
+.space-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--sp-3);
+}
+
+.space-tile__label {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  margin-bottom: var(--sp-1);
+}
+
+.space-tile__value {
+  font-family: var(--font-mono);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.3;
+}
+
+.space-tile__hint {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  margin-top: var(--sp-1);
+}
+
+.space-progress {
+  margin-top: var(--sp-3);
+}
+
+.space-progress__header {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  margin-bottom: var(--sp-1);
 }
 
 .dim {

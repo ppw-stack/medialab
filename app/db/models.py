@@ -309,6 +309,24 @@ class CrossSeedSnapshot(Base):
     paused_count: Mapped[int] = mapped_column(Integer, default=0)
     #: 暂停失败的种子数
     pause_failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    #: 磁盘剩余空间（字节）。NULL = 该下载器不提供 / 本次没取到。
+    #:
+    #: qBittorrent 只给剩余空间（``sync/maindata`` 的
+    #: ``free_space_on_disk``），Transmission 给剩余 + 总量。
+    disk_free_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    #: 磁盘总量（字节）。NULL = 拿不到（qBittorrent 不提供）。
+    disk_total_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    #: 辅种**实际占用**字节数（各种子 ``completed_bytes`` 求和）。
+    #:
+    #: ⚠️ 口径提示：TR 的 ``haveValid`` 是精确的磁盘占用；qB 的
+    #: ``completed`` 是 ``total_wanted_done``——**不含** unwanted 文件与
+    #: 冗余块，故 qB 的这个值会**小于**真实磁盘占用。
+    used_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    #: 辅种**总大小**字节数（各种子 ``size`` 求和，理论值）
+    total_size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    #: 按下载目录分布（JSON 数组：
+    #: ``[{dir, count, bytes, total_bytes}]``，bytes = 实际占用）
+    by_dir: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
     #: 分组统计明细（JSON 数组：``[{name, size_gb, count, sample_hash}]``）
     stats: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
     #: 异常种子明细（JSON 数组：``[{id, hash, name, size_gb, status,

@@ -143,6 +143,28 @@ _ALTER_STATEMENTS: tuple[tuple[str, str], ...] = (
         "add_column",
         "ALTER TABLE scheduler_job_settings ADD COLUMN cron VARCHAR(64)",
     ),
+    # 辅种空间统计 (2026-10-24)：磁盘剩余/总量 + 辅种实际占用 + 目录分布。
+    # 磁盘两列可空（qB 只给剩余空间、拿不到总量）。
+    (
+        "add_column",
+        "ALTER TABLE cross_seed_snapshot ADD COLUMN disk_free_bytes BIGINT",
+    ),
+    (
+        "add_column",
+        "ALTER TABLE cross_seed_snapshot ADD COLUMN disk_total_bytes BIGINT",
+    ),
+    (
+        "add_column",
+        "ALTER TABLE cross_seed_snapshot ADD COLUMN used_bytes BIGINT DEFAULT 0",
+    ),
+    (
+        "add_column",
+        "ALTER TABLE cross_seed_snapshot ADD COLUMN total_size_bytes BIGINT DEFAULT 0",
+    ),
+    (
+        "add_column",
+        "ALTER TABLE cross_seed_snapshot ADD COLUMN by_dir JSON",
+    ),
 )
 
 #: 独立创建的索引（不随上面的 ALTER 循环走）

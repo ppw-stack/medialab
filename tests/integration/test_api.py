@@ -474,6 +474,49 @@ async def test_cross_seed_refresh_unknown_downloader_404(
     assert resp.status_code == 404
 
 
+async def test_cross_seed_space_empty(client: httpx.AsyncClient) -> None:
+    """没有快照 → 空汇总（磁盘为 null，不是 0）。"""
+    resp = await client.get("/api/v1/cross-seed-monitor/space")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["downloaders"] == []
+    assert data["summary"]["downloaders"] == 0
+    assert data["summary"]["disk_free_bytes"] is None
+
+
+async def test_cross_seed_space_with_snapshot(client: httpx.AsyncClient) -> None:
+    """空间汇总：含磁盘剩余与辅种占用。"""
+    from app.db.models import CrossSeedSnapshot
+
+    dl_id = await _add_cross_seed_downloader("dl1")
+    async with session_scope() as session:
+        session.add(
+            CrossSeedSnapshot(
+                downloader_id=dl_id,
+                downloader_name="dl1",
+                scanned_at="2026-10-24 12:00:00",
+                total_torrents=10,
+                unique_count=5,
+                anomaly_count=0,
+                disk_free_bytes=4000,
+                disk_total_bytes=10000,
+                used_bytes=3200,
+                total_size_bytes=3500,
+            )
+        )
+        await session.flush()
+
+    resp = await client.get("/api/v1/cross-seed-monitor/space")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["downloaders"]) == 1
+    assert data["downloaders"][0]["used_bytes"] == 3200
+    assert data["downloaders"][0]["disk_free_bytes"] == 4000
+    assert data["summary"]["used_bytes"] == 3200
+    assert data["summary"]["disk_free_bytes"] == 4000
+    assert data["summary"]["disk_total_bytes"] == 10000
+
+
 # ------------------------------------------------------------------ 调度
 
 async def test_scheduler_status(client: httpx.AsyncClient) -> None:

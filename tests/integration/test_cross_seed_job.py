@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from app.adapters.downloaders.base import DownloaderError
+from app.adapters.downloaders.base import DiskSpace, DownloaderError
 from app.db.models import CrossSeedSnapshot, DownloaderInstance
 from app.db.session import session_scope
 from app.services.cross_seed_monitor import (
@@ -43,9 +43,14 @@ class _FakeAdapter:
         torrents: list[dict[str, object]] | None = None,
         *,
         mode: str = "ok",
+        disk_free_bytes: int | None = 1_000_000,
+        disk_total_bytes: int | None = 10_000_000,
     ) -> None:
         self._torrents = torrents or []
         self.mode = mode
+        #: 磁盘空间（None = 该下载器不提供总量 / 不支持查询）
+        self._disk_free_bytes = disk_free_bytes
+        self._disk_total_bytes = disk_total_bytes
         #: 每次 set_pause 的 hash 列表（记录调用次数与批量行为）
         self.pause_calls: list[list[str]] = []
         self.list_calls = 0
@@ -55,6 +60,14 @@ class _FakeAdapter:
         if self.mode == "raise":
             raise DownloaderError("连接超时")
         return list(self._torrents)
+
+    async def get_disk_space(self, path: str | None = None) -> DiskSpace:
+        if self._disk_free_bytes is None:
+            raise NotImplementedError("不支持磁盘空间查询")
+        return DiskSpace(
+            free_bytes=self._disk_free_bytes,
+            total_bytes=self._disk_total_bytes,
+        )
 
     async def set_pause(self, hashes: list[str], paused: bool) -> bool:
         assert paused is True
@@ -74,6 +87,8 @@ def _torrent(
     error_string: str = "",
     error_code: int = 0,
     tid: int = 0,
+    completed_bytes: int | None = None,
+    save_path: str | None = None,
 ) -> dict[str, object]:
     """构造一条 adapter 契约形状的种子记录。"""
     return {
@@ -85,6 +100,8 @@ def _torrent(
         "error_code": error_code,
         "error_string": error_string,
         "state": state,
+        "completed_bytes": completed_bytes if completed_bytes is not None else size,
+        "save_path": save_path,
     }
 
 
@@ -625,7 +642,6 @@ async def test_get_snapshot_returns_none_when_missing(
     svc = _svc(_factory_with({}), monkeypatch)
     assert await svc.get_snapshot(1) is None
 
-
 async def test_get_snapshot_returns_detail(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -657,3 +673,96 @@ async def test_get_snapshot_returns_detail(
 async def test_asyncio_import_is_used() -> None:
     """占位：确保 asyncio 导入被使用（并发实现依赖它）。"""
     assert asyncio is not None
+
+
+# ------------------------------------------------------------------ 空间统计
+
+
+async def test_space_stats_persisted_to_snapshot(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """空间统计落库：磁盘剩余/总量 + 辅种占用 + 按目录分布。"""
+    dl_id = await _add_downloader("dl1")
+    adapter = _FakeAdapter(
+        [
+            _torrent(
+                "a" * 40,
+                "A",
+                1000,
+                completed_bytes=900,
+                save_path="/data/aux",
+            ),
+            _torrent(
+                "b" * 40,
+                "B",
+                2000,
+                completed_bytes=1800,
+                save_path="/data/aux",
+            ),
+            _torrent(
+                "c" * 40,
+                "C",
+                500,
+                completed_bytes=500,
+                save_path="/data/other",
+            ),
+        ],
+        disk_free_bytes=4000,
+        disk_total_bytes=10000,
+    )
+    svc = _svc(_factory_with({dl_id: adapter}), monkeypatch)
+
+    await svc.refresh_downloader(dl_id)
+
+    rows = await _snapshots()
+    row = rows[0]
+    assert row.used_bytes == 3200, "实际占用 = completed_bytes 求和"
+    assert row.total_size_bytes == 3500, "总大小 = size 求和"
+    assert row.disk_free_bytes == 4000
+    assert row.disk_total_bytes == 10000
+    # 按目录分布（降序）
+    dirs = {d["dir"]: d for d in row.by_dir}
+    assert set(dirs) == {"/data/aux", "/data/other"}
+    assert dirs["/data/aux"]["count"] == 2
+    assert dirs["/data/aux"]["bytes"] == 2700
+    assert dirs["/data/aux"]["total_bytes"] == 3000
+    assert dirs["/data/other"]["bytes"] == 500
+
+
+async def test_space_snapshot_detail_includes_by_dir(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """快照详情含 by_dir（前端按目录展示）。"""
+    dl_id = await _add_downloader("dl1")
+    adapter = _FakeAdapter(
+        [_torrent("a" * 40, "A", 1000, completed_bytes=900, save_path="/data/aux")]
+    )
+    svc = _svc(_factory_with({dl_id: adapter}), monkeypatch)
+
+    await svc.refresh_downloader(dl_id)
+
+    snap = await svc.get_snapshot(dl_id)
+    assert snap is not None
+    assert len(snap["by_dir"]) == 1
+    assert snap["by_dir"][0]["dir"] == "/data/aux"
+    assert snap["used_bytes"] == 900
+    assert snap["disk_free_bytes"] == 1_000_000
+
+
+async def test_space_disk_failure_does_not_block_snapshot(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """磁盘空间拿不到 → 快照照常落库（占用数据有效，磁盘为 NULL）。"""
+    dl_id = await _add_downloader("dl1")
+    adapter = _FakeAdapter(
+        [_torrent("a" * 40, "A", 1000, completed_bytes=900, save_path="/data/aux")],
+        disk_free_bytes=None,  # → get_disk_space 抛 NotImplementedError
+    )
+    svc = _svc(_factory_with({dl_id: adapter}), monkeypatch)
+
+    await svc.refresh_downloader(dl_id)
+
+    rows = await _snapshots()
+    assert rows[0].used_bytes == 900
+    assert rows[0].disk_free_bytes is None
+    assert rows[0].disk_total_bytes is None

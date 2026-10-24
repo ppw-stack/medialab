@@ -30,6 +30,7 @@ from app.services.cross_seed_monitor import (
     NotCrossSeed,
     UnsupportedDownloader,
 )
+from app.services.cross_seed_space import SpaceStats, summarize_spaces
 
 logger = get_logger(__name__)
 
@@ -137,6 +138,46 @@ async def list_snapshots() -> SnapshotListOut:
             if r.id not in have
         ],
     )
+
+
+@router.get("/space", summary="辅种空间汇总")
+async def list_space() -> dict[str, Any]:
+    """所有辅种下载器的空间汇总（磁盘剩余 / 辅种占用）。
+
+    **纯 DB 读**（毫秒级）——数据来自定时作业写入的快照。
+
+    只统计 ``is_cross_seed=True`` 的下载器（非辅种的普通下载器不占辅种
+    空间，不在此列）。
+    """
+    svc = CrossSeedMonitorService()
+    headers = await svc.list_snapshot_headers()
+    summary = summarize_spaces([
+        (
+            h.downloader_name,
+            SpaceStats(
+                used_bytes=h.used_bytes,
+                total_size_bytes=h.total_size_bytes,
+                disk_free_bytes=h.disk_free_bytes,
+                disk_total_bytes=h.disk_total_bytes,
+            ),
+        )
+        for h in headers
+    ])
+    return {
+        "summary": summary.to_dict(),
+        "downloaders": [
+            {
+                "downloader_id": h.downloader_id,
+                "downloader_name": h.downloader_name,
+                "scanned_at": h.scanned_at,
+                "used_bytes": h.used_bytes,
+                "total_size_bytes": h.total_size_bytes,
+                "disk_free_bytes": h.disk_free_bytes,
+                "disk_total_bytes": h.disk_total_bytes,
+            }
+            for h in headers
+        ],
+    }
 
 
 @router.get("/downloaders/{downloader_id}/snapshot", summary="单个辅种下载器快照")

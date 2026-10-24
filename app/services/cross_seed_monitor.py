@@ -35,6 +35,7 @@ from app.core.logging import get_logger
 from app.core.timeutils import bj_now
 from app.db.models import CrossSeedSnapshot, DownloaderInstance
 from app.db.session import session_scope
+from app.services.cross_seed_space import SpaceStats, collect_space
 from app.services.factory import get_factory
 from app.services.scheduler import JobStep
 
@@ -139,6 +140,8 @@ class ScanResult:
     paused_count: int = 0
     #: 暂停失败的种子数
     pause_failed_count: int = 0
+    #: 空间统计（磁盘剩余 / 辅种占用 / 按目录分布）
+    space: SpaceStats = field(default_factory=SpaceStats)
 
     @property
     def anomaly_count(self) -> int:
@@ -161,6 +164,7 @@ class ScanResult:
             "pause_failed_count": self.pause_failed_count,
             "anomalies": [a.to_dict() for a in self.anomalies],
             "stats": [s.to_dict() for s in self.stats],
+            **self.space.to_dict(),
         }
 
 
@@ -179,6 +183,14 @@ class SnapshotHeader:
     paused_count: int = 0
     #: 暂停失败的种子数
     pause_failed_count: int = 0
+    #: 磁盘剩余空间（字节）；None = 没取到
+    disk_free_bytes: int | None = None
+    #: 磁盘总量（字节）；None = 该下载器不提供（qB）
+    disk_total_bytes: int | None = None
+    #: 辅种实际占用（字节）
+    used_bytes: int = 0
+    #: 辅种总大小（字节，理论值）
+    total_size_bytes: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -191,6 +203,10 @@ class SnapshotHeader:
             "inflight_count": self.inflight_count,
             "paused_count": self.paused_count,
             "pause_failed_count": self.pause_failed_count,
+            "disk_free_bytes": self.disk_free_bytes,
+            "disk_total_bytes": self.disk_total_bytes,
+            "used_bytes": self.used_bytes,
+            "total_size_bytes": self.total_size_bytes,
         }
 
 
@@ -280,6 +296,10 @@ class CrossSeedMonitorService:
                 inflight_count=r.inflight_count,
                 paused_count=r.paused_count,
                 pause_failed_count=r.pause_failed_count,
+                disk_free_bytes=r.disk_free_bytes,
+                disk_total_bytes=r.disk_total_bytes,
+                used_bytes=r.used_bytes,
+                total_size_bytes=r.total_size_bytes,
             )
             for r in rows
         ]
@@ -310,7 +330,12 @@ class CrossSeedMonitorService:
                     inflight_count=row.inflight_count,
                     paused_count=row.paused_count,
                     pause_failed_count=row.pause_failed_count,
+                    disk_free_bytes=row.disk_free_bytes,
+                    disk_total_bytes=row.disk_total_bytes,
+                    used_bytes=row.used_bytes,
+                    total_size_bytes=row.total_size_bytes,
                 ).to_dict(),
+                "by_dir": list(row.by_dir or []),
                 "stats": list(row.stats or []),
                 "anomalies": list(row.anomalies or []),
             }
@@ -328,6 +353,11 @@ class CrossSeedMonitorService:
             "inflight_count": result.inflight_count,
             "paused_count": result.paused_count,
             "pause_failed_count": result.pause_failed_count,
+            "disk_free_bytes": result.space.disk_free_bytes,
+            "disk_total_bytes": result.space.disk_total_bytes,
+            "used_bytes": result.space.used_bytes,
+            "total_size_bytes": result.space.total_size_bytes,
+            "by_dir": [d.to_dict() for d in result.space.by_dir],
             "stats": [s.to_dict() for s in result.stats],
             "anomalies": [a.to_dict() for a in result.anomalies],
         }
@@ -372,6 +402,9 @@ class CrossSeedMonitorService:
             raise
 
         result = self._build_result(row, torrents)
+        # 空间统计：复用**同一次**全量拉取的结果算占用（不额外打接口），
+        # 只有磁盘空间需要额外一次轻量调用。磁盘信息取不到不影响占用。
+        result.space = await collect_space(adapter, torrents)
         # **先暂停再落库**：快照里的 ``paused_count`` / ``pause_failed_count``
         # 是本次抓取**实际**的动作结果。先落库再暂停的话，这两列会停留在
         # 上一轮的值（前端据此显示「已暂停 N 个」会撒谎）。
