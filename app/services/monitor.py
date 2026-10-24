@@ -15,14 +15,23 @@
 
 删除模式的三条约束：
 
-1. **只删正在跑的**：已完成（``progress >= 1.0``）与已暂停的任务**跳过**
+1. **只删正在跑的**：已完成与已暂停的任务**跳过**
    （沿用暂停路径的跳过逻辑）。已完成的种子数据已下完，删掉是净损失。
+   「已完成」用**字节口径**判定（``completed_bytes >= size``），
+   **不能用** ``progress >= 1.0``——校验中 progress 是「校验进度」
+   不是完成度（详见 :func:`_is_completed`）。
 2. **保留 ``torrent_index`` 行**：删除只作用于下载器侧，索引行与
    ``push_status=pushed`` 保持不变。``push_free`` 的候选条件要求
    ``push_status IS NULL OR != pushed``，故该种**不会**被重新推送
    ——否则「推送 → 删除 → 再推送」会无限循环。
 3. **删磁盘数据不可逆**：走 ``delete_data=True``，且必须记审计日志
    （AGENTS.md：删磁盘数据单独开关并记审计日志）。
+
+**校验中（CHECKING）的种子两种模式都跳过**：
+
+- 暂停模式：等校验完成后由下一轮巡检处理（作业每 10 分钟一轮）
+- 删除模式：**绝不删除**校验中的种子——校验期完成度判定不可靠，
+  而删磁盘数据不可逆
 
 不写 DB。``torrent_index`` 中已推送但不在下载器中的种子不用管
 （可能 qB 自动删除 / 用户手动删，不强制标记）。
@@ -35,7 +44,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 
-from app.adapters.downloaders.base import DownloaderAdapter
+from app.adapters.downloaders.base import DownloaderAdapter, TorrentState
 from app.core.logging import get_logger
 from app.core.timeutils import bj_now_dt, format_bj
 from app.db.models import TorrentIndex
@@ -51,6 +60,33 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def _is_completed(info: TorrentInfo) -> bool:
+    """是否「已完成」（数据已下完）。
+
+    **必须用字节口径，不能用 ``progress >= 1.0``**——校验中
+    （recheck）时 qBittorrent 的 ``progress`` 返回的是**校验进度**而非
+    下载完成度（源码 ``TorrentImpl::progress()``：
+
+    .. code-block:: cpp
+
+        if (isChecking()) return m_nativeStatus.progress;
+
+    libtorrent 侧该值 = 已校验分片数 / 总分片数）。于是 qB 重启后
+    recheck 的**已完成做种种子** ``progress`` 从 0 爬升，
+    ``progress >= 1.0`` 判定失效 → 被当成「未完成」→ 删除模式下会
+    删掉早已下载完的磁盘数据（净损失）。
+
+    字节口径不受校验影响：``completed_bytes`` 是已校验有效的字节数
+    （qB 取 ``completed``，TR 取 ``haveValid``），与 ``size`` 同口径。
+
+    ``size <= 0`` 时无法判定（无元数据 / 元数据未到），按「未完成」处理
+    ——保守方向与原 ``progress`` 判定一致。
+    """
+    if info.size <= 0:
+        return False
+    return info.completed_bytes >= info.size
+
+
 @dataclass(frozen=True, slots=True)
 class MonitorResult:
     """单次监测作业的运行结果。"""
@@ -61,6 +97,7 @@ class MonitorResult:
     skipped_far_from_window: int = 0
     skipped_already_completed: int = 0
     skipped_already_paused: int = 0
+    skipped_checking: int = 0
     skipped_permanent: int = 0
     skipped_refund: int = 0
     pre_paused: int = 0
@@ -224,6 +261,7 @@ class MonitorFreeWindowService:
         skipped_far = 0
         skipped_completed = 0
         skipped_paused = 0
+        skipped_checking = 0
         skipped_permanent = 0
         skipped_refund = 0
         pre_paused = 0
@@ -246,11 +284,19 @@ class MonitorFreeWindowService:
                 continue
             matched += 1
 
-            if info.progress >= 1.0:
+            if _is_completed(info):
                 skipped_completed += 1
                 continue
             if info.state.is_paused:
                 skipped_paused += 1
+                continue
+            if info.state == TorrentState.CHECKING:
+                # 正在校验（recheck）——两种模式都跳过：
+                # 1) 暂停模式：等校验完成后由下一轮巡检处理（作业每 10 分钟一轮）
+                # 2) 删除模式：**绝不删除**校验中的种子——校验期 progress 是
+                #    「校验进度」不是完成度，判定不可靠，而删磁盘数据不可逆
+                #    （AGENTS.md：删磁盘数据是净损失）。
+                skipped_checking += 1
                 continue
 
             # 按 db 当前 free_type 决定（fetch_all_sites 已更新为最新值）
@@ -322,6 +368,7 @@ class MonitorFreeWindowService:
             skipped_far_from_window=skipped_far,
             skipped_already_completed=skipped_completed,
             skipped_already_paused=skipped_paused,
+            skipped_checking=skipped_checking,
             skipped_permanent=skipped_permanent,
             skipped_refund=skipped_refund,
             pre_paused=pre_paused,
@@ -346,6 +393,13 @@ class MonitorFreeWindowService:
                     f"{matched} 命中，{skipped_unmatched} 无关",
                 ),
                 JobStep(
+                    "跳过已完成/暂停",
+                    "ok",
+                    skipped_completed + skipped_paused,
+                    f"已完成 {skipped_completed}，已暂停 {skipped_paused}，"
+                    f"校验中 {skipped_checking}",
+                ),
+                JobStep(
                     "判断免费窗口",
                     "ok",
                     pre_paused + deleted,
@@ -365,12 +419,13 @@ class MonitorFreeWindowService:
         )
         logger.info(
             "monitor: 下载器 %d，命中 %d，触发%s %d，"
-            "跳过(无关/远/已完成/已暂停/永久/退还) %d/%d/%d/%d/%d/%d，失败 %d",
+            "跳过(无关/远/已完成/已暂停/校验中/永久/退还) %d/%d/%d/%d/%d/%d/%d，失败 %d",
             result.scanned, result.matched,
             "删除" if delete_mode else "暂停",
             result.deleted if delete_mode else result.pre_paused,
             result.skipped_unmatched, result.skipped_far_from_window,
             result.skipped_already_completed, result.skipped_already_paused,
+            result.skipped_checking,
             result.skipped_permanent, result.skipped_refund,
             result.failed,
         )

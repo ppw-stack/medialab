@@ -43,6 +43,9 @@ _FIELDS_ALL: tuple[str, ...] = (
     "percentDone",
     "downloadedEver",
     "uploadedEver",
+    # 已校验有效的字节数——用于「是否已完成」的字节口径判定。
+    # 不能用 downloadedEver（累计下载量，含重复下载）。
+    "haveValid",
     "downloadDir",
     "rateDownload",
     "rateUpload",
@@ -261,6 +264,9 @@ class TransmissionAdapter(DownloaderAdapter):
             size=int(row.get("totalSize") or 0),
             downloaded=int(row.get("downloadedEver") or 0),
             uploaded=int(row.get("uploadedEver") or 0),
+            # 已校验有效的字节数（TR 的「已完成」字节口径）。
+            # 不能用 downloadedEver——那是累计下载量，含重复下载。
+            completed_bytes=int(row.get("haveValid") or 0),
             save_path=row.get("downloadDir") or None,
             category=category,
             tags=tags,

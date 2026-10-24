@@ -128,6 +128,20 @@ class TorrentInfo:
     size: int = 0
     downloaded: int = 0
     uploaded: int = 0
+    #: **已完成（已校验有效）的字节数**——与 ``downloaded`` 语义不同。
+    #:
+    #: - qBittorrent：``completed``（libtorrent ``total_wanted_done``），
+    #:   seed mode 下等于全量
+    #: - Transmission：``haveValid``（已校验有效的字节数）
+    #:
+    #: 为什么需要它：``progress`` 在**校验中**返回的是「校验进度」而非
+    #: 下载完成度（qBittorrent ``TorrentImpl::progress()`` 源码：
+    #: ``if (isChecking()) return m_nativeStatus.progress;``），故
+    #: ``progress >= 1.0`` 不能用来判断「已完成」。字节口径不受影响。
+    #:
+    #: 而 ``downloaded`` 也不能复用：qB 的口径正确，但 TR 的
+    #: ``downloadedEver`` 是**累计**下载量（含重复下载），两站语义不一致。
+    completed_bytes: int = 0
     save_path: str | None = None
     category: str | None = None
     tags: frozenset[str] = frozenset()

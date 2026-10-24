@@ -77,8 +77,15 @@ async def _setup(
     free_end_at: str | None = None,
     progress: float = 0.5,
     state: TorrentState = TorrentState.DOWNLOADING,
+    size: int = 1000,
+    completed_bytes: int | None = None,
 ) -> _FakeDownloader:
-    """建默认下载器 + 索引行 + 假下载器，返回假下载器。"""
+    """建默认下载器 + 索引行 + 假下载器，返回假下载器。
+
+    ``completed_bytes`` 缺省按 ``progress * size`` 推导（模拟正常下载中
+    的种子）；显式传入可构造「字节已下完但 progress 不是 1.0」的场景
+    （qB 重启 recheck 时 progress 是**校验进度**而非完成度）。
+    """
     hash_ = "a" * 40
     async with session_scope() as session:
         session.add(Site(name="s1", domain="s1.test", adapter="hdsky"))
@@ -104,6 +111,9 @@ async def _setup(
         )
         await session.flush()
 
+    if completed_bytes is None:
+        completed_bytes = int(size * progress)
+
     return _FakeDownloader(
         [
             TorrentInfo(
@@ -111,8 +121,9 @@ async def _setup(
                 name="t",
                 state=state,
                 progress=progress,
-                size=1000,
+                size=size,
                 downloaded=500,
+                completed_bytes=completed_bytes,
             )
         ]
     )
@@ -208,7 +219,7 @@ async def test_refund_is_paused_immediately(db: None) -> None:
 # ------------------------------------------------------------------ 其他
 
 async def test_completed_torrent_is_skipped(db: None) -> None:
-    """已完成（progress=1）的任务不处理。"""
+    """已完成（字节已下完）的任务不处理。"""
     fake = await _setup(free_type=FreeType.TIMED, progress=1.0)
     result = await _run(fake)
     assert fake.paused == []
@@ -254,6 +265,119 @@ async def test_unmatched_torrent_is_skipped(db: None) -> None:
     result = await _run(fake)
     assert fake.paused == []
     assert result.skipped_unmatched == 1
+
+
+# ================================================================== 校验中（CHECKING）
+#
+# 校验中（recheck）的种子**两种模式都跳过**：
+# - 暂停模式：等校验完成后由下一轮巡检处理
+# - 删除模式：**绝不删除**——校验期完成度判定不可靠，删磁盘数据不可逆
+#
+# 根因：qBittorrent 的 ``progress`` 在校验中返回的是**校验进度**而非
+# 下载完成度（源码 ``TorrentImpl::progress()``：
+# ``if (isChecking()) return m_nativeStatus.progress;``），
+# 所以「已完成」必须改用字节口径判定。
+
+
+async def test_checking_torrent_is_skipped_in_pause_mode(db: None) -> None:
+    """校验中的种子：暂停模式**不暂停**（等校验结束，下一轮再处理）。"""
+    fake = await _setup(
+        free_type=FreeType.NEUTRAL, state=TorrentState.CHECKING
+    )
+    result = await _run(fake)
+    assert fake.paused == [], "校验中的种子不应被暂停"
+    assert result.skipped_checking == 1
+    assert result.pre_paused == 0
+
+
+async def test_checking_torrent_is_skipped_in_delete_mode(db: None) -> None:
+    """校验中的种子：删除模式**绝不删除**（删磁盘数据是净损失）。"""
+    _enable_delete_mode()
+    fake = await _setup(
+        free_type=FreeType.NEUTRAL, state=TorrentState.CHECKING
+    )
+    result = await _run(fake)
+    assert fake.removed == [], "校验中的种子绝不能被删除"
+    assert fake.paused == []
+    assert result.skipped_checking == 1
+    assert result.deleted == 0
+
+
+async def test_checking_timed_near_deadline_is_skipped(db: None) -> None:
+    """校验中的限时种：即使已到窗口截止，本轮也不处理。
+
+    校验结束后由下一轮巡检（每 10 分钟）按窗口规则处理。
+    """
+    end = format_bj(bj_now_dt() + timedelta(minutes=3))
+    fake = await _setup(
+        free_type=FreeType.TIMED,
+        free_end_at=end,
+        state=TorrentState.CHECKING,
+    )
+    result = await _run(fake)
+    assert fake.paused == []
+    assert result.skipped_checking == 1
+    assert result.pre_paused == 0
+
+
+async def test_completed_is_judged_by_bytes_not_progress(db: None) -> None:
+    """「已完成」用**字节口径**判定，不看 progress。
+
+    复现 qB 重启 recheck 的场景：progress = 0.2（**校验进度**），
+    但字节已下完（completed_bytes == size）→ 必须判定为「已完成」
+    并跳过，否则删除模式会删掉早已下载完的磁盘数据。
+    """
+    fake = await _setup(
+        free_type=FreeType.NEUTRAL,
+        progress=0.2,
+        completed_bytes=1000,  # == size
+    )
+    result = await _run(fake)
+    assert fake.paused == []
+    assert result.skipped_already_completed == 1
+
+
+async def test_delete_mode_completed_by_bytes_is_not_removed(db: None) -> None:
+    """删除模式：字节口径判定为已完成的种子不删（qB recheck 场景）。"""
+    _enable_delete_mode()
+    fake = await _setup(
+        free_type=FreeType.NEUTRAL,
+        progress=0.2,
+        completed_bytes=1000,  # == size，但 progress 是校验进度 0.2
+    )
+    result = await _run(fake)
+    assert fake.removed == [], "字节已下完的种子不能被删除"
+    assert result.skipped_already_completed == 1
+    assert result.deleted == 0
+
+
+async def test_incomplete_bytes_is_not_treated_as_completed(db: None) -> None:
+    """字节未下完 → 不算「已完成」，照常处理（不能误跳过）。"""
+    fake = await _setup(
+        free_type=FreeType.NEUTRAL,
+        progress=0.2,
+        completed_bytes=200,  # < size
+    )
+    result = await _run(fake)
+    assert fake.paused == [["a" * 40]]
+    assert result.pre_paused == 1
+    assert result.skipped_already_completed == 0
+
+
+async def test_zero_size_is_not_treated_as_completed(db: None) -> None:
+    """size <= 0（无元数据）→ 无法判定完成，按「未完成」处理。
+
+    保守方向与原 progress 判定一致（progress 也可能是 0）。
+    """
+    fake = await _setup(
+        free_type=FreeType.NEUTRAL,
+        progress=0.0,
+        size=0,
+        completed_bytes=0,
+    )
+    result = await _run(fake)
+    assert fake.paused == [["a" * 40]]
+    assert result.skipped_already_completed == 0
 
 
 # ==================================================================== 删除模式
@@ -339,7 +463,7 @@ async def test_delete_mode_never_deletes_permanent_free(db: None) -> None:
 
 
 async def test_delete_mode_skips_completed(db: None) -> None:
-    """删除模式：已完成（progress=1）的任务跳过（不删）。
+    """删除模式：已完成（字节已下完）的任务跳过（不删）。
 
     已完成的种子数据已下完，删掉是净损失——沿用暂停路径的跳过逻辑。
     """

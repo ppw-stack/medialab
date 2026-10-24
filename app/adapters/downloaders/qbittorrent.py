@@ -161,6 +161,10 @@ class QbittorrentAdapter(DownloaderAdapter):
                 size=int(row.get("size") or 0),
                 downloaded=int(row.get("completed") or 0),
                 uploaded=int(row.get("uploaded") or 0),
+                # completed_bytes 与 downloaded 同源（都是 total_wanted_done），
+                # 但语义独立：completed_bytes = 已完成字节数，downloaded 历史上
+                # 被前端当作「已下载」列展示。两者当前都取 row["completed"]。
+                completed_bytes=int(row.get("completed") or 0),
                 save_path=row.get("save_path") or None,
                 category=row.get("category") or None,
                 tags=tags,
