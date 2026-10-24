@@ -33,6 +33,16 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+#: **批量**操作（拉全量种子列表）的单次调用超时（秒）。
+#:
+#: 默认的 15s 是给普通 RPC（增删改、查状态）用的——那些都该快速失败。
+#: 但辅种站的 ``torrent-get`` 要返回**几千个**种子（实测 4600+ 个、
+#: 响应体 ~1.5MB），TR 繁忙时更慢——用 15s 会**必然超时**
+#: （实测辅种站全量拉取要 20s+，TR 卡时超过 120s）。
+#:
+#: 故批量路径显式用这个更长的超时。
+BULK_TIMEOUT = 180.0
+
 #: list_torrents 一次拉取的字段全集
 _FIELDS_ALL: tuple[str, ...] = (
     "id",
@@ -157,8 +167,16 @@ class TransmissionAdapter(DownloaderAdapter):
         self,
         method: str,
         arguments: dict[str, Any] | None = None,
+        *,
+        http_timeout: float | None = None,
     ) -> dict[str, Any]:
-        """通用 RPC 调用；处理 session-id 409 重取。"""
+        """通用 RPC 调用；处理 session-id 409 重取。
+
+        :param http_timeout: **单次 HTTP 请求的超时**（秒）。None = 用
+            client 的默认超时。批量操作（如 ``torrent-get`` 拉几千个种子）
+            需要更长的超时——辅种站实测全量拉取要 20s+，默认 15s 会必然
+            超时。
+        """
         body: dict[str, Any] = {"method": method, "tag": "seedhelper"}
         if arguments:
             body["arguments"] = arguments
@@ -166,7 +184,10 @@ class TransmissionAdapter(DownloaderAdapter):
         headers = {"X-Transmission-Session-Id": sid}
         try:
             resp = await self._client.post(
-                self._rpc_url, json=body, headers=headers
+                self._rpc_url,
+                json=body,
+                headers=headers,
+                timeout=http_timeout,
             )
         except httpx.HTTPError as exc:
             raise DownloaderError(
@@ -360,8 +381,15 @@ class TransmissionAdapter(DownloaderAdapter):
     async def list_torrents(
         self, filt: TorrentFilter | None = None
     ) -> list[TorrentInfo]:
+        """列出任务（批量路径，用 :data:`BULK_TIMEOUT`）。
+
+        ``_FIELDS_ALL`` 比 ``_FIELDS_WITH_ERRORS`` 多（files / fileStats 等），
+        辅种站的响应体更大——更需要长超时。
+        """
         resp = await self._rpc(
-            "torrent-get", {"fields": list(_FIELDS_ALL)}
+            "torrent-get",
+            {"fields": list(_FIELDS_ALL)},
+            http_timeout=BULK_TIMEOUT,
         )
         rows = resp.get("torrents") or []
         out: list[TorrentInfo] = []
@@ -401,9 +429,14 @@ class TransmissionAdapter(DownloaderAdapter):
         判定「是否已暂停」时要用。注意 TR 的 ``errorString`` 表示
         tracker 报错，种子的**传输状态**仍由 ``status`` 决定（两者是
         正交的），故 state 只按 status 换算，不被 errorString 覆盖。
+
+        **超时用 :data:`BULK_TIMEOUT`**：辅种站全量 4600+ 个种子的响应
+        实测要 20s+（TR 卡时更久），默认的 15s 会必然超时。
         """
         resp = await self._rpc(
-            "torrent-get", {"fields": list(_FIELDS_WITH_ERRORS)}
+            "torrent-get",
+            {"fields": list(_FIELDS_WITH_ERRORS)},
+            http_timeout=BULK_TIMEOUT,
         )
         out: list[dict[str, Any]] = []
         for row in resp.get("torrents") or []:

@@ -377,11 +377,15 @@ class Qb5ApiClient:
         reverse: bool = False,
         limit: int | None = None,
         offset: int | None = None,
+        http_timeout: float | None = None,
     ) -> list[dict[str, Any]]:
         """GET /api/v2/torrents/info — 列出种子。
 
         支持筛选：hashes / filter (downloading/completed/paused/active/error 等)
         / category / tag / sort (字段名) / reverse / limit / offset。
+
+        :param http_timeout: **单次 HTTP 请求的超时**（秒）。None = 用
+            client 的默认超时。批量路径（拉全量种子）需要更长的超时。
         """
         params: dict[str, str] = {}
         if hashes:
@@ -400,7 +404,11 @@ class Qb5ApiClient:
             params["limit"] = str(limit)
         if offset is not None:
             params["offset"] = str(offset)
-        result = await self._get("/api/v2/torrents/info", params=params or None)
+        result = await self._get(
+            "/api/v2/torrents/info",
+            params=params or None,
+            timeout=http_timeout,
+        )
         if not result:
             return []
         return list(result)

@@ -25,6 +25,15 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+#: **批量**操作（拉全量种子列表）的单次调用超时（秒）。
+#:
+#: 默认的 15s 是给普通 API 调用用的——那些都该快速失败。但辅种站的
+#: ``/torrents/info`` 要返回**几千个**种子（实测 7000+ 个），响应体很大，
+#: qB 繁忙时更慢——用 15s 会**必然超时**。
+#:
+#: 故批量路径显式用这个更长的超时。
+BULK_TIMEOUT = 180.0
+
 #: qBittorrent 原生 state → TorrentState。未知状态归 UNKNOWN，由 FR-3.4 兜底行按红线中止。
 _STATE_MAP: dict[str, TorrentState] = {
     "error": TorrentState.ERROR,
@@ -142,7 +151,9 @@ class QbittorrentAdapter(DownloaderAdapter):
         self, filt: TorrentFilter | None = None
     ) -> list[TorrentInfo]:
         try:
-            rows: list[dict[str, Any]] = await self._qb.list_torrents()
+            rows: list[dict[str, Any]] = await self._qb.list_torrents(
+                http_timeout=BULK_TIMEOUT
+            )
         except Qb5ApiError as exc:
             raise DownloaderError(str(exc), transient=exc.transient) from exc
 
@@ -202,7 +213,9 @@ class QbittorrentAdapter(DownloaderAdapter):
         本方法仅按 ``state`` 给出归一化错误码与中文描述。
         """
         try:
-            rows: list[dict[str, Any]] = await self._qb.list_torrents()
+            rows: list[dict[str, Any]] = await self._qb.list_torrents(
+                http_timeout=BULK_TIMEOUT
+            )
         except Qb5ApiError as exc:
             raise DownloaderError(str(exc), transient=exc.transient) from exc
 

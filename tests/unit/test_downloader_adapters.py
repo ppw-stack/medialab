@@ -378,3 +378,50 @@ async def test_tr_get_disk_space_returns_free_and_total() -> None:
     assert space.free_bytes == 400
     assert space.total_bytes == 1000
     assert space.used_bytes == 600
+
+
+# ================================================================ 批量超时
+
+
+def test_bulk_timeout_is_long_enough_for_cross_seed() -> None:
+    """批量路径的超时必须**远大于**默认的 15s。
+
+    辅种站实测：全量 4600+ 个种子的 ``torrent-get`` 要 20s+（TR 繁忙时
+    超过 120s）。用默认 15s 会**必然超时**——辅种快照与空间统计都拿不到
+    数据（表现为「辅种下载器拉取失败：TR 网络错误」）。
+    """
+    from app.adapters.downloaders.qbittorrent import (
+        BULK_TIMEOUT as QB_BULK_TIMEOUT,
+    )
+    from app.adapters.downloaders.transmission import (
+        BULK_TIMEOUT as TR_BULK_TIMEOUT,
+    )
+
+    assert TR_BULK_TIMEOUT >= 60
+    assert QB_BULK_TIMEOUT >= 60
+
+
+@pytest.mark.asyncio
+async def test_tr_bulk_list_uses_long_timeout() -> None:
+    """TR 的 ``torrent-get`` 必须用长超时（不是默认的 15s）。"""
+    from app.adapters.downloaders import transmission as tr_mod
+
+    seen: list[float | None] = []
+    original = tr_mod.TransmissionAdapter._rpc
+
+    async def _spy(self: Any, *args: Any, **kw: Any) -> Any:
+        seen.append(kw.get("http_timeout"))
+        return await original(self, *args, **kw)
+
+    tr_mod.TransmissionAdapter._rpc = _spy  # type: ignore[method-assign]
+    try:
+        with respx.mock(assert_all_mocked=False) as router:
+            _mock_tr(router, [_tr_row()])
+            adapter = tr_mod.TransmissionAdapter("tr", TR_BASE_URL, "u", "p")
+            await adapter.list_torrents_with_errors()
+    finally:
+        tr_mod.TransmissionAdapter._rpc = original  # type: ignore[method-assign]
+
+    assert seen, "未调用 _rpc"
+    assert seen[0] == tr_mod.BULK_TIMEOUT
+    assert seen[0] and seen[0] > 15.0
