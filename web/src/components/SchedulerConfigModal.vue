@@ -135,6 +135,10 @@ function onCancel() {
           />
           <span class="config-hint">5 字段: 分 时 日 月 星期</span>
         </div>
+        <div class="config-hint-note">
+          <span class="config-hint-note__icon">ⓘ</span>
+          保存后立即生效，并写入数据库——重启容器后保持不变。
+        </div>
       </section>
 
       <!-- 作业运行参数 (按 spec 渲染) -->
@@ -250,7 +254,17 @@ function onCancel() {
   color: var(--warning-text, #d97706);
   font-size: var(--text-xs);
 }
-.config-note__icon {
+/* 说明性提示（非风险）——独占一行，中性色。
+   用**独立的类名**（不是 .config-note 加修饰类）——.config-note 是
+   「风险提示」的语义标记，测试按它定位风险文案，混入说明性提示会让
+   定位器命中多个元素。 */
+.config-hint-note {
+  flex: 1 0 100%;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+}
+.config-note__icon,
+.config-hint-note__icon {
   margin-right: var(--sp-1);
   font-weight: 700;
 }

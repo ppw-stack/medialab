@@ -75,15 +75,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         set_runtime_params,
     )
 
-    set_runtime_params(await init_runtime_params_async(settings))
+    set_runtime_params(await init_runtime_params_async())
 
     if settings.scheduler_enabled:
-        # 作业启停状态（DB 持久化）同样必须在 register_jobs 之前载入：
-        # register() 会按 enabled 决定是否把作业安排到 APScheduler，
-        # 届时才知道被用户停用的作业该不该排
-        from app.services.job_settings import load_enabled_states
+        # 作业调度配置（DB 持久化的启停 + cron）同样必须在 register_jobs
+        # 之前载入：register() 会按 enabled 决定是否把作业安排到
+        # APScheduler、按 cron 决定触发时刻，届时才知道该用什么。
+        from app.services.job_settings import load_crons, load_enabled_states
 
-        scheduler_center.apply_enabled_overrides(await load_enabled_states())
+        scheduler_center.apply_overrides(
+            await load_enabled_states(),
+            await load_crons(),
+        )
         scheduler_center.start()
         register_jobs(factory)
 

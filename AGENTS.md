@@ -72,6 +72,15 @@
   - `min`/`max` **保留**——`validate()` 仍靠它做范围校验（后端安全边界不依赖 options）
   - 枚举参数额外校验：值必须在 options 内（`_assert_enum_options_consistent()` **导入时**执行——取值重复 / 越界 / 默认值不在 options 里都会立刻抛错）
   - 契约由 `tests/unit/test_runtime_params.py` + `tests/integration/test_api.py` 固化
+- **调度配置全部落库**（2026-10-24 加入）：
+  - **cron 与运行参数都不再走 env**——env 里已无对应配置，改 env 无效（残留的旧行被 `extra="ignore"` 静默忽略）
+  - cron 的**默认值真源**是代码常量 `app/services/job_registry.py` 的 `DEFAULT_CRON`；运行参数的默认值在 `app/services/runtime_params.py` 的 `ParamSpec.default`
+  - 用户在页面改的 → cron 落 `scheduler_job_settings.cron` 列，运行参数落 `app_runtime_params` 表——**都跨重启保持**
+  - `scheduler_job_settings` 的 `enabled` 与 `cron` **两列互相独立**：改 cron 不碰启停（改启停也不清 cron）
+  - 启动期回填：`SchedulerCenter.apply_overrides(states, crons)` 必须在 `register_jobs` **之前**调用（`register()` 按 enabled 决定是否排进 APScheduler、按 cron 决定触发时刻）
+  - **注册日志必须打生效值**（`scheduler_center.list_job_cron(name)`），不是 `DEFAULT_CRON` 里的默认值——打默认值会在用户改过 cron 后与实际行为矛盾
+  - DB 写失败时 API 返 500（配置已在内存生效但没存住）——与 toggle 端点同一处理
+  - 契约由 `tests/unit/test_scheduler.py` + `tests/integration/test_job_settings.py` + `tests/integration/test_api.py` 固化
 - **FR-3.6 AI 读码**（2026-10-22 加入，`app/core/ai.py`）：
   - 用于 hdsky 的 6 位图形验证码。**必须先放大 6 倍**再送模型：站点原图仅 150×40，同一模型直接读 0/8、放大后 8/8
   - 放大是**无损**的（只 resize，不二值化 / 不裁剪 / 不去噪）——按面积阈值去噪会删掉细笔画（实测 0/5）

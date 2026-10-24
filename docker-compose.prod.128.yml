@@ -36,9 +36,6 @@ services:
       # WAL 会在数据目录留 -wal/-shm 文件，Unraid 上备份/替换 .db 时
       # 容易漏掉这两个文件导致数据不一致。DELETE 模式每次提交即落盘。
       DB_JOURNAL_MODE: ${DB_JOURNAL_MODE:-DELETE}
-      # 生产 cron：通常拉取/推送更保守（按主机负载）
-      FETCH_ALL_SITES_CRON: ${FETCH_ALL_SITES_CRON:-*/10 * * * *}
-      PUSH_FREE_CRON: ${PUSH_FREE_CRON:-*/30 * * * *}
     env_file:
       - .env.prod
     volumes:

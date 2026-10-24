@@ -512,6 +512,76 @@ async def test_update_cron_invalid_400(client: httpx.AsyncClient) -> None:
     assert resp.status_code == 400
 
 
+async def test_update_cron_is_persisted(client: httpx.AsyncClient) -> None:
+    """改 cron → **落库**（跨重启保持）。
+
+    测试里调度中心没启动（``scheduler_enabled=False``），但
+    ``scheduler_center.register()`` 仍会填 ``_specs``——故
+    ``update_cron`` 对**已注册**的作业有效（会重排 APScheduler 槽，
+    没启动时该步是 no-op）。
+    """
+    from app.db.models import SchedulerJobSetting
+    from app.services.scheduler import JobSpec, scheduler_center
+    from sqlalchemy import select
+
+    async def _noop() -> dict[str, object]:
+        return {}
+
+    scheduler_center.register(
+        JobSpec(name="test_job_cron", func=_noop, cron="*/10 * * * *")
+    )
+    try:
+        resp = await client.post(
+            "/api/v1/scheduler/test_job_cron/cron", json={"cron": "15,45 * * * *"}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["cron"] == "15,45 * * * *"
+
+        # 落库了
+        async with session_scope() as session:
+            row = (
+                await session.execute(
+                    select(SchedulerJobSetting).where(
+                        SchedulerJobSetting.job_name == "test_job_cron"
+                    )
+                )
+            ).scalar_one()
+            assert row.cron == "15,45 * * * *"
+
+        # 内存也生效了
+        jobs = {j["name"]: j for j in scheduler_center.list_jobs()}
+        assert jobs["test_job_cron"]["cron"] == "15,45 * * * *"
+    finally:
+        scheduler_center._specs.pop("test_job_cron", None)
+
+
+async def test_job_config_returns_persisted_cron(
+    client: httpx.AsyncClient,
+) -> None:
+    """配置端点返回**当前生效**的 cron（DB 覆盖值优先于代码默认值）。"""
+    from app.services.scheduler import JobSpec, scheduler_center
+
+    async def _noop() -> dict[str, object]:
+        return {}
+
+    scheduler_center.register(
+        JobSpec(name="test_job_cfg", func=_noop, cron="*/10 * * * *")
+    )
+    try:
+        # 先改 cron（落库 + 内存生效）
+        resp = await client.post(
+            "/api/v1/scheduler/test_job_cfg/cron", json={"cron": "15,45 * * * *"}
+        )
+        assert resp.status_code == 200
+
+        # 配置端点返回的就是生效值
+        resp = await client.get("/api/v1/scheduler/test_job_cfg/config")
+        assert resp.status_code == 200
+        assert resp.json()["cron"] == "15,45 * * * *"
+    finally:
+        scheduler_center._specs.pop("test_job_cfg", None)
+
+
 async def test_runtime_params_view(client: httpx.AsyncClient) -> None:
     resp = await client.get("/api/v1/scheduler/runtime-params")
     assert resp.status_code == 200

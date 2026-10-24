@@ -137,6 +137,12 @@ _ALTER_STATEMENTS: tuple[tuple[str, str], ...] = (
         "add_column",
         "ALTER TABLE cross_seed_snapshot ADD COLUMN pause_failed_count INTEGER DEFAULT 0",
     ),
+    # 调度作业的 cron 落库 (2026-10-24)：页面改的 cron 跨重启保持。
+    # NULL = 用代码里的默认值（该列可空，故不需要 DEFAULT）。
+    (
+        "add_column",
+        "ALTER TABLE scheduler_job_settings ADD COLUMN cron VARCHAR(64)",
+    ),
 )
 
 #: 独立创建的索引（不随上面的 ALTER 循环走）

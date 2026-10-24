@@ -64,25 +64,19 @@ class AppSettings(BaseSettings):
 
     # -- 调度 --
     scheduler_enabled: bool = True
-    #: 站点拉取 cron 表达式（5 字段：分 时 日 月 星期），默认每 10 分钟
-    fetch_all_sites_cron: str = "*/10 * * * *"
-    #: 自动推送免费种到默认下载器的 cron（默认 30 分钟一次，与 fetch 错开）
-    push_free_cron: str = "*/30 * * * *"
-    #: 免费窗口巡检 cron（5/15/25/... 错峰 fetch 0/10/20/30 与 push 0/30）
-    monitor_free_window_cron: str = "5,15,25,35,45,55 * * * *"
-    #: 辅种下载器巡查 cron（默认 2/32 分各一次 = 每 30 分钟）
     #:
-    #: 分钟位刻意错开既有多 5 分钟的作业（fetch */10 / push */30 /
-    #: monitor 5,15,25... / drain */5 / refresh_user_data */30 /
-    #: checkin 37 8），避免同一分钟并发抢资源。
+    #: 注：**cron 表达式与作业运行参数都不在这里**（2026-10-24 起）。
     #:
-    #: 辅种下载器种子量大（实测 3000+ 个），单次抓取 20s+ → 用定时
-    #: 抓取 + 落库快照，前端读快照而不实时打下载器接口（2026-10-24）。
-    scan_cross_seed_cron: str = "2,32 * * * *"
-    #: 站点每日签到 cron（默认每天 08:37）。
-    #: 分钟位 37 刻意避开既有多 5 分钟的作业（fetch */10 / push */30 /
-    #: monitor 5,15,25... / drain */5 / scan 0 */6），避免同一分钟并发抢资源。
-    daily_checkin_cron: str = "37 8 * * *"
+    #: - cron —— 默认值是代码常量（:data:`app.services.job_registry.DEFAULT_CRON`），
+    #:   用户在页面改的落进 ``scheduler_job_settings`` 表，启动期回填覆盖
+    #: - 运行参数 —— 落进 ``app_runtime_params`` 表，默认值见
+    #:   :data:`app.services.runtime_params.PARAM_SPECS`
+    #:
+    #: 故 env 改这些**不再有任何效果**（且 ``extra="ignore"`` 会静默忽略
+    #: 残留的旧行——它们只是被无视，不会报错）。
+    #:
+    #: 站点每日签到 cron（默认每天 08:37）。分钟位 37 刻意避开既有多 5
+    #: 分钟的作业，避免同一分钟并发抢资源。
 
     # -- AI 读码（FR-3.6 站点签到的图形验证码）--
     # 三项**全为空则视为未配置**，需人工识别的站点会降级为 UNSUPPORTED
@@ -92,26 +86,6 @@ class AppSettings(BaseSettings):
     #: 必须是**视觉**模型（能吃 image_url 内容块）。纯文本模型读不了验证码。
     ai_model: str = ""
     ai_timeout_seconds: float = 60.0
-    #: 距 free_end_at 不足此分钟数且未完成 → 自动暂停下载器任务
-    monitor_pre_pause_minutes: int = 10
-    #: monitor 命中条件后的动作（0=仅暂停，1=删任务 + 删磁盘数据）
-    #:
-    #: 1 = **不可逆**（磁盘数据一起删）。默认 0（只暂停）——删除是用户
-    #: 显式开启的行为，不是默认路径。运行期改这个值走
-    #: :mod:`app.services.runtime_params`（DB 持久化 + UI 可调）。
-    monitor_delete_expired: int = 0
-    #: 限时种剩余时间低于此值不推（小时，默认 6）
-    push_min_remaining_hours: int = 6
-    #: 每次推送最多 N 个（避免下载器瞬时过载）
-    push_max_per_run: int = 20
-    #: 连续下载 .torrent 文件的间隔（毫秒，默认 2000 = 2 秒），避免触发站点限频
-    push_download_interval_ms: int = 2000
-    #: push_free 选种时「同档内」的排序方式（0=按时魔进度升序 1=随机）
-    #:
-    #: 档位（未封顶 / 无信号 / 已封顶）**始终**是主排序；本项只决定同一档内
-    #: 候选怎么排。0 = 按各站时魔进度升序（默认，进度低的站先）；
-    #: 1 = 整个档内随机打乱（含站点顺序）。
-    push_within_bucket_order: int = 0
 
     # -- 优雅停机（FR-8.2）--
     shutdown_grace_seconds: int = 60

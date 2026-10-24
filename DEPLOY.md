@@ -80,9 +80,13 @@ WEB_PASSWORD=...                    # 必填
 WEB_TOKEN=...                       # 必填
 LOG_LEVEL=INFO
 LOG_JSON=true
-FETCH_ALL_SITES_CRON=*/10 * * * *
-PUSH_FREE_CRON=*/30 * * * *
 ```
+
+> ⚠️ **调度配置不在 env 里**（2026-10-24 起）。cron 与作业运行参数都
+> 落库，用户在「设置 → 调度」页改的**跨重启保持**；env 改这些**无效**。
+> 默认值在代码里（`app/services/job_registry.py` 的 `DEFAULT_CRON` 与
+> `app/services/runtime_params.py` 的 `ParamSpec.default`）。
+> 见 `LOCAL_ENV.md` §6。
 
 ### prod（`.env.prod`）
 

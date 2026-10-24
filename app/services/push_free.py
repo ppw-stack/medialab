@@ -46,7 +46,6 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import case, func, or_, select, update
 
-from app.core.config import AppSettings
 from app.core.logging import get_logger
 from app.core.timeutils import bj_now, bj_now_dt, format_bj
 from app.db.models import Site, SiteUserData, TorrentIndex
@@ -104,7 +103,6 @@ class PushFreeService:
 
     def __init__(
         self,
-        settings: AppSettings,
         factory: AdapterFactory,
         *,
         rng: random.Random | None = None,
@@ -114,7 +112,6 @@ class PushFreeService:
         :param rng: 档内随机排序用的随机源。**生产传 None**（每次真随机）；
             测试传 ``random.Random(42)`` 可得到确定性结果。
         """
-        self._settings = settings
         self._factory = factory
         self._rng = rng
 

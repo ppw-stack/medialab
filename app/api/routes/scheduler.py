@@ -32,7 +32,7 @@ from app.core.logging import get_logger
 from app.services import job_run_service
 from app.services import runtime_params as runtime_params_service
 from app.services.job_run_service import JobRunRow
-from app.services.job_settings import save_enabled_state
+from app.services.job_settings import save_cron, save_enabled_state
 from app.services.runtime_params import (
     PARAM_SPECS,
     ParamSpec,
@@ -111,9 +111,12 @@ class UpdateCronIn(BaseModel):
 
 @router.post("/scheduler/{job_name}/cron", summary="修改作业的 cron 表达式")
 async def update_job_cron(job_name: str, payload: UpdateCronIn) -> dict[str, Any]:
-    """运行时切换 cron 表达式，立即对下一次调度生效。
+    """运行时切换 cron 表达式，**落库**（跨重启保持）。
 
     不合法 cron 返 400（由 :func:`CronTrigger.from_crontab` 抛 ValueError）。
+
+    DB 写失败时返 500：cron 在调度中心**已经生效**，但没存住，
+    容器重启后会回落到代码默认值。必须让用户知道，否则会以为修改是永久的。
     """
     try:
         CronTrigger.from_crontab(payload.cron, timezone=get_settings().timezone)
@@ -121,6 +124,14 @@ async def update_job_cron(job_name: str, payload: UpdateCronIn) -> dict[str, Any
         raise HTTPException(status_code=400, detail=f"cron 表达式不合法：{exc}") from exc
     if not scheduler_center.update_cron(job_name, payload.cron):
         raise HTTPException(status_code=404, detail=f"作业不存在：{job_name}")
+    try:
+        await save_cron(job_name, payload.cron)
+    except Exception as exc:
+        logger.exception("作业 %s 的 cron 写入 DB 失败", job_name)
+        raise HTTPException(
+            status_code=500,
+            detail="cron 已生效但持久化失败，容器重启后会回落到默认表达式",
+        ) from exc
     return {"job": job_name, "cron": payload.cron}
 
 

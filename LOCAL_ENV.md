@@ -91,7 +91,7 @@
 | `/api/v1/scheduler/runs/{run_id}` | 单次执行详情 |
 | `/api/v1/scheduler/runtime-params` | 作业运行参数（GET / PUT） |
 | `/api/v1/scheduler/{job_name}/toggle` | 启停作业 |
-| `/api/v1/scheduler/{job_name}/cron` | 运行时改 cron（**不落库**，见 §6） |
+| `/api/v1/scheduler/{job_name}/cron` | 改 cron（**落库**，跨重启保持，见 §6） |
 | `/api/v1/cross-seed-monitor/downloaders` | 辅种下载器列表 |
 | `/api/v1/cross-seed-monitor/snapshots` | 辅种快照列表 + 未抓过的下载器 |
 | `/api/v1/cross-seed-monitor/downloaders/{id}/snapshot` | 单个辅种下载器快照详情 |
@@ -147,7 +147,7 @@ curl -H "Authorization: Bearer $WEB_TOKEN" http://localhost:8080/api/v1/schedule
 
 ## 6. 调度作业（7 个）
 
-| 作业 | cron | 说明 |
+| 作业 | 默认 cron | 说明 |
 |---|---|---|
 | `fetch_all_sites` | `*/10 * * * *` | 全站拉取 |
 | `push_free_torrents` | `*/30 * * * *` | 免费种推送（走 TaskQueue） |
@@ -160,32 +160,37 @@ curl -H "Authorization: Bearer $WEB_TOKEN" http://localhost:8080/api/v1/schedule
 专属参数：
 
 - `push_free_torrents`：`push_min_remaining_hours` / `push_max_per_run` / `push_download_interval_ms`
-- `monitor_free_window`：`monitor_pre_pause_minutes`（`.env` 中为 10）
+- `monitor_free_window`：`monitor_pre_pause_minutes`
 
-cron 的**持久化来源是 `.env` / `.env.prod`**（`FETCH_ALL_SITES_CRON` / `PUSH_FREE_CRON` /
-`MONITOR_FREE_WINDOW_CRON` / `SCAN_CROSS_SEED_CRON` / `DAILY_CHECKIN_CRON` 等），
-`app/core/config.py` 提供默认值，`app/services/job_registry.py` 注册作业时读取。
+### 调度配置**全部落库**（2026-10-24 起）
 
-> ⚠️ 通过 API `POST /api/v1/scheduler/{job_name}/cron` 改 cron 是**运行时生效、不落库**的
-> （`scheduler_center.update_cron()` 只改内存中的 `spec.cron`）。
-> **重启容器后会回落到 `.env` 的值**。要长期生效必须改 `.env`。
-> `refresh_user_data`（`*/30 * * * *`）与 `drain_task_queue`（`*/5 * * * *`）的 cron
-> 目前是代码里硬编码的，没有对应的 env 变量。
-> `scan_cross_seed` 有 `SCAN_CROSS_SEED_CRON` 配置项，但当前 `.env` / `.env.prod` 未设置，
-> 走 `app/core/config.py` 的默认值 `2,32 * * * *`（每 30 分钟）。
-> 2026-10-24 起该作业改为**定时抓取 → 落库 `cross_seed_snapshot` 表**，
-> 辅种页与仪表盘「在途任务」都读快照，**不再实时打下载器接口**
-> （辅种站 3000+ 种子实时拉一次要 20s+，会把连接长期占住）。
-> `daily_checkin` 有 `DAILY_CHECKIN_CRON` 配置项，默认 `37 8 * * *`
-> （分钟位 37 避开所有既有多 5 分钟作业）。
+cron 与运行参数**都不再走 env**：
+
+| 配置 | 默认值真源 | 用户改动的存放处 | 跨重启 |
+|---|---|---|---|
+| **cron** | 代码常量 `app/services/job_registry.py` 的 `DEFAULT_CRON` | `scheduler_job_settings.cron` | ✅ 保持 |
+| **运行参数** | `app/services/runtime_params.py` 的 `PARAM_SPECS` | `app_runtime_params` | ✅ 保持 |
+
+- 在「设置 → 调度 → 配置」弹框改 cron → **立即生效 + 落库**，重启后保持
+- 改运行参数 → 同上（本来就是落库的）
+- **改 env 无效**——env 里已无对应配置；残留的旧行会被静默忽略
+  （`AppSettings` 用 `extra="ignore"`）
+- 想改**默认**值 → 改代码里的 `DEFAULT_CRON` / `ParamSpec.default`
+- `scheduler_job_settings` 表两列**互相独立**：改 cron 不碰启停，反之亦然
 
 > ✅ **作业的启停（enabled）已持久化**（2026-10-21，commit `6be6a9d`）：
-> 存在 `scheduler_job_settings` 表（`job_name` PK + `enabled`）。
+> 存在 `scheduler_job_settings` 表（`job_name` PK + `enabled` + `cron`）。
 > `POST /api/v1/scheduler/{job_name}/toggle?enabled=false` 禁用某作业后，
-> **重启容器保持停用**（启动期 `apply_enabled_overrides()` 回填，
+> **重启容器保持停用**（启动期 `apply_overrides()` 回填，
 > 被停用的作业根本不会被安排到 APScheduler）。
 >
-> 仍然**不落库**的是 cron 表达式（见上一条）——改 cron 仍需改 `.env`。
+> ✅ **cron 也已持久化**（2026-10-24）：同一张表的 `cron` 列。
+> `POST /api/v1/scheduler/{job_name}/cron` 改的 cron **重启后保持**。
+>
+> ⚠️ DB 写失败时 API 返 500（配置已在内存生效，但没存住）——
+> 与 toggle 端点同一处理。用户会看到「生效了但没存住」的提示。
+>
+> 仍然**不落库**的只有作业**注册时机**与**函数实现**（代码里的事）。
 >
 > 排查小技巧：disable 的请求会出现在容器访问日志里，形如
 > `POST /api/v1/scheduler/push_free_torrents/toggle?enabled=false`，

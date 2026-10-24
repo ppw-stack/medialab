@@ -1,11 +1,14 @@
 """应用运行时参数（DB 持久化的可调设置）。
 
-- 启动期：DB 空 → 写入 env 默认；DB 有 → 用 DB 覆盖
+- 启动期：DB 空 → 写入 :data:`PARAM_SPECS` 里的默认值；DB 有 → 用 DB 覆盖
 - 运行期：API 修改 → 同时写 DB + 更新内存
 - 业务侧：作业每次执行前从 manager 读取最新值（无缓存 / 即时一致）
 
+**默认值只在 :data:`PARAM_SPECS` 里**（2026-10-24 起）——不再从 env 取，
+env 里也没有对应配置了。改 env 无效。
+
 为何独立于 :class:`AppSettings`：
-    :class:`AppSettings` 是启动期一次性加载的 pydantic 配置；env 改完需重启。
+    :class:`AppSettings` 是启动期一次性加载的 pydantic 配置。
     本模块提供"运行期可变、DB 持久化"的薄层，业务代码
     （:class:`PushFreeService`、:class:`MonitorFreeWindowService`）从
     :func:`get_runtime_params` 取值，无需关心持久化细节。
@@ -18,7 +21,6 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import AppSettings
 from app.core.logging import get_logger
 from app.db.models import AppRuntimeParam
 from app.db.session import session_scope
@@ -212,18 +214,6 @@ class RuntimeParamManager:
                 row.value_int = value
 
 
-def _env_default(settings: AppSettings, key: str) -> int:
-    mapping = {
-        "push_min_remaining_hours": settings.push_min_remaining_hours,
-        "push_max_per_run": settings.push_max_per_run,
-        "monitor_pre_pause_minutes": settings.monitor_pre_pause_minutes,
-        "monitor_delete_expired": settings.monitor_delete_expired,
-        "push_download_interval_ms": settings.push_download_interval_ms,
-        "push_within_bucket_order": settings.push_within_bucket_order,
-    }
-    return mapping[key]
-
-
 def _sanitize_loaded(spec: ParamSpec, value: int, source: str) -> int:
     """把加载到的值收敛到合法范围（启动期用）。
 
@@ -253,8 +243,12 @@ def _sanitize_loaded(spec: ParamSpec, value: int, source: str) -> int:
     return value
 
 
-async def _load_and_seed_async(mgr: RuntimeParamManager, settings: AppSettings) -> None:
-    """启动期：从 DB 读，未在 DB 则用 env 默认 + 写 DB。
+async def _load_and_seed_async(mgr: RuntimeParamManager) -> None:
+    """启动期：从 DB 读，未在 DB 则用 spec 默认值 + 写 DB。
+
+    **默认值来自 :data:`PARAM_SPECS`，不再从 env 取**（2026-10-24 起）——
+    运行参数完全落库，env 里不再有对应配置（改 env 无效）。
+
 
     两处取值都会经 :func:`_sanitize_loaded` 收敛到合法范围——启动加载
     路径不经过 :func:`validate`（那是 API 写入路径的校验），脏数据不能
@@ -268,19 +262,15 @@ async def _load_and_seed_async(mgr: RuntimeParamManager, settings: AppSettings) 
         if existing_val is not None:
             mgr._values[spec.key] = _sanitize_loaded(spec, existing_val, "DB")
         else:
-            env_default = _sanitize_loaded(
-                spec, _env_default(settings, spec.key), "env"
-            )
-            mgr._values[spec.key] = env_default
+            default = _sanitize_loaded(spec, spec.default, "默认值")
+            mgr._values[spec.key] = default
             async with session_scope() as session:
-                session.add(AppRuntimeParam(key=spec.key, value_int=env_default))
-            logger.info("运行时参数 %s 默认值 %d 已写入 DB", spec.key, env_default)
+                session.add(AppRuntimeParam(key=spec.key, value_int=default))
+            logger.info("运行时参数 %s 默认值 %d 已写入 DB", spec.key, default)
     logger.info("运行时参数已初始化：%s", mgr._values)
 
 
-async def init_runtime_params_async(
-    settings: AppSettings,
-) -> RuntimeParamManager:
+async def init_runtime_params_async() -> RuntimeParamManager:
     """启动期初始化（异步）。lifespan 内 await 本函数。
 
     之前有同步壳 ``init_runtime_params`` 在已运行的 event loop 中开新线程
@@ -288,11 +278,11 @@ async def init_runtime_params_async(
     绑定到创建时的 loop），会抛 InterfaceError 或静默错乱。
     """
     mgr = RuntimeParamManager()
-    await _load_and_seed_async(mgr, settings)
+    await _load_and_seed_async(mgr)
     return mgr
 
 
-def init_runtime_params(settings: AppSettings) -> RuntimeParamManager:
+def init_runtime_params() -> RuntimeParamManager:
     """启动期初始化（同步壳，仅用于无 event loop 的同步上下文如测试）。
 
     已在 event loop 中时（lifespan 内）请改用
@@ -302,7 +292,7 @@ def init_runtime_params(settings: AppSettings) -> RuntimeParamManager:
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        asyncio.run(_load_and_seed_async(mgr, settings))
+        asyncio.run(_load_and_seed_async(mgr))
         return mgr
     raise RuntimeError(
         "init_runtime_params 不能在已运行的 event loop 中调用——"

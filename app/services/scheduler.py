@@ -97,9 +97,13 @@ class SchedulerCenter:
         #    写库时就退出。
         self._manual_inflight: set[asyncio.Task[None]] = set()
         #: DB 持久化的作业启停状态（作业名 → enabled）。启动期由
-        #: :meth:`apply_enabled_overrides` 灌入，:meth:`register` 时应用——
+        #: :meth:`apply_overrides` 灌入，:meth:`register` 时应用——
         #: 被停用的作业根本不会被安排到 APScheduler。
         self._enabled_overrides: dict[str, bool] = {}
+        #: DB 持久化的作业 cron 覆盖（作业名 → cron）。启动期由
+        #: :meth:`apply_overrides` 灌入，:meth:`register` 时应用——
+        #: 页面改的 cron 跨重启保持。
+        self._cron_overrides: dict[str, str] = {}
         #: 停机期间置 False：拒绝新作业，只等在途作业收敛（FR-8.2）
         self.accepting_new_work = True
 
@@ -173,29 +177,47 @@ class SchedulerCenter:
         logger.info("调度中心已停止")
 
     # ------------------------------------------------------------ 注册
-    def apply_enabled_overrides(self, states: dict[str, bool]) -> None:
-        """应用 DB 读回的作业启停状态（启动期，在 register_jobs 之前调用）。
+    def apply_overrides(
+        self, states: dict[str, bool], crons: dict[str, str]
+    ) -> None:
+        """应用 DB 读回的调度配置（启动期，在 register_jobs 之前调用）。
 
         必须在注册作业**之前**调用：:meth:`register` 会按
-        ``spec.enabled`` 决定是否把作业安排到 APScheduler，届时才知道
-        该不该排。
+        ``spec.enabled`` 决定是否把作业安排到 APScheduler，并按
+        ``spec.cron`` 决定触发时刻，届时才知道该用什么。
+
+        :param states: ``{作业名: enabled}``——DB 里的启停覆盖。
+        :param crons: ``{作业名: cron}``——DB 里的 cron 覆盖（**只含
+            非 NULL 的行**；NULL 表示用代码里的默认值，不该覆盖）。
         """
         self._enabled_overrides = dict(states)
-        if self._enabled_overrides:
+        self._cron_overrides = dict(crons)
+        if self._enabled_overrides or self._cron_overrides:
             disabled = sorted(
                 name for name, on in self._enabled_overrides.items() if not on
             )
             logger.info(
-                "已载入作业启停状态：%d 个作业（停用 %s）",
+                "已载入作业调度配置：%d 个作业（停用 %s，cron 覆盖 %d 个）",
                 len(self._enabled_overrides),
                 ", ".join(disabled) if disabled else "无",
+                len(self._cron_overrides),
             )
+
+    def apply_enabled_overrides(self, states: dict[str, bool]) -> None:
+        """兼容入口：只应用启停覆盖（cron 用代码默认值）。
+
+        新代码请用 :meth:`apply_overrides`——那个能同时应用 cron 覆盖。
+        """
+        self.apply_overrides(states, {})
 
     def register(self, spec: JobSpec) -> None:
         # DB 状态优先于 spec 自带的默认值——用户手动停用的作业重启后
-        # 不该"复活"。DB 里没有该作业时用 spec 默认值。
+        # 不该"复活"；用户在页面上改的 cron 重启后不该丢。
+        # DB 里没有该作业时用 spec 默认值。
         if spec.name in self._enabled_overrides:
             spec.enabled = self._enabled_overrides[spec.name]
+        if spec.name in self._cron_overrides:
+            spec.cron = self._cron_overrides[spec.name]
         self._specs[spec.name] = spec
         if self._scheduler is not None and spec.enabled:
             self._schedule(spec)
@@ -246,6 +268,15 @@ class SchedulerCenter:
             }
             for name, spec in self._specs.items()
         ]
+
+    def list_job_cron(self, name: str) -> str | None:
+        """单个作业**当前生效**的 cron（DB 覆盖后的值）。
+
+        日志用：注册完打印的必须是生效值，不是代码里的默认值——否则用户
+        改过 cron 后日志会与实际行为矛盾（"日志说 2,32 跑，实际 15,45 跑"）。
+        """
+        spec = self._specs.get(name)
+        return spec.cron if spec is not None else None
 
     # ------------------------------------------------------------ 执行包装
     def _wrap(self, spec: JobSpec) -> JobFn:

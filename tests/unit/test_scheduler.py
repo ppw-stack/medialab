@@ -90,9 +90,71 @@ def test_enabled_overrides_absent_falls_back_to_spec(center: SchedulerCenter) ->
 
 
 def test_enabled_overrides_unknown_job_ignored(center: SchedulerCenter) -> None:
+    """DB 里已下线的作业名不影响当前作业。"""
     center.apply_enabled_overrides({"gone": False})
     center.register(JobSpec(name="j1", func=_ok_job, cron="*/10 * * * *"))
     assert center.list_jobs()[0]["enabled"] is True
+
+
+# ------------------------------------------------------- cron 覆盖（持久化）
+
+def test_cron_overrides_take_precedence_over_spec(center: SchedulerCenter) -> None:
+    """DB 里的 cron 优先于 spec 默认值——页面改的 cron 重启后不该丢。"""
+    center.apply_overrides({}, {"j1": "15,45 * * * *"})
+    center.register(JobSpec(name="j1", func=_ok_job, cron="*/10 * * * *"))
+    assert center.list_jobs()[0]["cron"] == "15,45 * * * *"
+
+
+def test_cron_overrides_absent_falls_back_to_spec(center: SchedulerCenter) -> None:
+    """DB 里没有该作业的 cron → 用代码里的默认值。"""
+    center.apply_overrides({}, {"other": "*/7 * * * *"})
+    center.register(JobSpec(name="j1", func=_ok_job, cron="*/10 * * * *"))
+    assert center.list_jobs()[0]["cron"] == "*/10 * * * *"
+
+
+def test_cron_overrides_unknown_job_ignored(center: SchedulerCenter) -> None:
+    """DB 里已下线的作业名的 cron 不影响当前作业。"""
+    center.apply_overrides({}, {"gone": "*/7 * * * *"})
+    center.register(JobSpec(name="j1", func=_ok_job, cron="*/10 * * * *"))
+    assert center.list_jobs()[0]["cron"] == "*/10 * * * *"
+
+
+def test_overrides_apply_both_enabled_and_cron(center: SchedulerCenter) -> None:
+    """启停与 cron 两类覆盖同时生效。"""
+    center.apply_overrides({"j1": False}, {"j1": "15,45 * * * *"})
+    center.register(JobSpec(name="j1", func=_ok_job, cron="*/10 * * * *"))
+    job = center.list_jobs()[0]
+    assert job["enabled"] is False
+    assert job["cron"] == "15,45 * * * *"
+
+
+def test_default_cron_covers_all_registered_jobs() -> None:
+    """代码里的默认 cron 常量必须覆盖每个已注册作业。
+
+    漏一个 = 该作业在 :meth:`SchedulerCenter.register` 时 KeyError。
+    """
+    from app.services.job_registry import DEFAULT_CRON
+
+    assert set(DEFAULT_CRON) == {
+        "fetch_all_sites",
+        "push_free_torrents",
+        "monitor_free_window",
+        "refresh_user_data",
+        "scan_cross_seed",
+        "drain_task_queue",
+        "daily_checkin",
+    }
+
+
+def test_default_cron_values_are_valid() -> None:
+    """默认 cron 必须是合法的 5 字段表达式（否则启动时 APScheduler 抛错）。"""
+    from app.services.job_registry import DEFAULT_CRON
+    from apscheduler.triggers.cron import CronTrigger
+
+    for name, cron in DEFAULT_CRON.items():
+        assert len(cron.split()) == 5, f"{name} 的 cron 不是 5 字段：{cron}"
+        # 不合法会抛 ValueError
+        CronTrigger.from_crontab(cron)
 
 
 # ------------------------------------------------------------------ 手动触发

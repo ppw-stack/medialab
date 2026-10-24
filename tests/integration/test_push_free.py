@@ -16,7 +16,6 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
-from app.core.config import get_settings
 from app.core.timeutils import bj_now_dt, format_bj
 from app.db.models import DownloaderInstance, TorrentIndex
 from app.db.session import session_scope
@@ -91,7 +90,7 @@ async def _add_site() -> int:
 
 
 def _service() -> PushFreeService:
-    return PushFreeService(get_settings(), AdapterFactory())
+    return PushFreeService(AdapterFactory())
 
 
 # ------------------------------------------------------------- 无下载器
