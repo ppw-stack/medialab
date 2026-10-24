@@ -224,17 +224,53 @@ def _env_default(settings: AppSettings, key: str) -> int:
     return mapping[key]
 
 
+def _sanitize_loaded(spec: ParamSpec, value: int, source: str) -> int:
+    """把加载到的值收敛到合法范围（启动期用）。
+
+    启动加载路径（DB 值 / env 默认值）**不经过** :func:`validate`——
+    那是 API 写入路径的校验。DB 里可能存着历史遗留、手工改库、或参数
+    定义变更后失效的值（如枚举参数新增了取值、旧的 0/1 语义变了）。
+
+    非法值不能直接进内存：
+    - 枚举参数：值不在 options 里 → 内存里是"非法态"，前端 radio
+      **无选中项**，用户看到两个都没选，不知道当前是什么状态
+    - 连续参数：越界值 → 作业可能拿到意料外的阈值
+
+    故一律**回退到 spec.default 并记 warning**——启动不能因为一个脏
+    数据就崩，但要让问题可见。
+
+    :param source: 值的来源（"DB" / "env"），用于日志定位。
+    :return: 合法值（合法则原样返回，非法则返回 spec.default）。
+    """
+    try:
+        validate({spec.key: value})
+    except ValueError as exc:
+        logger.warning(
+            "运行时参数 %s 的%s 值 %d 非法（%s），已回退到默认值 %d",
+            spec.key, source, value, exc, spec.default,
+        )
+        return spec.default
+    return value
+
+
 async def _load_and_seed_async(mgr: RuntimeParamManager, settings: AppSettings) -> None:
-    """启动期：从 DB 读，未在 DB 则用 env 默认 + 写 DB。"""
+    """启动期：从 DB 读，未在 DB 则用 env 默认 + 写 DB。
+
+    两处取值都会经 :func:`_sanitize_loaded` 收敛到合法范围——启动加载
+    路径不经过 :func:`validate`（那是 API 写入路径的校验），脏数据不能
+    直接进内存。
+    """
     async with session_scope() as session:
         rows = (await session.execute(select(AppRuntimeParam))).scalars().all()
         existing = {row.key: row.value_int for row in rows}
     for spec in PARAM_SPECS:
         existing_val = existing.get(spec.key)
         if existing_val is not None:
-            mgr._values[spec.key] = existing_val
+            mgr._values[spec.key] = _sanitize_loaded(spec, existing_val, "DB")
         else:
-            env_default = _env_default(settings, spec.key)
+            env_default = _sanitize_loaded(
+                spec, _env_default(settings, spec.key), "env"
+            )
             mgr._values[spec.key] = env_default
             async with session_scope() as session:
                 session.add(AppRuntimeParam(key=spec.key, value_int=env_default))

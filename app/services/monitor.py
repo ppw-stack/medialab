@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 
+from app.adapters.downloaders.base import DownloaderAdapter
 from app.core.logging import get_logger
 from app.core.timeutils import bj_now_dt, format_bj
 from app.db.models import TorrentIndex
@@ -90,7 +91,7 @@ class MonitorFreeWindowService:
 
     @staticmethod
     async def _act(
-        adapter: Any, hash_: str, delete_mode: bool
+        adapter: DownloaderAdapter, hash_: str, delete_mode: bool
     ) -> tuple[str, str | None]:
         """对单个种子执行动作（暂停或删除）。
 

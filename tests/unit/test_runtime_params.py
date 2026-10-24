@@ -9,6 +9,10 @@
 2. **校验契约**——``validate`` 的三道关：参数已注册 / 是整数 / 在合法范围内
    （枚举参数还必须在 options 里）。
 
+3. **启动期加载的收敛**（2026-10-23 加入）——启动加载路径不经过
+   ``validate``（那是 API 写入路径的校验），脏数据必须由
+   ``_sanitize_loaded`` 收敛到 default，而不是直接进内存。
+
 注意：``_assert_enum_options_consistent()`` 是**导入时**执行的——spec 写错
 会在 import 阶段直接抛 RuntimeError，故这里测的是「现有 spec 全部合规」，
 而不是「写错会抛」（后者由该函数自身的存在保证）。
@@ -20,6 +24,7 @@ import pytest
 from app.services.runtime_params import (
     PARAM_SPECS,
     ParamSpec,
+    _sanitize_loaded,
     lookup_spec,
     specs_for_job,
     validate,
@@ -198,3 +203,46 @@ def test_enum_validation_error_message_mentions_allowed(
         rp.validate({"probe_enum2": 3})
     assert "只能取" in str(exc.value)
     assert "[0, 1]" in str(exc.value), "报错要列出合法取值"
+
+
+# ------------------------------------------------------- 启动期加载的收敛
+
+
+def test_sanitize_loaded_keeps_legal_values() -> None:
+    """合法值原样保留。"""
+    spec = lookup_spec("monitor_delete_expired")
+    assert spec is not None
+    assert _sanitize_loaded(spec, 0, "DB") == 0
+    assert _sanitize_loaded(spec, 1, "DB") == 1
+
+
+def test_sanitize_loaded_falls_back_on_illegal_enum() -> None:
+    """枚举外的值 → 回退 default（不能进内存）。
+
+    否则前端 radio **无选中项**——用户看到两个都没选，不知道当前状态。
+    """
+    spec = lookup_spec("monitor_delete_expired")
+    assert spec is not None
+    assert _sanitize_loaded(spec, 5, "DB") == spec.default
+
+
+def test_sanitize_loaded_falls_back_on_out_of_range() -> None:
+    """越界的连续数值 → 回退 default。"""
+    spec = lookup_spec("monitor_pre_pause_minutes")
+    assert spec is not None
+    assert _sanitize_loaded(spec, 999, "env") == spec.default
+    assert _sanitize_loaded(spec, -5, "env") == spec.default
+
+
+def test_sanitize_loaded_warns_on_illegal_value(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """非法值必须留下 warning（问题要可见，不能静默修正）。"""
+    import logging
+
+    spec = lookup_spec("monitor_delete_expired")
+    assert spec is not None
+    with caplog.at_level(logging.WARNING):
+        _sanitize_loaded(spec, 5, "DB")
+    assert any("monitor_delete_expired" in r.message for r in caplog.records)
+    assert any("回退" in r.message for r in caplog.records)

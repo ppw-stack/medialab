@@ -35,6 +35,7 @@ from app.services.job_run_service import JobRunRow
 from app.services.job_settings import save_enabled_state
 from app.services.runtime_params import (
     PARAM_SPECS,
+    ParamSpec,
     get_runtime_params,
     specs_for_job,
     validate,
@@ -45,15 +46,18 @@ logger = get_logger(__name__)
 router = APIRouter(dependencies=[Depends(require_session)], tags=["scheduler"])
 
 
-def _spec_options(spec: object) -> list[list[object]] | None:
+def _spec_options(spec: ParamSpec) -> list[list[object]] | None:
     """把 spec 的枚举取值转成 JSON 友好结构（``[[值, 显示名], ...]``）。
 
     连续数值参数没有枚举取值 → 返回 None（前端渲染数字输入框）。
+
+    参数类型用 :class:`ParamSpec` 而非 ``object`` + ``getattr``——后者会
+    静默吞掉「spec 没有 options 属性」的情况（拼错字段名也不会报错，
+    只是把枚举参数当成连续数值渲染）。
     """
-    options = getattr(spec, "options", None)
-    if not options:
+    if not spec.options:
         return None
-    return [[value, text] for value, text in options]
+    return [[value, text] for value, text in spec.options]
 
 
 class RunJobResult(BaseModel):

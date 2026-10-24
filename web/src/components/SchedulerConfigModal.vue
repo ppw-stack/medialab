@@ -161,7 +161,7 @@ function onCancel() {
               {{ text }}
             </a-radio-button>
           </a-radio-group>
-          <!-- 连续数值参数：数字输入框 -->
+          <!-- 连续数值参数：数字输入框 + 范围提示 -->
           <a-input-number
             v-else
             v-model:value="paramDraft[spec.key]"
@@ -170,7 +170,11 @@ function onCancel() {
             :step="1"
             style="width: 140px"
           />
-          <span class="config-hint">范围 {{ spec.min }}–{{ spec.max }} (默认 {{ spec.default }})</span>
+          <!-- 范围提示只对连续数值参数有意义——枚举参数的取值含义
+               已由单选选项直接表达（"范围 0–1" 对枚举不适用且冗余） -->
+          <span v-if="!spec.options" class="config-hint">
+            范围 {{ spec.min }}–{{ spec.max }} (默认 {{ spec.default }})
+          </span>
           <!-- 风险提示（如删除不可恢复）——单独一行，避免挤在 hint 里 -->
           <div v-if="spec.note" class="config-note">
             <span class="config-note__icon">⚠</span>
