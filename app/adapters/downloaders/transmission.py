@@ -126,15 +126,21 @@ class TransmissionAdapter(DownloaderAdapter):
         self._session_lock = asyncio.Lock()
 
     # -------------------------------------------------- 内部
-    async def _ensure_session_id(self) -> str:
-        """第一次握手拿 session-id。缓存后由 _rpc 在 409 时刷新一次。"""
+    async def _ensure_session_id(self) -> None:
+        """第一次握手拿 session-id。缓存后由 _rpc 在 409 时刷新一次。
+
+        **超时用 :data:`BULK_TIMEOUT`**：TR 卡住时握手本身会挂死
+        （实测带认证的 session-get 超过 40s 无响应），用默认 15s 会
+        让**每一次**调用都失败——辅种快照与空间统计完全拿不到数据。
+        """
         async with self._session_lock:
             if self._session_id:
-                return self._session_id
+                return
             try:
                 resp = await self._client.post(
                     self._rpc_url,
                     json={"method": "session-get", "tag": "seedhelper"},
+                    timeout=BULK_TIMEOUT,
                 )
             except httpx.HTTPError as exc:
                 raise DownloaderError(
@@ -149,7 +155,7 @@ class TransmissionAdapter(DownloaderAdapter):
                     )
                 self._session_id = hdr
                 assert self._session_id is not None
-                return self._session_id
+                return
             if resp.status_code in (401, 403):
                 raise DownloaderError(
                     f"TR 认证失败 {resp.status_code}", transient=False
@@ -180,8 +186,8 @@ class TransmissionAdapter(DownloaderAdapter):
         body: dict[str, Any] = {"method": method, "tag": "seedhelper"}
         if arguments:
             body["arguments"] = arguments
-        sid = await self._ensure_session_id()
-        headers = {"X-Transmission-Session-Id": sid}
+        await self._ensure_session_id()
+        headers = {"X-Transmission-Session-Id": self._session_id or ""}
         try:
             resp = await self._client.post(
                 self._rpc_url,
@@ -203,6 +209,7 @@ class TransmissionAdapter(DownloaderAdapter):
                         self._rpc_url,
                         json=body,
                         headers={"X-Transmission-Session-Id": new_sid},
+                        timeout=http_timeout,
                     )
                 except httpx.HTTPError as exc:
                     raise DownloaderError(
