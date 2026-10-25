@@ -173,3 +173,86 @@ test('辅种统计页 - 空间占用区块', async ({ page }) => {
   const dirRows = await spaceBlock.locator('.ant-table-tbody tr.ant-table-row').count()
   console.log(`  ✓ 目录分布行数: ${dirRows}`)
 })
+
+/**
+ * 异常种子明细的**批量删除**（2026-10-24）。
+ *
+ * 异常种子（tracker 未注册 / 数据丢失）已无价值，批量清理能腾空间、
+ * 减少无效连接。删除走「任务」页同一套语义：可选是否连带删磁盘数据。
+ *
+ * 真实删除会动用户的下载器，故本用例**只验证 UI 交互**（勾选、全选、
+ * 确认弹框），**不点最终的删除按钮**。
+ */
+test('辅种统计页 - 异常明细批量删除 UI', async ({ page }) => {
+  await login(page)
+  await page.goto('/cross-seed')
+
+  const tabs = page.locator('.ant-tabs-tab')
+  await expect(tabs.first()).toBeVisible({ timeout: 15000 }).catch(() => { /* 无下载器 */ })
+  const tabCount = await tabs.count()
+  if (tabCount === 0) {
+    console.log('  ✓ 无辅种下载器：跳过批量删除断言')
+    return
+  }
+
+  // 找有异常明细的 tab
+  let pane = page.locator('.ant-tabs-tabpane-active')
+  let found = false
+  for (let i = 0; i < tabCount; i++) {
+    await tabs.nth(i).click()
+    pane = page.locator('.ant-tabs-tabpane-active')
+    await page.waitForTimeout(800)
+    if ((await pane.locator('.ant-collapse-header:has-text("异常种子明细")').count()) > 0) {
+      found = true
+      break
+    }
+  }
+  if (!found) {
+    console.log('  ✓ 当前没有异常明细：跳过批量删除断言')
+    return
+  }
+
+  // 展开异常明细
+  await pane.locator('.ant-collapse-header:has-text("异常种子明细")').click()
+  await page.waitForTimeout(600)
+
+  const toolbar = pane.locator('.anomaly-toolbar')
+  await expect(toolbar).toBeVisible()
+
+  // 「删除选中」初始禁用（没勾选）
+  const delBtn = toolbar.locator('button:has-text("删除选中")')
+  await expect(delBtn).toBeDisabled()
+  console.log('  ✓ 未勾选时删除按钮禁用')
+
+  // 勾选一行 → 按钮可用且计数更新
+  await pane.locator('.ant-table-tbody .ant-checkbox-input').first().click()
+  await page.waitForTimeout(400)
+  await expect(delBtn).toBeEnabled()
+  expect((await delBtn.textContent()) ?? '').toContain('1')
+  console.log('  ✓ 勾选后按钮可用，计数 = 1')
+
+  // 全选 → 计数 = 全部异常数
+  // ⚠️ 表格分页（每页 20），当前页的行数 ≠ 异常总数——总数从折叠标题读
+  const headerText =
+    (await pane.locator('.ant-collapse-header:has-text("异常种子明细")').textContent()) ?? ''
+  const total = Number(headerText.match(/异常种子明细（(\d+)）/)?.[1] ?? 0)
+  expect(total).toBeGreaterThan(0)
+  await toolbar.locator('button:has-text("全选")').click()
+  await page.waitForTimeout(400)
+  expect((await delBtn.textContent()) ?? '').toContain(String(total))
+  console.log(`  ✓ 全选后计数 = ${total}（跨分页全选）`)
+
+  // 打开确认弹框 → 校验两个删除选项都在
+  await delBtn.click()
+  const modal = page.locator('.ant-modal-content:has-text("删除异常种子")')
+  await expect(modal).toBeVisible()
+  await expect(modal.locator('button:has-text("仅删任务")')).toBeVisible()
+  await expect(modal.locator('button:has-text("删任务 + 磁盘数据")')).toBeVisible()
+  console.log('  ✓ 确认弹框含「仅删任务」与「删任务 + 磁盘数据」')
+
+  // 取消（**不执行真实删除**）
+  // 注：AntD 对两个中文字符的按钮会渲染成「取 消」（中间有空格），
+  // 故用正则而非精确文本匹配。
+  await modal.getByRole('button', { name: /取\s*消/ }).click()
+  await expect(modal).toBeHidden()
+})

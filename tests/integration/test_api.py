@@ -474,6 +474,40 @@ async def test_cross_seed_refresh_unknown_downloader_404(
     assert resp.status_code == 404
 
 
+async def test_cross_seed_remove_anomalies_rejects_bad_hash(
+    client: httpx.AsyncClient,
+) -> None:
+    """非法 hash → 400（拒绝 all / 通配，不误删全部任务）。"""
+    dl_id = await _add_cross_seed_downloader("dl1")
+    resp = await client.post(
+        f"/api/v1/cross-seed-monitor/downloaders/{dl_id}/remove-anomalies",
+        json={"hashes": ["all"], "delete_data": False},
+    )
+    assert resp.status_code == 400
+
+
+async def test_cross_seed_remove_anomalies_requires_hashes(
+    client: httpx.AsyncClient,
+) -> None:
+    """空 hash 列表 → 422（pydantic 校验）。"""
+    dl_id = await _add_cross_seed_downloader("dl1")
+    resp = await client.post(
+        f"/api/v1/cross-seed-monitor/downloaders/{dl_id}/remove-anomalies",
+        json={"hashes": [], "delete_data": False},
+    )
+    assert resp.status_code == 422
+
+
+async def test_cross_seed_remove_anomalies_unknown_downloader_404(
+    client: httpx.AsyncClient,
+) -> None:
+    resp = await client.post(
+        "/api/v1/cross-seed-monitor/downloaders/9999/remove-anomalies",
+        json={"hashes": ["a" * 40], "delete_data": False},
+    )
+    assert resp.status_code == 404
+
+
 async def test_cross_seed_space_empty(client: httpx.AsyncClient) -> None:
     """没有快照 → 空汇总（磁盘为 null，不是 0）。"""
     resp = await client.get("/api/v1/cross-seed-monitor/space")

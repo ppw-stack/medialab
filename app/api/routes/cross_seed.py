@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.api.auth import require_session
 from app.core.logging import get_logger
@@ -31,6 +31,8 @@ from app.services.cross_seed_monitor import (
     UnsupportedDownloader,
 )
 from app.services.cross_seed_space import SpaceStats, summarize_spaces
+from app.services.downloader_service import remove_torrents_in_batches
+from app.services.errors import ServiceError
 
 logger = get_logger(__name__)
 
@@ -92,6 +94,15 @@ class RefreshResultOut(BaseModel):
     pause_failed_count: int = 0
     stats: list[dict[str, Any]]
     anomalies: list[dict[str, Any]]
+
+
+class RemoveAnomaliesIn(BaseModel):
+    """批量删除异常种子的请求体。"""
+
+    #: 要删除的种子 infohash 列表（40 位 hex，由 service 层校验）
+    hashes: list[str] = Field(..., min_length=1)
+    #: 是否连磁盘数据一起删（**不可恢复**）
+    delete_data: bool = False
 
 
 # ============================================================ 端点
@@ -177,6 +188,37 @@ async def list_space() -> dict[str, Any]:
             }
             for h in headers
         ],
+    }
+
+
+@router.post("/downloaders/{downloader_id}/remove-anomalies", summary="批量删除异常种子")
+async def remove_anomalies(
+    downloader_id: int, payload: RemoveAnomaliesIn
+) -> dict[str, Any]:
+    """删除辅种下载器里的异常种子（tracker 未注册 / 数据丢失）。
+
+    **不限数量**（分批发送）——辅种站的异常种子动辄数百个，超出普通批量
+    操作上限（200）时会分批逐个删。
+
+    :param delete_data: True = 连**磁盘数据**一起删（不可恢复，见
+        :func:`app.services.downloader_service.remove_torrents_in_batches`
+        的审计日志）。
+
+    删除后建议重新抓取一次快照，让 UI 反映最新状态。
+    """
+    try:
+        result = await remove_torrents_in_batches(
+            downloader_id,
+            payload.hashes,
+            delete_data=payload.delete_data,
+        )
+    except ServiceError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    return {
+        "requested": result.requested,
+        "succeeded": result.succeeded,
+        "failed": result.failed,
+        "errors": result.errors,
     }
 
 

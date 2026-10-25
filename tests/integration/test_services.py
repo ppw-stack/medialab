@@ -632,6 +632,120 @@ async def test_batch_op_rejects_too_many(db: None, monkeypatch, factory: Adapter
     assert exc.value.status == 400
 
 
+# ------------------------------------------------------- 分批删除（不限数量）
+
+
+async def test_remove_in_batches_splits_by_batch_size(
+    db: None, monkeypatch, factory: AdapterFactory
+) -> None:
+    """超过单批上限 → 分批发送（辅种站异常种子动辄数百个）。"""
+    fake = _FakeDownloaderAdapter()
+    _install_fake_downloader(monkeypatch, fake)
+    dl_id = await _add_downloader("dl1")
+
+    hashes = [f"{i:040x}" for i in range(250)]
+    result = await downloader_service.remove_torrents_in_batches(
+        dl_id, hashes, batch_size=100
+    )
+
+    assert result.requested == 250
+    assert result.succeeded == 250
+    assert result.failed == 0
+    # 3 批
+    assert len(fake.removed) == 3
+    assert [len(h) for h, _ in fake.removed] == [100, 100, 50]
+
+
+async def test_remove_in_batches_exceeds_normal_limit(
+    db: None, monkeypatch, factory: AdapterFactory
+) -> None:
+    """**超过** BATCH_LIMIT（200）也能删——分批路径不受那个上限约束。"""
+    fake = _FakeDownloaderAdapter()
+    _install_fake_downloader(monkeypatch, fake)
+    dl_id = await _add_downloader("dl1")
+
+    hashes = [f"{i:040x}" for i in range(downloader_service.BATCH_LIMIT + 50)]
+    result = await downloader_service.remove_torrents_in_batches(dl_id, hashes)
+
+    assert result.succeeded == len(hashes)
+    assert len(fake.removed) == 2
+
+
+async def test_remove_in_batches_rejects_bad_hash(
+    db: None, monkeypatch, factory: AdapterFactory
+) -> None:
+    """非法 hash → 400（拒绝 all / 通配），且**不删任何东西**。"""
+    fake = _FakeDownloaderAdapter()
+    _install_fake_downloader(monkeypatch, fake)
+    dl_id = await _add_downloader("dl1")
+
+    with pytest.raises(ServiceError) as exc:
+        await downloader_service.remove_torrents_in_batches(dl_id, ["all"])
+    assert exc.value.status == 400
+    assert fake.removed == []
+
+
+async def test_remove_in_batches_empty_is_noop(
+    db: None, monkeypatch, factory: AdapterFactory
+) -> None:
+    """空列表 → 直接返回（不发请求）。"""
+    fake = _FakeDownloaderAdapter()
+    _install_fake_downloader(monkeypatch, fake)
+    dl_id = await _add_downloader("dl1")
+
+    result = await downloader_service.remove_torrents_in_batches(dl_id, [])
+
+    assert result.requested == 0
+    assert result.succeeded == 0
+    assert fake.removed == []
+
+
+async def test_remove_in_batches_passes_delete_data_flag(
+    db: None, monkeypatch, factory: AdapterFactory
+) -> None:
+    """delete_data 标志要透传到 adapter（删磁盘数据走审计路径）。"""
+    fake = _FakeDownloaderAdapter()
+    _install_fake_downloader(monkeypatch, fake)
+    dl_id = await _add_downloader("dl1")
+
+    await downloader_service.remove_torrents_in_batches(
+        dl_id, ["a" * 40], delete_data=True
+    )
+
+    assert fake.removed == [(["a" * 40], True)]
+
+
+async def test_remove_in_batches_continues_after_batch_failure(
+    db: None, monkeypatch, factory: AdapterFactory
+) -> None:
+    """单批失败**不中断**后续批次（尽可能多删），失败数计入结果。"""
+    fake = _FakeDownloaderAdapter()
+    _install_fake_downloader(monkeypatch, fake)
+    dl_id = await _add_downloader("dl1")
+
+    # 第一批失败（下载器不可达），第二批正常
+    calls: list[int] = []
+
+    async def _fail_first(hashes: list[str], *, delete_data: bool) -> bool:
+        calls.append(len(hashes))
+        if len(calls) == 1:
+            raise DownloaderError("boom")
+        return True
+
+    fake.remove = _fail_first  # type: ignore[method-assign]
+
+    hashes = [f"{i:040x}" for i in range(200)]
+    result = await downloader_service.remove_torrents_in_batches(
+        dl_id, hashes, batch_size=100
+    )
+
+    assert result.requested == 200
+    assert result.failed == 100, "第一批 100 个失败"
+    assert result.succeeded == 100, "第二批 100 个成功"
+    assert result.errors, "失败原因要记下来"
+    assert len(calls) == 2, "第一批失败后仍要试第二批"
+
+
 async def test_disabled_downloader_rejected(db: None, monkeypatch, factory: AdapterFactory) -> None:
     """已禁用的下载器 → 400（不给操作入口）。"""
     fake = _FakeDownloaderAdapter()
@@ -820,3 +934,18 @@ async def test_job_run_bad_json_is_none(db: None) -> None:
 
     page = await job_run_service.list_job_runs()
     assert page.items[0].result is None
+
+
+async def test_remove_in_batches_raises_when_downloader_missing(
+    db: None, monkeypatch, factory: AdapterFactory
+) -> None:
+    """下载器不存在 → 直接抛 404（不吞掉，也不白跑后续批次）。"""
+    fake = _FakeDownloaderAdapter()
+    _install_fake_downloader(monkeypatch, fake)
+
+    with pytest.raises(ServiceError) as exc:
+        await downloader_service.remove_torrents_in_batches(
+            9999, [f"{i:040x}" for i in range(250)]
+        )
+    assert exc.value.status == 404
+    assert fake.removed == []

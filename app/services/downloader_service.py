@@ -48,6 +48,7 @@ __all__ = [
     "list_downloaders",
     "pause_downloader_torrents",
     "remove_downloader_torrents",
+    "remove_torrents_in_batches",
     "test_downloader",
     "test_downloader_config",
     "update_downloader",
@@ -600,4 +601,60 @@ async def remove_downloader_torrents(
         requested=len(hashes),
         succeeded=len(hashes) if ok else 0,
         failed=0 if ok else len(hashes),
+    )
+
+
+async def remove_torrents_in_batches(
+    downloader_id: int,
+    hashes: list[str],
+    *,
+    delete_data: bool = False,
+    batch_size: int = BATCH_LIMIT,
+) -> DownloaderBatchOpResult:
+    """删除**不限数量**的任务（分批发送）。
+
+    与 :func:`remove_downloader_torrents` 的区别：后者受
+    :data:`BATCH_LIMIT`（200）上限约束——辅种站的异常种子动辄数百个
+    （实测 477 个），超限会直接被拒。
+
+    本函数按 :paramref:`batch_size` 切批，逐批调用删除并累计结果。
+    单批失败**不中断**后续批次（尽可能多删），失败数计入结果。
+
+    但**下载器整体不可用**（404 不存在 / 400 已禁用）会直接抛出——后续批次
+    同样会失败，继续跑只是白费时间，且用户需要知道「下载器都没了」。
+
+    同样的 hash 校验与审计日志在每批里生效（:func:`remove_downloader_torrents`
+    的行为）。
+
+    :raises ServiceError: 400（非法 hash / 下载器已禁用）/ 404（下载器不存在）/ 502
+    """
+    validate_hashes(hashes)
+    if not hashes:
+        return DownloaderBatchOpResult(requested=0, succeeded=0, failed=0)
+
+    succeeded = 0
+    failed = 0
+    errors: list[str] = []
+    for i in range(0, len(hashes), batch_size):
+        batch = hashes[i : i + batch_size]
+        try:
+            result = await remove_downloader_torrents(
+                downloader_id, batch, delete_data=delete_data
+            )
+        except ServiceError as exc:
+            # 下载器整体不可用（404 不存在 / 400 已禁用）→ 后续批次同样会
+            # 失败，直接抛出（不吞掉——用户需要知道「下载器都没了」）。
+            if exc.status in (404, 400):
+                raise
+            # 单批失败（如上游 502）→ 记下并继续下一批（尽可能多删）
+            failed += len(batch)
+            errors.append(f"第 {i // batch_size + 1} 批：{exc}")
+            continue
+        succeeded += result.succeeded
+        failed += result.failed
+    return DownloaderBatchOpResult(
+        requested=len(hashes),
+        succeeded=succeeded,
+        failed=failed,
+        errors=errors,
     )

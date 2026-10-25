@@ -109,6 +109,14 @@
   - **磁盘信息拿不到不阻塞**：适配器不支持 / 查询失败 → 降级成 NULL，占用数据照样落库
   - 数据落在 `cross_seed_snapshot` 的空间列（`disk_free_bytes` / `disk_total_bytes` / `used_bytes` / `total_size_bytes` / `by_dir`）
   - 契约由 `tests/unit/test_cross_seed_space.py` + `tests/unit/test_downloader_adapters.py` + `tests/integration/test_cross_seed_job.py` + `tests/integration/test_api.py` 固化
+- **辅种异常种子批量删除**（2026-10-24 加入）：
+  - 端点 `POST /cross-seed-monitor/downloaders/{id}/remove-anomalies`（body：`hashes` / `delete_data`）
+  - **不限数量**（辅种站异常种子动辄数百个，超出普通批量上限 200）→ `downloader_service.remove_torrents_in_batches()` 按批切分（默认 200/批）
+  - **单批失败不中断**后续批次（尽可能多删），失败数计入结果；但**下载器整体不可用**（404 不存在 / 400 已禁用）**直接抛出**——后续批次同样会失败，且用户需要知道「下载器都没了」
+  - hash 必须是 40 位 hex（拒绝 `all` / 通配）——复用既有 `validate_hashes`
+  - 删磁盘数据走既有审计路径（`delete_data=True` → 记 warning 日志，含 hash 列表）
+  - 前端：异常明细表格加勾选 + 「全选（N）」快捷键 + 「删除选中（N）」，确认弹框与「任务」页一致（仅删任务 / 删任务+磁盘数据）
+  - 契约由 `tests/integration/test_services.py` + `tests/integration/test_api.py` + `web/tests/cross-seed.spec.ts` 固化
 
 ## 必备命令
 ```bash

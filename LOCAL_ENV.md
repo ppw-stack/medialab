@@ -97,6 +97,7 @@
 | `/api/v1/cross-seed-monitor/space` | 辅种空间汇总（磁盘剩余 / 辅种占用） |
 | `/api/v1/cross-seed-monitor/downloaders/{id}/snapshot` | 单个辅种下载器快照详情 |
 | `/api/v1/cross-seed-monitor/downloaders/{id}/refresh` | 手动抓取单个辅种下载器（await 完整抓取） |
+| `/api/v1/cross-seed-monitor/downloaders/{id}/remove-anomalies` | 批量删除异常种子（不限数量，分批发送） |
 | `/api/v1/cross-seed-monitor/downloaders/{id}/scan` | 实时扫描单个辅种下载器（调试用，不落库） |
 | `/api/v1/sites` | 站点列表 |
 | `/api/v1/sites/{site_id}/feed-test` | 站点拉取测试 |

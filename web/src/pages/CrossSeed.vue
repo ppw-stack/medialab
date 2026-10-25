@@ -2,6 +2,7 @@
 import { ref, onMounted, watch, computed } from 'vue'
 import { api, errMsg } from '../api'
 import type {
+  BatchOpResult,
   CrossSeedAnomaly,
   CrossSeedDirUsage,
   CrossSeedDownloader,
@@ -43,6 +44,13 @@ const anomalyColumns = [
   { title: '错误描述', dataIndex: 'error_string', key: 'error_string', ellipsis: true, minWidth: 220 },
   { title: '状态', key: 'paused', width: 100 },
 ]
+
+//: 异常种子里勾选的 hash（批量删除用）
+const selectedAnomalyHashes = ref<string[]>([])
+/** 删除确认弹框 */
+const deleteModalOpen = ref(false)
+/** 删除中 */
+const deleting = ref(false)
 
 const dirColumns = [
   { title: '下载目录', dataIndex: 'dir', key: 'dir', ellipsis: true, minWidth: 320 },
@@ -131,8 +139,57 @@ async function refreshNow() {
 }
 
 watch(selectedId, (id) => {
+  // 换 tab → 清掉上一个 tab 的勾选（hash 属于不同下载器）
+  selectedAnomalyHashes.value = []
   if (id != null) loadDetail(id)
 })
+
+/** 异常明细的勾选变化。 */
+function onAnomalySelectionChange(keys: (string | number)[]) {
+  selectedAnomalyHashes.value = keys.map(String)
+}
+
+/** 全选当前 tab 的全部异常（跨分页）。 */
+function selectAllAnomalies() {
+  selectedAnomalyHashes.value = (snapshot.value?.anomalies ?? []).map((a) => a.hash)
+}
+
+/** 打开删除确认弹框。 */
+function openDeleteModal() {
+  if (!selectedAnomalyHashes.value.length) return
+  deleteModalOpen.value = true
+}
+
+/** 执行批量删除。 */
+async function doDeleteAnomalies(deleteData: boolean) {
+  const id = selectedId.value
+  const hashes = [...selectedAnomalyHashes.value]
+  if (id == null || hashes.length === 0) return
+  deleteModalOpen.value = false
+  deleting.value = true
+  try {
+    const r = await api.post<BatchOpResult>(
+      `/cross-seed-monitor/downloaders/${id}/remove-anomalies`,
+      { hashes, delete_data: deleteData },
+    )
+    const what = deleteData ? '任务 + 磁盘数据' : '任务'
+    if (r.failed > 0) {
+      message.warning(
+        `已删除${what} ${r.succeeded} 个，失败 ${r.failed} 个` +
+          (r.errors?.length ? `：${r.errors[0]}` : ''),
+      )
+    } else {
+      message.success(`已删除${what} ${r.succeeded} 个`)
+    }
+    selectedAnomalyHashes.value = []
+    // 重新抓取快照 → UI 反映最新状态（异常数、占用、目录分布都会变）
+    await refreshNow()
+  } catch (e) {
+    message.error('删除失败：' + errMsg(e))
+  } finally {
+    deleting.value = false
+  }
+}
 
 function countColor(c: number) {
   if (c >= 5) return 'red'
@@ -361,10 +418,38 @@ onMounted(async () => {
                   <span class="dim">— tracker 未注册 / 本地数据丢失</span>
                 </span>
               </template>
+
+              <!-- 批量删除工具条 -->
+              <div class="anomaly-toolbar">
+                <a-button
+                  size="small"
+                  @click="selectAllAnomalies"
+                >
+                  全选（{{ snapshot.anomalies.length }}）
+                </a-button>
+                <a-button
+                  size="small"
+                  type="danger"
+                  :disabled="selectedAnomalyHashes.length === 0"
+                  :loading="deleting"
+                  @click="openDeleteModal"
+                >
+                  删除选中（{{ selectedAnomalyHashes.length }}）
+                </a-button>
+                <span v-if="selectedAnomalyHashes.length" class="dim">
+                  已选 {{ selectedAnomalyHashes.length }} 个异常种子
+                </span>
+              </div>
+
               <a-table
                 :columns="anomalyColumns"
                 :data-source="snapshot.anomalies"
                 :row-key="(r: CrossSeedAnomaly) => r.hash"
+                :row-selection="{
+                  selectedRowKeys: selectedAnomalyHashes,
+                  onChange: onAnomalySelectionChange,
+                  preserveSelectedRowKeys: false,
+                }"
                 :pagination="{ pageSize: 20, showSizeChanger: true }"
                 size="small"
               >
@@ -426,6 +511,37 @@ onMounted(async () => {
       </a-tab-pane>
     </a-tabs>
     </section>
+
+    <!-- 批量删除异常种子的确认弹框 -->
+    <a-modal
+      v-model:open="deleteModalOpen"
+      title="删除异常种子"
+      :footer="null"
+      :mask-closable="false"
+    >
+      <p class="modal-text">
+        即将从下载器中删除选中的
+        <b>{{ selectedAnomalyHashes.length }}</b> 个异常种子（tracker 未注册 /
+        本地数据丢失），请选择删除方式：
+      </p>
+      <div class="modal-actions">
+        <a-button @click="deleteModalOpen = false">取消</a-button>
+        <a-button :loading="deleting" @click="doDeleteAnomalies(false)">
+          仅删任务（保留文件）
+        </a-button>
+        <a-popconfirm
+          title="磁盘数据将被永久删除，无法恢复。确认继续？"
+          ok-text="确认删除"
+          cancel-text="取消"
+          :ok-button-props="{ danger: true }"
+          @confirm="doDeleteAnomalies(true)"
+        >
+          <a-button danger :loading="deleting">
+            删任务 + 磁盘数据
+          </a-button>
+        </a-popconfirm>
+      </div>
+    </a-modal>
   </div>
 </template>
 
@@ -462,6 +578,29 @@ onMounted(async () => {
 
 .anomaly-header {
   font-weight: 500;
+}
+
+/* 异常明细的批量操作工具条 */
+.anomaly-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.modal-text {
+  color: var(--text-primary);
+  line-height: 1.6;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border-hairline);
 }
 
 /* 空间占用区块 */
