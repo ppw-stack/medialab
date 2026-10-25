@@ -226,6 +226,30 @@ async def remove_torrents(
     }
 
 
+@router.get("/orphans", summary="辅种孤儿文件统计")
+async def list_orphans() -> dict[str, Any]:
+    """所有辅种下载器的孤儿文件统计（文件在、任务没了）。
+
+    **纯 DB 读**——数据来自定时作业 ``scan_orphans`` 写入的
+    ``cross_seed_orphan`` 表。
+
+    没有记录 = 还没扫过（或该环境没挂载辅种目录）。
+    """
+    from app.services.cross_seed_orphan import list_orphans as _list
+
+    rows = await _list()
+    total_count = sum(r.orphan_count for r in rows)
+    total_bytes = sum(r.orphan_bytes for r in rows)
+    return {
+        "summary": {
+            "downloaders": len(rows),
+            "orphan_count": total_count,
+            "orphan_bytes": total_bytes,
+        },
+        "downloaders": [r.to_dict() for r in rows],
+    }
+
+
 @router.get("/downloaders/{downloader_id}/snapshot", summary="单个辅种下载器快照")
 async def get_snapshot(downloader_id: int) -> dict[str, Any]:
     """取单个辅种下载器的快照详情（含分组统计 + 异常明细）.

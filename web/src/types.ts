@@ -295,6 +295,42 @@ export interface CrossSeedSnapshot extends CrossSeedSnapshotHeader {
   by_dir: CrossSeedDirUsage[]
 }
 
+/** 一个孤儿条目（磁盘有、下载器里已无对应任务）。 */
+export interface CrossSeedOrphan {
+  /** 条目名（顶层目录名或文件名）。 */
+  name: string
+  /** 绝对路径。 */
+  path: string
+  /** 占用字节数。 */
+  bytes: number
+  /** 包含的文件数。 */
+  file_count: number
+}
+
+/** 单个辅种下载器的孤儿统计。 */
+export interface CrossSeedOrphanStat {
+  downloader_id: number
+  downloader_name: string
+  scanned_at: string
+  orphan_count: number
+  orphan_bytes: number
+  total_scan_bytes: number
+  total_scan_count: number
+  orphans: CrossSeedOrphan[]
+  /** 扫描失败的原因（null = 成功）。 */
+  error: string | null
+}
+
+/** 辅种孤儿文件汇总（`GET /cross-seed-monitor/orphans`）。 */
+export interface CrossSeedOrphanSummary {
+  summary: {
+    downloaders: number
+    orphan_count: number
+    orphan_bytes: number
+  }
+  downloaders: CrossSeedOrphanStat[]
+}
+
 /** 辅种空间汇总（`GET /cross-seed-monitor/space`）。 */
 export interface CrossSeedSpace {
   summary: {

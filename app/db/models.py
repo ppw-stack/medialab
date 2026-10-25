@@ -29,6 +29,7 @@ from app.domain.enums import FreeType
 
 __all__ = [
     "Base",
+    "CrossSeedOrphan",
     "CrossSeedSnapshot",
     "DownloaderInstance",
     "JobRun",
@@ -332,6 +333,51 @@ class CrossSeedSnapshot(Base):
     #: 异常种子明细（JSON 数组：``[{id, hash, name, size_gb, status,
     #: anomaly_type, error_code, error_string}]``）
     anomalies: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
+    created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
+    updated_at: Mapped[str] = mapped_column(
+        String(32), default=_bj_now, onupdate=_bj_now
+    )
+
+
+class CrossSeedOrphan(Base):
+    """辅种**孤儿文件**统计（文件在、任务没了）。
+
+    辅种站的下载目录通过 NFS/CIFS **只读**挂载到 seedhelper 容器，作业
+    定期扫盘，把「磁盘上有、但下载器里已经没有对应任务」的顶层条目
+    统计成孤儿。
+
+    **为什么需要**：用「仅删任务」的方式清理种子时，磁盘文件会保留下来
+    ——它们不再被做种，却一直占着空间（辅种站实测 21 个孤儿占 527 GB）。
+    下载器**没有**列目录的接口（TR 的 RPC spec 不提供 filesystem 浏览，
+    qB 也没有），故只能靠挂载目录 + 顶层名匹配来发现。
+
+    每个辅种下载器一行（``downloader_id`` UNIQUE）。
+    """
+
+    __tablename__ = "cross_seed_orphan"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: 关联辅种下载器（一站一行）
+    downloader_id: Mapped[int] = mapped_column(
+        ForeignKey("downloader_instances.id"), unique=True, index=True
+    )
+    #: 下载器名（冗余存一份：列表展示免 JOIN）
+    downloader_name: Mapped[str] = mapped_column(String(64), default="")
+    #: 扫描时刻（北京时间字符串）
+    scanned_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
+    #: 孤儿条目数（顶层目录/文件个数）
+    orphan_count: Mapped[int] = mapped_column(Integer, default=0)
+    #: 孤儿占用总字节数
+    orphan_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    #: 扫描目录的总字节数（用于算占比）
+    total_scan_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    #: 扫描目录里的顶层条目总数
+    total_scan_count: Mapped[int] = mapped_column(Integer, default=0)
+    #: 孤儿明细（JSON 数组：``[{name, path, bytes, file_count}]``）
+    orphans: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
+    #: 扫描不可用时的原因（NULL = 扫描成功）
+    #: 例：目录未挂载 / 不可读 ——**不静默失败**，前端据此显示原因
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
     updated_at: Mapped[str] = mapped_column(
         String(32), default=_bj_now, onupdate=_bj_now

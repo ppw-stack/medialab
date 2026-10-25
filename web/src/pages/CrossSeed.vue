@@ -6,6 +6,8 @@ import type {
   CrossSeedAnomaly,
   CrossSeedDirUsage,
   CrossSeedDownloader,
+  CrossSeedOrphan,
+  CrossSeedOrphanSummary,
   CrossSeedSnapshot,
   CrossSeedSnapshotHeader,
   CrossSeedSnapshotList,
@@ -77,6 +79,16 @@ const dirColumns = [
   { title: '总大小', dataIndex: 'total_bytes', key: 'total_bytes', width: 140 },
 ]
 
+const orphanColumns = [
+  { title: '条目名', dataIndex: 'name', key: 'name', ellipsis: true, minWidth: 320 },
+  { title: '占用', dataIndex: 'bytes', key: 'bytes', width: 140 },
+  { title: '文件数', dataIndex: 'file_count', key: 'file_count', width: 100 },
+]
+
+/** 孤儿文件统计（定时作业写入，页面只读 DB） */
+const orphanSummary = ref<CrossSeedOrphanSummary | null>(null)
+const orphanLoading = ref(false)
+
 async function loadDownloaders() {
   try {
     downloaders.value = await api.get<CrossSeedDownloader[]>('/cross-seed-monitor/downloaders')
@@ -109,6 +121,27 @@ async function loadSnapshotList() {
     loading.value = false
   }
 }
+
+/** 加载孤儿文件统计。 */
+async function loadOrphans() {
+  orphanLoading.value = true
+  try {
+    orphanSummary.value = await api.get<CrossSeedOrphanSummary>(
+      '/cross-seed-monitor/orphans',
+    )
+  } catch (e) {
+    message.error('加载孤儿文件统计失败：' + errMsg(e))
+  } finally {
+    orphanLoading.value = false
+  }
+}
+
+/** 当前 tab 的孤儿统计（该下载器的）。 */
+const currentOrphan = computed(() => {
+  const id = selectedId.value
+  if (id == null || !orphanSummary.value) return null
+  return orphanSummary.value.downloaders.find(d => d.downloader_id === id) ?? null
+})
 
 /** 快照头部（列表响应带来，避免逐 tab 请求） */
 const headers = ref<Map<number, CrossSeedSnapshotHeader>>(new Map())
@@ -267,6 +300,13 @@ const diskUsagePercent = computed<number | null>(() => {
   return Math.min(used / s.disk_total_bytes, 1)
 })
 
+/** 孤儿占用占扫描目录的比例（0–1）。 */
+const orphanRatio = computed<number | null>(() => {
+  const o = currentOrphan.value
+  if (!o || !o.total_scan_bytes) return null
+  return o.orphan_bytes / o.total_scan_bytes
+})
+
 /** 快照的新鲜度文案。 */
 function freshnessText(scannedAt: string): string {
   if (!scannedAt) return '—'
@@ -280,7 +320,7 @@ function freshnessText(scannedAt: string): string {
 
 onMounted(async () => {
   await loadDownloaders()
-  await loadSnapshotList()
+  await Promise.all([loadSnapshotList(), loadOrphans()])
   if (selectedId.value != null) {
     await loadDetail(selectedId.value)
   }
@@ -434,6 +474,100 @@ onMounted(async () => {
                 </template>
               </template>
             </a-table>
+          </section>
+
+          <!-- 孤儿文件（磁盘有、任务没了） -->
+          <section class="space-block">
+            <div class="label-caps" style="margin-bottom: var(--sp-2)">
+              孤儿文件 · ORPHANS
+            </div>
+
+            <!-- 加载中 -->
+            <div v-if="orphanLoading" class="loading-row">
+              <span class="mono dim">加载孤儿统计...</span>
+            </div>
+
+            <!-- 扫描不可用（未挂载 / 失败）-->
+            <a-alert
+              v-else-if="currentOrphan?.error"
+              type="warning"
+              show-icon
+              message="孤儿扫描不可用"
+              :description="currentOrphan.error"
+            />
+
+            <!-- 还没扫过 -->
+            <a-alert
+              v-else-if="!currentOrphan"
+              type="info"
+              show-icon
+              message="尚未扫描孤儿文件"
+              description="孤儿文件由定时作业「辅种孤儿文件扫描」每天扫一次盘得出（需把辅种站的下载目录只读挂载到容器）。"
+            />
+
+            <!-- 有数据 -->
+            <template v-else>
+              <div class="space-tiles">
+                <div class="space-tile">
+                  <div class="space-tile__label">孤儿条目</div>
+                  <div class="space-tile__value">{{ currentOrphan.orphan_count }}</div>
+                  <div class="space-tile__hint">磁盘有、下载器已无对应任务</div>
+                </div>
+                <div class="space-tile">
+                  <div class="space-tile__label">孤儿占用</div>
+                  <div class="space-tile__value">{{ fmtBytes(currentOrphan.orphan_bytes) }}</div>
+                  <div class="space-tile__hint">
+                    扫描于 {{ currentOrphan.scanned_at }}
+                  </div>
+                </div>
+                <div class="space-tile">
+                  <div class="space-tile__label">占扫描目录</div>
+                  <div class="space-tile__value">
+                    {{ orphanRatio === null ? '—' : `${(orphanRatio * 100).toFixed(2)}%` }}
+                  </div>
+                  <div class="space-tile__hint">
+                    共 {{ fmtBytes(currentOrphan.total_scan_bytes) }} /
+                    {{ currentOrphan.total_scan_count }} 个顶层条目
+                  </div>
+                </div>
+              </div>
+
+              <a-alert
+                v-if="currentOrphan.orphan_count"
+                type="warning"
+                show-icon
+                message="这些文件不再被做种，却一直占着空间。本页只做统计，不提供删除——请自行到 NAS 上确认后清理。"
+                style="margin-top: var(--sp-3)"
+              />
+
+              <a-collapse v-if="currentOrphan.orphans.length" style="margin-top: var(--sp-3)">
+                <a-collapse-panel key="orphans">
+                  <template #header>
+                    <span class="anomaly-header">
+                      孤儿明细（{{ currentOrphan.orphans.length }}）
+                    </span>
+                  </template>
+                  <a-table
+                    :columns="orphanColumns"
+                    :data-source="currentOrphan.orphans"
+                    :row-key="(r: CrossSeedOrphan) => r.path"
+                    :pagination="{ pageSize: 20, showSizeChanger: true }"
+                    size="small"
+                  >
+                    <template #bodyCell="{ column, record }">
+                      <template v-if="column.key === 'name'">
+                        <a-tooltip :title="(record as CrossSeedOrphan).path">
+                          <span class="name-cell">{{ (record as CrossSeedOrphan).name }}</span>
+                        </a-tooltip>
+                      </template>
+                      <template v-else-if="column.key === 'bytes'">
+                        {{ fmtBytes((record as CrossSeedOrphan).bytes) }}
+                      </template>
+                    </template>
+                  </a-table>
+                </a-collapse-panel>
+              </a-collapse>
+            </template>
           </section>
 
           <a-alert

@@ -425,3 +425,85 @@ async def test_tr_bulk_list_uses_long_timeout() -> None:
     assert seen, "未调用 _rpc"
     assert seen[0] == tr_mod.BULK_TIMEOUT
     assert seen[0] and seen[0] > 15.0
+
+
+# ================================================================ 孤儿匹配的顶层名
+
+
+@pytest.mark.asyncio
+async def test_tr_list_with_errors_returns_top_names() -> None:
+    """TR：``top_names`` = ``files[].name`` 的顶层段（孤儿匹配用）。
+
+    - 多文件种子：``"目录名/子目录/文件.mkv"`` → ``"目录名"``
+    - 单文件种子：``"文件.mkv"`` → ``"文件.mkv"``
+    """
+    from app.adapters.downloaders.transmission import TransmissionAdapter
+
+    _TR_REQUESTED_FIELDS.clear()
+    with respx.mock(assert_all_mocked=False) as router:
+        router.post(TR_URL).mock(
+            side_effect=_tr_side_effect(
+                [
+                    _tr_row(
+                        files=[
+                            {"name": "目录名/子目录/a.mkv"},
+                            {"name": "目录名/b.mkv"},
+                        ]
+                    ),
+                    _tr_row(hashString="2" * 40, files=[{"name": "单文件.mkv"}]),
+                ]
+            )
+        )
+        adapter = TransmissionAdapter("tr", TR_BASE_URL, "u", "p")
+        rows = await adapter.list_torrents_with_errors()
+
+    assert rows[0]["top_names"] == ["目录名"], "同目录的多个文件只取一次顶层名"
+    assert rows[1]["top_names"] == ["单文件.mkv"]
+    # 请求里必须带上 files 字段
+    assert "files" in _TR_REQUESTED_FIELDS[0]
+
+
+@pytest.mark.asyncio
+async def test_qb_list_with_errors_returns_top_names() -> None:
+    """qB：``top_names`` = ``content_path`` 相对 ``save_path`` 的首段。
+
+    实测 7296/7296 全部可取。**不能**用 ``content_path`` 的倒数第二段——
+    单文件种子时那是父目录名（实测 3665 个种子会错）。
+    """
+    from app.adapters.downloaders.qbittorrent import QbittorrentAdapter
+
+    with respx.mock(assert_all_mocked=False) as router:
+        router.get(f"{QB_URL}/api/v2/torrents/info").mock(
+            return_value=httpx_response(
+                [
+                    _qb_row(
+                        save_path="/downloads",
+                        content_path="/downloads/根目录/子目录/a.mkv",
+                    ),
+                    _qb_row(
+                        hash="b" * 40,
+                        save_path="/downloads",
+                        content_path="/downloads/单文件.mkv",
+                    ),
+                ]
+            )
+        )
+        adapter = QbittorrentAdapter("qb", QB_URL, "u", "p")
+        rows = await adapter.list_torrents_with_errors()
+
+    assert rows[0]["top_names"] == ["根目录"]
+    assert rows[1]["top_names"] == ["单文件.mkv"]
+
+
+def test_qb_top_names_handles_edge_cases() -> None:
+    """qB 顶层名提取的边界：空路径 / 不在 save_path 下 / 结尾斜杠。"""
+    from app.adapters.downloaders.qbittorrent import _qb_top_names
+
+    assert _qb_top_names("", "/downloads") == []
+    # 结尾斜杠要被去掉
+    assert _qb_top_names("/downloads/dir/", "/downloads") == ["dir"]
+    # 相对 save_path 的首段
+    assert _qb_top_names("/downloads/a/b.mkv", "/downloads") == ["a"]
+    # content_path 不在 save_path 下 → 首段为空（绝对路径以 / 开头）
+    # → 返回空列表（**不猜**）
+    assert _qb_top_names("/other/a.mkv", "/downloads") == []

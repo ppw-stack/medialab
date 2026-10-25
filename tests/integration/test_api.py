@@ -556,6 +556,55 @@ async def test_cross_seed_space_empty(client: httpx.AsyncClient) -> None:
     assert data["summary"]["disk_free_bytes"] is None
 
 
+async def test_cross_seed_orphans_empty(client: httpx.AsyncClient) -> None:
+    """没扫过 → 空汇总。"""
+    resp = await client.get("/api/v1/cross-seed-monitor/orphans")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["downloaders"] == []
+    assert data["summary"]["orphan_count"] == 0
+
+
+async def test_cross_seed_orphans_with_row(client: httpx.AsyncClient) -> None:
+    """孤儿统计：含数量、字节与明细。"""
+    from app.db.models import CrossSeedOrphan
+
+    dl_id = await _add_cross_seed_downloader("dl1")
+    async with session_scope() as session:
+        session.add(
+            CrossSeedOrphan(
+                downloader_id=dl_id,
+                downloader_name="dl1",
+                scanned_at="2026-10-25 04:07:00",
+                orphan_count=2,
+                orphan_bytes=527 * 1024**3,
+                total_scan_bytes=21 * 1024**4,
+                total_scan_count=1669,
+                orphans=[
+                    {
+                        "name": "orphan-a",
+                        "path": "/mnt/cross-seed-data/辅种/orphan-a",
+                        "bytes": 100,
+                        "file_count": 3,
+                    }
+                ],
+            )
+        )
+        await session.flush()
+
+    resp = await client.get("/api/v1/cross-seed-monitor/orphans")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["downloaders"]) == 1
+    row = data["downloaders"][0]
+    assert row["orphan_count"] == 2
+    assert row["orphan_bytes"] == 527 * 1024**3
+    assert row["total_scan_count"] == 1669
+    assert row["error"] is None
+    assert len(row["orphans"]) == 1
+    assert data["summary"]["orphan_count"] == 2
+
+
 async def test_cross_seed_space_with_snapshot(client: httpx.AsyncClient) -> None:
     """空间汇总：含磁盘剩余与辅种占用。"""
     from app.db.models import CrossSeedSnapshot

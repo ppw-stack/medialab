@@ -36,11 +36,15 @@ services:
       # WAL 会在数据目录留 -wal/-shm 文件，Unraid 上备份/替换 .db 时
       # 容易漏掉这两个文件导致数据不一致。DELETE 模式每次提交即落盘。
       DB_JOURNAL_MODE: ${DB_JOURNAL_MODE:-DELETE}
+      # 辅种孤儿文件扫描的目录（容器内路径，对应上面挂载的 NAS 目录）
+      CROSS_SEED_SCAN_DIR: ${CROSS_SEED_SCAN_DIR:-/mnt/cross-seed-data/辅种}
     env_file:
       - .env.prod
     volumes:
       - /mnt/user/appdata/seedhelper/config:/app/config
       - /mnt/user/appdata/seedhelper/data:/app/data       # SQLite 库文件（prod 独立）
+      # 辅种站(172)的下载目录——用于统计孤儿文件（只读挂载）
+      - /mnt/remotes/192.168.0.172_Public/home/downloads:/mnt/cross-seed-data:ro
       - /mnt/user/appdata/seedhelper/logs:/app/logs
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]

@@ -104,6 +104,30 @@ def _completion_to_ts(value: object) -> int | None:
     return ts if ts > 0 else None
 
 
+def _qb_top_names(content_path: str, save_path: str) -> list[str]:
+    """从 qB 的 ``content_path`` 提取**顶层**名字（目录名或单文件名）。
+
+    qB 的 ``content_path`` 是绝对路径：
+    - 目录型种子：``<save_path>/<根目录>/<子目录>/<文件>`` → 顶层是根目录名
+    - 单文件种子：``<save_path>/<文件>`` → 顶层就是文件名
+
+    取**相对 save_path 的首段**（实测 7296/7296 全部可取）。不能用
+    ``content_path`` 的倒数第二段——单文件种子时那是父目录名，会把
+    同目录的多个种子混成一个（实测 3665 个种子会错）。
+
+    与 TR 的 ``files[].name`` 顶层段语义一致（见
+    :func:`app.adapters.downloaders.transmission._top_names`）。
+    """
+    if not content_path:
+        return []
+    path = content_path.rstrip("/")
+    base = save_path.rstrip("/")
+    if base and path.startswith(base + "/"):
+        path = path[len(base) + 1 :]
+    top = path.split("/", 1)[0]
+    return [top] if top else []
+
+
 class QbittorrentAdapter(DownloaderAdapter):
     """qBittorrent WebUI 适配器。"""
 
@@ -249,6 +273,11 @@ class QbittorrentAdapter(DownloaderAdapter):
                 "completed_bytes": int(row.get("completed") or 0),
                 # 下载目录（按目录统计占用用）
                 "save_path": row.get("save_path") or None,
+                # 顶层名（孤儿文件统计用）：相对 save_path 的首段
+                "top_names": _qb_top_names(
+                    str(row.get("content_path") or ""),
+                    str(row.get("save_path") or ""),
+                ),
             })
         return out
 

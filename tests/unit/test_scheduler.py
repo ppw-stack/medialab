@@ -143,6 +143,7 @@ def test_default_cron_covers_all_registered_jobs() -> None:
         "scan_cross_seed",
         "drain_task_queue",
         "daily_checkin",
+        "scan_orphans",
     }
 
 

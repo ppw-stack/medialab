@@ -82,6 +82,8 @@ _FIELDS_ALL: tuple[str, ...] = (
 #:
 #: ``haveValid`` / ``downloadDir`` 用于辅种空间统计（实际占用 + 按目录
 #: 分布）——与 :meth:`list_torrents` 的 ``_FIELDS_ALL`` 口径一致。
+#:
+#: ``files`` 用于孤儿文件统计（哪些顶层目录/文件属于这个种子）。
 _FIELDS_WITH_ERRORS: tuple[str, ...] = (
     "id",
     "hashString",
@@ -94,7 +96,29 @@ _FIELDS_WITH_ERRORS: tuple[str, ...] = (
     "rateUpload",
     "haveValid",       # 已校验有效的字节数（= 磁盘实际占用）
     "downloadDir",     # 下载目录（按目录统计占用用）
+    "files",           # 文件列表（孤儿文件统计用）
 )
+
+
+def _top_names(files: list[dict[str, Any]]) -> list[str]:
+    """从 TR 的 ``files`` 提取**顶层**名字（目录名或单文件名）。
+
+    TR 的 ``files[].name`` 是相对 ``downloadDir`` 的路径：
+    - 多文件种子：``"目录名/子目录/文件.mkv"`` → 顶层是 ``"目录名"``
+    - 单文件种子：``"文件.mkv"`` → 顶层就是它自己
+
+    孤儿判定只需顶层名（磁盘上的孤儿也是顶层条目），故不保留完整路径
+    ——辅种站有 15.8 万个文件条目，保留全路径会显著增大响应体。
+    """
+    out: list[str] = []
+    for f in files:
+        name = str(f.get("name") or "")
+        if not name:
+            continue
+        top = name.split("/", 1)[0]
+        if top and top not in out:
+            out.append(top)
+    return out
 
 
 class TransmissionAdapter(DownloaderAdapter):
@@ -468,6 +492,12 @@ class TransmissionAdapter(DownloaderAdapter):
                 "completed_bytes": int(row.get("haveValid") or 0),
                 # 下载目录（按目录统计占用用）
                 "save_path": row.get("downloadDir") or None,
+                # 文件名列表（相对 downloadDir；孤儿文件统计用）。
+                #
+                # 只取**顶层名**——孤儿判定只需知道「这个种子占了哪些顶层
+                # 目录/文件」。完整路径列表会显著增大响应体（辅种站
+                # 15.8 万个文件条目），而顶层名只需 1685 个。
+                "top_names": _top_names(row.get("files") or []),
             })
         return out
 

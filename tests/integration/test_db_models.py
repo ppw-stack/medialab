@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 from app.db.models import (
+    CrossSeedOrphan,
     CrossSeedSnapshot,
     DownloaderInstance,
     Site,
@@ -41,6 +42,7 @@ async def test_create_all_builds_expected_tables(db: None) -> None:
         "scheduler_job_settings",
         "site_user_data",
         "cross_seed_snapshot",
+        "cross_seed_orphan",
     }
     assert expected <= tables
 
@@ -176,6 +178,29 @@ async def test_unmarking_cross_seed_deletes_snapshot(db: None) -> None:
     async with session_scope() as session:
         rows = (await session.execute(select(CrossSeedSnapshot))).scalars().all()
         assert rows == []
+
+
+async def test_cross_seed_orphan_unique_downloader_id(db: None) -> None:
+    """孤儿统计每下载器一行（UNIQUE downloader_id）——当前快照语义。"""
+    async with session_scope() as session:
+        dl = DownloaderInstance(
+            name="dl1", type="qbittorrent", url="http://x", is_cross_seed=True
+        )
+        session.add(dl)
+        await session.flush()
+        session.add(CrossSeedOrphan(downloader_id=dl.id))
+        await session.flush()
+
+    with pytest.raises(IntegrityError):
+        async with session_scope() as session:
+            dl = (
+                await session.execute(
+                    select(DownloaderInstance).where(
+                        DownloaderInstance.name == "dl1"
+                    )
+                )
+            ).scalar_one()
+            session.add(CrossSeedOrphan(downloader_id=dl.id))
 
 
 # ------------------------------------------------------------------ 枚举

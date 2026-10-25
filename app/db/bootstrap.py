@@ -165,6 +165,8 @@ _ALTER_STATEMENTS: tuple[tuple[str, str], ...] = (
         "add_column",
         "ALTER TABLE cross_seed_snapshot ADD COLUMN by_dir JSON",
     ),
+    # 注：辅种孤儿统计表 ``cross_seed_orphan`` 是本次**新加**的表——
+    # ``create_all`` 会直接建，老库不需要 ALTER 迁移。
 )
 
 #: 独立创建的索引（不随上面的 ALTER 循环走）

@@ -47,6 +47,9 @@ DEFAULT_CRON: dict[str, str] = {
     "scan_cross_seed": "2,32 * * * *",
     "drain_task_queue": "*/5 * * * *",
     "daily_checkin": "37 8 * * *",
+    # 孤儿文件扫描：辅种站全量扫盘实测 39 秒（1669 目录 / 3.6 万文件），
+    # 每天一次足够——孤儿不会快速变化。分钟位 7 避开所有多 5 分钟的作业。
+    "scan_orphans": "7 4 * * *",
 }
 
 
@@ -96,6 +99,11 @@ def register_jobs(factory: AdapterFactory) -> None:
         "daily_checkin",
         lambda: _run_and_return(_run_daily_checkin(factory)),
         "站点签到",
+    )
+    _register(
+        "scan_orphans",
+        lambda: _run_and_return(_run_scan_orphans()),
+        "辅种孤儿文件扫描",
     )
 
 
@@ -188,6 +196,13 @@ async def _run_daily_checkin(factory: AdapterFactory) -> dict[str, object]:
     from app.services.checkin import refresh_all_sites
 
     return await refresh_all_sites(factory)
+
+
+async def _run_scan_orphans() -> dict[str, object]:
+    """执行辅种孤儿文件扫描（磁盘有、任务没了）。"""
+    from app.services.cross_seed_orphan import run_scan_orphans
+
+    return await run_scan_orphans()
 
 
 async def _run_and_return(result: Awaitable[object]) -> object:
