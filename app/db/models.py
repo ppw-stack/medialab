@@ -373,8 +373,17 @@ class CrossSeedOrphan(Base):
     total_scan_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     #: 扫描目录里的顶层条目总数
     total_scan_count: Mapped[int] = mapped_column(Integer, default=0)
-    #: 孤儿明细（JSON 数组：``[{name, path, bytes, file_count}]``）
+    #: 孤儿明细（JSON 数组：
+    #: ``[{name, path, bytes, file_count, scan_dir}]``）
     orphans: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
+    #: 空目录孤儿数（0 文件）——它们是残留但**不占空间**
+    empty_dir_count: Mapped[int] = mapped_column(Integer, default=0)
+    #: 逐目录的扫描统计（JSON 数组：
+    #: ``[{scan_dir, total_count, orphan_count, orphan_bytes,
+    #: empty_dir_count, owned_count}]``）
+    scanned_dirs: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON, default=list
+    )
     #: 扫描不可用时的原因（NULL = 扫描成功）
     #: 例：目录未挂载 / 不可读 ——**不静默失败**，前端据此显示原因
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

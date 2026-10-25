@@ -22,7 +22,7 @@ from app.core.timeutils import bj_now
 from app.db.models import CrossSeedOrphan, DownloaderInstance
 from app.db.session import session_scope
 from app.services.factory import get_factory
-from app.services.orphan_scanner import failed_scan, scan_orphans
+from app.services.orphan_scanner import failed_scan, parse_scan_dirs, scan_orphans
 from app.services.scheduler import JobStep
 
 logger = get_logger(__name__)
@@ -46,6 +46,10 @@ class OrphanRow:
     orphan_bytes: int
     total_scan_bytes: int
     total_scan_count: int
+    #: 空目录孤儿数（0 文件）——残留但**不占空间**
+    empty_dir_count: int = 0
+    #: 逐目录的扫描统计
+    scanned_dirs: list[dict[str, Any]] = field(default_factory=list)
     orphans: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
 
@@ -58,6 +62,8 @@ class OrphanRow:
             "orphan_bytes": self.orphan_bytes,
             "total_scan_bytes": self.total_scan_bytes,
             "total_scan_count": self.total_scan_count,
+            "empty_dir_count": self.empty_dir_count,
+            "scanned_dirs": self.scanned_dirs,
             "orphans": self.orphans,
             "error": self.error,
         }
@@ -80,6 +86,8 @@ async def list_orphans() -> list[OrphanRow]:
             orphan_bytes=r.orphan_bytes,
             total_scan_bytes=r.total_scan_bytes,
             total_scan_count=r.total_scan_count,
+            empty_dir_count=r.empty_dir_count,
+            scanned_dirs=list(r.scanned_dirs or []),
             orphans=list(r.orphans or []),
             error=r.error,
         )
@@ -96,6 +104,8 @@ async def _upsert(downloader_id: int, name: str, result: Any) -> None:
         "orphan_bytes": result.orphan_bytes,
         "total_scan_bytes": result.total_bytes,
         "total_scan_count": result.total_count,
+        "empty_dir_count": result.empty_dir_count,
+        "scanned_dirs": result.scanned_dirs,
         "orphans": [o.to_dict() for o in result.orphans],
         "error": result.error,
     }
@@ -120,8 +130,8 @@ async def scan_one_downloader(row: DownloaderInstance) -> dict[str, Any]:
     **网络 IO 在事务外**：拉任务 → 扫盘 → 短事务落库。
 
     拉取用 :meth:`DownloaderAdapter.list_torrents_with_errors`——它已含
-    ``top_names`` 字段（孤儿匹配要用的顶层名），**复用同一次全量拉取**，
-    不额外打接口（辅种站拉一次要 20s+）。
+    ``save_path``（= downloadDir）与 ``top_names`` 字段（孤儿匹配要用的
+    顶层名），**复用同一次全量拉取**，不额外打接口（辅种站拉一次要 20s+）。
     """
     factory = get_factory()
     adapter = factory.downloader(row)
@@ -133,8 +143,8 @@ async def scan_one_downloader(row: DownloaderInstance) -> dict[str, Any]:
         await _upsert(row.id, row.name, result)
         return result.to_dict()
 
-    scan_dir = get_settings().cross_seed_scan_dir or None
-    result = scan_orphans(torrents, scan_dir)
+    scan_dirs = parse_scan_dirs(get_settings().cross_seed_scan_dirs)
+    result = scan_orphans(torrents, scan_dirs)
     await _upsert(row.id, row.name, result)
     return result.to_dict()
 

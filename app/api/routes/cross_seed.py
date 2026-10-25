@@ -258,11 +258,13 @@ async def list_orphans() -> dict[str, Any]:
     rows = await _list()
     total_count = sum(r.orphan_count for r in rows)
     total_bytes = sum(r.orphan_bytes for r in rows)
+    empty_count = sum(r.empty_dir_count for r in rows)
     return {
         "summary": {
             "downloaders": len(rows),
             "orphan_count": total_count,
             "orphan_bytes": total_bytes,
+            "empty_dir_count": empty_count,
         },
         "downloaders": [r.to_dict() for r in rows],
     }

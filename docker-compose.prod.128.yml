@@ -37,14 +37,21 @@ services:
       # 容易漏掉这两个文件导致数据不一致。DELETE 模式每次提交即落盘。
       DB_JOURNAL_MODE: ${DB_JOURNAL_MODE:-DELETE}
       # 辅种孤儿文件扫描的目录（容器内路径，对应上面挂载的 NAS 目录）
-      CROSS_SEED_SCAN_DIR: ${CROSS_SEED_SCAN_DIR:-/mnt/cross-seed-data/辅种}
+      # 辅种孤儿文件扫描的目录（容器内路径 = 172 上的 downloadDir 同路径）
+      # 逗号分隔多个目录，每个目录独立扫描。路径必须与 downloadDir 完全一致。
+      CROSS_SEED_SCAN_DIRS: ${CROSS_SEED_SCAN_DIRS:-/share/Public/home/downloads/辅种}
     env_file:
       - .env.prod
     volumes:
       - /mnt/user/appdata/seedhelper/config:/app/config
       - /mnt/user/appdata/seedhelper/data:/app/data       # SQLite 库文件（prod 独立）
-      # 辅种站(172)的下载目录——用于统计孤儿文件（只读挂载）
-      - /mnt/remotes/192.168.0.172_Public/home/downloads:/mnt/cross-seed-data:ro
+      # 辅种站(172)的下载目录——用于统计孤儿文件（只读挂载）。
+      #
+      # ⚠️ 挂载点必须与下载器里的 downloadDir **完全同路径**
+      # （172 上是 /share/Public/home/downloads）。这样任务的绝对路径
+      # 能直接与磁盘上的绝对路径比对，不用做路径映射——映射一旦有偏差，
+      # 就会把所有条目误判成孤儿。
+      - /mnt/remotes/192.168.0.172_Public/home/downloads:/share/Public/home/downloads:ro
       - /mnt/user/appdata/seedhelper/logs:/app/logs
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]

@@ -41,15 +41,22 @@ class AppSettings(BaseSettings):
     # -- 路径 --
     data_dir: Path = Path("/app/data")
     log_dir: Path = Path("/app/logs")
-    #: 辅种站下载目录的**容器内**挂载路径（孤儿文件统计用）。
+    #: 辅种站下载目录的**容器内**扫描路径列表（孤儿文件统计用）。
+    #:
+    #: 逗号分隔的**多个**目录，每个目录独立扫描 + 独立统计。
     #:
     #: 辅种数据在另一台机器（192.168.0.172 的 NAS）上，seedhelper 容器
     #: 看不到它——除非把那个目录**只读**挂载进来。下载器本身没有浏览
     #: 文件系统的接口（TR 的 RPC spec 不提供 filesystem 浏览，qB 也没有
-    #: 列目录 API），故只能靠挂载 + 顶层名匹配来发现孤儿文件。
+    #: 列目录 API），故只能靠挂载 + 名称匹配来发现孤儿文件。
+    #:
+    #: **路径必须与下载器里的 downloadDir 完全一致**（TR 的 downloadDir
+    #: 原值，如 ``/share/Public/home/downloads/辅种``）。这样任务与磁盘
+    #: 条目才能按 downloadDir 分组对应——「这个目录归哪些任务管」决定了
+    #: 哪些磁盘条目算「有主」。路径映射一旦有偏差就会误判。
     #:
     #: 留空 = 不做孤儿扫描（该功能降级，前端显示「未启用」）。
-    cross_seed_scan_dir: str = ""
+    cross_seed_scan_dirs: str = ""
 
     # -- Web 面板（FR-6 / 非功能·安全性）--
     # 注：``web_host`` / ``web_port`` 曾在此处配置监听地址与端口，但

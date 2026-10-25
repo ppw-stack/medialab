@@ -43,7 +43,9 @@ class _FakeAdapter:
         return None
 
 
-def _torrent(top_names: list[str]) -> dict[str, object]:
+def _torrent(
+    top_names: list[str], save_path: str = "/mnt/cross-seed-data/辅种"
+) -> dict[str, object]:
     return {
         "id": 0,
         "hash": "a" * 40,
@@ -54,7 +56,8 @@ def _torrent(top_names: list[str]) -> dict[str, object]:
         "error_string": "",
         "state": "seeding",
         "completed_bytes": 1000,
-        "save_path": "/mnt/cross-seed-data/辅种",
+        # downloadDir —— 孤儿判定按它分组（只认同目录的任务）
+        "save_path": save_path,
         "top_names": top_names,
     }
 
@@ -107,7 +110,7 @@ def scan_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     d = tmp_path / "辅种"
     d.mkdir()
     settings = get_settings()
-    monkeypatch.setattr(settings, "cross_seed_scan_dir", str(d))
+    monkeypatch.setattr(settings, "cross_seed_scan_dirs", str(d))
     return str(d)
 
 
@@ -125,7 +128,11 @@ async def test_scan_writes_orphan_row(
     (root / "task_dir" / "b.mkv").write_bytes(b"\0" * 2000)
 
     dl_id = await _add_downloader("dl1")
-    _svc(monkeypatch, {dl_id: _FakeAdapter([_torrent(["task_dir"])])})
+    # 任务的 downloadDir 要与扫描目录**一致**（否则不算「有主」）
+    _svc(
+        monkeypatch,
+        {dl_id: _FakeAdapter([_torrent(["task_dir"], save_path=scan_dir)])},
+    )
 
     result = await run_scan_orphans()
 
@@ -145,6 +152,59 @@ async def test_scan_writes_orphan_row(
     assert row.error is None
     assert len(row.orphans) == 1
     assert row.orphans[0]["name"] == "orphan_dir"
+    # 逐目录统计
+    assert len(row.scanned_dirs) == 1
+    assert row.scanned_dirs[0]["scan_dir"] == scan_dir
+    assert row.scanned_dirs[0]["orphan_count"] == 1
+
+
+async def test_scan_counts_empty_dir_as_orphan(
+    db: None, monkeypatch: pytest.MonkeyPatch, scan_dir: str
+) -> None:
+    """**空目录也算孤儿**（0 字节），但单独计数。"""
+    root = Path(scan_dir)
+    (root / "empty_dir").mkdir()
+
+    dl_id = await _add_downloader("dl1")
+    _svc(monkeypatch, {dl_id: _FakeAdapter([])})
+
+    await run_scan_orphans()
+
+    rows = await _rows()
+    assert rows[0].orphan_count == 1
+    assert rows[0].empty_dir_count == 1
+    assert rows[0].orphan_bytes == 0
+
+
+async def test_scan_multiple_dirs(
+    db: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """多个配置目录 → 各自独立扫描 + 独立统计。"""
+    from app.core.config import get_settings
+
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    (a / "orphan_a").mkdir()
+    (a / "orphan_a" / "x").write_bytes(b"\0" * 100)
+    (b / "owned_b").mkdir()
+    (b / "owned_b" / "y").write_bytes(b"\0" * 200)
+
+    monkeypatch.setattr(get_settings(), "cross_seed_scan_dirs", f"{a},{b}")
+
+    dl_id = await _add_downloader("dl1")
+    _svc(
+        monkeypatch,
+        {dl_id: _FakeAdapter([_torrent(["owned_b"], save_path=str(b))])},
+    )
+
+    await run_scan_orphans()
+
+    rows = await _rows()
+    assert rows[0].orphan_count == 1
+    assert rows[0].orphans[0]["name"] == "orphan_a"
+    assert len(rows[0].scanned_dirs) == 2
 
 
 async def test_scan_is_upsert(
@@ -178,7 +238,7 @@ async def test_scan_dir_missing_records_error(
     from app.core.config import get_settings
 
     monkeypatch.setattr(
-        get_settings(), "cross_seed_scan_dir", "/nonexistent/辅种"
+        get_settings(), "cross_seed_scan_dirs", "/nonexistent/辅种"
     )
     dl_id = await _add_downloader("dl1")
     _svc(monkeypatch, {dl_id: _FakeAdapter([_torrent([])])})
@@ -199,7 +259,7 @@ async def test_scan_dir_not_configured_records_error(
     """未配置扫描目录 → 记 error（前端显示「未启用」）。"""
     from app.core.config import get_settings
 
-    monkeypatch.setattr(get_settings(), "cross_seed_scan_dir", "")
+    monkeypatch.setattr(get_settings(), "cross_seed_scan_dirs", "")
     dl_id = await _add_downloader("dl1")
     _svc(monkeypatch, {dl_id: _FakeAdapter([_torrent([])])})
 

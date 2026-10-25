@@ -8,6 +8,7 @@ import type {
   CrossSeedDownloader,
   CrossSeedOrphan,
   CrossSeedOrphanSummary,
+  CrossSeedScannedDir,
   CrossSeedSnapshot,
   CrossSeedSnapshotHeader,
   CrossSeedSnapshotList,
@@ -83,6 +84,15 @@ const orphanColumns = [
   { title: '条目名', dataIndex: 'name', key: 'name', ellipsis: true, minWidth: 320 },
   { title: '占用', dataIndex: 'bytes', key: 'bytes', width: 140 },
   { title: '文件数', dataIndex: 'file_count', key: 'file_count', width: 100 },
+]
+
+const scannedDirColumns = [
+  { title: '扫描目录', dataIndex: 'scan_dir', key: 'scan_dir', ellipsis: true, minWidth: 320 },
+  { title: '顶层条目', dataIndex: 'total_count', key: 'total_count', width: 100 },
+  { title: '有主', dataIndex: 'owned_count', key: 'owned_count', width: 90 },
+  { title: '孤儿', dataIndex: 'orphan_count', key: 'orphan_count', width: 90 },
+  { title: '其中空目录', dataIndex: 'empty_dir_count', key: 'empty_dir_count', width: 110 },
+  { title: '孤儿占用', dataIndex: 'orphan_bytes', key: 'orphan_bytes', width: 140 },
 ]
 
 /** 孤儿文件统计（定时作业写入，页面只读 DB） */
@@ -521,6 +531,11 @@ onMounted(async () => {
                   </div>
                 </div>
                 <div class="space-tile">
+                  <div class="space-tile__label">其中空目录</div>
+                  <div class="space-tile__value">{{ currentOrphan.empty_dir_count }}</div>
+                  <div class="space-tile__hint">0 字节残留，不占空间</div>
+                </div>
+                <div class="space-tile">
                   <div class="space-tile__label">占扫描目录</div>
                   <div class="space-tile__value">
                     {{ orphanRatio === null ? '—' : `${(orphanRatio * 100).toFixed(2)}%` }}
@@ -531,6 +546,26 @@ onMounted(async () => {
                   </div>
                 </div>
               </div>
+
+              <!-- 逐目录统计（多路径配置时每个目录一行） -->
+              <a-table
+                v-if="currentOrphan.scanned_dirs.length > 1"
+                :columns="scannedDirColumns"
+                :data-source="currentOrphan.scanned_dirs"
+                :row-key="(r: CrossSeedScannedDir) => r.scan_dir"
+                :pagination="false"
+                size="small"
+                style="margin-top: var(--sp-3)"
+              >
+                <template #bodyCell="{ column, record }">
+                  <template v-if="column.key === 'scan_dir'">
+                    <span class="name-cell mono">{{ (record as CrossSeedScannedDir).scan_dir }}</span>
+                  </template>
+                  <template v-else-if="column.key === 'orphan_bytes'">
+                    {{ fmtBytes((record as CrossSeedScannedDir).orphan_bytes) }}
+                  </template>
+                </template>
+              </a-table>
 
               <a-alert
                 v-if="currentOrphan.orphan_count"

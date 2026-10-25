@@ -301,10 +301,24 @@ export interface CrossSeedOrphan {
   name: string
   /** 绝对路径。 */
   path: string
-  /** 占用字节数。 */
+  /** 占用字节数（空目录为 0）。 */
   bytes: number
-  /** 包含的文件数。 */
+  /** 包含的文件数（0 = 空目录）。 */
   file_count: number
+  /** 该条目属于哪个扫描目录（= 下载器的 downloadDir）。 */
+  scan_dir: string
+}
+
+/** 单个扫描目录的统计。 */
+export interface CrossSeedScannedDir {
+  scan_dir: string
+  total_count: number
+  orphan_count: number
+  orphan_bytes: number
+  /** 空目录孤儿数（0 文件）——残留但不占空间。 */
+  empty_dir_count: number
+  /** 该目录下「有主」的顶层名数（下载器任务覆盖的条目）。 */
+  owned_count: number
 }
 
 /** 单个辅种下载器的孤儿统计。 */
@@ -316,6 +330,10 @@ export interface CrossSeedOrphanStat {
   orphan_bytes: number
   total_scan_bytes: number
   total_scan_count: number
+  /** 空目录孤儿数（0 文件）——残留但不占空间。 */
+  empty_dir_count: number
+  /** 逐目录的扫描统计。 */
+  scanned_dirs: CrossSeedScannedDir[]
   orphans: CrossSeedOrphan[]
   /** 扫描失败的原因（null = 成功）。 */
   error: string | null
@@ -327,6 +345,7 @@ export interface CrossSeedOrphanSummary {
     downloaders: number
     orphan_count: number
     orphan_bytes: number
+    empty_dir_count: number
   }
   downloaders: CrossSeedOrphanStat[]
 }
