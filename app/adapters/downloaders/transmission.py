@@ -2,7 +2,8 @@
 
 协议：HTTP/HTTPS POST /transmission/rpc，header ``X-Transmission-Session-Id``。
 认证：HTTP Basic（username/password）。
-契约：基类 5(含抽象 remove/set_pause) + list_torrents_with_errors + close 全部实现；不引入能力声明。
+契约：基类 5(含抽象 remove/set_pause) + list_torrents_with_errors
++ list_torrent_file_names + close 全部实现；不引入能力声明。
 差异（与 qBittorrent）：
     - add_torrent **不支持同时多个** URL/magnet（决策 1，硬拒收）
     - 无原生 RSS（FR-1 由本系统自拉补齐）
@@ -23,6 +24,7 @@ from app.adapters.downloaders.base import (
     DiskSpace,
     DownloaderAdapter,
     DownloaderError,
+    TorrentFileNames,
     TorrentFilter,
     TorrentHandle,
     TorrentInfo,
@@ -44,6 +46,10 @@ logger = get_logger(__name__)
 BULK_TIMEOUT = 180.0
 
 #: list_torrents 一次拉取的字段全集
+#:
+#: **不含** ``files`` / ``fileStats``——:class:`TorrentInfo` 没有这两个
+#: 字段，拉了完全用不上，而响应体会因此膨胀到 27 MB+（辅种站实测）。
+#: 需要文件列表的孤儿统计走 :meth:`list_torrent_file_names`。
 _FIELDS_ALL: tuple[str, ...] = (
     "id",
     "hashString",
@@ -62,8 +68,6 @@ _FIELDS_ALL: tuple[str, ...] = (
     "rateUpload",
     "secondsDownloading",
     "secondsSeeding",
-    "files",
-    "fileStats",
     # 与 qBittorrent 视图对齐（FR-1.1 统一契约）。
     "labels",                # TR 用「labels」承载原自定义标签
     "uploadRatio",           # 上传/下载比
@@ -83,7 +87,9 @@ _FIELDS_ALL: tuple[str, ...] = (
 #: ``haveValid`` / ``downloadDir`` 用于辅种空间统计（实际占用 + 按目录
 #: 分布）——与 :meth:`list_torrents` 的 ``_FIELDS_ALL`` 口径一致。
 #:
-#: ``files`` 用于孤儿文件统计（哪些顶层目录/文件属于这个种子）。
+#: **不含** ``files``：文件列表的响应体极大（辅种站 15.8 万个文件条目，
+#: 占响应体 98%），而本方法只要 status / 占用。顶层名（孤儿统计用）
+#: 由 :meth:`list_torrent_file_names` 单独拉取。
 _FIELDS_WITH_ERRORS: tuple[str, ...] = (
     "id",
     "hashString",
@@ -96,7 +102,15 @@ _FIELDS_WITH_ERRORS: tuple[str, ...] = (
     "rateUpload",
     "haveValid",       # 已校验有效的字节数（= 磁盘实际占用）
     "downloadDir",     # 下载目录（按目录统计占用用）
-    "files",           # 文件列表（孤儿文件统计用）
+)
+
+#: 孤儿文件统计专用：拉顶层名所需的字段。
+#:
+#: 只有 :meth:`TransmissionAdapter.list_torrent_file_names` 用它。
+_FIELDS_FILE_NAMES: tuple[str, ...] = (
+    "hashString",
+    "downloadDir",     # 下载目录（孤儿判定按它分组）
+    "files",           # 文件列表（算顶层名）
 )
 
 
@@ -492,13 +506,36 @@ class TransmissionAdapter(DownloaderAdapter):
                 "completed_bytes": int(row.get("haveValid") or 0),
                 # 下载目录（按目录统计占用用）
                 "save_path": row.get("downloadDir") or None,
-                # 文件名列表（相对 downloadDir；孤儿文件统计用）。
-                #
-                # 只取**顶层名**——孤儿判定只需知道「这个种子占了哪些顶层
-                # 目录/文件」。完整路径列表会显著增大响应体（辅种站
-                # 15.8 万个文件条目），而顶层名只需 1685 个。
-                "top_names": _top_names(row.get("files") or []),
             })
+        return out
+
+    async def list_torrent_file_names(self) -> list[TorrentFileNames]:
+        """拉取每个种子的顶层文件名（孤儿文件统计专用）。
+
+        **单独一次 RPC**：``files`` 字段的响应体在辅种站是 27.5 MB
+        （15.8 万个文件条目，占全量响应的 98%）。混进
+        :meth:`list_torrents_with_errors` 会让每次辅种巡查（30 分钟一次）
+        都白拉这 27 MB——巡查本身并不需要文件列表。
+
+        只保留**顶层名**（相对 downloadDir 的第一段）：孤儿判定只需知道
+        「这个种子占了哪些顶层目录/文件」，完整路径列表会更大。
+
+        超时用 :data:`BULK_TIMEOUT`（辅种站全量拉取实测 20s+）。
+        """
+        resp = await self._rpc(
+            "torrent-get",
+            {"fields": list(_FIELDS_FILE_NAMES)},
+            http_timeout=BULK_TIMEOUT,
+        )
+        out: list[TorrentFileNames] = []
+        for row in resp.get("torrents") or []:
+            out.append(
+                TorrentFileNames(
+                    hash=str(row.get("hashString") or ""),
+                    save_path=row.get("downloadDir") or None,
+                    top_names=tuple(_top_names(row.get("files") or [])),
+                )
+            )
         return out
 
     async def get_disk_space(self, path: str | None = None) -> DiskSpace:

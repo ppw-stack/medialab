@@ -129,14 +129,20 @@ async def scan_one_downloader(row: DownloaderInstance) -> dict[str, Any]:
 
     **网络 IO 在事务外**：拉任务 → 扫盘 → 短事务落库。
 
-    拉取用 :meth:`DownloaderAdapter.list_torrents_with_errors`——它已含
-    ``save_path``（= downloadDir）与 ``top_names`` 字段（孤儿匹配要用的
-    顶层名），**复用同一次全量拉取**，不额外打接口（辅种站拉一次要 20s+）。
+    拉取用 :meth:`DownloaderAdapter.list_torrent_file_names`——它给出
+    每个种子的顶层名**与**它的 downloadDir（孤儿匹配按 downloadDir 分组
+    所需的两样都在里面），**只打一次**下载器接口。
+
+    为什么不用 :meth:`DownloaderAdapter.list_torrents_with_errors`：顶层名
+    需要下载器的**文件列表**才能算出，而 TR 的 ``files`` 字段在辅种站是
+    27.5 MB（15.8 万个文件条目）。混进巡查路径会让每次辅种巡查
+    （30 分钟一次）都白拉这 27 MB——巡查并不需要文件列表。故拆成独立
+    方法，只有本作业（每天一次）付这个代价。
     """
     factory = get_factory()
     adapter = factory.downloader(row)
     try:
-        torrents = await adapter.list_torrents_with_errors()
+        files = await adapter.list_torrent_file_names()
     except Exception as exc:
         logger.warning("辅种下载器 %s 拉取失败（孤儿扫描跳过）：%s", row.name, exc)
         result = failed_scan(str(exc) or type(exc).__name__)
@@ -144,7 +150,7 @@ async def scan_one_downloader(row: DownloaderInstance) -> dict[str, Any]:
         return result.to_dict()
 
     scan_dirs = parse_scan_dirs(get_settings().cross_seed_scan_dirs)
-    result = scan_orphans(torrents, scan_dirs)
+    result = scan_orphans(files, scan_dirs)
     await _upsert(row.id, row.name, result)
     return result.to_dict()
 

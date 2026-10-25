@@ -10,6 +10,8 @@
 附加可选：
 - close: 释放连接池（优雅停机用）
 - list_torrents_with_errors: 拉取全量种子 + 归一化错误信息（辅种巡查用）
+- list_torrent_file_names: 拉取每个种子的顶层文件名（孤儿文件统计用）
+- get_disk_space: 查询磁盘空间（辅种空间统计用）
 
 设计约束（FR-1.3）：子类**必须**实现全部抽象方法，不支持的能力返回安全默认值。
 """
@@ -175,6 +177,22 @@ class TorrentInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class TorrentFileNames:
+    """一个种子的顶层文件名（孤儿文件统计用）。
+
+    :attr:`save_path` 是该种子的下载目录（TR 的 ``downloadDir`` /
+    qB 的 ``save_path``）——孤儿判定按它把任务分组到各自的目录下。
+    """
+
+    #: infohash（40 位 hex）
+    hash: str
+    #: 下载目录（= downloadDir）
+    save_path: str | None = None
+    #: 顶层文件名列表（相对 save_path 的第一段）
+    top_names: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class TorrentFilter:
     """任务列表过滤条件（list_torrents 入参）。"""
 
@@ -301,8 +319,33 @@ class DownloaderAdapter(ABC):
             f"{self.client_type} 适配器暂不支持 list_torrents_with_errors"
         )
 
+    async def list_torrent_file_names(self) -> list[TorrentFileNames]:
+        """7. 拉取每个种子的**顶层文件名**（孤儿文件统计专用）。
+
+        顶层名是相对该种子 ``save_path``（= downloadDir）的第一段路径：
+
+        - 目录型种子：``"目录名/子目录/文件.mkv"`` → ``["目录名"]``
+        - 单文件种子：``"文件.mkv"`` → ``["文件.mkv"]``
+
+        **为什么单独一个方法**：顶层名需要下载器的**文件列表**才能算出，
+        而文件列表的响应体极大——Transmission 的 ``files`` 字段在辅种站
+        有 15.8 万个文件条目，占响应体 98%（27.5 MB / 27.5 MB）。把它
+        混进 :meth:`list_torrents_with_errors` 会让**每次**辅种巡查
+        （30 分钟一次）都白拉 27 MB，而巡查本身只要 status / 占用等。
+
+        故拆成独立方法：只有孤儿扫描作业（每天一次）才付这个代价。
+
+        本方法**自带** ``save_path``——孤儿扫描据此按 downloadDir 分组，
+        无需再调 :meth:`list_torrents_with_errors`（省一次全量拉取）。
+
+        不支持时抛 :class:`NotImplementedError`。
+        """
+        raise NotImplementedError(
+            f"{self.client_type} 适配器暂不支持 list_torrent_file_names"
+        )
+
     async def get_disk_space(self, path: str | None = None) -> DiskSpace:
-        """7. 查询下载器所在磁盘的空间信息（辅种空间统计用）。
+        """8. 查询下载器所在磁盘的空间信息（辅种空间统计用）。
 
         :param path: 参考目录——用于定位**哪个分区**（同一个盘上不同
             挂载点可能不同）。None = 用下载器默认位置。

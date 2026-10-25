@@ -13,6 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from app.adapters.downloaders.base import TorrentFileNames
 from app.db.models import CrossSeedOrphan, DownloaderInstance
 from app.db.session import session_scope
 from app.services.cross_seed_orphan import list_orphans, run_scan_orphans
@@ -38,6 +39,20 @@ class _FakeAdapter:
         if self.fail:
             raise RuntimeError("下载器不可达")
         return list(self._torrents)
+
+    async def list_torrent_file_names(self) -> list[TorrentFileNames]:
+        """孤儿扫描用的顶层名 + downloadDir。"""
+        self.list_calls += 1
+        if self.fail:
+            raise RuntimeError("下载器不可达")
+        return [
+            TorrentFileNames(
+                hash=str(t.get("hash") or ""),
+                save_path=str(t.get("save_path") or "") or None,
+                top_names=tuple(t.get("top_names") or ()),  # type: ignore[arg-type]
+            )
+            for t in self._torrents
+        ]
 
     async def close(self) -> None:
         return None
@@ -283,6 +298,24 @@ async def test_downloader_failure_records_error(
     assert result["orphan_count"] == 0
     rows = await _rows()
     assert rows[0].error is not None
+
+
+async def test_scan_uses_only_one_downloader_call(
+    db: None, monkeypatch: pytest.MonkeyPatch, scan_dir: str
+) -> None:
+    """孤儿扫描**只打一次**下载器接口。
+
+    顶层名与 downloadDir 由 :meth:`list_torrent_file_names` 一并给出，
+    不需要再调 :meth:`list_torrents_with_errors`——后者会白拉 TR 的
+    ``files`` 字段（辅种站 27.5 MB）。
+    """
+    dl_id = await _add_downloader("dl1")
+    adapter = _FakeAdapter([_torrent(["task_dir"], save_path=scan_dir)])
+    _svc(monkeypatch, {dl_id: adapter})
+
+    await run_scan_orphans()
+
+    assert adapter.list_calls == 1, "只该调一次下载器接口"
 
 
 async def test_no_cross_seed_downloaders(

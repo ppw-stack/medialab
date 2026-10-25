@@ -14,6 +14,7 @@ from app.adapters.downloaders.base import (
     DiskSpace,
     DownloaderAdapter,
     DownloaderError,
+    TorrentFileNames,
     TorrentFilter,
     TorrentHandle,
     TorrentInfo,
@@ -273,12 +274,40 @@ class QbittorrentAdapter(DownloaderAdapter):
                 "completed_bytes": int(row.get("completed") or 0),
                 # 下载目录（按目录统计占用用）
                 "save_path": row.get("save_path") or None,
-                # 顶层名（孤儿文件统计用）：相对 save_path 的首段
-                "top_names": _qb_top_names(
-                    str(row.get("content_path") or ""),
-                    str(row.get("save_path") or ""),
-                ),
             })
+        return out
+
+    async def list_torrent_file_names(self) -> list[TorrentFileNames]:
+        """拉取每个种子的顶层文件名（孤儿文件统计专用）。
+
+        qB 的 ``/torrents/info`` **本来就返回** ``content_path`` 与
+        ``save_path``——顶层名直接由这两者算出，**无需额外请求**
+        （TR 需要额外的 ``files`` 字段，故那边响应体大得多）。
+
+        超时用 :data:`BULK_TIMEOUT`（辅种站全量拉取实测 20s+）。
+        """
+        try:
+            rows: list[dict[str, Any]] = await self._qb.list_torrents(
+                http_timeout=BULK_TIMEOUT
+            )
+        except Qb5ApiError as exc:
+            raise DownloaderError(str(exc), transient=exc.transient) from exc
+
+        out: list[TorrentFileNames] = []
+        for row in rows:
+            save_path = row.get("save_path") or None
+            out.append(
+                TorrentFileNames(
+                    hash=str(row.get("hash", "")),
+                    save_path=str(save_path) if save_path else None,
+                    top_names=tuple(
+                        _qb_top_names(
+                            str(row.get("content_path") or ""),
+                            str(save_path or ""),
+                        )
+                    ),
+                )
+            )
         return out
 
     async def get_disk_space(self, path: str | None = None) -> DiskSpace:

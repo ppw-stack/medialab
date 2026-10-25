@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.adapters.downloaders.base import TorrentFileNames
 from app.services.orphan_scanner import (
     failed_scan,
     parse_scan_dirs,
@@ -24,14 +25,13 @@ from app.services.orphan_scanner import (
 def _torrent(
     top_names: list[str],
     save_path: str = "/data/aux",
-) -> dict[str, object]:
+) -> TorrentFileNames:
     """构造一条带顶层名与 downloadDir 的种子记录。"""
-    return {
-        "hash": "a" * 40,
-        "name": "x",
-        "save_path": save_path,
-        "top_names": top_names,
-    }
+    return TorrentFileNames(
+        hash="a" * 40,
+        save_path=save_path,
+        top_names=tuple(top_names),
+    )
 
 
 def _make_tree(root: Path, spec: dict[str, int]) -> None:

@@ -431,11 +431,13 @@ async def test_tr_bulk_list_uses_long_timeout() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tr_list_with_errors_returns_top_names() -> None:
-    """TR：``top_names`` = ``files[].name`` 的顶层段（孤儿匹配用）。
+async def test_tr_list_torrent_file_names_returns_top_names() -> None:
+    """TR：``list_torrent_file_names`` 的顶层名 = ``files[].name`` 的首段。
 
     - 多文件种子：``"目录名/子目录/文件.mkv"`` → ``"目录名"``
     - 单文件种子：``"文件.mkv"`` → ``"文件.mkv"``
+
+    同时带上该种子的 downloadDir（孤儿判定按它分组）。
     """
     from app.adapters.downloaders.transmission import TransmissionAdapter
 
@@ -445,30 +447,82 @@ async def test_tr_list_with_errors_returns_top_names() -> None:
             side_effect=_tr_side_effect(
                 [
                     _tr_row(
+                        downloadDir="/downloads",
                         files=[
                             {"name": "目录名/子目录/a.mkv"},
                             {"name": "目录名/b.mkv"},
-                        ]
+                        ],
                     ),
-                    _tr_row(hashString="2" * 40, files=[{"name": "单文件.mkv"}]),
+                    _tr_row(
+                        hashString="2" * 40,
+                        downloadDir="/downloads",
+                        files=[{"name": "单文件.mkv"}],
+                    ),
                 ]
             )
         )
         adapter = TransmissionAdapter("tr", TR_BASE_URL, "u", "p")
-        rows = await adapter.list_torrents_with_errors()
+        rows = await adapter.list_torrent_file_names()
 
-    assert rows[0]["top_names"] == ["目录名"], "同目录的多个文件只取一次顶层名"
-    assert rows[1]["top_names"] == ["单文件.mkv"]
-    # 请求里必须带上 files 字段
+    assert rows[0].top_names == ("目录名",), "同目录的多个文件只取一次顶层名"
+    assert rows[1].top_names == ("单文件.mkv",)
+    assert rows[0].save_path == "/downloads"
+    # 这个方法**必须**带 files 字段（顶层名的唯一来源）
     assert "files" in _TR_REQUESTED_FIELDS[0]
+    assert "downloadDir" in _TR_REQUESTED_FIELDS[0]
 
 
 @pytest.mark.asyncio
-async def test_qb_list_with_errors_returns_top_names() -> None:
-    """qB：``top_names`` = ``content_path`` 相对 ``save_path`` 的首段。
+async def test_tr_list_with_errors_does_not_fetch_files() -> None:
+    """TR：``list_torrents_with_errors`` **不得**拉 ``files``。
+
+    ``files`` 在辅种站是 27.5 MB（15.8 万个文件条目，占响应体 98%），
+    而巡查只需要 status / 占用。混进来会让每次巡查都白拉 27 MB。
+    """
+    from app.adapters.downloaders.transmission import TransmissionAdapter
+
+    _TR_REQUESTED_FIELDS.clear()
+    with respx.mock(assert_all_mocked=False) as router:
+        router.post(TR_URL).mock(
+            side_effect=_tr_side_effect([_tr_row(files=[{"name": "x.mkv"}])])
+        )
+        adapter = TransmissionAdapter("tr", TR_BASE_URL, "u", "p")
+        await adapter.list_torrents_with_errors()
+
+    assert "files" not in _TR_REQUESTED_FIELDS[0]
+    assert "fileStats" not in _TR_REQUESTED_FIELDS[0]
+
+
+@pytest.mark.asyncio
+async def test_tr_list_torrents_does_not_fetch_files() -> None:
+    """TR：``list_torrents`` **不得**拉 ``files`` / ``fileStats``。
+
+    :class:`TorrentInfo` 没有这两个字段——拉了完全用不上，却让响应体
+    膨胀到 27 MB+（辅种站实测）。monitor / dashboard 走这条路径。
+    """
+    from app.adapters.downloaders.transmission import TransmissionAdapter
+
+    _TR_REQUESTED_FIELDS.clear()
+    with respx.mock(assert_all_mocked=False) as router:
+        router.post(TR_URL).mock(
+            side_effect=_tr_side_effect([_tr_row(files=[{"name": "x.mkv"}])])
+        )
+        adapter = TransmissionAdapter("tr", TR_BASE_URL, "u", "p")
+        await adapter.list_torrents()
+
+    assert "files" not in _TR_REQUESTED_FIELDS[0]
+    assert "fileStats" not in _TR_REQUESTED_FIELDS[0]
+
+
+@pytest.mark.asyncio
+async def test_qb_list_torrent_file_names_returns_top_names() -> None:
+    """qB：顶层名 = ``content_path`` 相对 ``save_path`` 的首段。
 
     实测 7296/7296 全部可取。**不能**用 ``content_path`` 的倒数第二段——
     单文件种子时那是父目录名（实测 3665 个种子会错）。
+
+    qB 的 ``/torrents/info`` 本来就返回 ``content_path`` + ``save_path``，
+    故**无需额外请求**。
     """
     from app.adapters.downloaders.qbittorrent import QbittorrentAdapter
 
@@ -489,10 +543,11 @@ async def test_qb_list_with_errors_returns_top_names() -> None:
             )
         )
         adapter = QbittorrentAdapter("qb", QB_URL, "u", "p")
-        rows = await adapter.list_torrents_with_errors()
+        rows = await adapter.list_torrent_file_names()
 
-    assert rows[0]["top_names"] == ["根目录"]
-    assert rows[1]["top_names"] == ["单文件.mkv"]
+    assert rows[0].top_names == ("根目录",)
+    assert rows[1].top_names == ("单文件.mkv",)
+    assert rows[0].save_path == "/downloads"
 
 
 def test_qb_top_names_handles_edge_cases() -> None:

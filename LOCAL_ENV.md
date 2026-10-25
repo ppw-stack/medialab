@@ -140,15 +140,24 @@
 故 prod 只需一行 compose 挂载（已加）：
 
 ```yaml
-- /mnt/remotes/192.168.0.172_Public/home/downloads:/mnt/cross-seed-data:ro
+- /mnt/remotes/192.168.0.172_Public/home/downloads:/share/Public/home/downloads:ro
 environment:
-  CROSS_SEED_SCAN_DIR: ${CROSS_SEED_SCAN_DIR:-/mnt/cross-seed-data/辅种}
+  CROSS_SEED_SCAN_DIRS: ${CROSS_SEED_SCAN_DIRS:-/share/Public/home/downloads/辅种}
 ```
 
+> **路径必须与下载器里的 `downloadDir` 完全一致**（172 上辅种站的
+> `downloadDir` 就是 `/share/Public/home/downloads/辅种`）。孤儿判定把
+> 任务按 `downloadDir` 分组，路径不一致就分不对组。
+>
+> **可以配多个路径**（逗号分隔），每个目录独立扫描 + 独立统计。
+> 辅种站实测有 3 种 `downloadDir`：`辅种`（4639 个种子）/ 父目录（5 个）/
+> `game`（1 个）——只扫「辅种」目录时，父目录与 `game` 的任务**不参与**
+> 「有主」判定（它们的文件本来也不在这个目录里）。
+>
 > **dev（本机 92）无法挂**：172 的 NFS 只导出给 `192.168.0.128`。
 > 故 dev 的孤儿统计会降级（记 error「未配置扫描目录」），不影响其他功能。
 >
-> 全量扫 1669 目录 / 3.6 万文件：CIFS **39 秒**（NFS 57 秒）。
+> 全量扫 1696 个顶层条目 / 3.6 万文件：CIFS **约 40 秒**（NFS 57 秒）。
 
 ## 5. 凭据获取方式（不在此记录明文）
 

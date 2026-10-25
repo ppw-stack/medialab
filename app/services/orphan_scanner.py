@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from app.adapters.downloaders.base import TorrentFileNames
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -152,17 +153,17 @@ def _dir_size(path: Path) -> tuple[int, int]:
     return total, count
 
 
-def _top_names_by_dir(torrents: list[dict[str, Any]]) -> dict[str, set[str]]:
+def _top_names_by_dir(files: list[TorrentFileNames]) -> dict[str, set[str]]:
     """按 downloadDir 分组，收集每组占用的**顶层名**。
 
     分组键用 ``save_path``（= TR 的 ``downloadDir`` / qB 的 ``save_path``）
     —— 顶层名只在同一个 downloadDir 内才有意义。
     """
     out: dict[str, set[str]] = {}
-    for t in torrents:
-        save_path = str(t.get("save_path") or "")
+    for t in files:
+        save_path = str(t.save_path or "")
         names = out.setdefault(save_path, set())
-        for name in t.get("top_names") or []:
+        for name in t.top_names:
             if name:
                 names.add(str(name))
     return out
@@ -179,13 +180,13 @@ def _match_dir(a: str, b: str) -> bool:
 
 
 def scan_orphans(
-    torrents: list[dict[str, Any]],
+    files: list[TorrentFileNames],
     scan_dirs: list[str],
 ) -> OrphanScanResult:
     """扫描配置的目录，找出「磁盘有、任务无」的孤儿条目。
 
-    :param torrents: :meth:`DownloaderAdapter.list_torrents_with_errors` 的
-        返回值（需含 ``save_path`` 与 ``top_names`` 字段）。
+    :param files: :meth:`DownloaderAdapter.list_torrent_file_names` 的
+        返回值（每个种子的顶层名 + 它的 downloadDir）。
     :param scan_dirs: 要扫描的目录列表（= 下载器的 downloadDir 列表）。
         空 / 不存在 / 不可读 → 记 error（**不抛**——扫描失败不该让作业
         变红）。
@@ -197,7 +198,7 @@ def scan_orphans(
             error="未配置扫描目录（辅种下载目录未挂载到容器）"
         )
 
-    names_by_dir = _top_names_by_dir(torrents)
+    names_by_dir = _top_names_by_dir(files)
 
     orphans: list[OrphanEntry] = []
     scanned_dirs: list[dict[str, Any]] = []
