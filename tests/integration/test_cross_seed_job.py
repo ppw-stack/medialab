@@ -219,6 +219,59 @@ async def test_stats_group_by_name_and_size(
     assert result.unique_count == 2
 
 
+async def test_stats_store_full_hashes_for_deletion(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """每个分组存下**完整 40 位** hash 列表（删除该组时要用）。
+
+    ``sample_hash`` 是 12 位**截断**的，只作展示用——拿它删除会被适配器
+    拒绝（hash 必须是 40 位 hex）。
+    """
+    dl_id = await _add_downloader("dl1")
+    adapter = _FakeAdapter(
+        [
+            _torrent("a" * 40, "Group", 1024**3),
+            _torrent("b" * 40, "Group", 1024**3),
+            _torrent("c" * 40, "Group", 1024**3),
+            _torrent("d" * 40, "Other", 1024**3),
+        ]
+    )
+    svc = _svc(_factory_with({dl_id: adapter}), monkeypatch)
+
+    await svc.refresh_downloader(dl_id)
+
+    rows = await _snapshots()
+    stats = {s["name"]: s for s in rows[0].stats}
+    group = stats["Group"]
+    assert group["count"] == 3
+    # 完整 40 位 hash（删除要用）
+    assert sorted(group["hashes"]) == ["a" * 40, "b" * 40, "c" * 40]
+    assert all(len(h) == 40 for h in group["hashes"])
+    # sample_hash 仍是 12 位截断（展示用）
+    assert len(group["sample_hash"]) == 12
+    # 不同组各有各的 hash 列表
+    assert stats["Other"]["hashes"] == ["d" * 40]
+
+
+async def test_stats_hashes_are_omitted_when_torrent_has_no_hash(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """没有 hash 的种子不进 hash 列表（不塞空串）。"""
+    dl_id = await _add_downloader("dl1")
+    adapter = _FakeAdapter(
+        [
+            {"id": 0, "hash": "", "name": "X", "size": 100},
+            _torrent("a" * 40, "X", 100),
+        ]
+    )
+    svc = _svc(_factory_with({dl_id: adapter}), monkeypatch)
+
+    await svc.refresh_downloader(dl_id)
+
+    rows = await _snapshots()
+    assert rows[0].stats[0]["hashes"] == ["a" * 40]
+
+
 async def test_snapshot_is_upserted_not_duplicated(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -110,13 +110,20 @@
   - 数据落在 `cross_seed_snapshot` 的空间列（`disk_free_bytes` / `disk_total_bytes` / `used_bytes` / `total_size_bytes` / `by_dir`）
   - 契约由 `tests/unit/test_cross_seed_space.py` + `tests/unit/test_downloader_adapters.py` + `tests/integration/test_cross_seed_job.py` + `tests/integration/test_api.py` 固化
 - **辅种异常种子批量删除**（2026-10-24 加入）：
-  - 端点 `POST /cross-seed-monitor/downloaders/{id}/remove-anomalies`（body：`hashes` / `delete_data`）
+  - 端点 `POST /cross-seed-monitor/downloaders/{id}/remove-torrents`（body：`hashes` / `delete_data`）——**通用**删除（异常种子明细 + 统计卡片的分组共用）
   - **不限数量**（辅种站异常种子动辄数百个，超出普通批量上限 200）→ `downloader_service.remove_torrents_in_batches()` 按批切分（默认 200/批）
   - **单批失败不中断**后续批次（尽可能多删），失败数计入结果；但**下载器整体不可用**（404 不存在 / 400 已禁用）**直接抛出**——后续批次同样会失败，且用户需要知道「下载器都没了」
   - hash 必须是 40 位 hex（拒绝 `all` / 通配）——复用既有 `validate_hashes`
   - 删磁盘数据走既有审计路径（`delete_data=True` → 记 warning 日志，含 hash 列表）
   - 前端：异常明细表格加勾选 + 「全选（N）」快捷键 + 「删除选中（N）」，确认弹框与「任务」页一致（仅删任务 / 删任务+磁盘数据）
   - 契约由 `tests/integration/test_services.py` + `tests/integration/test_api.py` + `web/tests/cross-seed.spec.ts` 固化
+- **统计卡片的分组删除**（2026-10-24 加入）：
+  - 统计表一行 = 一个 (name, size) 分组，可能代表**多个**种子（`count=13` 就是 13 个）——删该行 = 删该组**全部**种子
+  - **数据前提**：快照的每组必须存**完整 40 位** hash 列表（`StatsRow.hashes`）。`sample_hash` 是 **12 位截断**的，只作展示用——**不能**用于删除（适配器会拒绝非 40 位 hash）
+  - 旧快照行没有 `hashes` → 前端删除按钮**置灰** + tooltip「需重新抓取」（不静默失败）
+  - 快照体积：辅种站 2257 组 / 4600+ 种子 → stats 从 356KB 涨到约 590KB（SQLite 无压力）
+  - 弹框必须写清「将删除 N 个种子（同名同大小）」+ 警告「这些是**正常做种**的种子」+ 提示「仅删任务会留下不再做种的孤儿数据」
+  - 契约由 `tests/integration/test_cross_seed_job.py` + `test_api.py` + `web/tests/cross-seed.spec.ts` 固化
 
 ## 必备命令
 ```bash

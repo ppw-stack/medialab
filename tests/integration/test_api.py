@@ -474,38 +474,76 @@ async def test_cross_seed_refresh_unknown_downloader_404(
     assert resp.status_code == 404
 
 
-async def test_cross_seed_remove_anomalies_rejects_bad_hash(
+async def test_cross_seed_remove_torrents_rejects_bad_hash(
     client: httpx.AsyncClient,
 ) -> None:
     """非法 hash → 400（拒绝 all / 通配，不误删全部任务）。"""
     dl_id = await _add_cross_seed_downloader("dl1")
     resp = await client.post(
-        f"/api/v1/cross-seed-monitor/downloaders/{dl_id}/remove-anomalies",
+        f"/api/v1/cross-seed-monitor/downloaders/{dl_id}/remove-torrents",
         json={"hashes": ["all"], "delete_data": False},
     )
     assert resp.status_code == 400
 
 
-async def test_cross_seed_remove_anomalies_requires_hashes(
+async def test_cross_seed_remove_torrents_requires_hashes(
     client: httpx.AsyncClient,
 ) -> None:
     """空 hash 列表 → 422（pydantic 校验）。"""
     dl_id = await _add_cross_seed_downloader("dl1")
     resp = await client.post(
-        f"/api/v1/cross-seed-monitor/downloaders/{dl_id}/remove-anomalies",
+        f"/api/v1/cross-seed-monitor/downloaders/{dl_id}/remove-torrents",
         json={"hashes": [], "delete_data": False},
     )
     assert resp.status_code == 422
 
 
-async def test_cross_seed_remove_anomalies_unknown_downloader_404(
+async def test_cross_seed_remove_torrents_unknown_downloader_404(
     client: httpx.AsyncClient,
 ) -> None:
     resp = await client.post(
-        "/api/v1/cross-seed-monitor/downloaders/9999/remove-anomalies",
+        "/api/v1/cross-seed-monitor/downloaders/9999/remove-torrents",
         json={"hashes": ["a" * 40], "delete_data": False},
     )
     assert resp.status_code == 404
+
+
+async def test_cross_seed_snapshot_stats_carry_full_hashes(
+    client: httpx.AsyncClient,
+) -> None:
+    """快照的分组统计带**完整 40 位** hash 列表（统计卡片删除要用）。
+
+    ``sample_hash`` 是 12 位截断的——拿它删除会被适配器拒绝。
+    """
+    from app.db.models import CrossSeedSnapshot
+
+    dl_id = await _add_cross_seed_downloader("dl1")
+    async with session_scope() as session:
+        session.add(
+            CrossSeedSnapshot(
+                downloader_id=dl_id,
+                downloader_name="dl1",
+                total_torrents=3,
+                unique_count=1,
+                stats=[
+                    {
+                        "name": "Group",
+                        "size_gb": 1.0,
+                        "count": 2,
+                        "sample_hash": "a" * 12,
+                        "hashes": ["a" * 40, "b" * 40],
+                    }
+                ],
+            )
+        )
+        await session.flush()
+
+    resp = await client.get(f"/api/v1/cross-seed-monitor/downloaders/{dl_id}/snapshot")
+    assert resp.status_code == 200
+    row = resp.json()["stats"][0]
+    assert row["hashes"] == ["a" * 40, "b" * 40]
+    assert all(len(h) == 40 for h in row["hashes"])
+    assert len(row["sample_hash"]) == 12
 
 
 async def test_cross_seed_space_empty(client: httpx.AsyncClient) -> None:

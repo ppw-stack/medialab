@@ -96,8 +96,8 @@ class RefreshResultOut(BaseModel):
     anomalies: list[dict[str, Any]]
 
 
-class RemoveAnomaliesIn(BaseModel):
-    """批量删除异常种子的请求体。"""
+class RemoveTorrentsIn(BaseModel):
+    """批量删除种子的请求体。"""
 
     #: 要删除的种子 infohash 列表（40 位 hex，由 service 层校验）
     hashes: list[str] = Field(..., min_length=1)
@@ -191,11 +191,15 @@ async def list_space() -> dict[str, Any]:
     }
 
 
-@router.post("/downloaders/{downloader_id}/remove-anomalies", summary="批量删除异常种子")
-async def remove_anomalies(
-    downloader_id: int, payload: RemoveAnomaliesIn
+@router.post("/downloaders/{downloader_id}/remove-torrents", summary="批量删除种子")
+async def remove_torrents(
+    downloader_id: int, payload: RemoveTorrentsIn
 ) -> dict[str, Any]:
-    """删除辅种下载器里的异常种子（tracker 未注册 / 数据丢失）。
+    """删除下载器里的种子（**通用**——不限是异常还是正常种子）。
+
+    两处调用：
+    - 异常种子明细（tracker 未注册 / 数据丢失）
+    - 统计卡片的分组（同名同大小的一组种子）
 
     **不限数量**（分批发送）——辅种站的异常种子动辄数百个，超出普通批量
     操作上限（200）时会分批逐个删。

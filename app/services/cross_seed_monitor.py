@@ -115,6 +115,13 @@ class StatsRow:
     size_gb: float
     count: int
     sample_hash: str
+    #: 该组的**完整 40 位** hash 列表（删除用）。
+    #:
+    #: ⚠️ :attr:`sample_hash` 是 **12 位截断**的，只作展示/抽样用——
+    #: **不能**用于删除（删除必须 40 位完整 hash，否则适配器会拒绝）。
+    #:
+    #: 旧快照行没有这个字段 → 前端据此把删除按钮置灰（提示重新抓取）。
+    hashes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -122,6 +129,7 @@ class StatsRow:
             "size_gb": self.size_gb,
             "count": self.count,
             "sample_hash": self.sample_hash,
+            "hashes": self.hashes,
         }
 
 
@@ -649,8 +657,13 @@ class CrossSeedMonitorService:
                     "size_gb": round(t_size / 1024**3, 2),
                     "count": 0,
                     "sample_hash": t_hash[:12] if t_hash else "",
+                    # 完整 40 位 hash 列表——删除该组时要用到
+                    # （sample_hash 是 12 位截断的，删不了）
+                    "hashes": [],
                 }
             groups[key]["count"] += 1
+            if t_hash:
+                groups[key]["hashes"].append(t_hash)
 
         stats = sorted(
             (StatsRow(**g) for g in groups.values()),

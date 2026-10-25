@@ -224,7 +224,14 @@ export interface CrossSeedStatsRow {
   name: string
   size_gb: number
   count: number
+  /** 12 位截断的样本 hash（仅展示用，**不能**用于删除）。 */
   sample_hash: string
+  /**
+   * 该组的**完整 40 位** hash 列表（删除用）。
+   *
+   * 旧快照行没有这个字段 → 空数组 → 删除按钮置灰（提示重新抓取）。
+   */
+  hashes?: string[]
 }
 
 /** 辅种异常种子（快照里的异常明细）。 */

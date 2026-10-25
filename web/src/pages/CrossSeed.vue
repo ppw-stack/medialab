@@ -35,6 +35,7 @@ const statsColumns = [
   { title: '原始名称', dataIndex: 'name', key: 'name', ellipsis: true, minWidth: 360 },
   { title: '大小 (GB)', dataIndex: 'size_gb', key: 'size_gb', width: 120, sorter: (a: CrossSeedStatsRow, b: CrossSeedStatsRow) => a.size_gb - b.size_gb },
   { title: '出现次数', dataIndex: 'count', key: 'count', width: 120, sorter: (a: CrossSeedStatsRow, b: CrossSeedStatsRow) => a.count - b.count },
+  { title: '操作', key: 'actions', width: 100, fixed: 'right' as const },
 ]
 
 const anomalyColumns = [
@@ -51,6 +52,23 @@ const selectedAnomalyHashes = ref<string[]>([])
 const deleteModalOpen = ref(false)
 /** 删除中 */
 const deleting = ref(false)
+/**
+ * 待删除的目标。
+ *
+ * 两种来源共用一个弹框：
+ * - 异常种子明细（tracker 未注册 / 数据丢失）
+ * - 统计卡片的分组（同名同大小的一组**正常**种子）
+ */
+const deleteTarget = ref<{
+  /** 要删的 hash 列表 */
+  hashes: string[]
+  /** 弹框里显示的数量（= hashes.length） */
+  count: number
+  /** 弹框主文案（说明删的是什么） */
+  desc: string
+  /** 危险程度提示（正常种子比异常种子更需要注意） */
+  warn?: string
+} | null>(null)
 
 const dirColumns = [
   { title: '下载目录', dataIndex: 'dir', key: 'dir', ellipsis: true, minWidth: 320 },
@@ -154,23 +172,41 @@ function selectAllAnomalies() {
   selectedAnomalyHashes.value = (snapshot.value?.anomalies ?? []).map((a) => a.hash)
 }
 
-/** 打开删除确认弹框。 */
+/** 打开删除确认弹框（异常种子明细）。 */
 function openDeleteModal() {
   if (!selectedAnomalyHashes.value.length) return
+  deleteTarget.value = {
+    hashes: [...selectedAnomalyHashes.value],
+    count: selectedAnomalyHashes.value.length,
+    desc: '个异常种子（tracker 未注册 / 本地数据丢失）',
+  }
+  deleteModalOpen.value = true
+}
+
+/** 打开删除确认弹框（统计卡片的分组）。 */
+function openDeleteGroupModal(row: CrossSeedStatsRow) {
+  const hashes = row.hashes ?? []
+  if (!hashes.length) return
+  deleteTarget.value = {
+    hashes: [...hashes],
+    count: hashes.length,
+    desc: `组「${row.name}」的 ${hashes.length} 个种子（同名同大小）`,
+    warn: '这些是正常做种的种子，删除后不再做种。',
+  }
   deleteModalOpen.value = true
 }
 
 /** 执行批量删除。 */
-async function doDeleteAnomalies(deleteData: boolean) {
+async function doDelete(deleteData: boolean) {
   const id = selectedId.value
-  const hashes = [...selectedAnomalyHashes.value]
-  if (id == null || hashes.length === 0) return
+  const target = deleteTarget.value
+  if (id == null || !target || target.hashes.length === 0) return
   deleteModalOpen.value = false
   deleting.value = true
   try {
     const r = await api.post<BatchOpResult>(
-      `/cross-seed-monitor/downloaders/${id}/remove-anomalies`,
-      { hashes, delete_data: deleteData },
+      `/cross-seed-monitor/downloaders/${id}/remove-torrents`,
+      { hashes: target.hashes, delete_data: deleteData },
     )
     const what = deleteData ? '任务 + 磁盘数据' : '任务'
     if (r.failed > 0) {
@@ -182,6 +218,7 @@ async function doDeleteAnomalies(deleteData: boolean) {
       message.success(`已删除${what} ${r.succeeded} 个`)
     }
     selectedAnomalyHashes.value = []
+    deleteTarget.value = null
     // 重新抓取快照 → UI 反映最新状态（异常数、占用、目录分布都会变）
     await refreshNow()
   } catch (e) {
@@ -505,6 +542,23 @@ onMounted(async () => {
                   {{ (record as CrossSeedStatsRow).count }}
                 </a-tag>
               </template>
+              <template v-else-if="column.key === 'actions'">
+                <a-tooltip
+                  v-if="!(record as CrossSeedStatsRow).hashes?.length"
+                  title="该快照没有存完整 hash（升级前抓的），需重新抓取后才能删除"
+                >
+                  <a-button size="small" danger disabled>删除</a-button>
+                </a-tooltip>
+                <a-button
+                  v-else
+                  size="small"
+                  danger
+                  :loading="deleting"
+                  @click="openDeleteGroupModal(record as CrossSeedStatsRow)"
+                >
+                  删除
+                </a-button>
+              </template>
             </template>
           </a-table>
         </div>
@@ -512,35 +566,49 @@ onMounted(async () => {
     </a-tabs>
     </section>
 
-    <!-- 批量删除异常种子的确认弹框 -->
+    <!-- 批量删除种子的确认弹框（异常种子明细 / 统计卡片分组 共用） -->
     <a-modal
       v-model:open="deleteModalOpen"
-      title="删除异常种子"
+      title="删除种子"
       :footer="null"
       :mask-closable="false"
     >
-      <p class="modal-text">
-        即将从下载器中删除选中的
-        <b>{{ selectedAnomalyHashes.length }}</b> 个异常种子（tracker 未注册 /
-        本地数据丢失），请选择删除方式：
-      </p>
-      <div class="modal-actions">
-        <a-button @click="deleteModalOpen = false">取消</a-button>
-        <a-button :loading="deleting" @click="doDeleteAnomalies(false)">
-          仅删任务（保留文件）
-        </a-button>
-        <a-popconfirm
-          title="磁盘数据将被永久删除，无法恢复。确认继续？"
-          ok-text="确认删除"
-          cancel-text="取消"
-          :ok-button-props="{ danger: true }"
-          @confirm="doDeleteAnomalies(true)"
-        >
-          <a-button danger :loading="deleting">
-            删任务 + 磁盘数据
+      <template v-if="deleteTarget">
+        <p class="modal-text">
+          即将从下载器中删除选中的
+          <b>{{ deleteTarget.count }}</b> {{ deleteTarget.desc }}，请选择删除方式：
+        </p>
+        <a-alert
+          v-if="deleteTarget.warn"
+          type="warning"
+          show-icon
+          :message="deleteTarget.warn"
+          style="margin-bottom: var(--sp-3)"
+        />
+        <a-alert
+          type="info"
+          show-icon
+          message="仅删任务会保留磁盘文件，但这些文件不再被做种——变成占空间的孤儿数据。要真正腾出空间，请选「删任务 + 磁盘数据」。"
+          style="margin-bottom: var(--sp-3)"
+        />
+        <div class="modal-actions">
+          <a-button @click="deleteModalOpen = false">取消</a-button>
+          <a-button :loading="deleting" @click="doDelete(false)">
+            仅删任务（保留文件）
           </a-button>
-        </a-popconfirm>
-      </div>
+          <a-popconfirm
+            title="磁盘数据将被永久删除，无法恢复。确认继续？"
+            ok-text="确认删除"
+            cancel-text="取消"
+            :ok-button-props="{ danger: true }"
+            @confirm="doDelete(true)"
+          >
+            <a-button danger :loading="deleting">
+              删任务 + 磁盘数据
+            </a-button>
+          </a-popconfirm>
+        </div>
+      </template>
     </a-modal>
   </div>
 </template>
