@@ -95,6 +95,7 @@
 | `/api/v1/cross-seed-monitor/downloaders` | 辅种下载器列表 |
 | `/api/v1/cross-seed-monitor/snapshots` | 辅种快照列表 + 未抓过的下载器 |
 | `/api/v1/cross-seed-monitor/space` | 辅种空间汇总（磁盘剩余 / 辅种占用） |
+| `/api/v1/cross-seed-monitor/orphans` | 辅种孤儿文件统计（磁盘有、任务没了） |
 | `/api/v1/cross-seed-monitor/downloaders/{id}/snapshot` | 单个辅种下载器快照详情 |
 | `/api/v1/cross-seed-monitor/downloaders/{id}/refresh` | 手动抓取单个辅种下载器（await 完整抓取） |
 | `/api/v1/cross-seed-monitor/downloaders/{id}/remove-torrents` | 批量删除种子（不限数量，分批发送；异常明细 + 统计卡片共用） |
@@ -124,6 +125,31 @@
 > `192.168.0.172:9090` 是 prod 视角下 qB 的地址（compose 注释所述），
 > 与 dev 库里的 `192.168.0.92:8081` 是不同环境的两套配置。
 
+### 辅种站的 NAS 挂载（孤儿文件统计用）
+
+辅种数据在 **192.168.0.172**（NAS）上，seedhelper 容器看不到它——
+除非把目录**只读挂载**进来。下载器本身**没有**浏览文件系统的接口
+（TR 的 RPC spec 不提供 filesystem 浏览，qB 也没有列目录 API）。
+
+128 上 Unraid **已自动挂好** CIFS：
+
+```
+//192.168.0.172/Public on /mnt/remotes/192.168.0.172_Public type cifs (rw,...)
+```
+
+故 prod 只需一行 compose 挂载（已加）：
+
+```yaml
+- /mnt/remotes/192.168.0.172_Public/home/downloads:/mnt/cross-seed-data:ro
+environment:
+  CROSS_SEED_SCAN_DIR: ${CROSS_SEED_SCAN_DIR:-/mnt/cross-seed-data/辅种}
+```
+
+> **dev（本机 92）无法挂**：172 的 NFS 只导出给 `192.168.0.128`。
+> 故 dev 的孤儿统计会降级（记 error「未配置扫描目录」），不影响其他功能。
+>
+> 全量扫 1669 目录 / 3.6 万文件：CIFS **39 秒**（NFS 57 秒）。
+
 ## 5. 凭据获取方式（不在此记录明文）
 
 | 环境 | Token 位置 | 长度要求 |
@@ -147,7 +173,7 @@ python -c "import secrets; print('WEB_TOKEN=' + secrets.token_urlsafe(32))"
 curl -H "Authorization: Bearer $WEB_TOKEN" http://localhost:8080/api/v1/scheduler
 ```
 
-## 6. 调度作业（7 个）
+## 6. 调度作业（8 个）
 
 | 作业 | 默认 cron | 说明 |
 |---|---|---|
@@ -158,6 +184,7 @@ curl -H "Authorization: Bearer $WEB_TOKEN" http://localhost:8080/api/v1/schedule
 | `scan_cross_seed` | `2,32 * * * *` | 辅种巡查（定时抓取 → 落库快照 + 暂停异常） |
 | `drain_task_queue` | `*/5 * * * *` | 任务队列排空 |
 | `daily_checkin` | `37 8 * * *` | 站点每日签到（FR-3.6，仅 3 站） |
+| `scan_orphans` | `7 4 * * *` | 辅种孤儿文件扫描（磁盘有、任务没了） |
 
 专属参数：
 

@@ -339,3 +339,70 @@ test('辅种统计页 - 统计卡片删除 UI', async ({ page }) => {
   await modal.getByRole('button', { name: /取\s*消/ }).click()
   await expect(modal).toBeHidden()
 })
+
+/**
+ * 孤儿文件区块（2026-10-24）。
+ *
+ * 孤儿 = 磁盘上有、下载器里已无对应任务的文件（典型来源：用「仅删任务」
+ * 清理种子时磁盘文件留下，不再做种却一直占空间）。
+ *
+ * 数据来自定时作业 `scan_orphans` 写入的 `cross_seed_orphan` 表。
+ * 扫描不可用时（未挂载辅种目录 / 下载器不可达）显示**原因**而非空白。
+ */
+test('辅种统计页 - 孤儿文件区块', async ({ page }) => {
+  await login(page)
+  await page.goto('/cross-seed')
+
+  const tabs = page.locator('.ant-tabs-tab')
+  await expect(tabs.first()).toBeVisible({ timeout: 15000 }).catch(() => { /* 无下载器 */ })
+  const tabCount = await tabs.count()
+  if (tabCount === 0) {
+    console.log('  ✓ 无辅种下载器：跳过孤儿区块断言')
+    return
+  }
+
+  // 找有快照的 tab（孤儿区块在快照详情里）
+  let pane = page.locator('.ant-tabs-tabpane-active')
+  let found = false
+  for (let i = 0; i < tabCount; i++) {
+    await tabs.nth(i).click()
+    pane = page.locator('.ant-tabs-tabpane-active')
+    try {
+      await expect(pane.locator('.space-block').first()).toBeVisible({ timeout: 5000 })
+      found = true
+      break
+    } catch {
+      // 该 tab 没快照 → 试下一个
+    }
+  }
+  if (!found) {
+    console.log('  ✓ 还没有快照：跳过孤儿区块断言')
+    return
+  }
+
+  // 孤儿区块存在
+  const block = pane.locator('.space-block').filter({ hasText: 'ORPHANS' })
+  await expect(block).toBeVisible()
+  console.log('  ✓ 孤儿区块已渲染')
+
+  // 三种状态之一：有数据卡片 / 扫描失败提示 / 尚未扫描
+  const tiles = block.locator('.space-tile')
+  const alerts = block.locator('.ant-alert')
+  const state = (await tiles.count()) > 0 ? '有数据'
+    : (await alerts.count()) > 0 ? '扫描失败/未扫描' : '未知'
+  console.log(`  ✓ 状态: ${state}`)
+
+  if (state === '有数据') {
+    await expect(tiles).toHaveCount(3)
+    // 孤儿数量与占用
+    const labels = await tiles.locator('.space-tile__label').allTextContents()
+    expect(labels.join('|')).toContain('孤儿')
+    console.log('  ✓ 孤儿卡片: 孤儿条目 / 孤儿占用 / 占扫描目录')
+  } else {
+    // 不可用时必须有**说明**（不能是空白）
+    expect(await alerts.count()).toBeGreaterThan(0)
+    const text = (await block.innerText()).replace(/\s+/g, ' ')
+    expect(text).toMatch(/孤儿|扫描|挂载/)
+    console.log('  ✓ 不可用状态有明确说明')
+  }
+})

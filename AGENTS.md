@@ -124,6 +124,18 @@
   - 快照体积：辅种站 2257 组 / 4600+ 种子 → stats 从 356KB 涨到约 590KB（SQLite 无压力）
   - 弹框必须写清「将删除 N 个种子（同名同大小）」+ 警告「这些是**正常做种**的种子」+ 提示「仅删任务会留下不再做种的孤儿数据」
   - 契约由 `tests/integration/test_cross_seed_job.py` + `test_api.py` + `web/tests/cross-seed.spec.ts` 固化
+- **辅种孤儿文件统计**（2026-10-24 加入，`app/services/orphan_scanner.py`）：
+  - 孤儿 = **磁盘有、任务没了**（典型来源：用「仅删任务」清理种子时磁盘文件留下，不再做种却一直占空间）
+  - **必须挂载磁盘**：下载器**没有**浏览文件系统的接口（TR 的 RPC spec 不提供 filesystem 浏览，qB 也没有列目录 API）→ 只能把辅种站的下载目录**只读挂载**进容器，扫盘 + 顶层名匹配
+  - 128 上 Unraid **已自动挂好** CIFS（`/mnt/remotes/192.168.0.172_Public`）→ 只需一行 compose 挂载，无需 NAS 配置
+  - 匹配：下载器任务的 `top_names`（TR 取 `files[].name` 的顶层段、qB 取 `content_path` 相对 `save_path` 的首段）与磁盘顶层条目名比对
+  - **口径是保守下界**：同名但不同种子的目录会**漏判** → 数字只会偏少，不会偏多
+  - **只统计不删除**（527 GB 的误删代价太高，清理由用户自己决定）
+  - 新表 `cross_seed_orphan`（每下载器一行）+ 新作业 `scan_orphans`（cron `7 4 * * *`，每天一次——孤儿不会快变）+ 端点 `GET /cross-seed-monitor/orphans`
+  - `list_torrents_with_errors()` 新增 `top_names` 字段 → **复用同一次全量拉取**，不额外打接口（辅种站拉一次要 20s+）
+  - 实测：辅种站 1669 目录 / 3.6 万文件，CIFS 全量扫 **39 秒**；识别出 21 个孤儿 / 550 GB
+  - **降级不静默**：目录未挂载 / 不可读 / 下载器拉取失败 → 记 `error` 字段（前端据此显示原因），作业不炸
+  - 契约由 `tests/unit/test_orphan_scanner.py` + `test_downloader_adapters.py` + `tests/integration/test_cross_seed_orphan.py` + `test_api.py` + `test_db_models.py` 固化
 
 ## 必备命令
 ```bash
