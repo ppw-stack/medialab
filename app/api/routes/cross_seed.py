@@ -67,6 +67,14 @@ class SnapshotHeaderOut(BaseModel):
     paused_count: int = 0
     #: 暂停失败的种子数
     pause_failed_count: int = 0
+    #: 磁盘剩余空间（字节）；None = 没取到
+    disk_free_bytes: int | None = None
+    #: 磁盘总量（字节）；None = 该下载器不提供（qBittorrent）
+    disk_total_bytes: int | None = None
+    #: 辅种实际占用（字节）
+    used_bytes: int = 0
+    #: 辅种总大小（字节，理论值）
+    total_size_bytes: int = 0
 
 
 class SnapshotListOut(BaseModel):
@@ -92,6 +100,16 @@ class RefreshResultOut(BaseModel):
     inflight_count: int
     paused_count: int = 0
     pause_failed_count: int = 0
+    #: 磁盘剩余空间（字节）；None = 没取到
+    disk_free_bytes: int | None = None
+    #: 磁盘总量（字节）；None = 该下载器不提供（qBittorrent）
+    disk_total_bytes: int | None = None
+    #: 辅种实际占用（字节）
+    used_bytes: int = 0
+    #: 辅种总大小（字节，理论值）
+    total_size_bytes: int = 0
+    #: 按下载目录的占用分布
+    by_dir: list[dict[str, Any]] = []
     stats: list[dict[str, Any]]
     anomalies: list[dict[str, Any]]
 

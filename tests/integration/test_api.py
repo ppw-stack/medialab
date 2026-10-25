@@ -565,6 +565,52 @@ async def test_cross_seed_orphans_empty(client: httpx.AsyncClient) -> None:
     assert data["summary"]["orphan_count"] == 0
 
 
+async def test_cross_seed_snapshot_returns_space_fields(
+    client: httpx.AsyncClient,
+) -> None:
+    """端点**实际**返回空间字段（不只是 DTO 声明了）。
+
+    回归测试：2026-10-25 加空间统计时漏同步了 ``SnapshotHeaderOut``，
+    pydantic 静默丢弃 → 端点 200 但响应里没有这些字段（本地 dev 没数据，
+    只有 prod 暴露）。见 test_cross_seed_dto.py。
+    """
+    from app.db.models import CrossSeedSnapshot
+
+    dl_id = await _add_cross_seed_downloader("dl1")
+    async with session_scope() as session:
+        session.add(
+            CrossSeedSnapshot(
+                downloader_id=dl_id,
+                downloader_name="dl1",
+                scanned_at="2026-10-25 12:00:00",
+                total_torrents=10,
+                unique_count=5,
+                used_bytes=12345,
+                total_size_bytes=23456,
+                disk_free_bytes=34567,
+                disk_total_bytes=45678,
+            )
+        )
+        await session.flush()
+
+    # 详情端点
+    resp = await client.get(f"/api/v1/cross-seed-monitor/downloaders/{dl_id}/snapshot")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["used_bytes"] == 12345
+    assert data["total_size_bytes"] == 23456
+    assert data["disk_free_bytes"] == 34567
+    assert data["disk_total_bytes"] == 45678
+
+    # 列表端点
+    resp = await client.get("/api/v1/cross-seed-monitor/snapshots")
+    assert resp.status_code == 200
+    row = resp.json()["snapshots"][0]
+    assert row["used_bytes"] == 12345
+    assert row["disk_free_bytes"] == 34567
+    assert row["disk_total_bytes"] == 45678
+
+
 async def test_cross_seed_orphans_with_row(client: httpx.AsyncClient) -> None:
     """孤儿统计：含数量、字节与明细。"""
     from app.db.models import CrossSeedOrphan
