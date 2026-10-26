@@ -51,7 +51,11 @@ services:
       # （172 上是 /share/Public/home/downloads）。这样任务的绝对路径
       # 能直接与磁盘上的绝对路径比对，不用做路径映射——映射一旦有偏差，
       # 就会把所有条目误判成孤儿。
-      - /mnt/remotes/192.168.0.172_Public/home/downloads:/share/Public/home/downloads:ro
+      #
+      # 权限是 **rw**（不是 ro）——孤儿文件删除功能需要写权限。
+      # 删除有三重安全闸（目录范围 / 二次复核 / 审计日志），
+      # 见 app/services/orphan_deleter.py。
+      - /mnt/remotes/192.168.0.172_Public/home/downloads:/share/Public/home/downloads:rw
       - /mnt/user/appdata/seedhelper/logs:/app/logs
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]

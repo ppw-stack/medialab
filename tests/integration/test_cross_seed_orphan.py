@@ -91,6 +91,26 @@ async def _add_downloader(name: str = "dl1") -> int:
         return row.id
 
 
+async def _add_non_cross_seed_downloader(name: str = "qb") -> int:
+    """加一个**非辅种**下载器（is_cross_seed=False）。
+
+    辅种目录可能被**多个下载器共用**——实测 qB 有任务就在辅种目录里。
+    故「有主」集合必须汇总所有下载器，否则共用目录里的数据会被误判
+    成孤儿。
+    """
+    async with session_scope() as session:
+        row = DownloaderInstance(
+            name=name,
+            type="qbittorrent",
+            url="http://192.168.0.172:9090",
+            is_cross_seed=False,
+            enabled=True,
+        )
+        session.add(row)
+        await session.flush()
+        return row.id
+
+
 def _svc(
     monkeypatch: pytest.MonkeyPatch, adapters: dict[int, _FakeAdapter]
 ) -> None:
@@ -316,6 +336,64 @@ async def test_scan_uses_only_one_downloader_call(
     await run_scan_orphans()
 
     assert adapter.list_calls == 1, "只该调一次下载器接口"
+
+
+async def test_orphan_excludes_files_owned_by_other_downloader(
+    db: None, monkeypatch: pytest.MonkeyPatch, scan_dir: str
+) -> None:
+    """**其它下载器**（非辅种）认领的条目**不算孤儿**。
+
+    辅种目录可能被多个下载器共用——实测 qB 有 6 个任务的 save_path
+    就在辅种目录里。若「有主」只看辅种下载器（TR）的任务，那 6 个
+    qB 任务的数据会被误判成孤儿（实测误判 480 GB / 78%）。
+    """
+    root = Path(scan_dir)
+    (root / "tr_owned").mkdir()
+    (root / "tr_owned" / "a.mkv").write_bytes(b"\0" * 1000)
+    (root / "qb_owned").mkdir()
+    (root / "qb_owned" / "b.mkv").write_bytes(b"\0" * 2000)
+    (root / "real_orphan").mkdir()
+    (root / "real_orphan" / "c.mkv").write_bytes(b"\0" * 3000)
+
+    tr_id = await _add_downloader("tr")
+    qb_id = await _add_non_cross_seed_downloader("qb")
+    _svc(
+        monkeypatch,
+        {
+            tr_id: _FakeAdapter([_torrent(["tr_owned"], save_path=scan_dir)]),
+            qb_id: _FakeAdapter([_torrent(["qb_owned"], save_path=scan_dir)]),
+        },
+    )
+
+    result = await run_scan_orphans()
+
+    assert result["orphan_count"] == 1, "只有真正无主的才算孤儿"
+    rows = await _rows()
+    assert rows[0].orphan_bytes == 3000
+    names = [o["name"] for o in rows[0].orphans]
+    assert names == ["real_orphan"]
+
+
+async def test_pull_failure_is_reported(
+    db: None, monkeypatch: pytest.MonkeyPatch, scan_dir: str
+) -> None:
+    """某个下载器拉取失败 → **点名**（判定不完整，不能静默）。"""
+    tr_id = await _add_downloader("tr")
+    qb_id = await _add_non_cross_seed_downloader("qb")
+    _svc(
+        monkeypatch,
+        {
+            tr_id: _FakeAdapter([_torrent([], save_path=scan_dir)]),
+            qb_id: _FakeAdapter([], fail=True),
+        },
+    )
+
+    result = await run_scan_orphans()
+
+    # 拉取失败的下载器不贡献「有主」→ 其数据可能被误判 → 必须能看出来
+    steps = result["steps"]
+    assert any("qb" in str(s) for s in steps), "失败的下载器要点名"
+    assert "判定不完整" in result["summary"]
 
 
 async def test_no_cross_seed_downloaders(

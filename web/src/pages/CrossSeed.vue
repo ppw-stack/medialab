@@ -7,6 +7,7 @@ import type {
   CrossSeedDirUsage,
   CrossSeedDownloader,
   CrossSeedOrphan,
+  CrossSeedOrphanDeleteResult,
   CrossSeedOrphanSummary,
   CrossSeedScannedDir,
   CrossSeedSnapshot,
@@ -85,6 +86,13 @@ const orphanColumns = [
   { title: '占用', dataIndex: 'bytes', key: 'bytes', width: 140 },
   { title: '文件数', dataIndex: 'file_count', key: 'file_count', width: 100 },
 ]
+
+//: 孤儿明细里勾选的条目（按 path 选中——path 唯一）
+const selectedOrphanPaths = ref<string[]>([])
+/** 孤儿删除确认弹框 */
+const orphanDeleteModalOpen = ref(false)
+/** 孤儿删除中 */
+const orphanDeleting = ref(false)
 
 const scannedDirColumns = [
   { title: '扫描目录', dataIndex: 'scan_dir', key: 'scan_dir', ellipsis: true, minWidth: 320 },
@@ -268,6 +276,43 @@ async function doDelete(deleteData: boolean) {
     message.error('删除失败：' + errMsg(e))
   } finally {
     deleting.value = false
+  }
+}
+
+/** 打开孤儿删除确认弹框。 */
+function openOrphanDeleteModal() {
+  if (!selectedOrphanPaths.value.length) return
+  orphanDeleteModalOpen.value = true
+}
+
+/** 执行孤儿文件删除（**不可逆**）。 */
+async function doDeleteOrphans() {
+  orphanDeleteModalOpen.value = false
+  orphanDeleting.value = true
+  try {
+    const r = await api.post<CrossSeedOrphanDeleteResult>(
+      '/cross-seed-monitor/orphans/delete',
+      { paths: selectedOrphanPaths.value },
+    )
+    const parts: string[] = []
+    if (r.succeeded > 0) parts.push(`已删除 ${r.succeeded} 个（${fmtBytes(r.freed_bytes)}）`)
+    if (r.skipped > 0) parts.push(`跳过 ${r.skipped} 个（复核时已有任务）`)
+    if (r.failed > 0) parts.push(`失败 ${r.failed} 个`)
+    if (r.warning) {
+      message.warning(r.warning)
+    }
+    if (r.failed > 0) {
+      message.warning(parts.join('，'))
+    } else {
+      message.success(parts.join('，') || '没有可删除的条目')
+    }
+    selectedOrphanPaths.value = []
+    // 重新拉孤儿统计 → UI 反映最新状态
+    await loadOrphans()
+  } catch (e) {
+    message.error('删除失败：' + errMsg(e))
+  } finally {
+    orphanDeleting.value = false
   }
 }
 
@@ -571,7 +616,7 @@ onMounted(async () => {
                 v-if="currentOrphan.orphan_count"
                 type="warning"
                 show-icon
-                message="这些文件不再被做种，却一直占着空间。本页只做统计，不提供删除——请自行到 NAS 上确认后清理。"
+                message="这些文件不再被做种，却一直占着空间。删除前请确认——删除不可恢复。"
                 style="margin-top: var(--sp-3)"
               />
 
@@ -582,10 +627,32 @@ onMounted(async () => {
                       孤儿明细（{{ currentOrphan.orphans.length }}）
                     </span>
                   </template>
+                  <div class="orphan-toolbar">
+                    <a-button
+                      size="small"
+                      @click="selectedOrphanPaths = currentOrphan.orphans.map(o => o.path)"
+                    >
+                      全选（{{ currentOrphan.orphans.length }}）
+                    </a-button>
+                    <a-button
+                      size="small"
+                      danger
+                      :disabled="!selectedOrphanPaths.length"
+                      @click="openOrphanDeleteModal"
+                    >
+                      删除选中（{{ selectedOrphanPaths.length }}）
+                    </a-button>
+                  </div>
                   <a-table
                     :columns="orphanColumns"
                     :data-source="currentOrphan.orphans"
                     :row-key="(r: CrossSeedOrphan) => r.path"
+                    :row-selection="{
+                      selectedRowKeys: selectedOrphanPaths,
+                      onChange: (keys: (string | number)[]) => {
+                        selectedOrphanPaths = keys.map(String)
+                      },
+                    }"
                     :pagination="{ pageSize: 20, showSizeChanger: true }"
                     size="small"
                   >
@@ -779,6 +846,45 @@ onMounted(async () => {
         </div>
       </template>
     </a-modal>
+
+    <!-- 孤儿文件删除的确认弹框（**不可逆**） -->
+    <a-modal
+      v-model:open="orphanDeleteModalOpen"
+      title="删除孤儿文件"
+      :footer="null"
+      :mask-closable="false"
+    >
+      <p class="modal-text">
+        即将从磁盘上**永久删除**选中的
+        <b>{{ selectedOrphanPaths.length }}</b> 个孤儿条目。
+      </p>
+      <a-alert
+        type="warning"
+        show-icon
+        message="删除不可恢复。删除前系统会重新扫描一次，确认这些条目此刻仍无对应任务；若期间已有任务接管，会自动跳过。"
+        style="margin-bottom: var(--sp-3)"
+      />
+      <a-alert
+        type="info"
+        show-icon
+        message="孤儿 = 磁盘上有、下载器里已无对应任务的文件。请确认这些内容确实不再需要做种。"
+        style="margin-bottom: var(--sp-3)"
+      />
+      <div class="modal-actions">
+        <a-button @click="orphanDeleteModalOpen = false">取消</a-button>
+        <a-popconfirm
+          title="磁盘文件将被永久删除，无法恢复。确认继续？"
+          ok-text="确认删除"
+          cancel-text="取消"
+          :ok-button-props="{ danger: true }"
+          @confirm="doDeleteOrphans"
+        >
+          <a-button danger :loading="orphanDeleting">
+            确认删除（{{ selectedOrphanPaths.length }}）
+          </a-button>
+        </a-popconfirm>
+      </div>
+    </a-modal>
   </div>
 </template>
 
@@ -819,6 +925,15 @@ onMounted(async () => {
 
 /* 异常明细的批量操作工具条 */
 .anomaly-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+/* 孤儿明细的批量操作工具条 */
+.orphan-toolbar {
   display: flex;
   align-items: center;
   gap: var(--sp-2);

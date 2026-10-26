@@ -11,8 +11,10 @@ settings 注入通道（否则会用 ``/app/data`` 的真 DB）。
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import httpx
+import pytest
 import pytest_asyncio
 from app.core.config import AppSettings
 from app.db.models import Site, SiteUserData, TorrentIndex
@@ -649,6 +651,65 @@ async def test_cross_seed_orphans_with_row(client: httpx.AsyncClient) -> None:
     assert row["error"] is None
     assert len(row["orphans"]) == 1
     assert data["summary"]["orphan_count"] == 2
+
+
+async def test_cross_seed_orphans_delete(
+    client: httpx.AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """删除孤儿文件端点：删掉扫描目录下的孤儿，越界的路径被跳过。"""
+    from app.core.config import get_settings
+
+    scan_root = tmp_path / "aux"
+    scan_root.mkdir()
+    (scan_root / "orphan").mkdir()
+    (scan_root / "orphan" / "a.mkv").write_bytes(b"\0" * 100)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.mkv").write_bytes(b"\0" * 200)
+
+    monkeypatch.setattr(get_settings(), "cross_seed_scan_dirs", str(scan_root))
+
+    resp = await client.post(
+        "/api/v1/cross-seed-monitor/orphans/delete",
+        json={
+            "paths": [
+                str(scan_root / "orphan"),
+                str(outside / "keep.mkv"),
+            ]
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["succeeded"] == 1
+    assert data["skipped"] == 1
+    assert not (scan_root / "orphan").exists()
+    assert (outside / "keep.mkv").exists(), "越界路径不该被删"
+
+
+async def test_cross_seed_orphans_delete_requires_paths(
+    client: httpx.AsyncClient,
+) -> None:
+    """删除端点：paths 为空 → 422。"""
+    resp = await client.post(
+        "/api/v1/cross-seed-monitor/orphans/delete",
+        json={"paths": []},
+    )
+    assert resp.status_code == 422
+
+
+async def test_cross_seed_orphans_delete_without_scan_dirs(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未配置扫描目录 → 400（不删任何东西）。"""
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "cross_seed_scan_dirs", "")
+    resp = await client.post(
+        "/api/v1/cross-seed-monitor/orphans/delete",
+        json={"paths": ["/tmp/whatever"]},
+    )
+    assert resp.status_code == 400
+
 
 
 async def test_cross_seed_space_with_snapshot(client: httpx.AsyncClient) -> None:

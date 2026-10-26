@@ -393,11 +393,13 @@ test('辅种统计页 - 孤儿文件区块', async ({ page }) => {
   console.log(`  ✓ 状态: ${state}`)
 
   if (state === '有数据') {
-    await expect(tiles).toHaveCount(3)
+    // 4 张卡：孤儿条目 / 孤儿占用 / 其中空目录 / 占扫描目录
+    await expect(tiles).toHaveCount(4)
     // 孤儿数量与占用
     const labels = await tiles.locator('.space-tile__label').allTextContents()
     expect(labels.join('|')).toContain('孤儿')
-    console.log('  ✓ 孤儿卡片: 孤儿条目 / 孤儿占用 / 占扫描目录')
+    expect(labels.join('|')).toContain('空目录')
+    console.log('  ✓ 孤儿卡片: 孤儿条目 / 孤儿占用 / 其中空目录 / 占扫描目录')
   } else {
     // 不可用时必须有**说明**（不能是空白）
     expect(await alerts.count()).toBeGreaterThan(0)
@@ -405,4 +407,78 @@ test('辅种统计页 - 孤儿文件区块', async ({ page }) => {
     expect(text).toMatch(/孤儿|扫描|挂载/)
     console.log('  ✓ 不可用状态有明确说明')
   }
+})
+
+/**
+ * 孤儿文件删除（2026-10-26）。
+ *
+ * 删除**不可逆**——e2e 只验证 UI 流程（勾选 → 确认弹框 → 二次确认），
+ * **不真的点最终确认**（那会删掉 NAS 上的真实数据）。
+ */
+test('辅种统计页 - 孤儿文件删除确认流程', async ({ page }) => {
+  await login(page)
+  await page.goto('/cross-seed')
+
+  const tabs = page.locator('.ant-tabs-tab')
+  await expect(tabs.first()).toBeVisible({ timeout: 15000 }).catch(() => { /* 无下载器 */ })
+  const tabCount = await tabs.count()
+  if (tabCount === 0) {
+    console.log('  ✓ 无辅种下载器：跳过删除流程断言')
+    return
+  }
+
+  // 找有快照的 tab
+  let pane = page.locator('.ant-tabs-tabpane-active')
+  let found = false
+  for (let i = 0; i < tabCount; i++) {
+    await tabs.nth(i).click()
+    pane = page.locator('.ant-tabs-tabpane-active')
+    try {
+      await expect(pane.locator('.space-block').first()).toBeVisible({ timeout: 5000 })
+      found = true
+      break
+    } catch {
+      // 该 tab 没快照 → 试下一个
+    }
+  }
+  if (!found) {
+    console.log('  ✓ 还没有快照：跳过删除流程断言')
+    return
+  }
+
+  const block = pane.locator('.space-block').filter({ hasText: 'ORPHANS' })
+  await expect(block).toBeVisible()
+
+  // 展开孤儿明细
+  const panel = block.locator('.ant-collapse-panel')
+  if ((await panel.count()) === 0) {
+    console.log('  ✓ 没有孤儿明细：跳过删除流程断言')
+    return
+  }
+  await panel.first().locator('.ant-collapse-header').click()
+  await expect(block.locator('.orphan-toolbar')).toBeVisible()
+
+  // 未勾选时删除按钮置灰
+  const delBtn = block.locator('.orphan-toolbar button', { hasText: '删除选中' })
+  await expect(delBtn).toBeDisabled()
+  console.log('  ✓ 未勾选时删除按钮置灰')
+
+  // 全选 → 按钮可用
+  await block.locator('.orphan-toolbar button', { hasText: '全选' }).click()
+  await expect(delBtn).toBeEnabled()
+  console.log('  ✓ 全选后删除按钮可用')
+
+  // 点删除 → 出现确认弹框（**不点最终确认**）
+  await delBtn.click()
+  const modal = page.locator('.ant-modal', { hasText: '删除孤儿文件' })
+  await expect(modal).toBeVisible()
+  const modalText = (await modal.innerText()).replace(/\s+/g, ' ')
+  expect(modalText).toContain('永久删除')
+  expect(modalText).toContain('无法恢复')
+  console.log('  ✓ 删除确认弹框已弹出，含不可逆警告')
+
+  // 取消 → 关闭弹框
+  await modal.locator('button', { hasText: '取消' }).first().click()
+  await expect(modal).toBeHidden()
+  console.log('  ✓ 取消后弹框关闭（未删除任何东西）')
 })

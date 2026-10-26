@@ -126,7 +126,7 @@
   - 契约由 `tests/integration/test_cross_seed_job.py` + `test_api.py` + `web/tests/cross-seed.spec.ts` 固化
 - **辅种孤儿文件统计**（2026-10-24 加入，`app/services/orphan_scanner.py`）：
   - 孤儿 = **磁盘有、任务没了**（典型来源：用「仅删任务」清理种子时磁盘文件留下，不再做种却一直占空间）
-  - **必须挂载磁盘**：下载器**没有**浏览文件系统的接口（TR 的 RPC spec 不提供 filesystem 浏览，qB 也没有列目录 API）→ 只能把辅种站的下载目录**只读挂载**进容器，扫盘 + 顶层名匹配
+  - **必须挂载磁盘**：下载器**没有**浏览文件系统的接口（TR 的 RPC spec 不提供 filesystem 浏览，qB 也没有列目录 API）→ 只能把辅种站的下载目录**挂载**进容器，扫盘 + 顶层名匹配（权限 **rw**——删除孤儿文件需要写权限）
   - 128 上 Unraid **已自动挂好** CIFS（`/mnt/remotes/192.168.0.172_Public`）→ 只需一行 compose 挂载，无需 NAS 配置
   - **挂载路径必须与下载器的 `downloadDir` 完全一致**（辅种站 = `/share/Public/home/downloads/辅种`）——孤儿判定把任务按 downloadDir 分组，路径不一致就分不对组
   - **多路径配置**：`cross_seed_scan_dirs`（逗号分隔多目录），每个目录独立扫描 + 独立统计（`scanned_dirs` 列）。辅种站实测 3 种 downloadDir：`辅种`(4639) / 父目录(5) / `game`(1)
@@ -135,15 +135,26 @@
   - **空目录也算孤儿**（0 字节）——是「任务没了的残留」，但**不占空间** → 单独统计 `empty_dir_count`
   - 匹配：下载器任务的 `top_names`（TR 取 `files[].name` 的顶层段、qB 取 `content_path` 相对 `save_path` 的首段）与磁盘顶层条目名比对
   - **口径是保守下界**：同名但不同种子的目录会**漏判** → 数字只会偏少，不会偏多
-  - **只统计不删除**（527 GB 的误删代价太高，清理由用户自己决定）
+  - **跨下载器汇总「有主」**（2026-10-26 修正）：辅种目录**被多个下载器共用**——实测 qB 有 6 个任务的 `save_path` 也在辅种目录里。只看辅种下载器（TR）的任务会把那 6 个 qB 任务的数据误判成孤儿（实测误判 480 GB，占「孤儿」总量 78%）。故「有主」集合必须汇总**所有已启用下载器**的任务
+    - 拉取失败的下载器不贡献「有主」→ 其数据可能被误判 → **必须点名**（作业 summary + 步骤里写明哪个下载器失败）
+    - 每个下载器**只拉一次**（汇总时拉的结果复用给扫描，别拉两遍）
   - 新表 `cross_seed_orphan`（每下载器一行）+ 新作业 `scan_orphans`（cron `7 4 * * *`，每天一次——孤儿不会快变）+ 端点 `GET /cross-seed-monitor/orphans`
   - **顶层名单独拉**（2026-10-26）：`list_torrent_file_names()` 是**独立**的 adapter 方法——顶层名需要 TR 的 `files` 字段，而它在辅种站是 **27.5 MB**（15.8 万个文件条目，占响应体 98%）。混进 `list_torrents_with_errors()` 会让每次辅种巡查（30 分钟一次）都白拉 27 MB。**只有孤儿作业（每天一次）付这个代价**
     - 该方法**自带 `save_path`**（= downloadDir）→ 孤儿扫描**只打一次**下载器接口
     - qB 的 `/torrents/info` 本来就返回 `content_path` + `save_path` → **零额外请求**
     - `list_torrents_with_errors()` 与 `list_torrents()` **都不再拉 `files`/`fileStats`**（TR 的 `TorrentInfo` 没有这两个字段，拉了完全用不上）
+  - **孤儿文件删除**（2026-10-26 加入，`app/services/orphan_deleter.py`）：
+    - 端点 `POST /cross-seed-monitor/orphans/delete`（body：`paths`）——删的是**磁盘文件**，不是下载器任务（孤儿本来就没任务）
+    - **三道安全闸**（不只靠前端弹框）：
+      1. **目录范围**：路径必须是配置的扫描目录的**直接子项**——不能是任意路径、不能是子目录内部的某个文件（防路径穿越）
+      2. **二次扫描复核**：删除前**重新**拉所有下载器的任务，确认条目**此刻**仍无主。快照可能是几小时前的 → 期间被加回来的任务会被**跳过**（不删）
+      3. **审计日志**：逐条记路径 + 大小（删磁盘数据不可逆 → 必须能回答「删了什么」）
+    - 逐条删除，**单条失败不中断**其余条目；复核不通过的记 `skipped`、删除失败的记 `failed`
+    - 挂载权限必须是 **rw**（`ro` 删不了）——compose 里已改
+    - 契约由 `tests/unit/test_orphan_deleter.py` + `tests/integration/test_api.py` 固化
   - 实测：辅种站扫 1696 个顶层条目（1670 有主 / 63 孤儿，其中 39 空目录 + 24 有内容 612.85 GB），CIFS 全量扫 **约 40 秒**
   - **降级不静默**：目录未挂载 / 不可读 / 下载器拉取失败 → 记 `error` 字段（前端据此显示原因），作业不炸
-  - 契约由 `tests/unit/test_orphan_scanner.py` + `test_downloader_adapters.py` + `tests/integration/test_cross_seed_orphan.py` + `test_api.py` + `test_db_models.py` 固化
+  - 契约由 `tests/unit/test_orphan_scanner.py` + `test_orphan_deleter.py` + `test_downloader_adapters.py` + `tests/integration/test_cross_seed_orphan.py` + `test_api.py` + `test_db_models.py` 固化
 
 ## 必备命令
 ```bash

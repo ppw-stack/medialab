@@ -16,6 +16,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from app.adapters.downloaders.base import TorrentFileNames
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.timeutils import bj_now
@@ -29,6 +30,7 @@ logger = get_logger(__name__)
 
 __all__ = [
     "OrphanRow",
+    "collect_owned_names",
     "list_orphans",
     "run_scan_orphans",
     "scan_one_downloader",
@@ -124,7 +126,60 @@ async def _upsert(downloader_id: int, name: str, result: Any) -> None:
                 setattr(row, k, v)
 
 
-async def scan_one_downloader(row: DownloaderInstance) -> dict[str, Any]:
+async def collect_owned_names() -> tuple[
+    list[TorrentFileNames], dict[int, list[TorrentFileNames]], list[str]
+]:
+    """拉取**所有**已启用下载器的顶层名（跨下载器汇总）。
+
+    辅种目录可能**被多个下载器共用**——实测 qB 有 6 个任务的
+    ``save_path`` 就在辅种目录里。若「有主」只看辅种下载器（TR）的任务，
+    这 6 个 qB 任务的数据会被误判成孤儿（实测误判 480 GB，占「孤儿」
+    总量的 78%）。故必须汇总**所有**已启用下载器。
+
+    :returns: ``(全部顶层名, {下载器 id: 该下载器的顶层名}, 失败的下载器名)``。
+
+        中间那个字典让调用方**复用**已拉到的数据——每个下载器只拉一次
+        （辅种站拉一次 20s+，拉两次代价太大）。
+
+        失败的下载器不贡献「有主」条目 → 它们的数据可能被误判为孤儿，
+        故**必须**在结果里点名（前端据此提示「判定可能不完整」）。
+    """
+    async with session_scope() as session:
+        rows = list(
+            (
+                await session.execute(
+                    select(DownloaderInstance)
+                    .where(DownloaderInstance.enabled.is_(True))
+                    .order_by(DownloaderInstance.id)
+                )
+            ).scalars().all()
+        )
+
+    factory = get_factory()
+    all_files: list[TorrentFileNames] = []
+    by_downloader: dict[int, list[TorrentFileNames]] = {}
+    failed: list[str] = []
+    for row in rows:
+        adapter = factory.downloader(row)
+        try:
+            files = await adapter.list_torrent_file_names()
+        except Exception as exc:
+            # 拉取失败 → 该下载器的数据可能被误判成孤儿 → 记名
+            logger.warning(
+                "下载器 %s 拉取失败（孤儿判定不完整）：%s", row.name, exc
+            )
+            failed.append(row.name)
+            continue
+        by_downloader[row.id] = files
+        all_files.extend(files)
+    return all_files, by_downloader, failed
+
+
+async def scan_one_downloader(
+    row: DownloaderInstance,
+    owned: list[TorrentFileNames] | None = None,
+    own_files: list[TorrentFileNames] | None = None,
+) -> dict[str, Any]:
     """扫描单个辅种下载器的孤儿文件。
 
     **网络 IO 在事务外**：拉任务 → 扫盘 → 短事务落库。
@@ -138,19 +193,34 @@ async def scan_one_downloader(row: DownloaderInstance) -> dict[str, Any]:
     27.5 MB（15.8 万个文件条目）。混进巡查路径会让每次辅种巡查
     （30 分钟一次）都白拉这 27 MB——巡查并不需要文件列表。故拆成独立
     方法，只有本作业（每天一次）付这个代价。
+
+    :param owned: **跨下载器汇总**的「有主」集合（见
+        :func:`collect_owned_names`）。None = 只用本下载器的任务
+        （单下载器调试用；生产路径必须传汇总值，否则共用目录的其他
+        下载器的数据会被误判成孤儿）。
+    :param own_files: 本下载器**已拉取**的顶层名——传了就复用（不重复
+        拉取）；None = 本函数自己拉一次。
     """
     factory = get_factory()
     adapter = factory.downloader(row)
-    try:
-        files = await adapter.list_torrent_file_names()
-    except Exception as exc:
-        logger.warning("辅种下载器 %s 拉取失败（孤儿扫描跳过）：%s", row.name, exc)
-        result = failed_scan(str(exc) or type(exc).__name__)
-        await _upsert(row.id, row.name, result)
-        return result.to_dict()
+    if own_files is not None:
+        files = own_files
+    else:
+        try:
+            files = await adapter.list_torrent_file_names()
+        except Exception as exc:
+            logger.warning(
+                "辅种下载器 %s 拉取失败（孤儿扫描跳过）：%s", row.name, exc
+            )
+            result = failed_scan(str(exc) or type(exc).__name__)
+            await _upsert(row.id, row.name, result)
+            return result.to_dict()
 
     scan_dirs = parse_scan_dirs(get_settings().cross_seed_scan_dirs)
-    result = scan_orphans(files, scan_dirs)
+    # 汇总所有下载器的顶层名 + 本下载器的（汇总里已含本下载器，重复无害）
+    merged = list(owned) if owned is not None else []
+    merged.extend(files)
+    result = scan_orphans(merged, scan_dirs)
     await _upsert(row.id, row.name, result)
     return result.to_dict()
 
@@ -182,10 +252,23 @@ async def run_scan_orphans() -> dict[str, Any]:
             "steps": [JobStep("查询辅种下载器", "skip", 0, "无辅种下载器")],
         }
 
+    # 跨下载器汇总「有主」集合——辅种目录可能被多个下载器共用
+    # （实测 qB 有 6 个任务在辅种目录里）。只看辅种下载器会把那些
+    # 正在做种的数据误判成孤儿（实测误判 480 GB / 78%）。
+    owned, by_downloader, pull_failed = await collect_owned_names()
+    if pull_failed:
+        logger.warning(
+            "部分下载器拉取失败，孤儿判定可能不完整：%s", "、".join(pull_failed)
+        )
+
     results: list[dict[str, Any]] = []
     errors: list[str] = []
     for row in rows:
-        result = await scan_one_downloader(row)
+        result = await scan_one_downloader(
+            row,
+            owned=owned,
+            own_files=by_downloader.get(row.id),
+        )
         results.append(result)
         if result.get("error"):
             errors.append(f"{row.name}: {result['error']}")
@@ -198,6 +281,8 @@ async def run_scan_orphans() -> dict[str, Any]:
     )
     if errors:
         summary += f"，{len(errors)} 个扫描失败"
+    if pull_failed:
+        summary += f"，{len(pull_failed)} 个下载器拉取失败（判定不完整）"
 
     return {
         "scanned_downloaders": len(rows),
@@ -206,6 +291,17 @@ async def run_scan_orphans() -> dict[str, Any]:
         "summary": summary,
         "errors": errors,
         "steps": [
+            JobStep(
+                "汇总各下载器的任务",
+                "warn" if pull_failed else "ok",
+                len(owned),
+                f"{len(owned)} 个种子"
+                + (
+                    f"，{len(pull_failed)} 个下载器失败（{'、'.join(pull_failed)}）"
+                    if pull_failed
+                    else ""
+                ),
+            ),
             JobStep(
                 "扫描辅种下载器",
                 "warn" if errors else "ok",

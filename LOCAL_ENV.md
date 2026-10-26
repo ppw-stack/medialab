@@ -140,11 +140,15 @@
 故 prod 只需一行 compose 挂载（已加）：
 
 ```yaml
-- /mnt/remotes/192.168.0.172_Public/home/downloads:/share/Public/home/downloads:ro
+- /mnt/remotes/192.168.0.172_Public/home/downloads:/share/Public/home/downloads:rw
 environment:
   CROSS_SEED_SCAN_DIRS: ${CROSS_SEED_SCAN_DIRS:-/share/Public/home/downloads/辅种}
 ```
 
+> **权限是 `rw`（不是 `ro`）**——孤儿文件删除功能需要写权限。
+> 删除有三重安全闸（只删扫描目录的直接子项 / 删除前二次复核 /
+> 审计日志），见 `app/services/orphan_deleter.py`。
+>
 > **路径必须与下载器里的 `downloadDir` 完全一致**（172 上辅种站的
 > `downloadDir` 就是 `/share/Public/home/downloads/辅种`）。孤儿判定把
 > 任务按 `downloadDir` 分组，路径不一致就分不对组。
@@ -153,6 +157,11 @@ environment:
 > 辅种站实测有 3 种 `downloadDir`：`辅种`（4639 个种子）/ 父目录（5 个）/
 > `game`（1 个）——只扫「辅种」目录时，父目录与 `game` 的任务**不参与**
 > 「有主」判定（它们的文件本来也不在这个目录里）。
+>
+> ⚠️ **辅种目录被多个下载器共用**：实测 qB 有 6 个任务的 `save_path`
+> 也在辅种目录里。故「有主」集合必须**汇总所有下载器**的任务——
+> 只看辅种下载器会把那 6 个 qB 任务的数据误判成孤儿（实测误判 480 GB，
+> 占「孤儿」总量的 78%）。
 >
 > **dev（本机 92）无法挂**：172 的 NFS 只导出给 `192.168.0.128`。
 > 故 dev 的孤儿统计会降级（记 error「未配置扫描目录」），不影响其他功能。

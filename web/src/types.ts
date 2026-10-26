@@ -350,6 +350,29 @@ export interface CrossSeedOrphanSummary {
   downloaders: CrossSeedOrphanStat[]
 }
 
+/** 孤儿删除的单条结果。 */
+export interface CrossSeedOrphanDeleteItem {
+  path: string
+  /** deleted = 已删；skipped = 复核不通过跳过；failed = 删除失败。 */
+  status: 'deleted' | 'skipped' | 'failed'
+  bytes?: number
+  reason?: string
+}
+
+/** 孤儿删除结果（`POST /cross-seed-monitor/orphans/delete`）。 */
+export interface CrossSeedOrphanDeleteResult {
+  requested: number
+  succeeded: number
+  failed: number
+  /** 复核不通过而跳过的数量（期间已不再是无主条目）。 */
+  skipped: number
+  freed_bytes: number
+  items: CrossSeedOrphanDeleteItem[]
+  error: string | null
+  /** 判定不完整的警告（部分下载器拉取失败）。 */
+  warning?: string
+}
+
 /** 辅种空间汇总（`GET /cross-seed-monitor/space`）。 */
 export interface CrossSeedSpace {
   summary: {

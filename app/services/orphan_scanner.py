@@ -10,7 +10,7 @@
     filesystem 浏览，qBittorrent 也没有列目录的 API。所以只能靠把辅种站
     的下载目录**只读挂载**进容器，然后扫盘 + 与下载器任务做名称匹配。
 
-匹配算法（按 downloadDir 分组）：
+匹配算法（按 downloadDir 分组 + **跨下载器汇总**）：
     辅种站的 Transmission 有多个 ``downloadDir``（实测：``辅种`` 4639 个
     种子 / 父目录 5 个 / ``game`` 1 个）。每个种子的 ``files[].name`` 是
     **相对它自己 downloadDir** 的路径，所以：
@@ -20,8 +20,14 @@
     - 扫描某个配置目录时，**只把 downloadDir 等于该目录的任务**算作
       「有主」——否则父目录的任务会把辅种目录里的同名条目误认有主
 
+    **跨下载器汇总**（2026-10-26 修正）：辅种目录可能**被多个下载器共用**
+    ——实测 qB 有 6 个任务的 ``save_path`` 就在辅种目录里。若只看辅种
+    下载器（TR）的任务，这 6 个 qB 任务的数据会被误判成孤儿（实测误判
+    480 GB，占「孤儿」总量的 78%）。故「有主」集合必须汇总**所有**已启用
+    下载器的任务。
+
     对每个配置目录 D：
-        有主 = { 顶层名(t) | t 的 downloadDir == D }
+        有主 = { 顶层名(t) | t 的 downloadDir == D }   # 跨所有下载器汇总
         孤儿 = { D 下的顶层条目 } - 有主
 
     **空目录也算孤儿**（0 字节）——它们是「任务没了的残留」，清理掉能
@@ -153,7 +159,7 @@ def _dir_size(path: Path) -> tuple[int, int]:
     return total, count
 
 
-def _top_names_by_dir(files: list[TorrentFileNames]) -> dict[str, set[str]]:
+def top_names_by_dir(files: list[TorrentFileNames]) -> dict[str, set[str]]:
     """按 downloadDir 分组，收集每组占用的**顶层名**。
 
     分组键用 ``save_path``（= TR 的 ``downloadDir`` / qB 的 ``save_path``）
@@ -169,7 +175,7 @@ def _top_names_by_dir(files: list[TorrentFileNames]) -> dict[str, set[str]]:
     return out
 
 
-def _match_dir(a: str, b: str) -> bool:
+def match_dir(a: str, b: str) -> bool:
     """两个 downloadDir 是否指向同一个目录（忽略尾部斜杠）。
 
     路径**必须完全一致**才算同一个——不做前缀匹配（前缀匹配会把
@@ -198,7 +204,7 @@ def scan_orphans(
             error="未配置扫描目录（辅种下载目录未挂载到容器）"
         )
 
-    names_by_dir = _top_names_by_dir(files)
+    names_by_dir = top_names_by_dir(files)
 
     orphans: list[OrphanEntry] = []
     scanned_dirs: list[dict[str, Any]] = []
@@ -216,7 +222,7 @@ def scan_orphans(
         # 只把 downloadDir 等于该目录的任务算作「有主」
         owned: set[str] = set()
         for d, names in names_by_dir.items():
-            if _match_dir(d, scan_dir):
+            if match_dir(d, scan_dir):
                 owned |= names
 
         try:

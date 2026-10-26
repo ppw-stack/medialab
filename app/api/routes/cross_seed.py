@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_session
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.services.cross_seed_monitor import (
     CrossSeedMonitorService,
@@ -33,6 +34,7 @@ from app.services.cross_seed_monitor import (
 from app.services.cross_seed_space import SpaceStats, summarize_spaces
 from app.services.downloader_service import remove_torrents_in_batches
 from app.services.errors import ServiceError
+from app.services.orphan_scanner import parse_scan_dirs
 
 logger = get_logger(__name__)
 
@@ -121,6 +123,13 @@ class RemoveTorrentsIn(BaseModel):
     hashes: list[str] = Field(..., min_length=1)
     #: 是否连磁盘数据一起删（**不可恢复**）
     delete_data: bool = False
+
+
+class DeleteOrphansIn(BaseModel):
+    """删除孤儿文件的请求体。"""
+
+    #: 要删除的孤儿条目的**绝对路径**（来自孤儿明细的 path 字段）
+    paths: list[str] = Field(..., min_length=1)
 
 
 # ============================================================ 端点
@@ -268,6 +277,43 @@ async def list_orphans() -> dict[str, Any]:
         },
         "downloaders": [r.to_dict() for r in rows],
     }
+
+
+@router.post("/orphans/delete", summary="删除孤儿文件（不可逆）")
+async def delete_orphan_files(payload: DeleteOrphansIn) -> dict[str, Any]:
+    """删除孤儿文件（磁盘上有、下载器里已无对应任务的条目）。
+
+    **不可逆**——删的是 NAS 上的实际数据。安全机制在 service 层
+    （:mod:`app.services.orphan_deleter`），不只靠前端弹框：
+
+    1. **只在配置的扫描目录内删**——路径必须是扫描目录的**直接子项**，
+       不能是任意路径（防路径穿越）
+    2. **二次扫描复核**——删除前**重新**拉一遍所有下载器的任务，确认这些
+       条目**此刻**仍无主（快照可能是几小时前的，期间情况可能变了）
+    3. **审计日志**——逐条记路径 + 大小
+
+    逐条删除，单条失败不中断其余条目。复核不通过的会被**跳过**
+    （记在 ``skipped`` 里），不会删。
+    """
+    from app.services.cross_seed_orphan import collect_owned_names
+    from app.services.orphan_deleter import delete_orphans
+
+    scan_dirs = parse_scan_dirs(get_settings().cross_seed_scan_dirs)
+    if not scan_dirs:
+        raise HTTPException(
+            status_code=400, detail="未配置扫描目录（辅种下载目录未挂载到容器）"
+        )
+
+    owned, _by_downloader, pull_failed = await collect_owned_names()
+    result = delete_orphans(payload.paths, owned, scan_dirs)
+
+    out = result.to_dict()
+    if pull_failed:
+        # 拉取失败的下载器不贡献「有主」→ 判定可能不完整 → 必须点名
+        out["warning"] = (
+            f"以下下载器拉取失败，判定可能不完整：{'、'.join(pull_failed)}"
+        )
+    return out
 
 
 @router.get("/downloaders/{downloader_id}/snapshot", summary="单个辅种下载器快照")
