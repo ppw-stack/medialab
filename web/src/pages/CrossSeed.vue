@@ -36,18 +36,19 @@ const detailLoading = ref(false)
 const refreshing = ref(false)
 
 const statsColumns = [
-  { title: '原始名称', dataIndex: 'name', key: 'name', ellipsis: true, minWidth: 360 },
+  { title: '原始名称', dataIndex: 'name', key: 'name', ellipsis: true, minWidth: 360, sorter: (a: CrossSeedStatsRow, b: CrossSeedStatsRow) => a.name.localeCompare(b.name) },
   { title: '大小 (GB)', dataIndex: 'size_gb', key: 'size_gb', width: 120, sorter: (a: CrossSeedStatsRow, b: CrossSeedStatsRow) => a.size_gb - b.size_gb },
   { title: '出现次数', dataIndex: 'count', key: 'count', width: 120, sorter: (a: CrossSeedStatsRow, b: CrossSeedStatsRow) => a.count - b.count },
   { title: '操作', key: 'actions', width: 100, fixed: 'right' as const },
 ]
 
 const anomalyColumns = [
-  { title: '名称', dataIndex: 'name', key: 'name', ellipsis: true, minWidth: 260 },
-  { title: 'Hash', dataIndex: 'hash', key: 'hash', width: 300 },
-  { title: '异常类型', dataIndex: 'anomaly_type', key: 'anomaly_type', width: 180 },
-  { title: '错误描述', dataIndex: 'error_string', key: 'error_string', ellipsis: true, minWidth: 220 },
-  { title: '状态', key: 'paused', width: 100 },
+  { title: '名称', dataIndex: 'name', key: 'name', ellipsis: true, minWidth: 260, sorter: (a: CrossSeedAnomaly, b: CrossSeedAnomaly) => a.name.localeCompare(b.name) },
+  { title: 'Hash', dataIndex: 'hash', key: 'hash', width: 300, sorter: (a: CrossSeedAnomaly, b: CrossSeedAnomaly) => a.hash.localeCompare(b.hash) },
+  { title: '异常类型', dataIndex: 'anomaly_type', key: 'anomaly_type', width: 180, sorter: (a: CrossSeedAnomaly, b: CrossSeedAnomaly) => a.anomaly_type.localeCompare(b.anomaly_type) },
+  { title: '错误描述', dataIndex: 'error_string', key: 'error_string', ellipsis: true, minWidth: 220, sorter: (a: CrossSeedAnomaly, b: CrossSeedAnomaly) => a.error_string.localeCompare(b.error_string) },
+  { title: '大小 (GB)', dataIndex: 'size_gb', key: 'size_gb', width: 110, sorter: (a: CrossSeedAnomaly, b: CrossSeedAnomaly) => a.size_gb - b.size_gb },
+  { title: '状态', key: 'paused', width: 100, sorter: (a: CrossSeedAnomaly, b: CrossSeedAnomaly) => Number(a.paused) - Number(b.paused) },
 ]
 
 //: 异常种子里勾选的 hash（批量删除用）
@@ -75,16 +76,16 @@ const deleteTarget = ref<{
 } | null>(null)
 
 const dirColumns = [
-  { title: '下载目录', dataIndex: 'dir', key: 'dir', ellipsis: true, minWidth: 320 },
-  { title: '种子数', dataIndex: 'count', key: 'count', width: 100 },
-  { title: '实际占用', dataIndex: 'bytes', key: 'bytes', width: 140 },
-  { title: '总大小', dataIndex: 'total_bytes', key: 'total_bytes', width: 140 },
+  { title: '下载目录', dataIndex: 'dir', key: 'dir', ellipsis: true, minWidth: 320, sorter: (a: CrossSeedDirUsage, b: CrossSeedDirUsage) => a.dir.localeCompare(b.dir) },
+  { title: '种子数', dataIndex: 'count', key: 'count', width: 100, sorter: (a: CrossSeedDirUsage, b: CrossSeedDirUsage) => a.count - b.count },
+  { title: '实际占用', dataIndex: 'bytes', key: 'bytes', width: 140, sorter: (a: CrossSeedDirUsage, b: CrossSeedDirUsage) => a.bytes - b.bytes },
+  { title: '总大小', dataIndex: 'total_bytes', key: 'total_bytes', width: 140, sorter: (a: CrossSeedDirUsage, b: CrossSeedDirUsage) => a.total_bytes - b.total_bytes },
 ]
 
 const orphanColumns = [
-  { title: '条目名', dataIndex: 'name', key: 'name', ellipsis: true, minWidth: 320 },
-  { title: '占用', dataIndex: 'bytes', key: 'bytes', width: 140 },
-  { title: '文件数', dataIndex: 'file_count', key: 'file_count', width: 100 },
+  { title: '条目名', dataIndex: 'name', key: 'name', ellipsis: true, minWidth: 320, sorter: (a: CrossSeedOrphan, b: CrossSeedOrphan) => a.name.localeCompare(b.name) },
+  { title: '占用', dataIndex: 'bytes', key: 'bytes', width: 140, sorter: (a: CrossSeedOrphan, b: CrossSeedOrphan) => a.bytes - b.bytes },
+  { title: '文件数', dataIndex: 'file_count', key: 'file_count', width: 100, sorter: (a: CrossSeedOrphan, b: CrossSeedOrphan) => a.file_count - b.file_count },
 ]
 
 //: 孤儿明细里勾选的条目（按 path 选中——path 唯一）
@@ -95,12 +96,12 @@ const orphanDeleteModalOpen = ref(false)
 const orphanDeleting = ref(false)
 
 const scannedDirColumns = [
-  { title: '扫描目录', dataIndex: 'scan_dir', key: 'scan_dir', ellipsis: true, minWidth: 320 },
-  { title: '顶层条目', dataIndex: 'total_count', key: 'total_count', width: 100 },
-  { title: '有主', dataIndex: 'owned_count', key: 'owned_count', width: 90 },
-  { title: '孤儿', dataIndex: 'orphan_count', key: 'orphan_count', width: 90 },
-  { title: '其中空目录', dataIndex: 'empty_dir_count', key: 'empty_dir_count', width: 110 },
-  { title: '孤儿占用', dataIndex: 'orphan_bytes', key: 'orphan_bytes', width: 140 },
+  { title: '扫描目录', dataIndex: 'scan_dir', key: 'scan_dir', ellipsis: true, minWidth: 320, sorter: (a: CrossSeedScannedDir, b: CrossSeedScannedDir) => a.scan_dir.localeCompare(b.scan_dir) },
+  { title: '顶层条目', dataIndex: 'total_count', key: 'total_count', width: 100, sorter: (a: CrossSeedScannedDir, b: CrossSeedScannedDir) => a.total_count - b.total_count },
+  { title: '有主', dataIndex: 'owned_count', key: 'owned_count', width: 90, sorter: (a: CrossSeedScannedDir, b: CrossSeedScannedDir) => a.owned_count - b.owned_count },
+  { title: '孤儿', dataIndex: 'orphan_count', key: 'orphan_count', width: 90, sorter: (a: CrossSeedScannedDir, b: CrossSeedScannedDir) => a.orphan_count - b.orphan_count },
+  { title: '其中空目录', dataIndex: 'empty_dir_count', key: 'empty_dir_count', width: 110, sorter: (a: CrossSeedScannedDir, b: CrossSeedScannedDir) => a.empty_dir_count - b.empty_dir_count },
+  { title: '孤儿占用', dataIndex: 'orphan_bytes', key: 'orphan_bytes', width: 140, sorter: (a: CrossSeedScannedDir, b: CrossSeedScannedDir) => a.orphan_bytes - b.orphan_bytes },
 ]
 
 /** 孤儿文件统计（定时作业写入，页面只读 DB） */
@@ -523,6 +524,7 @@ onMounted(async () => {
               :data-source="snapshot.by_dir"
               :row-key="(r: CrossSeedDirUsage) => r.dir"
               :pagination="false"
+              :default-sort-order="{ columnKey: 'bytes', order: 'descend' }"
               size="small"
               style="margin-top: var(--sp-3)"
             >
@@ -610,6 +612,7 @@ onMounted(async () => {
                 :data-source="currentOrphan.scanned_dirs"
                 :row-key="(r: CrossSeedScannedDir) => r.scan_dir"
                 :pagination="false"
+                :default-sort-order="{ columnKey: 'orphan_bytes', order: 'descend' }"
                 size="small"
                 style="margin-top: var(--sp-3)"
               >
@@ -665,6 +668,7 @@ onMounted(async () => {
                       },
                     }"
                     :pagination="{ pageSize: 20, showSizeChanger: true }"
+                    :default-sort-order="{ columnKey: 'bytes', order: 'descend' }"
                     size="small"
                   >
                     <template #bodyCell="{ column, record }">
@@ -735,6 +739,7 @@ onMounted(async () => {
                   preserveSelectedRowKeys: false,
                 }"
                 :pagination="{ pageSize: 20, showSizeChanger: true }"
+                :default-sort-order="{ columnKey: 'size_gb', order: 'descend' }"
                 size="small"
               >
                 <template #bodyCell="{ column, record }">
@@ -755,6 +760,9 @@ onMounted(async () => {
                     <span class="dim">
                       {{ (record as CrossSeedAnomaly).error_string || '—' }}
                     </span>
+                  </template>
+                  <template v-else-if="column.key === 'size_gb'">
+                    {{ (record as CrossSeedAnomaly).size_gb }}
                   </template>
                   <template v-else-if="column.key === 'paused'">
                     <a-tag v-if="(record as CrossSeedAnomaly).anomaly_type === 'tracker_error'" color="orange">

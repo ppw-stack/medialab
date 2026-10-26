@@ -496,12 +496,6 @@ test('辅种统计页 - 孤儿文件删除确认流程', async ({ page }) => {
 test('辅种统计页 - 孤儿删除后自动重扫', async ({ page }) => {
   await login(page)
 
-  // 监听删除请求的响应体
-  const respPromise = page.waitForResponse(
-    r => r.url().includes('/cross-seed-monitor/orphans/delete') && r.request().method() === 'POST',
-    { timeout: 180000 },
-  )
-
   await page.goto('/cross-seed')
   const tabs = page.locator('.ant-tabs-tab')
   await expect(tabs.first()).toBeVisible({ timeout: 15000 }).catch(() => { /* 无下载器 */ })
@@ -539,6 +533,13 @@ test('辅种统计页 - 孤儿删除后自动重扫', async ({ page }) => {
   await block.locator('.orphan-toolbar button', { hasText: '全选' }).click()
   await block.locator('.orphan-toolbar button', { hasText: '删除选中' }).click()
 
+  // 监听删除请求的响应体（**放在所有 early-return 之后**——否则提前
+  // 返回时会留下一个永不 resolve 的 waitForResponse，测试直接超时）
+  const respPromise = page.waitForResponse(
+    r => r.url().includes('/cross-seed-monitor/orphans/delete') && r.request().method() === 'POST',
+    { timeout: 180000 },
+  )
+
   const modal = page.locator('.ant-modal', { hasText: '删除孤儿文件' })
   await expect(modal).toBeVisible()
   // 二次确认 —— 这一次**真的删**（选的是空目录，代价最小）
@@ -552,4 +553,91 @@ test('辅种统计页 - 孤儿删除后自动重扫', async ({ page }) => {
   expect(body.orphans).toBeTruthy()
   expect(body.orphans.summary).toBeTruthy()
   console.log('  ✓ 删除响应带最新孤儿统计（已重扫）')
+})
+
+/**
+ * 辅种页所有列表的**表头排序**（2026-10-26）。
+ *
+ * 辅种页有 5 张表：统计分组 / 异常明细 / 目录分布 / 孤儿明细 / 逐目录统计。
+ * 每张表的**每个数据列**都应可点表头排序——辅种站动辄几千行，不排序
+ * 没法用（找最大的那个、按名字定位某条）。
+ *
+ * 本用例验证：表头存在排序控件（`.ant-table-column-sorter`），且点击后
+ * 行顺序真的变了。
+ */
+test('辅种统计页 - 各列表表头可排序', async ({ page }) => {
+  await login(page)
+  await page.goto('/cross-seed')
+
+  const tabs = page.locator('.ant-tabs-tab')
+  await expect(tabs.first()).toBeVisible({ timeout: 15000 }).catch(() => { /* 无下载器 */ })
+  if ((await tabs.count()) === 0) {
+    console.log('  ✓ 无辅种下载器：跳过排序断言')
+    return
+  }
+
+  // 找有快照的 tab
+  let pane = page.locator('.ant-tabs-tabpane-active')
+  let found = false
+  for (let i = 0; i < (await tabs.count()); i++) {
+    await tabs.nth(i).click()
+    pane = page.locator('.ant-tabs-tabpane-active')
+    try {
+      // ⚠️ 必须用 .first()——页面里有多张 space-block（空间占用 + 孤儿），
+      // 直接定位会命中多个元素（Playwright strict mode 报错）
+      await expect(pane.locator('.space-block').first()).toBeVisible({ timeout: 5000 })
+      found = true
+      break
+    } catch {
+      // 该 tab 没快照 → 试下一个
+    }
+  }
+  if (!found) {
+    console.log('  ✓ 还没有快照：跳过排序断言')
+    return
+  }
+
+  const tables = pane.locator('.ant-table')
+  const tableCount = await tables.count()
+  console.log(`  ✓ 页面内共 ${tableCount} 张表`)
+  expect(tableCount).toBeGreaterThan(0)
+
+  // 每张表的数据列都应有排序控件
+  let checked = 0
+  for (let i = 0; i < tableCount; i++) {
+    const table = tables.nth(i)
+    const sorters = table.locator('th .ant-table-column-sorter')
+    const n = await sorters.count()
+    const headers = await table.locator('thead th').allTextContents()
+    console.log(`  ✓ 表 ${i + 1}: ${n} 个可排序列 / ${headers.length} 列 — ${headers.join(' | ').slice(0, 70)}`)
+    expect(n).toBeGreaterThan(0)
+    checked += n
+  }
+  expect(checked).toBeGreaterThan(0)
+
+  // 点「出现次数」表头 → 行顺序真的变了（排序生效，不只是控件存在）
+  const statsTable = pane.locator('.ant-table').filter({ hasText: '操作' }).last()
+  if (await statsTable.count()) {
+    const countHeader = statsTable.locator('th:has-text("出现次数")').first()
+    if (await countHeader.count()) {
+      // 只取首行的「出现次数」单元格——不要整行 allTextContents（表格
+      // 有 50 行 × 多列，逐格读很慢，会撞 30s 超时）
+      const firstCount = () =>
+        statsTable.locator('tbody tr.ant-table-row').first().locator('td').nth(2).innerText()
+
+      const before = await firstCount()
+      // 点 **.ant-table-column-sorters 容器**（整个表头区域）——点里面的
+      // caret 图标会因为它只有 12px 宽、又在视口外而超时
+      await countHeader.locator('.ant-table-column-sorters').first().click()
+      await page.waitForTimeout(600)
+      const after = await firstCount()
+      console.log(`  ✓ 点击「出现次数」表头：首行 ${before} → ${after}`)
+      expect(after).not.toBe(before)
+
+      // 表头出现排序状态 class
+      const sortedHeaders = await statsTable.locator('th.ant-table-column-has-sorters').count()
+      expect(sortedHeaders).toBeGreaterThan(0)
+      console.log('  ✓ 表头出现排序状态 class')
+    }
+  }
 })
