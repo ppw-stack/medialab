@@ -38,6 +38,7 @@ async def test_create_all_builds_expected_tables(db: None) -> None:
         "torrent_index",
         "task_queue",
         "app_runtime_params",
+        "app_env_settings",
         "job_runs",
         "scheduler_job_settings",
         "site_user_data",

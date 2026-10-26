@@ -28,6 +28,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from app.domain.enums import FreeType
 
 __all__ = [
+    "AppEnvSetting",
     "Base",
     "CrossSeedOrphan",
     "CrossSeedSnapshot",
@@ -207,6 +208,40 @@ class AppRuntimeParam(Base):
     #: 整型值（与前端 input-number 一致；str 字段留作未来扩展）
     value_int: Mapped[int | None] = mapped_column(Integer, nullable=True)
     value_str: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    #: 最近一次修改时间
+    updated_at: Mapped[str] = mapped_column(
+        String(32), default=_bj_now, onupdate=_bj_now
+    )
+
+
+class AppEnvSetting(Base):
+    """环境变量配置（DB 持久化的字符串型设置）。
+
+    与 :class:`AppRuntimeParam` 的分工：
+
+    - :class:`AppRuntimeParam` —— **整型**作业运行参数（``value_int``），
+      归属作业，按作业的「配置」弹框分组编辑
+    - 本表 —— **字符串型**进程级配置（辅种扫描目录 / 未来其它 env→DB
+      的字符串设置），不归属作业，在「设置 → 环境变量」tab 集中编辑
+
+    单行 kv 表（PK = key）。仅存**用户显式改过**或**首次启动回填**的
+    配置——未在此表出现的配置用 env 来源值（``AppSettings`` 同名字段）。
+    因此新增配置项时不会受历史行影响。
+
+    为何独立于 :class:`AppSettings`：
+
+        :class:`AppSettings` 是启动期一次性加载的 pydantic 配置，
+        **不可运行期修改**。本表把 env 来源的字符串配置落库，让用户在
+        Web 页面的修改跨重启保持（与 ``scheduler_job_settings`` 同构）。
+        详见 :mod:`app.services.env_settings`。
+    """
+
+    __tablename__ = "app_env_settings"
+
+    #: 配置名（PK）—— 与 ``AppSettings`` 同名字段一致
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    #: 配置值（字符串型；多目录等以逗号分隔存原值，由业务侧 parse）
+    value: Mapped[str] = mapped_column(Text, default="")
     #: 最近一次修改时间
     updated_at: Mapped[str] = mapped_column(
         String(32), default=_bj_now, onupdate=_bj_now

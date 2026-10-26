@@ -554,6 +554,29 @@ export interface RuntimeParamsView {
   specs: ParamSpec[]
 }
 
+/** 环境变量配置项（`GET/PUT /env-settings`）。
+ *
+ * 与 `ParamSpec`（运行参数）平行但独立——本类型服务「字符串型」配置
+ * （辅种扫描目录 / 未来其它 env→DB 字符串设置），不归属作业。
+ */
+export interface EnvSettingItem {
+  key: string
+  label: string
+  /** 补充说明（前端渲染在字段下方）。 */
+  note: string
+  /** textarea 的 placeholder。 */
+  placeholder: string
+  /** 值的最大长度（前端 maxlength + 后端校验双保险）。 */
+  max_length: number
+  /** 当前值。 */
+  value: string
+}
+
+/** 环境变量配置响应。 */
+export interface EnvSettingsView {
+  items: EnvSettingItem[]
+}
+
 // ==================================================================== 仪表盘
 
 /** 仪表盘总览（`GET /dashboard`）。 */

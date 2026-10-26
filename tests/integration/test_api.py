@@ -657,7 +657,7 @@ async def test_cross_seed_orphans_delete(
     client: httpx.AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """删除孤儿文件端点：删掉扫描目录下的孤儿，越界的路径被跳过。"""
-    from app.core.config import get_settings
+    from app.services.env_settings import EnvSettingsManager, set_env_settings
 
     scan_root = tmp_path / "aux"
     scan_root.mkdir()
@@ -667,7 +667,9 @@ async def test_cross_seed_orphans_delete(
     outside.mkdir()
     (outside / "keep.mkv").write_bytes(b"\0" * 200)
 
-    monkeypatch.setattr(get_settings(), "cross_seed_scan_dirs", str(scan_root))
+    set_env_settings(
+        EnvSettingsManager({"cross_seed_scan_dirs": str(scan_root)})
+    )
 
     resp = await client.post(
         "/api/v1/cross-seed-monitor/orphans/delete",
@@ -701,9 +703,9 @@ async def test_cross_seed_orphans_delete_without_scan_dirs(
     client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """未配置扫描目录 → 400（不删任何东西）。"""
-    from app.core.config import get_settings
+    from app.services.env_settings import EnvSettingsManager, set_env_settings
 
-    monkeypatch.setattr(get_settings(), "cross_seed_scan_dirs", "")
+    set_env_settings(EnvSettingsManager({"cross_seed_scan_dirs": ""}))
     resp = await client.post(
         "/api/v1/cross-seed-monitor/orphans/delete",
         json={"paths": ["/tmp/whatever"]},
@@ -720,14 +722,16 @@ async def test_cross_seed_orphans_scan(
     孤儿扫描默认**每天一次**（cron 7 4 * * *）——当天发现孤儿想现在清理，
     等不到明天，故提供「只扫不删」的手动入口。
     """
-    from app.core.config import get_settings
+    from app.services.env_settings import EnvSettingsManager, set_env_settings
 
     scan_root = tmp_path / "aux"
     scan_root.mkdir()
     (scan_root / "orphan").mkdir()
     (scan_root / "orphan" / "a.mkv").write_bytes(b"\0" * 100)
 
-    monkeypatch.setattr(get_settings(), "cross_seed_scan_dirs", str(scan_root))
+    set_env_settings(
+        EnvSettingsManager({"cross_seed_scan_dirs": str(scan_root)})
+    )
 
     # 假下载器：没有任务 → 磁盘上的条目就是孤儿
     class _FakeAdapter:
@@ -796,14 +800,16 @@ async def test_cross_seed_orphans_delete_rescans(
     孤儿统计表是每天一次的作业快照，不重扫页面会一直显示旧数字
     （已删的还在列表里、且看不到新产生的孤儿）。
     """
-    from app.core.config import get_settings
+    from app.services.env_settings import EnvSettingsManager, set_env_settings
 
     scan_root = tmp_path / "aux"
     scan_root.mkdir()
     (scan_root / "orphan").mkdir()
     (scan_root / "orphan" / "a.mkv").write_bytes(b"\0" * 100)
 
-    monkeypatch.setattr(get_settings(), "cross_seed_scan_dirs", str(scan_root))
+    set_env_settings(
+        EnvSettingsManager({"cross_seed_scan_dirs": str(scan_root)})
+    )
 
     rescanned = {"n": 0}
 
@@ -833,13 +839,15 @@ async def test_cross_seed_orphans_delete_rescan_failure_is_reported(
     client: httpx.AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """重扫失败**不影响删除结果**——删除成功，但记 ``rescan_error``。"""
-    from app.core.config import get_settings
+    from app.services.env_settings import EnvSettingsManager, set_env_settings
 
     scan_root = tmp_path / "aux"
     scan_root.mkdir()
     (scan_root / "orphan").mkdir()
 
-    monkeypatch.setattr(get_settings(), "cross_seed_scan_dirs", str(scan_root))
+    set_env_settings(
+        EnvSettingsManager({"cross_seed_scan_dirs": str(scan_root)})
+    )
 
     async def _boom() -> dict[str, object]:
         raise RuntimeError("扫描炸了")
@@ -1114,3 +1122,113 @@ async def test_push_without_default_downloader_400(
     resp = await client.post(f"/api/v1/torrent-index/{index_id}/push", json={})
     assert resp.status_code == 400
     assert "未配置默认下载器" in resp.json()["detail"]
+
+
+# ============================================================ 环境变量配置
+
+
+async def test_env_settings_get_returns_specs_and_values(
+    client: httpx.AsyncClient,
+) -> None:
+    """GET /env-settings 返回 specs + 当前值（首次启动用 env 默认值回填）。"""
+    from app.services.env_settings import EnvSettingsManager, set_env_settings
+
+    set_env_settings(
+        EnvSettingsManager({"cross_seed_scan_dirs": "/foo,/bar"})
+    )
+    try:
+        resp = await client.get("/api/v1/env-settings")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "items" in data
+        items = data["items"]
+        assert len(items) >= 1
+        item = next(
+            (i for i in items if i["key"] == "cross_seed_scan_dirs"),
+            None,
+        )
+        assert item is not None
+        assert item["label"]
+        assert item["note"]
+        assert item["placeholder"]
+        assert item["max_length"] > 0
+        assert item["value"] == "/foo,/bar"
+    finally:
+        set_env_settings(None)
+
+
+async def test_env_settings_put_persists_and_updates_memory(
+    client: httpx.AsyncClient,
+) -> None:
+    """PUT /env-settings：DB 先 / 内存后，下次 GET 立即看到新值。"""
+    from app.db.models import AppEnvSetting
+    from app.db.session import session_scope
+    from app.services.env_settings import EnvSettingsManager, set_env_settings
+    from sqlalchemy import select
+
+    set_env_settings(EnvSettingsManager({"cross_seed_scan_dirs": "/old"}))
+    try:
+        resp = await client.put(
+            "/api/v1/env-settings",
+            json={"cross_seed_scan_dirs": "/new,/dirs"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        item = next(
+            i for i in data["items"] if i["key"] == "cross_seed_scan_dirs"
+        )
+        assert item["value"] == "/new,/dirs"
+
+        # DB 已写入
+        async with session_scope() as session:
+            row = (
+                await session.execute(
+                    select(AppEnvSetting).where(
+                        AppEnvSetting.key == "cross_seed_scan_dirs"
+                    )
+                )
+            ).scalar_one()
+            assert row.value == "/new,/dirs"
+
+        # 内存已更新（业务读 get_env_setting 拿到新值）
+        from app.services.env_settings import get_env_settings
+
+        assert (
+            get_env_settings().get("cross_seed_scan_dirs") == "/new,/dirs"
+        )
+    finally:
+        set_env_settings(None)
+
+
+async def test_env_settings_put_empty_body_returns_400(
+    client: httpx.AsyncClient,
+) -> None:
+    """PUT /env-settings 不带任何字段 → 400。"""
+    resp = await client.put("/api/v1/env-settings", json={})
+    assert resp.status_code == 400
+
+
+async def test_env_settings_put_too_long_value_returns_400(
+    client: httpx.AsyncClient,
+) -> None:
+    """超长值 → 400（拒塞爆 DB）。"""
+    from app.services.env_settings import lookup_spec
+
+    spec = lookup_spec("cross_seed_scan_dirs")
+    assert spec is not None
+    resp = await client.put(
+        "/api/v1/env-settings",
+        json={"cross_seed_scan_dirs": "x" * (spec.max_length + 1)},
+    )
+    assert resp.status_code == 400
+
+
+async def test_env_settings_requires_session(app_settings: AppSettings) -> None:
+    """未登录访问 → 401。"""
+    app = create_app(app_settings)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as c:
+        resp = await c.get("/api/v1/env-settings")
+    assert resp.status_code == 401

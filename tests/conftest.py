@@ -101,6 +101,28 @@ def no_network() -> Iterator[respx.MockRouter]:
         yield router
 
 
+@pytest.fixture(autouse=True)
+def env_settings(app_settings: AppSettings) -> Iterator[None]:
+    """注入环境变量配置 manager（autouse）。
+
+    生产里 manager 由 lifespan 的 ``init_env_settings_async`` 建立——
+    service 层测试不走 lifespan（``scheduler_enabled=False`` 时 lifespan
+    仍会跑，但 service-only 测试连 app 都不建），故这里手动注入。
+
+    用空 dict 初始化 manager：业务侧调 ``get_env_setting(key)`` 时回落到
+    ``get_settings()`` 上对应字段——既有测试 monkeypatch settings 对象
+    的写法仍生效，无需逐个改。
+
+    用例需要测 DB 持久化路径时，自行调用
+    ``set_env_settings(EnvSettingsManager({...}))`` 覆盖即可。
+    """
+    from app.services.env_settings import EnvSettingsManager, set_env_settings
+
+    set_env_settings(EnvSettingsManager())
+    yield
+    set_env_settings(None)
+
+
 @pytest.fixture
 def factory() -> Iterator[AdapterFactory]:
     """初始化全局适配器工厂（服务层测试需要）。

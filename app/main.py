@@ -77,6 +77,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     set_runtime_params(await init_runtime_params_async())
 
+    # 环境变量配置（DB 持久化的字符串型设置，如辅种扫描目录）同样
+    # 必须在调度作业跑之前初始化——孤儿扫描作业会读它。
+    #
+    # 同样**不放在 scheduler_enabled 分支里**——API 层的 GET/PUT
+    # /env-settings 端点在调度器关闭时仍要可用。
+    from app.services.env_settings import (
+        init_env_settings_async,
+        set_env_settings,
+    )
+
+    set_env_settings(await init_env_settings_async())
+
     if settings.scheduler_enabled:
         # 作业调度配置（DB 持久化的启停 + cron）同样必须在 register_jobs
         # 之前载入：register() 会按 enabled 决定是否把作业安排到
@@ -154,6 +166,7 @@ def _mount_routes(app: FastAPI) -> None:
         cross_seed,
         dashboard,
         downloaders,
+        env_settings,
         scheduler,
         sites,
         torrent_index,
@@ -168,6 +181,7 @@ def _mount_routes(app: FastAPI) -> None:
         cross_seed.router,
         torrent_index.router,
         user_data.router,
+        env_settings.router,
     ):
         app.include_router(router, prefix="/api/v1")
     app.include_router(auth_router)  # 自身已含 /api/v1 前缀

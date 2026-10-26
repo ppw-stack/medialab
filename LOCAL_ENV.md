@@ -145,7 +145,15 @@ environment:
   CROSS_SEED_SCAN_DIRS: ${CROSS_SEED_SCAN_DIRS:-/share/Public/home/downloads/辅种}
 ```
 
-> **权限是 `rw`（不是 `ro`）**——孤儿文件删除功能需要写权限。
+> ✅ **`CROSS_SEED_SCAN_DIRS` 已落库**（2026-10-26 起）：
+> env 来源（`AppSettings.cross_seed_scan_dirs`）只作**首次启动的默认值**
+> （DB 空时回填）。之后改 env 无效——env 里已无对应配置生效路径，
+> 残留的旧行被 `extra="ignore"` 静默忽略。
+>
+> **改扫描目录**：进入「设置 → 环境变量」tab 直接编辑（`PUT /api/v1/env-settings`），
+> 改动立即生效 + 落库，**重启后保持**。详见「调度配置全部落库」章节。
+>
+> > **权限是 `rw`（不是 `ro`）**——孤儿文件删除功能需要写权限。
 > 删除有三重安全闸（只删扫描目录的直接子项 / 删除前二次复核 /
 > 审计日志），见 `app/services/orphan_deleter.py`。
 >

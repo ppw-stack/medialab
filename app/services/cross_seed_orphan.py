@@ -17,11 +17,11 @@ from typing import Any
 from sqlalchemy import select
 
 from app.adapters.downloaders.base import TorrentFileNames
-from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.timeutils import bj_now
 from app.db.models import CrossSeedOrphan, DownloaderInstance
 from app.db.session import session_scope
+from app.services.env_settings import get_env_setting
 from app.services.factory import get_factory
 from app.services.orphan_scanner import failed_scan, parse_scan_dirs, scan_orphans
 from app.services.scheduler import JobStep
@@ -216,7 +216,7 @@ async def scan_one_downloader(
             await _upsert(row.id, row.name, result)
             return result.to_dict()
 
-    scan_dirs = parse_scan_dirs(get_settings().cross_seed_scan_dirs)
+    scan_dirs = parse_scan_dirs(get_env_setting("cross_seed_scan_dirs"))
     # 汇总所有下载器的顶层名 + 本下载器的（汇总里已含本下载器，重复无害）
     merged = list(owned) if owned is not None else []
     merged.extend(files)

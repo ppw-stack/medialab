@@ -21,7 +21,6 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_session
-from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.services.cross_seed_monitor import (
     CrossSeedMonitorService,
@@ -34,7 +33,6 @@ from app.services.cross_seed_monitor import (
 from app.services.cross_seed_space import SpaceStats, summarize_spaces
 from app.services.downloader_service import remove_torrents_in_batches
 from app.services.errors import ServiceError
-from app.services.orphan_scanner import parse_scan_dirs
 
 logger = get_logger(__name__)
 
@@ -320,9 +318,11 @@ async def delete_orphan_files(payload: DeleteOrphansIn) -> dict[str, Any]:
         collect_owned_names,
         run_scan_orphans,
     )
+    from app.services.env_settings import get_env_setting
     from app.services.orphan_deleter import delete_orphans
+    from app.services.orphan_scanner import parse_scan_dirs
 
-    scan_dirs = parse_scan_dirs(get_settings().cross_seed_scan_dirs)
+    scan_dirs = parse_scan_dirs(get_env_setting("cross_seed_scan_dirs"))
     if not scan_dirs:
         raise HTTPException(
             status_code=400, detail="未配置扫描目录（辅种下载目录未挂载到容器）"

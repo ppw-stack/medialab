@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import { useAuthStore } from '../stores/auth'
 import SchedulerTab from './settings/SchedulerTab.vue'
+import EnvTab from './settings/EnvTab.vue'
 
 const auth = useAuthStore()
 
@@ -26,6 +27,9 @@ const activeKey = ref('scheduler')
       <a-tabs v-model:active-key="activeKey">
         <a-tab-pane key="scheduler" tab="调度作业">
           <SchedulerTab />
+        </a-tab-pane>
+        <a-tab-pane key="env" tab="环境变量">
+          <EnvTab />
         </a-tab-pane>
       </a-tabs>
     </section>
