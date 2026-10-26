@@ -35,6 +35,20 @@ const detailLoading = ref(false)
 /** 手动刷新中（要 await 完整抓取，20s+） */
 const refreshing = ref(false)
 
+/**
+ * 内容分区的 Tab（**内层**，在下载器 Tab 之下）。
+ *
+ * 页面原本把 4 块内容纵向堆叠，实测 3727 px / 4.1 屏 —— 其中 2 屏是
+ * 2237 行的分组表。分区后首屏只放概览（空间 + 目录分布），各块内容
+ * 互不干扰（异常与孤儿各有独立空间，不会互相误点删除按钮）。
+ *
+ * 层级刻意是「下载器 Tab（外层，数据维度）→ 内容 Tab（内层，功能维度）」：
+ * 用户的真实心智是「我要看 tr-172 这个下载器怎么样」——那是数据维度，
+ * 不该被功能维度打散。
+ */
+type BlockTab = 'overview' | 'groups' | 'anomalies' | 'orphans'
+const blockTab = ref<BlockTab>('overview')
+
 const statsColumns = [
   { title: '原始名称', dataIndex: 'name', key: 'name', ellipsis: true, minWidth: 360, sorter: (a: CrossSeedStatsRow, b: CrossSeedStatsRow) => a.name.localeCompare(b.name) },
   { title: '大小 (GB)', dataIndex: 'size_gb', key: 'size_gb', width: 120, sorter: (a: CrossSeedStatsRow, b: CrossSeedStatsRow) => a.size_gb - b.size_gb },
@@ -493,6 +507,9 @@ onMounted(async () => {
             <a-tag v-else color="green">无异常</a-tag>
           </div>
 
+          <!-- 内容分区 Tab（内层）：下载器 Tab 是数据维度，这里是功能维度 -->
+          <a-tabs v-model:active-key="blockTab" class="block-tabs" size="small">
+          <a-tab-pane key="overview" tab="概览">
           <!-- 空间占用 -->
           <section class="space-block">
             <div class="space-block__header">
@@ -608,8 +625,155 @@ onMounted(async () => {
               </template>
             </a-table>
           </section>
+          </a-tab-pane>
 
           <!-- 孤儿文件（磁盘有、任务没了） -->
+
+          <a-tab-pane key="groups">
+            <template #tab>分组</template>
+          <a-alert
+            type="info"
+            show-icon
+            message="按原始名称 + 大小精确分组, 不做归一化 (集数/分辨率/制作组差异都算不同)"
+            style="margin-bottom: var(--sp-3)"
+          />
+
+          <a-table
+            :columns="statsColumns"
+            :data-source="snapshot.stats"
+            :row-key="(r: CrossSeedStatsRow) => r.name + '|' + r.size_gb"
+            :pagination="{ pageSize: 50, showSizeChanger: true }"
+            :default-sort-order="{ columnKey: 'count', order: 'descend' }"
+            size="middle"
+          >
+            <template #bodyCell="{ column, record }">
+              <template v-if="column.key === 'name'">
+                <a-tooltip :title="(record as CrossSeedStatsRow).name">
+                  <span class="name-cell">{{ (record as CrossSeedStatsRow).name }}</span>
+                </a-tooltip>
+              </template>
+              <template v-else-if="column.key === 'size_gb'">
+                {{ (record as CrossSeedStatsRow).size_gb }} GB
+              </template>
+              <template v-else-if="column.key === 'count'">
+                <a-tag :color="countColor((record as CrossSeedStatsRow).count)">
+                  {{ (record as CrossSeedStatsRow).count }}
+                </a-tag>
+              </template>
+              <template v-else-if="column.key === 'actions'">
+                <a-tooltip
+                  v-if="!(record as CrossSeedStatsRow).hashes?.length"
+                  title="该快照没有存完整 hash（升级前抓的），需重新抓取后才能删除"
+                >
+                  <a-button size="small" danger disabled>删除</a-button>
+                </a-tooltip>
+                <a-button
+                  v-else
+                  size="small"
+                  danger
+                  :loading="deleting"
+                  @click="openDeleteGroupModal(record as CrossSeedStatsRow)"
+                >
+                  删除
+                </a-button>
+              </template>
+            </template>
+          </a-table>
+          </a-tab-pane>
+
+          <a-tab-pane key="anomalies">
+            <template #tab>
+              异常
+              <a-badge
+                v-if="snapshot.anomalies.length"
+                :count="snapshot.anomalies.length"
+                :title="String(snapshot.anomalies.length)"
+                :number-style="{ backgroundColor: '#fa8c16', fontSize: '11px', height: '16px', lineHeight: '16px', padding: '0 5px' }"
+              />
+            </template>
+
+          <!-- 异常明细 -->
+          <div v-if="snapshot.anomalies.length">
+              <!-- 批量删除工具条 -->
+              <div class="anomaly-toolbar">
+                <a-button
+                  size="small"
+                  @click="selectAllAnomalies"
+                >
+                  全选（{{ snapshot.anomalies.length }}）
+                </a-button>
+                <a-button
+                  size="small"
+                  type="danger"
+                  :disabled="selectedAnomalyHashes.length === 0"
+                  :loading="deleting"
+                  @click="openDeleteModal"
+                >
+                  删除选中（{{ selectedAnomalyHashes.length }}）
+                </a-button>
+                <span v-if="selectedAnomalyHashes.length" class="dim">
+                  已选 {{ selectedAnomalyHashes.length }} 个异常种子
+                </span>
+              </div>
+
+              <a-table
+                :columns="anomalyColumns"
+                :data-source="snapshot.anomalies"
+                :row-key="(r: CrossSeedAnomaly) => r.hash"
+                :row-selection="{
+                  selectedRowKeys: selectedAnomalyHashes,
+                  onChange: onAnomalySelectionChange,
+                  preserveSelectedRowKeys: false,
+                }"
+                :pagination="{ pageSize: 20, showSizeChanger: true }"
+                :default-sort-order="{ columnKey: 'size_gb', order: 'descend' }"
+                size="small"
+              >
+                <template #bodyCell="{ column, record }">
+                  <template v-if="column.key === 'name'">
+                    <a-tooltip :title="(record as CrossSeedAnomaly).name">
+                      <span class="name-cell">{{ (record as CrossSeedAnomaly).name }}</span>
+                    </a-tooltip>
+                  </template>
+                  <template v-else-if="column.key === 'hash'">
+                    <span class="mono">{{ (record as CrossSeedAnomaly).hash }}</span>
+                  </template>
+                  <template v-else-if="column.key === 'anomaly_type'">
+                    <a-tag color="orange">
+                      {{ anomalyLabel((record as CrossSeedAnomaly).anomaly_type) }}
+                    </a-tag>
+                  </template>
+                  <template v-else-if="column.key === 'error_string'">
+                    <span class="dim">
+                      {{ (record as CrossSeedAnomaly).error_string || '—' }}
+                    </span>
+                  </template>
+                  <template v-else-if="column.key === 'size_gb'">
+                    {{ (record as CrossSeedAnomaly).size_gb }}
+                  </template>
+                  <template v-else-if="column.key === 'paused'">
+                    <a-tag v-if="(record as CrossSeedAnomaly).anomaly_type === 'tracker_error'" color="orange">
+                      不暂停
+                    </a-tag>
+                    <a-tag v-else-if="(record as CrossSeedAnomaly).paused" color="default">
+                      已暂停
+                    </a-tag>
+                    <a-tag v-else color="red">待暂停</a-tag>
+                  </template>
+                </template>
+              </a-table>
+          </div>
+          </a-tab-pane>
+          <a-tab-pane key="orphans">
+            <template #tab>
+              孤儿
+              <a-badge
+                v-if="currentOrphan && currentOrphan.orphan_count"
+                :count="currentOrphan.orphan_count"
+                :title="String(currentOrphan.orphan_count)"
+                :number-style="{ backgroundColor: '#fa8c16', fontSize: '11px', height: '16px', lineHeight: '16px', padding: '0 5px' }"
+              />
+            </template>
           <section class="space-block">
             <div class="label-caps" style="margin-bottom: var(--sp-2)">
               孤儿文件 · ORPHANS
@@ -699,13 +863,7 @@ onMounted(async () => {
                 style="margin-top: var(--sp-3)"
               />
 
-              <a-collapse v-if="currentOrphan.orphans.length" style="margin-top: var(--sp-3)">
-                <a-collapse-panel key="orphans">
-                  <template #header>
-                    <span class="anomaly-header">
-                      孤儿明细（{{ currentOrphan.orphans.length }}）
-                    </span>
-                  </template>
+              <div v-if="currentOrphan.orphans.length" style="margin-top: var(--sp-3)">
                   <div class="orphan-toolbar">
                     <a-button
                       size="small"
@@ -747,143 +905,11 @@ onMounted(async () => {
                       </template>
                     </template>
                   </a-table>
-                </a-collapse-panel>
-              </a-collapse>
+              </div>
             </template>
           </section>
-
-          <a-alert
-            type="info"
-            show-icon
-            message="按原始名称 + 大小精确分组, 不做归一化 (集数/分辨率/制作组差异都算不同)"
-            style="margin-bottom: var(--sp-3)"
-          />
-
-          <!-- 异常明细 -->
-          <a-collapse
-            v-if="snapshot.anomalies.length"
-            style="margin-bottom: var(--sp-3)"
-          >
-            <a-collapse-panel key="anomalies">
-              <template #header>
-                <span class="anomaly-header">
-                  异常种子明细（{{ snapshot.anomalies.length }}）
-                  <span class="dim">— tracker 未注册 / 本地数据丢失</span>
-                </span>
-              </template>
-
-              <!-- 批量删除工具条 -->
-              <div class="anomaly-toolbar">
-                <a-button
-                  size="small"
-                  @click="selectAllAnomalies"
-                >
-                  全选（{{ snapshot.anomalies.length }}）
-                </a-button>
-                <a-button
-                  size="small"
-                  type="danger"
-                  :disabled="selectedAnomalyHashes.length === 0"
-                  :loading="deleting"
-                  @click="openDeleteModal"
-                >
-                  删除选中（{{ selectedAnomalyHashes.length }}）
-                </a-button>
-                <span v-if="selectedAnomalyHashes.length" class="dim">
-                  已选 {{ selectedAnomalyHashes.length }} 个异常种子
-                </span>
-              </div>
-
-              <a-table
-                :columns="anomalyColumns"
-                :data-source="snapshot.anomalies"
-                :row-key="(r: CrossSeedAnomaly) => r.hash"
-                :row-selection="{
-                  selectedRowKeys: selectedAnomalyHashes,
-                  onChange: onAnomalySelectionChange,
-                  preserveSelectedRowKeys: false,
-                }"
-                :pagination="{ pageSize: 20, showSizeChanger: true }"
-                :default-sort-order="{ columnKey: 'size_gb', order: 'descend' }"
-                size="small"
-              >
-                <template #bodyCell="{ column, record }">
-                  <template v-if="column.key === 'name'">
-                    <a-tooltip :title="(record as CrossSeedAnomaly).name">
-                      <span class="name-cell">{{ (record as CrossSeedAnomaly).name }}</span>
-                    </a-tooltip>
-                  </template>
-                  <template v-else-if="column.key === 'hash'">
-                    <span class="mono">{{ (record as CrossSeedAnomaly).hash }}</span>
-                  </template>
-                  <template v-else-if="column.key === 'anomaly_type'">
-                    <a-tag color="orange">
-                      {{ anomalyLabel((record as CrossSeedAnomaly).anomaly_type) }}
-                    </a-tag>
-                  </template>
-                  <template v-else-if="column.key === 'error_string'">
-                    <span class="dim">
-                      {{ (record as CrossSeedAnomaly).error_string || '—' }}
-                    </span>
-                  </template>
-                  <template v-else-if="column.key === 'size_gb'">
-                    {{ (record as CrossSeedAnomaly).size_gb }}
-                  </template>
-                  <template v-else-if="column.key === 'paused'">
-                    <a-tag v-if="(record as CrossSeedAnomaly).anomaly_type === 'tracker_error'" color="orange">
-                      不暂停
-                    </a-tag>
-                    <a-tag v-else-if="(record as CrossSeedAnomaly).paused" color="default">
-                      已暂停
-                    </a-tag>
-                    <a-tag v-else color="red">待暂停</a-tag>
-                  </template>
-                </template>
-              </a-table>
-            </a-collapse-panel>
-          </a-collapse>
-
-          <a-table
-            :columns="statsColumns"
-            :data-source="snapshot.stats"
-            :row-key="(r: CrossSeedStatsRow) => r.name + '|' + r.size_gb"
-            :pagination="{ pageSize: 50, showSizeChanger: true }"
-            :default-sort-order="{ columnKey: 'count', order: 'descend' }"
-            size="middle"
-          >
-            <template #bodyCell="{ column, record }">
-              <template v-if="column.key === 'name'">
-                <a-tooltip :title="(record as CrossSeedStatsRow).name">
-                  <span class="name-cell">{{ (record as CrossSeedStatsRow).name }}</span>
-                </a-tooltip>
-              </template>
-              <template v-else-if="column.key === 'size_gb'">
-                {{ (record as CrossSeedStatsRow).size_gb }} GB
-              </template>
-              <template v-else-if="column.key === 'count'">
-                <a-tag :color="countColor((record as CrossSeedStatsRow).count)">
-                  {{ (record as CrossSeedStatsRow).count }}
-                </a-tag>
-              </template>
-              <template v-else-if="column.key === 'actions'">
-                <a-tooltip
-                  v-if="!(record as CrossSeedStatsRow).hashes?.length"
-                  title="该快照没有存完整 hash（升级前抓的），需重新抓取后才能删除"
-                >
-                  <a-button size="small" danger disabled>删除</a-button>
-                </a-tooltip>
-                <a-button
-                  v-else
-                  size="small"
-                  danger
-                  :loading="deleting"
-                  @click="openDeleteGroupModal(record as CrossSeedStatsRow)"
-                >
-                  删除
-                </a-button>
-              </template>
-            </template>
-          </a-table>
+          </a-tab-pane>
+          </a-tabs>
         </div>
       </a-tab-pane>
     </a-tabs>
@@ -983,6 +1009,20 @@ onMounted(async () => {
   box-shadow: var(--shadow-sm);
   padding: var(--sp-4);
   min-height: 400px;
+}
+
+/*
+ * 内层内容 Tab（概览 / 分组 / 异常 / 孤儿）。
+ *
+ * 与外层「下载器 Tab」区分开：外层是数据维度（哪个下载器），内层是功能
+ * 维度（看什么）。内层用小号 tab + 更少的留白，避免与外层抢视觉层级。
+ */
+.block-tabs :deep(.ant-tabs-nav) {
+  margin-bottom: var(--sp-3);
+}
+
+.block-tabs :deep(.ant-tabs-tab) {
+  padding: 6px 0;
 }
 
 .loading-row {

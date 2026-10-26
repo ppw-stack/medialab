@@ -9,6 +9,47 @@ async function login(page: any) {
 }
 
 /**
+ * 切到内层的**内容分区 Tab**（概览 / 分组 / 异常 / 孤儿）。
+ *
+ * 页面结构（2026-10-26 起）：
+ *   外层 Tab = 下载器（数据维度）
+ *   内层 Tab = 内容分区（功能维度）
+ *
+ * 内层 Tab 在**每个**下载器 pane 里各渲染一份（Ant Design 隐藏 inactive
+ * pane），所以必须挑**可见**的那份——用 `:visible` 过滤最外层的
+ * `.ant-tabs-tabpane`，再往下找 `.block-tabs`。
+ */
+async function switchBlockTab(page: any, name: string) {
+  const tab = page
+    .locator('.ant-tabs-tabpane-active:visible .block-tabs .ant-tabs-tab')
+    .filter({ hasText: name })
+    .first()
+  // 没有内层 Tab（该下载器还没快照）→ 不报错，交给调用方判断
+  if ((await tab.count()) === 0) return false
+  await tab.click()
+  await page.waitForTimeout(600)
+  return true
+}
+
+/**
+ * 当前**可见**的内容分区 Tab 名。
+ *
+ * 内层 Tab 在每个下载器 pane 里都渲染一份，Ant Design 只把 active 的
+ * 那个显示出来——判断「当前在哪个分区」要看哪个 tab-pane 可见。
+ */
+async function currentBlockTab(page: any): Promise<string> {
+  return page.evaluate(() => {
+    const panes = Array.from(
+      document.querySelectorAll('.block-tabs'),
+    ) as HTMLElement[]
+    const visible = panes.find((p) => p.offsetParent !== null)
+    if (!visible) return ''
+    const active = visible.querySelector('.ant-tabs-tab-active')
+    return (active?.textContent ?? '').replace(/\s+/g, ' ').trim()
+  })
+}
+
+/**
  * 辅种下载器统计页面（2026-10-24 改为「定时抓取 + 读快照」）。
  *
  * 关键变化：页面**不再实时打下载器接口**——辅种站种子量大（3000+），
@@ -132,14 +173,14 @@ test('辅种统计页 - 空间占用区块', async ({ page }) => {
   // ⚠️ 详情是**异步**加载的——用 expect 轮询等它出现（isVisible 不轮询，
   // 会在数据到达前就返回 false → 误判成「没有快照」）。
   const tabCount = await tabs.count()
-  let pane = page.locator('.ant-tabs-tabpane-active')
+  let pane = page.locator('.ant-tabs-tabpane-active:visible')
   let found = false
   for (let i = 0; i < tabCount; i++) {
     await tabs.nth(i).click()
-    pane = page.locator('.ant-tabs-tabpane-active')
+    pane = page.locator('.ant-tabs-tabpane-active:visible')
     // 空间区块出现 = 该 tab 有快照（含空间数据）
     try {
-      await expect(pane.locator('.space-block')).toBeVisible({ timeout: 5000 })
+      await expect(pane.locator('.block-tabs:visible')).toBeVisible({ timeout: 5000 })
       found = true
       break
     } catch {
@@ -196,13 +237,19 @@ test('辅种统计页 - 异常明细批量删除 UI', async ({ page }) => {
   }
 
   // 找有异常明细的 tab
-  let pane = page.locator('.ant-tabs-tabpane-active')
+  // ⚠️ 只点**外层**的下载器 Tab——`.ant-tabs-tab` 同时匹配内层的内容
+  // 分区 Tab，点到内层会切走整个 pane。
+  const outerTabs = page.locator('.content-tabs > .ant-tabs-nav .ant-tabs-tab')
+  let pane = page.locator('.ant-tabs-tabpane-active:visible')
   let found = false
-  for (let i = 0; i < tabCount; i++) {
-    await tabs.nth(i).click()
-    pane = page.locator('.ant-tabs-tabpane-active')
-    await page.waitForTimeout(800)
-    if ((await pane.locator('.ant-collapse-header:has-text("异常种子明细")').count()) > 0) {
+  for (let i = 0; i < (await outerTabs.count()); i++) {
+    await outerTabs.nth(i).click()
+    await page.waitForTimeout(1200)
+    pane = page.locator('.ant-tabs-tabpane-active:visible')
+    // 切到「异常」分区，看有没有异常明细
+    // （该下载器可能还没快照 → 没有内层 Tab → helper 返回 false）
+    if (!(await switchBlockTab(page, '异常'))) continue
+    if ((await pane.locator('.anomaly-toolbar').count()) > 0) {
       found = true
       break
     }
@@ -211,10 +258,6 @@ test('辅种统计页 - 异常明细批量删除 UI', async ({ page }) => {
     console.log('  ✓ 当前没有异常明细：跳过批量删除断言')
     return
   }
-
-  // 展开异常明细
-  await pane.locator('.ant-collapse-header:has-text("异常种子明细")').click()
-  await page.waitForTimeout(600)
 
   const toolbar = pane.locator('.anomaly-toolbar')
   await expect(toolbar).toBeVisible()
@@ -232,10 +275,18 @@ test('辅种统计页 - 异常明细批量删除 UI', async ({ page }) => {
   console.log('  ✓ 勾选后按钮可用，计数 = 1')
 
   // 全选 → 计数 = 全部异常数
-  // ⚠️ 表格分页（每页 20），当前页的行数 ≠ 异常总数——总数从折叠标题读
-  const headerText =
-    (await pane.locator('.ant-collapse-header:has-text("异常种子明细")').textContent()) ?? ''
-  const total = Number(headerText.match(/异常种子明细（(\d+)）/)?.[1] ?? 0)
+  // ⚠️ 表格分页（每页 20），当前页的行数 ≠ 异常总数——总数从 Tab 标签读。
+  // ⚠️ 不能用标签文本：badge 超过 99 会显示成「99+」，读出来是 99。
+  const total = await page.evaluate(() => {
+    const visible = Array.from(
+      document.querySelectorAll('.block-tabs'),
+    ).find((p) => (p as HTMLElement).offsetParent !== null)
+    const badge = visible?.querySelector(
+      '.ant-tabs-tab .ant-badge-count',
+    ) as HTMLElement | null
+    const raw = badge?.getAttribute('title') ?? badge?.textContent ?? ''
+    return Number(raw.replace(/\D/g, '')) || 0
+  })
   expect(total).toBeGreaterThan(0)
   await toolbar.locator('button:has-text("全选")').click()
   await page.waitForTimeout(400)
@@ -281,13 +332,13 @@ test('辅种统计页 - 统计卡片删除 UI', async ({ page }) => {
   }
 
   // 找有快照的 tab
-  let pane = page.locator('.ant-tabs-tabpane-active')
+  let pane = page.locator('.ant-tabs-tabpane-active:visible')
   let found = false
   for (let i = 0; i < tabCount; i++) {
     await tabs.nth(i).click()
-    pane = page.locator('.ant-tabs-tabpane-active')
+    pane = page.locator('.ant-tabs-tabpane-active:visible')
     try {
-      await expect(pane.locator('.space-block')).toBeVisible({ timeout: 5000 })
+      await expect(pane.locator('.block-tabs:visible')).toBeVisible({ timeout: 5000 })
       found = true
       break
     } catch {
@@ -299,9 +350,11 @@ test('辅种统计页 - 统计卡片删除 UI', async ({ page }) => {
     return
   }
 
-  // 统计表（页面下半部分的分组表）
-  // ⚠️ 不能用 `.ant-table` 的 last/first——页面里有多张表（目录分布表在
-  // 统计表**上面**）。用「操作」列所在的表来定位。
+  // 统计表在「分组」分区里
+  await switchBlockTab(page, '分组')
+
+  // ⚠️ 不能用 `.ant-table` 的 last/first——页面里有多张表。用「操作」列
+  // 所在的表来定位。
   const statsTable = pane.locator('.ant-table').filter({
     hasText: '操作',
   }).last()
@@ -362,13 +415,13 @@ test('辅种统计页 - 孤儿文件区块', async ({ page }) => {
   }
 
   // 找有快照的 tab（孤儿区块在快照详情里）
-  let pane = page.locator('.ant-tabs-tabpane-active')
+  let pane = page.locator('.ant-tabs-tabpane-active:visible')
   let found = false
   for (let i = 0; i < tabCount; i++) {
     await tabs.nth(i).click()
-    pane = page.locator('.ant-tabs-tabpane-active')
+    pane = page.locator('.ant-tabs-tabpane-active:visible')
     try {
-      await expect(pane.locator('.space-block').first()).toBeVisible({ timeout: 5000 })
+      await expect(pane.locator('.block-tabs:visible')).toBeVisible({ timeout: 5000 })
       found = true
       break
     } catch {
@@ -379,6 +432,9 @@ test('辅种统计页 - 孤儿文件区块', async ({ page }) => {
     console.log('  ✓ 还没有快照：跳过孤儿区块断言')
     return
   }
+
+  // 切到「孤儿」分区
+  await switchBlockTab(page, '孤儿')
 
   // 孤儿区块存在
   const block = pane.locator('.space-block').filter({ hasText: 'ORPHANS' })
@@ -428,13 +484,13 @@ test('辅种统计页 - 孤儿文件删除确认流程', async ({ page }) => {
   }
 
   // 找有快照的 tab
-  let pane = page.locator('.ant-tabs-tabpane-active')
+  let pane = page.locator('.ant-tabs-tabpane-active:visible')
   let found = false
   for (let i = 0; i < tabCount; i++) {
     await tabs.nth(i).click()
-    pane = page.locator('.ant-tabs-tabpane-active')
+    pane = page.locator('.ant-tabs-tabpane-active:visible')
     try {
-      await expect(pane.locator('.space-block').first()).toBeVisible({ timeout: 5000 })
+      await expect(pane.locator('.block-tabs:visible')).toBeVisible({ timeout: 5000 })
       found = true
       break
     } catch {
@@ -446,16 +502,16 @@ test('辅种统计页 - 孤儿文件删除确认流程', async ({ page }) => {
     return
   }
 
+  // 切到「孤儿」分区
+  await switchBlockTab(page, '孤儿')
   const block = pane.locator('.space-block').filter({ hasText: 'ORPHANS' })
   await expect(block).toBeVisible()
 
-  // 展开孤儿明细
-  const panel = block.locator('.ant-collapse-panel')
-  if ((await panel.count()) === 0) {
+  // 孤儿明细（独立 Tab，不再折叠）
+  if ((await block.locator('.orphan-toolbar').count()) === 0) {
     console.log('  ✓ 没有孤儿明细：跳过删除流程断言')
     return
   }
-  await panel.first().locator('.ant-collapse-header').click()
   await expect(block.locator('.orphan-toolbar')).toBeVisible()
 
   // 未勾选时删除按钮置灰
@@ -505,13 +561,13 @@ test('辅种统计页 - 孤儿删除后自动重扫', async ({ page }) => {
   }
 
   // 找有快照的 tab
-  let pane = page.locator('.ant-tabs-tabpane-active')
+  let pane = page.locator('.ant-tabs-tabpane-active:visible')
   let found = false
   for (let i = 0; i < (await tabs.count()); i++) {
     await tabs.nth(i).click()
-    pane = page.locator('.ant-tabs-tabpane-active')
+    pane = page.locator('.ant-tabs-tabpane-active:visible')
     try {
-      await expect(pane.locator('.space-block').first()).toBeVisible({ timeout: 5000 })
+      await expect(pane.locator('.block-tabs:visible')).toBeVisible({ timeout: 5000 })
       found = true
       break
     } catch {
@@ -523,13 +579,13 @@ test('辅种统计页 - 孤儿删除后自动重扫', async ({ page }) => {
     return
   }
 
+  // 切到「孤儿」分区
+  await switchBlockTab(page, '孤儿')
   const block = pane.locator('.space-block').filter({ hasText: 'ORPHANS' })
-  const panel = block.locator('.ant-collapse-panel')
-  if ((await panel.count()) === 0) {
+  if ((await block.locator('.orphan-toolbar').count()) === 0) {
     console.log('  ✓ 没有孤儿明细：跳过重扫断言')
     return
   }
-  await panel.first().locator('.ant-collapse-header').click()
   await block.locator('.orphan-toolbar button', { hasText: '全选' }).click()
   await block.locator('.orphan-toolbar button', { hasText: '删除选中' }).click()
 
@@ -577,15 +633,14 @@ test('辅种统计页 - 各列表表头可排序', async ({ page }) => {
   }
 
   // 找有快照的 tab
-  let pane = page.locator('.ant-tabs-tabpane-active')
+  let pane = page.locator('.ant-tabs-tabpane-active:visible')
   let found = false
-  for (let i = 0; i < (await tabs.count()); i++) {
-    await tabs.nth(i).click()
-    pane = page.locator('.ant-tabs-tabpane-active')
+  const outerTabs = page.locator('.content-tabs > .ant-tabs-nav .ant-tabs-tab')
+  for (let i = 0; i < (await outerTabs.count()); i++) {
+    await outerTabs.nth(i).click()
+    pane = page.locator('.ant-tabs-tabpane-active:visible')
     try {
-      // ⚠️ 必须用 .first()——页面里有多张 space-block（空间占用 + 孤儿），
-      // 直接定位会命中多个元素（Playwright strict mode 报错）
-      await expect(pane.locator('.space-block').first()).toBeVisible({ timeout: 5000 })
+      await expect(pane.locator('.block-tabs:visible')).toBeVisible({ timeout: 5000 })
       found = true
       break
     } catch {
@@ -597,23 +652,43 @@ test('辅种统计页 - 各列表表头可排序', async ({ page }) => {
     return
   }
 
-  const tables = pane.locator('.ant-table')
-  const tableCount = await tables.count()
-  console.log(`  ✓ 页面内共 ${tableCount} 张表`)
-  expect(tableCount).toBeGreaterThan(0)
-
-  // 每张表的数据列都应有排序控件
-  let checked = 0
-  for (let i = 0; i < tableCount; i++) {
-    const table = tables.nth(i)
-    const sorters = table.locator('th .ant-table-column-sorter')
-    const n = await sorters.count()
-    const headers = await table.locator('thead th').allTextContents()
-    console.log(`  ✓ 表 ${i + 1}: ${n} 个可排序列 / ${headers.length} 列 — ${headers.join(' | ').slice(0, 70)}`)
-    expect(n).toBeGreaterThan(0)
-    checked += n
+  // 逐个内容分区检查（表分布在不同分区里）
+  let totalTables = 0
+  let totalSorters = 0
+  for (const block of ['概览', '分组', '异常', '孤儿']) {
+    await switchBlockTab(page, block)
+    // ⚠️ 只看**当前可见**的分区——内层 Tab 在每个下载器 pane 里都渲染
+    // 一份，不加 :visible 会把隐藏 pane 的表也算进来
+    const active = await currentBlockTab(page)
+    if (!active.startsWith(block)) {
+      console.log(`  ✗ 切到「${block}」失败（当前在「${active}」）`)
+      continue
+    }
+    const tables = pane.locator('.ant-table:visible')
+    const n = await tables.count()
+    if (n === 0) {
+      console.log(`  ✓ [${block}] 无表格`)
+      continue
+    }
+    totalTables += n
+    for (let i = 0; i < n; i++) {
+      const sorters = tables.nth(i).locator('th .ant-table-column-sorter')
+      const c = await sorters.count()
+      const headers = await tables.nth(i).locator('thead th').allTextContents()
+      console.log(`  ✓ [${block}] 表 ${i + 1}: ${c} 个可排序列 / ${headers.length} 列 — ${headers.join(' | ').slice(0, 60)}`)
+      expect(c).toBeGreaterThan(0)
+      totalSorters += c
+    }
   }
-  expect(checked).toBeGreaterThan(0)
+  console.log(`  ✓ 共 ${totalTables} 张表 / ${totalSorters} 个可排序列`)
+  expect(totalTables).toBeGreaterThan(0)
+  expect(totalSorters).toBeGreaterThan(0)
+
+  // 点一个数值列的表头 → 排序生效（表头出现排序状态 class）
+  await switchBlockTab(page, '分组')
+  const tables2 = pane.locator('.ant-table')
+  const tableCount = await tables2.count()
+  expect(tableCount).toBeGreaterThan(0)
 
   // 点「出现次数」表头 → 行顺序真的变了（排序生效，不只是控件存在）
   const statsTable = pane.locator('.ant-table').filter({ hasText: '操作' }).last()
@@ -666,13 +741,13 @@ test('辅种统计页 - 空间区块口径标注与时间标记', async ({ page 
   }
 
   // 找有快照的 tab
-  let pane = page.locator('.ant-tabs-tabpane-active')
+  let pane = page.locator('.ant-tabs-tabpane-active:visible')
   let found = false
   for (let i = 0; i < (await tabs.count()); i++) {
     await tabs.nth(i).click()
-    pane = page.locator('.ant-tabs-tabpane-active')
+    pane = page.locator('.ant-tabs-tabpane-active:visible')
     try {
-      await expect(pane.locator('.space-block').first()).toBeVisible({ timeout: 5000 })
+      await expect(pane.locator('.block-tabs:visible')).toBeVisible({ timeout: 5000 })
       found = true
       break
     } catch {
