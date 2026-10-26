@@ -366,6 +366,18 @@ export interface CrossSeedOrphanDeleteItem {
   reason?: string
 }
 
+/** 孤儿手动扫描结果（`POST /cross-seed-monitor/orphans/scan`）。 */
+export interface CrossSeedOrphanScanResult {
+  /** 一句话摘要（作业的 summary）。 */
+  summary: string
+  orphan_count: number
+  orphan_bytes: number
+  /** 失败的下载器（点名）。 */
+  errors: string[]
+  /** 扫描后有孤儿表的新鲜统计。 */
+  orphans: CrossSeedOrphanSummary
+}
+
 /** 孤儿删除结果（`POST /cross-seed-monitor/orphans/delete`）。 */
 export interface CrossSeedOrphanDeleteResult {
   requested: number

@@ -160,6 +160,8 @@
     - qB 的 `/torrents/info` 本来就返回 `content_path` + `save_path` → **零额外请求**
     - `list_torrents_with_errors()` 与 `list_torrents()` **都不再拉 `files`/`fileStats`**（TR 的 `TorrentInfo` 没有这两个字段，拉了完全用不上）
   - **孤儿文件删除**（2026-10-26 加入，`app/services/orphan_deleter.py`）：
+    - 端点 `POST /cross-seed-monitor/orphans/scan`（**手动扫描**，不等 cron）——孤儿扫描默认**每天一次**（`7 4 * * *`），当天发现孤儿想现在清理等不到明天。**同步 await**（40–60 s），响应带上有孤儿表的新鲜统计 → 前端直接用，省一次请求
+    - 前端入口在「孤儿」分区的区块标题行：「立即扫描」按钮 + 扫描时间标记
     - 端点 `POST /cross-seed-monitor/orphans/delete`（body：`paths`）——删的是**磁盘文件**，不是下载器任务（孤儿本来就没任务）
     - **三道安全闸**（不只靠前端弹框）：
       1. **目录范围**：路径必须是配置的扫描目录的**直接子项**——不能是任意路径、不能是子目录内部的某个文件（防路径穿越）

@@ -787,3 +787,61 @@ test('辅种统计页 - 空间区块口径标注与时间标记', async ({ page 
     console.log('  ✓ 进度条标签:', (await progress.innerText()).replace(/\s+/g, ' '))
   }
 })
+
+/**
+ * 孤儿文件**手动扫描**（2026-10-26）。
+ *
+ * 孤儿扫描默认**每天一次**（cron `7 4 * * *`）——当天发现孤儿想现在清理，
+ * 等不到明天。故「孤儿」分区提供「立即扫描」入口。
+ *
+ * 扫描耗时 40–60 s（扫盘 + 拉所有下载器 + 落库），本用例只验证**入口
+ * 存在**——不真的触发（dev 环境没挂载辅种目录，触发也扫不出东西）。
+ */
+test('辅种统计页 - 孤儿分区有手动扫描入口', async ({ page }) => {
+  await login(page)
+  await page.goto('/cross-seed')
+
+  const outer = page.locator('.content-tabs > .ant-tabs-nav .ant-tabs-tab')
+  await expect(outer.first()).toBeVisible({ timeout: 15000 }).catch(() => { /* 无下载器 */ })
+  if ((await outer.count()) === 0) {
+    console.log('  ✓ 无辅种下载器：跳过扫描入口断言')
+    return
+  }
+
+  // 找有快照的 tab
+  let pane = page.locator('.ant-tabs-tabpane-active:visible')
+  let found = false
+  for (let i = 0; i < (await outer.count()); i++) {
+    await outer.nth(i).click()
+    await page.waitForTimeout(1200)
+    pane = page.locator('.ant-tabs-tabpane-active:visible')
+    try {
+      await expect(pane.locator('.block-tabs:visible')).toBeVisible({ timeout: 5000 })
+      found = true
+      break
+    } catch {
+      // 该 tab 没快照 → 试下一个
+    }
+  }
+  if (!found) {
+    console.log('  ✓ 还没有快照：跳过扫描入口断言')
+    return
+  }
+
+  // 切到「孤儿」分区
+  await switchBlockTab(page, '孤儿')
+
+  const block = pane.locator('.space-block').filter({ hasText: 'ORPHANS' })
+  await expect(block).toBeVisible()
+
+  // 「立即扫描」按钮存在
+  const scanBtn = block.locator('button', { hasText: '立即扫描' })
+  await expect(scanBtn).toBeVisible()
+  console.log('  ✓ 孤儿分区有「立即扫描」按钮')
+
+  // 扫描时间标记（有数据时）
+  const timeMark = block.locator('.space-block__actions .dim.mono')
+  if ((await timeMark.count()) > 0) {
+    console.log('  ✓ 扫描时间标记:', (await timeMark.innerText()).replace(/\s+/g, ' '))
+  }
+})

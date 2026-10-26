@@ -8,6 +8,7 @@ import type {
   CrossSeedDownloader,
   CrossSeedOrphan,
   CrossSeedOrphanDeleteResult,
+  CrossSeedOrphanScanResult,
   CrossSeedOrphanSummary,
   CrossSeedScannedDir,
   CrossSeedSnapshot,
@@ -108,6 +109,8 @@ const selectedOrphanPaths = ref<string[]>([])
 const orphanDeleteModalOpen = ref(false)
 /** 孤儿删除中 */
 const orphanDeleting = ref(false)
+/** 孤儿手动扫描中（实测 40–60 s） */
+const orphanScanning = ref(false)
 
 const scannedDirColumns = [
   { title: '扫描目录', dataIndex: 'scan_dir', key: 'scan_dir', ellipsis: true, minWidth: 320, sorter: (a: CrossSeedScannedDir, b: CrossSeedScannedDir) => a.scan_dir.localeCompare(b.scan_dir) },
@@ -300,6 +303,40 @@ function openOrphanDeleteModal() {
   orphanDeleteModalOpen.value = true
 }
 
+/**
+ * 手动扫描孤儿文件（不等 cron）。
+ *
+ * 孤儿扫描默认**每天一次**（cron `7 4 * * *`）——当天发现孤儿想现在清理，
+ * 等不到明天。删除操作本身会触发重扫，但「只扫不删」原先没有入口。
+ *
+ * 耗时 40–60 s（扫盘 + 拉所有下载器 + 落库）——与「立即抓取」同一性质，
+ * 按钮保持 loading 直到返回。
+ */
+async function scanOrphansNow() {
+  orphanScanning.value = true
+  try {
+    const r = await api.post<CrossSeedOrphanScanResult>(
+      '/cross-seed-monitor/orphans/scan',
+    )
+    // 响应里带上有孤儿表的新鲜统计 → 直接用，省一次请求
+    if (r.orphans) {
+      orphanSummary.value = r.orphans
+    } else {
+      await loadOrphans()
+    }
+    selectedOrphanPaths.value = []
+    if (r.errors?.length) {
+      message.warning(`扫描完成，但有 ${r.errors.length} 个下载器失败：${r.errors[0]}`)
+    } else {
+      message.success(r.summary || '扫描完成')
+    }
+  } catch (e) {
+    message.error('扫描失败：' + errMsg(e))
+  } finally {
+    orphanScanning.value = false
+  }
+}
+
 /** 执行孤儿文件删除（**不可逆**）。 */
 async function doDeleteOrphans() {
   orphanDeleteModalOpen.value = false
@@ -485,7 +522,7 @@ onMounted(async () => {
           type="info"
           show-icon
           message="等待首次抓取"
-          description="辅种数据由定时作业抓取后落库。若一直没有数据，请检查调度中心的「辅种巡查」作业是否启用，或点右上角「立即抓取」。"
+          description="辅种数据由定时作业「辅种巡查」抓取后落库（默认每 30 分钟一次：2,32 * * * *）。若一直没有数据，请到「设置 → 调度作业」确认该作业已启用，或点右上角「立即抓取」。"
         />
 
         <div v-else-if="snapshot">
@@ -775,8 +812,25 @@ onMounted(async () => {
               />
             </template>
           <section class="space-block">
-            <div class="label-caps" style="margin-bottom: var(--sp-2)">
-              孤儿文件 · ORPHANS
+            <div class="space-block__header">
+              <div class="label-caps">孤儿文件 · ORPHANS</div>
+              <!--
+                手动扫描入口（2026-10-26）：孤儿扫描默认**每天一次**
+                （cron 7 4 * * *）——当天发现孤儿想现在清理，等不到明天。
+                耗时 40–60 s，与「立即抓取」同一性质。
+              -->
+              <div class="space-block__actions">
+                <span v-if="currentOrphan" class="dim mono">
+                  扫描于 {{ currentOrphan.scanned_at }}（{{ freshnessText(currentOrphan.scanned_at) }}）
+                </span>
+                <a-button
+                  size="small"
+                  :loading="orphanScanning"
+                  @click="scanOrphansNow"
+                >
+                  立即扫描
+                </a-button>
+              </div>
             </div>
 
             <!-- 加载中 -->
@@ -799,7 +853,7 @@ onMounted(async () => {
               type="info"
               show-icon
               message="尚未扫描孤儿文件"
-              description="孤儿文件由定时作业「辅种孤儿文件扫描」每天扫一次盘得出（需把辅种站的下载目录只读挂载到容器）。"
+              description="孤儿文件由定时作业每天扫一次盘得出（需把辅种站的下载目录挂载到容器）。可以点右上角「立即扫描」现在就跑一次。"
             />
 
             <!-- 有数据 -->
@@ -813,9 +867,7 @@ onMounted(async () => {
                 <div class="space-tile">
                   <div class="space-tile__label">孤儿占用</div>
                   <div class="space-tile__value">{{ fmtBytes(currentOrphan.orphan_bytes) }}</div>
-                  <div class="space-tile__hint">
-                    扫描于 {{ currentOrphan.scanned_at }}（{{ freshnessText(currentOrphan.scanned_at) }}）
-                  </div>
+                  <div class="space-tile__hint">不再做种却仍占着空间</div>
                 </div>
                 <div class="space-tile">
                   <div class="space-tile__label">其中空目录</div>
@@ -1097,6 +1149,14 @@ onMounted(async () => {
   justify-content: space-between;
   gap: var(--sp-2);
   margin-bottom: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+/* 标题行右侧的操作区（时间标记 + 按钮） */
+.space-block__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
   flex-wrap: wrap;
 }
 

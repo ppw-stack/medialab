@@ -712,6 +712,82 @@ async def test_cross_seed_orphans_delete_without_scan_dirs(
 
 
 
+async def test_cross_seed_orphans_scan(
+    client: httpx.AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """手动扫描孤儿：返回新鲜统计 + 落库。
+
+    孤儿扫描默认**每天一次**（cron 7 4 * * *）——当天发现孤儿想现在清理，
+    等不到明天，故提供「只扫不删」的手动入口。
+    """
+    from app.core.config import get_settings
+
+    scan_root = tmp_path / "aux"
+    scan_root.mkdir()
+    (scan_root / "orphan").mkdir()
+    (scan_root / "orphan" / "a.mkv").write_bytes(b"\0" * 100)
+
+    monkeypatch.setattr(get_settings(), "cross_seed_scan_dirs", str(scan_root))
+
+    # 假下载器：没有任务 → 磁盘上的条目就是孤儿
+    class _FakeAdapter:
+        async def list_torrent_file_names(self) -> list:
+            return []
+
+        async def close(self) -> None:
+            return None
+
+    import app.services.factory as factory_mod
+    from app.db.models import DownloaderInstance
+    from app.db.session import session_scope
+    from app.services.factory import AdapterFactory
+
+    async with session_scope() as session:
+        row = DownloaderInstance(
+            name="dl-scan",
+            type="transmission",
+            url="http://192.168.0.172:9091",
+            is_cross_seed=True,
+            enabled=True,
+        )
+        session.add(row)
+        await session.flush()
+        dl_id = row.id
+
+    factory = AdapterFactory()
+    factory.downloader = lambda row, **kw: _FakeAdapter()  # type: ignore[method-assign]
+    prev = factory_mod._factory
+    factory_mod._factory = factory
+    try:
+        resp = await client.post("/api/v1/cross-seed-monitor/orphans/scan")
+    finally:
+        factory_mod._factory = prev
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["orphan_count"] == 1
+    assert data["orphan_bytes"] == 100
+    # 响应里带上有孤儿表的新鲜统计
+    assert "orphans" in data
+    assert data["orphans"]["summary"]["orphan_count"] == 1
+    # 落库了
+    from app.db.models import CrossSeedOrphan
+
+    async with session_scope() as session:
+        rows = list(
+            (
+                await session.execute(
+                    select(CrossSeedOrphan).where(
+                        CrossSeedOrphan.downloader_id == dl_id
+                    )
+                )
+            ).scalars()
+        )
+    assert len(rows) == 1
+    assert rows[0].orphan_count == 1
+
+
+
 async def test_cross_seed_orphans_delete_rescans(
     client: httpx.AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

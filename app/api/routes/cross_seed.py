@@ -267,6 +267,31 @@ async def list_orphans() -> dict[str, Any]:
     return await _orphan_summary_payload()
 
 
+@router.post("/orphans/scan", summary="手动扫描孤儿文件")
+async def scan_orphan_files() -> dict[str, Any]:
+    """立即扫描孤儿文件（不等 cron）。
+
+    孤儿扫描默认**每天一次**（cron \`7 4 * * *\`）——用户当天发现一个孤儿
+    想现在清理，等不到明天。本端点提供「只扫不删」的手动入口。
+
+    **同步 await**（实测 40–60 s，扫盘 + 拉所有下载器 + 落库）——与辅种页
+    的「立即抓取」同一性质（前端要等）。
+
+    返回体带上有孤儿表的新鲜统计，前端直接用，不用再发一次请求。
+    """
+    from app.services.cross_seed_orphan import run_scan_orphans
+
+    result = await run_scan_orphans()
+    out: dict[str, Any] = {
+        "summary": result.get("summary", ""),
+        "orphan_count": result.get("orphan_count", 0),
+        "orphan_bytes": result.get("orphan_bytes", 0),
+        "errors": result.get("errors", []),
+        "orphans": await _orphan_summary_payload(),
+    }
+    return out
+
+
 @router.post("/orphans/delete", summary="删除孤儿文件（不可逆）")
 async def delete_orphan_files(payload: DeleteOrphansIn) -> dict[str, Any]:
     """删除孤儿文件（磁盘上有、下载器里已无对应任务的条目）。
