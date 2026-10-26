@@ -45,18 +45,69 @@ logger = get_logger(__name__)
 # ============================================================ 异常检测
 ANOMALY_TRACKER_NOT_REGISTERED = "tracker_not_registered"
 ANOMALY_NO_DATA_FOUND = "no_data_found"
+#: 本地数据丢失 / 损坏（TR error=3，qB state=missingFiles）。
+ANOMALY_LOCAL_DATA_MISSING = "local_data_missing"
+#: tracker 报错（TR error=2，如 HTTP 502/522）。
+ANOMALY_TRACKER_ERROR = "tracker_error"
+
+#: 下载器原生的 error 码（TR 的 ``error`` 字段 / qB 的归一化码）：
+#:
+#: - ``0`` = 无错
+#: - ``1`` = tracker 警告
+#: - ``2`` = tracker 错误
+#: - ``3`` = **本地数据丢失**
+#:
+#: 码 3 是**本地数据**问题（文件缺失/损坏）——该暂停（不再做种，数据也没用）。
+#: 码 2 是 **tracker** 报错（HTTP 502/522 等）——**不该暂停**：tracker 临时
+#: 挂掉与本地数据无关，暂停只会白白损失上传。
+ERROR_CODE_LOCAL_DATA_MISSING = 3
+ERROR_CODE_TRACKER_ERROR = 2
 
 
-def _detect_anomaly(error_string: str) -> str | None:
-    """返回异常类型, 优先匹配更具体的 (no_data_found 在前)."""
-    if not error_string:
-        return None
-    msg = error_string.lower()
+def _detect_anomaly(error_code: int, error_string: str) -> str | None:
+    """返回异常类型。
+
+    **必须同时看 error 码与 errorString 文本**——只看文本会漏掉大量异常：
+
+    - TR 的 ``error=3``（本地数据丢失/损坏）文案是
+      ``"Please Verify Local Data! Piece #335 is corrupt."``，
+      **不含** "no data found" 也不含 "not registered" → 只匹配文本会漏掉
+    - TR 的 ``error=2``（tracker HTTP 502/522）同理漏掉
+
+    实测（prod 辅种站）：TR 有 **156 个**种子带 error 码，其中 2 个是
+    本地数据损坏——只匹配文本时这 156 个**全部漏判**（异常数恒为 0）。
+
+    判定优先级（从具体到笼统）：
+    1. 文本里的 "no data found"（TR 的 tracker 未收到 announce）
+    2. 文本里的 "not registered"（tracker 未注册）
+    3. ``error_code == 3``（本地数据丢失/损坏）→ 该暂停
+    4. ``error_code == 2``（tracker 报错）→ **只报告不暂停**（见
+       :data:`_PAUSE_EXEMPT_ANOMALIES`）
+
+    :param error_code: 下载器原生 error 码（0 = 无错）。
+    :param error_string: 人类可读的错误描述（可能为空串）。
+    """
+    msg = (error_string or "").lower()
     if "no data found" in msg:
         return ANOMALY_NO_DATA_FOUND
     if "not registered" in msg or "unregistered" in msg:
         return ANOMALY_TRACKER_NOT_REGISTERED
+    # 本地数据丢失——TR error=3 / qB missingFiles（文案已含中文「本地数据丢失」）
+    if error_code == ERROR_CODE_LOCAL_DATA_MISSING:
+        return ANOMALY_LOCAL_DATA_MISSING
+    if error_code == ERROR_CODE_TRACKER_ERROR:
+        return ANOMALY_TRACKER_ERROR
     return None
+
+
+#: **不触发暂停**的异常类型。
+#:
+#: tracker 报错（HTTP 502/522）是**网络/服务端**问题，与本地数据无关——
+#: 暂停它只会白白损失上传，等 tracker 恢复即可。故只报告，不动它。
+#:
+#: 本地数据丢失（error=3）**要**暂停：数据已经没了，继续做种无意义，
+#: 而且会一直占着 tracker 位置。
+_PAUSE_EXEMPT_ANOMALIES: frozenset[str] = frozenset({ANOMALY_TRACKER_ERROR})
 
 
 # ============================================================ 批量暂停参数
@@ -436,8 +487,15 @@ class CrossSeedMonitorService:
           / TR ``status=0``），再发一次暂停是白费 API 调用。
         - **分批发送**：按 :data:`PAUSE_BATCH_SIZE` 切批，一次
           ``set_pause([...])`` 发一批。
+        - **跳过 tracker 报错**（:data:`_PAUSE_EXEMPT_ANOMALIES`）：那是
+          tracker 服务端的问题（HTTP 502/522），与本地数据无关——暂停它
+          只会白白损失上传，等 tracker 恢复即可。
         """
-        pending = [a for a in anomalies if not a.paused]
+        pending = [
+            a
+            for a in anomalies
+            if not a.paused and a.anomaly_type not in _PAUSE_EXEMPT_ANOMALIES
+        ]
         if not pending:
             return 0, 0
 
@@ -527,14 +585,25 @@ class CrossSeedMonitorService:
         total_torrents = sum(r.total_torrents for r in results)
         total_paused = sum(r.paused_count for r in results)
         total_pause_failed = sum(r.pause_failed_count for r in results)
-        total_skipped = total_anomalies - total_paused - total_pause_failed
         anomaly_types: dict[str, int] = {}
+        already_paused = 0
+        exempt = 0
         for r in results:
             for a in r.anomalies:
                 anomaly_types[a.anomaly_type] = anomaly_types.get(a.anomaly_type, 0) + 1
+                if a.anomaly_type in _PAUSE_EXEMPT_ANOMALIES:
+                    exempt += 1
+                elif a.paused:
+                    already_paused += 1
+        # 「跳过」有两类，要分开说：
+        # - 此前已暂停（再发一次指令是白费 API 调用）
+        # - tracker 报错豁免暂停（tracker 服务端的问题，与本地数据无关）
+        total_skipped = already_paused
 
         tracker_count = anomaly_types.get(ANOMALY_TRACKER_NOT_REGISTERED, 0)
         no_data_count = anomaly_types.get(ANOMALY_NO_DATA_FOUND, 0)
+        local_missing_count = anomaly_types.get(ANOMALY_LOCAL_DATA_MISSING, 0)
+        tracker_err_count = anomaly_types.get(ANOMALY_TRACKER_ERROR, 0)
         # 失败必须**点名**——只说"1 个失败"用户不知道是哪台（AGENTS.md
         # 契约：故障不能被伪装成正常）。
         fail_detail = (
@@ -548,6 +617,7 @@ class CrossSeedMonitorService:
             f"，暂停 {total_paused} 个"
             + (f"（{total_pause_failed} 失败）" if total_pause_failed else "")
             + (f"，{total_skipped} 个此前已暂停" if total_skipped > 0 else "")
+            + (f"，{exempt} 个 tracker 报错（不暂停）" if exempt > 0 else "")
         )
         return {
             "scanned_downloaders": len(results),
@@ -586,7 +656,9 @@ class CrossSeedMonitorService:
                     "检测异常",
                     "warn" if total_anomalies else "ok",
                     total_anomalies,
-                    f"tracker 未注册 {tracker_count} / 数据丢失 {no_data_count}",
+                    f"tracker 未注册 {tracker_count} / 数据丢失 {no_data_count}"
+                    f" / 本地数据损坏 {local_missing_count}"
+                    f" / tracker 报错 {tracker_err_count}",
                 ),
                 JobStep(
                     "自动暂停",
@@ -594,7 +666,8 @@ class CrossSeedMonitorService:
                     total_paused,
                     f"已暂停 {total_paused} 个"
                     + (f"，{total_pause_failed} 失败" if total_pause_failed else "")
-                    + (f"，{total_skipped} 个此前已暂停（跳过）" if total_skipped > 0 else ""),
+                    + (f"，{total_skipped} 个此前已暂停（跳过）" if total_skipped > 0 else "")
+                    + (f"，{exempt} 个 tracker 报错（豁免暂停）" if exempt > 0 else ""),
                 ),
             ],
         }
@@ -628,8 +701,10 @@ class CrossSeedMonitorService:
             if state.is_inflight:
                 inflight += 1
 
-            # 异常检测
-            anom = _detect_anomaly(err_str)
+            # 异常检测（**同时看 error 码与文案**——只看文案会漏掉
+            # TR error=3「本地数据损坏」与 error=2「tracker 报错」，
+            # 实测 156 个带 error 的种子会全部漏判）
+            anom = _detect_anomaly(err_code, err_str)
             if anom:
                 anomalies.append(AnomalyItem(
                     id=int(t.get("id") or 0),
@@ -711,7 +786,9 @@ class UnsupportedDownloader(Exception):
 #: 适配层异常在此 re-export——API 层只需知道 service 层抛什么，
 #: 不必直接依赖适配层（``from app.adapters...``）。
 __all__ = [
+    "ANOMALY_LOCAL_DATA_MISSING",
     "ANOMALY_NO_DATA_FOUND",
+    "ANOMALY_TRACKER_ERROR",
     "ANOMALY_TRACKER_NOT_REGISTERED",
     "PAUSE_BATCH_SIZE",
     "AnomalyItem",

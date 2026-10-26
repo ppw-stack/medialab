@@ -335,6 +335,8 @@ function countColor(c: number) {
 const ANOMALY_LABELS: Record<string, string> = {
   tracker_not_registered: 'Tracker 未注册',
   no_data_found: '数据丢失',
+  local_data_missing: '本地数据损坏',
+  tracker_error: 'Tracker 报错',
 }
 
 function anomalyLabel(t: string): string {
@@ -755,7 +757,10 @@ onMounted(async () => {
                     </span>
                   </template>
                   <template v-else-if="column.key === 'paused'">
-                    <a-tag v-if="(record as CrossSeedAnomaly).paused" color="default">
+                    <a-tag v-if="(record as CrossSeedAnomaly).anomaly_type === 'tracker_error'" color="orange">
+                      不暂停
+                    </a-tag>
+                    <a-tag v-else-if="(record as CrossSeedAnomaly).paused" color="default">
                       已暂停
                     </a-tag>
                     <a-tag v-else color="red">待暂停</a-tag>

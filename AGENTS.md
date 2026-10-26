@@ -100,6 +100,13 @@
   - **抓取失败保留上一次的快照**（不写 0 兜底）+ 计入 failed **并点名**——写 0 等于把故障伪装成"没有种子"
   - **异常种子批量暂停**：按 100 个一批调 `set_pause([...])`（不是逐个发——477 个异常 = 477 次 API 往返）；**已暂停的跳过**（上一轮已暂停过，不重复发指令）
   - 「是否已暂停」用 adapter 归一化的 `state` 判定（`TorrentState.is_paused`），**不能用 `status == 0`**——qB 把 `error` / `missingFiles` 也映射成 0，用它判会把「数据丢失」的种子误当成已暂停而跳过暂停（那正是最该暂停的一类）
+  - **异常检测必须同时看 error 码与文案**（2026-10-26 修正）：`_detect_anomaly(error_code, error_string)`
+    - 只匹配文案会漏掉大量异常：TR 的 `error=3` 文案是 `"Please Verify Local Data! Piece #335 is corrupt."`——既不含 "no data found" 也不含 "not registered" → **整个漏判**
+    - 实测（prod 辅种站）：TR 有 **156 个**种子带 error 码（154 个 tracker HTTP 502/522 + 2 个本地数据损坏），只匹配文案时**全部漏判**（异常数恒为 0）
+    - error 码语义：`0`=无错 `1`=tracker 警告 `2`=tracker 错误 `3`=**本地数据丢失**
+    - 异常类型：`no_data_found` / `tracker_not_registered`（文案匹配）/ `local_data_missing`（码 3）/ `tracker_error`（码 2）
+    - **`tracker_error` 豁免暂停**（`_PAUSE_EXEMPT_ANOMALIES`）：那是 tracker **服务端**的问题（HTTP 502/522），与本地数据无关——暂停只会白白损失上传，等 tracker 恢复即可。`local_data_missing` **要**暂停（数据没了，做种无意义）
+    - 「跳过」要分两类说：此前已暂停 vs 豁免暂停（tracker 报错）——混在一起会让人以为漏暂停了
   - 契约由 `tests/unit/test_cross_seed_monitor.py` + `tests/integration/test_cross_seed_job.py` + `tests/integration/test_db_models.py` + `tests/integration/test_api.py` 固化
 - **辅种空间统计**（2026-10-24 加入，`app/services/cross_seed_space.py`）：
   - **复用同一次全量拉取**：辅种站 4600+ 种子拉一次要 20s+，占用数据直接从 `list_torrents_with_errors()` 的返回值算（**不额外打接口**）；只有磁盘空间需要**额外一次**轻量调用（TR `free-space` / qB `sync/maindata`，毫秒级）
