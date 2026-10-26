@@ -78,8 +78,8 @@ const deleteTarget = ref<{
 const dirColumns = [
   { title: '下载目录', dataIndex: 'dir', key: 'dir', ellipsis: true, minWidth: 320, sorter: (a: CrossSeedDirUsage, b: CrossSeedDirUsage) => a.dir.localeCompare(b.dir) },
   { title: '种子数', dataIndex: 'count', key: 'count', width: 100, sorter: (a: CrossSeedDirUsage, b: CrossSeedDirUsage) => a.count - b.count },
-  { title: '实际占用', dataIndex: 'bytes', key: 'bytes', width: 140, sorter: (a: CrossSeedDirUsage, b: CrossSeedDirUsage) => a.bytes - b.bytes },
-  { title: '总大小', dataIndex: 'total_bytes', key: 'total_bytes', width: 140, sorter: (a: CrossSeedDirUsage, b: CrossSeedDirUsage) => a.total_bytes - b.total_bytes },
+  { title: '声明占用', dataIndex: 'bytes', key: 'bytes', width: 140, sorter: (a: CrossSeedDirUsage, b: CrossSeedDirUsage) => a.bytes - b.bytes },
+  { title: '声明总大小', dataIndex: 'total_bytes', key: 'total_bytes', width: 140, sorter: (a: CrossSeedDirUsage, b: CrossSeedDirUsage) => a.total_bytes - b.total_bytes },
 ]
 
 const orphanColumns = [
@@ -385,6 +385,27 @@ function freshnessText(scannedAt: string): string {
   return `${Math.floor(diff / 86400)} 天前`
 }
 
+/**
+ * 快照的年龄（秒）；无法解析时返回 null。
+ *
+ * 用于判断「空间数字是不是已经过时」——辅种巡查的 cron 是
+ * \`2,32 * * * *\`（每 30 分钟一次），所以超过 30 分钟就说明这份数据
+ * 可能已经明显滞后（期间种子数、磁盘占用都可能变）。
+ */
+function snapshotAgeSeconds(scannedAt: string): number | null {
+  if (!scannedAt) return null
+  const d = new Date(scannedAt.replace(' ', 'T') + '+08:00')
+  const ts = d.getTime()
+  if (Number.isNaN(ts)) return null
+  return Math.max(0, (Date.now() - ts) / 1000)
+}
+
+/** 快照是否陈旧（超过一个抓取周期 = 30 分钟）。 */
+const isSnapshotStale = computed<boolean>(() => {
+  const age = snapshotAgeSeconds(snapshot.value?.scanned_at ?? '')
+  return age !== null && age > 30 * 60
+})
+
 onMounted(async () => {
   await loadDownloaders()
   await Promise.all([loadSnapshotList(), loadOrphans()])
@@ -474,19 +495,40 @@ onMounted(async () => {
 
           <!-- 空间占用 -->
           <section class="space-block">
-            <div class="label-caps" style="margin-bottom: var(--sp-2)">
-              空间占用 · SPACE
+            <div class="space-block__header">
+              <div class="label-caps">空间占用 · SPACE</div>
+              <!--
+                抓取时间（2026-10-26）：这 4 个数字全部来自**同一次**抓取，
+                区块独立于顶部摘要——滚动下来就看不到时间了 → 在这里补上，
+                并在数据陈旧时提示。
+              -->
+              <span class="dim mono">
+                抓取于 {{ snapshot.scanned_at }}（{{ freshnessText(snapshot.scanned_at) }}）
+              </span>
             </div>
+            <a-alert
+              v-if="isSnapshotStale"
+              type="warning"
+              show-icon
+              message="这份空间数据已超过 30 分钟（辅种巡查每 30 分钟抓一次）——期间的种子增减与磁盘占用变化都不会反映在这里。"
+              style="margin-bottom: var(--sp-2)"
+            >
+              <template #action>
+                <a-button size="small" type="primary" :loading="refreshing" @click="refreshNow">
+                  立即刷新
+                </a-button>
+              </template>
+            </a-alert>
             <div class="space-tiles">
               <div class="space-tile">
-                <div class="space-tile__label">辅种实际占用</div>
+                <div class="space-tile__label">种子声明占用</div>
                 <div class="space-tile__value">{{ fmtBytes(snapshot.used_bytes) }}</div>
-                <div class="space-tile__hint">磁盘上实际占用的字节数</div>
+                <div class="space-tile__hint">共享数据重复计入，非磁盘真实占用</div>
               </div>
               <div class="space-tile">
-                <div class="space-tile__label">辅种总大小</div>
+                <div class="space-tile__label">种子总大小</div>
                 <div class="space-tile__value">{{ fmtBytes(snapshot.total_size_bytes) }}</div>
-                <div class="space-tile__hint">种子理论总大小</div>
+                <div class="space-tile__hint">同样含共享重复计入</div>
               </div>
               <div class="space-tile">
                 <div class="space-tile__label">磁盘剩余</div>
@@ -508,10 +550,33 @@ onMounted(async () => {
               </div>
             </div>
 
+            <!--
+              口径说明（2026-10-26）。
+
+              「种子声明占用」可能**大于**下面的「分区已用」——这是正常的，
+              两个数字的范畴不同：
+
+              - **种子声明占用** = 各种子上报的占用求和。辅种的本质是**同一条
+                数据被多个种子共享**（实测 4646 个种子只对应 2237 份数据），
+                共享的部分被重复计了 N 次。它只是辅种这一块「声明」了多少，
+                **不是**磁盘真实占用。
+              - **分区已用** = 磁盘总量 − 剩余，是**整个分区**的视角
+                （含辅种之外的 VM / 备份 / 其它共享），这个才准。
+
+              所以要看「磁盘还剩多少空间」，看剩余与进度条；要看「辅种声明了
+              多少数据」，看上面那两个数。
+            -->
+            <a-alert
+              type="info"
+              show-icon
+              message="口径说明：上面两个「种子」数字含共享数据重复计入（辅种场景下同一条数据常被多个种子共享），可能大于磁盘真实占用。磁盘实际用量看下面的「分区已用」——那是整个分区的口径，含辅种之外的数据。"
+              style="margin-top: var(--sp-2)"
+            />
+
             <!-- 占用进度条（总量未知时不画——画出来会误导成「磁盘已满」） -->
             <div v-if="diskUsagePercent !== null" class="space-progress">
               <div class="space-progress__header">
-                <span>磁盘已用 {{ fmtBytes(diskUsedBytes) }}</span>
+                <span>分区已用 {{ fmtBytes(diskUsedBytes) }}（含非辅种数据）</span>
                 <span class="dim">{{ (diskUsagePercent * 100).toFixed(1) }}%</span>
               </div>
               <a-progress :percent="diskUsagePercent * 100" :show-info="false" />
@@ -585,7 +650,7 @@ onMounted(async () => {
                   <div class="space-tile__label">孤儿占用</div>
                   <div class="space-tile__value">{{ fmtBytes(currentOrphan.orphan_bytes) }}</div>
                   <div class="space-tile__hint">
-                    扫描于 {{ currentOrphan.scanned_at }}
+                    扫描于 {{ currentOrphan.scanned_at }}（{{ freshnessText(currentOrphan.scanned_at) }}）
                   </div>
                 </div>
                 <div class="space-tile">
@@ -983,6 +1048,16 @@ onMounted(async () => {
   padding: var(--sp-3);
   background: var(--bg-inset);
   border-radius: var(--r-sm);
+}
+
+/* 空间区块的标题行：标题 + 抓取时间（同一行，靠右对齐） */
+.space-block__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+  flex-wrap: wrap;
 }
 
 .space-tiles {

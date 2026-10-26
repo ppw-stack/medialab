@@ -111,7 +111,11 @@
 - **辅种空间统计**（2026-10-24 加入，`app/services/cross_seed_space.py`）：
   - **复用同一次全量拉取**：辅种站 4600+ 种子拉一次要 20s+，占用数据直接从 `list_torrents_with_errors()` 的返回值算（**不额外打接口**）；只有磁盘空间需要**额外一次**轻量调用（TR `free-space` / qB `sync/maindata`，毫秒级）
   - adapter 的 `list_torrents_with_errors()` 返回值新增 `completed_bytes`（实际占用）+ `save_path`（按目录分布）；`get_disk_space()` 是新增的基类方法（不支持时抛 `NotImplementedError`，与 `list_torrents_with_errors` 同模式）
-  - **口径诚实**：TR 的 `haveValid` 是精确的磁盘占用；qB 的 `completed` 是 `total_wanted_done`（**不含** unwanted 文件与冗余块），会**小于**真实占用。不夸大、不折算
+  - **口径诚实**：TR 的 `haveValid` 是**单个种子**的精确磁盘占用；qB 的 `completed` 是 `total_wanted_done`（**不含** unwanted 文件与冗余块），会**小于**真实占用。不夸大、不折算
+  - ⚠️ **`used_bytes` / `total_size_bytes` 不是磁盘占用**（2026-10-26 澄清）：辅种的本质是**同一条数据被多个种子共享**（实测辅种站 **4646 个种子只对应 2237 份数据**，组内种子数分布：1 个的 1352 组 / 2 个的 168 组 / 3 个的 378 组 / 4 个的 181 组…），共享部分被重复计了 N 次 → 实测「声明占用 71.47 TB」**大于**「分区总量 28.33 TB」
+    - 故前端标签用「**种子声明占用**」（不是「辅种实际占用」），并加口径说明 alert
+    - **真实磁盘占用 = `disk_total_bytes - disk_free_bytes`**（分区视角，含辅种之外的 VM/备份/其它共享）→ 前端进度条用这个，标为「分区已用（含非辅种数据）」
+    - 字段名**不改**（`used_bytes` 保持）——改名字会破坏 API 契约 + DB 列名，代价远大于收益；只改**标签与注释**
   - **qB 拿不到磁盘总量**（`sync/maindata` 只给 `free_space_on_disk`）→ `total_bytes=None`（**不是 0**——0 会被前端画成「磁盘已满」）→ 前端据此**不画进度条**
   - **磁盘信息拿不到不阻塞**：适配器不支持 / 查询失败 → 降级成 NULL，占用数据照样落库
   - 数据落在 `cross_seed_snapshot` 的空间列（`disk_free_bytes` / `disk_total_bytes` / `used_bytes` / `total_size_bytes` / `by_dir`）

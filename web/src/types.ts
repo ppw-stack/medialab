@@ -254,9 +254,9 @@ export interface CrossSeedDirUsage {
   dir: string
   /** 该目录下的种子数。 */
   count: number
-  /** 实际占用字节数。 */
+  /** 声明占用字节数——**含共享重复计入**（见 `used_bytes` 的说明）。 */
   bytes: number
-  /** 种子总大小字节数（理论值）。 */
+  /** 声明总大小字节数——同样含共享重复计入。 */
   total_bytes: number
 }
 
@@ -281,9 +281,16 @@ export interface CrossSeedSnapshotHeader {
   disk_free_bytes: number | null
   /** 磁盘总量（字节）。null = 该下载器不提供（qBittorrent）。 */
   disk_total_bytes: number | null
-  /** 辅种实际占用字节数（各种子 `completed_bytes` 求和）。 */
+  /**
+   * 种子声明占用字节数（各种子 `completed_bytes` 求和）。
+   *
+   * ⚠️ **不等于磁盘真实占用**：辅种的本质是**同一条数据被多个种子共享**
+   * （实测辅种站 4646 个种子只对应 2237 份数据），共享部分被重复计了
+   * N 次。它只是「辅种这一块声明了多少」，真实磁盘占用看
+   * `disk_total_bytes - disk_free_bytes`。
+   */
   used_bytes: number
-  /** 辅种总大小字节数（理论值）。 */
+  /** 种子总大小字节数（理论值）。同样含共享重复计入。 */
   total_size_bytes: number
 }
 

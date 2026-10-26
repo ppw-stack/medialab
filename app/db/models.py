@@ -317,16 +317,21 @@ class CrossSeedSnapshot(Base):
     disk_free_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     #: 磁盘总量（字节）。NULL = 拿不到（qBittorrent 不提供）。
     disk_total_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    #: 辅种**实际占用**字节数（各种子 ``completed_bytes`` 求和）。
+    #: 种子**声明占用**字节数（各种子 ``completed_bytes`` 求和）。
     #:
-    #: ⚠️ 口径提示：TR 的 ``haveValid`` 是精确的磁盘占用；qB 的
+    #: ⚠️ **不等于磁盘真实占用**：辅种的本质是**同一条数据被多个种子共享**
+    #: （实测辅种站 4646 个种子只对应 2237 份数据），共享部分被重复计了
+    #: N 次——故它可以**大于**磁盘真实占用（实测 71.47 TB vs 分区 26 TB）。
+    #: 真实磁盘占用 = ``disk_total_bytes - disk_free_bytes``。
+    #:
+    #: 另：TR 的 ``haveValid`` 是**单个种子**的精确磁盘占用；qB 的
     #: ``completed`` 是 ``total_wanted_done``——**不含** unwanted 文件与
     #: 冗余块，故 qB 的这个值会**小于**真实磁盘占用。
     used_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
-    #: 辅种**总大小**字节数（各种子 ``size`` 求和，理论值）
+    #: 种子**总大小**字节数（各种子 ``size`` 求和，理论值）——同样含共享重复计入。
     total_size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     #: 按下载目录分布（JSON 数组：
-    #: ``[{dir, count, bytes, total_bytes}]``，bytes = 实际占用）
+    #: ``[{dir, count, bytes, total_bytes}]``，bytes = 声明占用）
     by_dir: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
     #: 分组统计明细（JSON 数组：``[{name, size_gb, count, sample_hash}]``）
     stats: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)

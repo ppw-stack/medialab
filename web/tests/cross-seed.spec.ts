@@ -641,3 +641,74 @@ test('辅种统计页 - 各列表表头可排序', async ({ page }) => {
     }
   }
 })
+
+/**
+ * 空间区块的**口径标注**与**时效提示**（2026-10-26）。
+ *
+ * 背景：辅种的本质是**同一条数据被多个种子共享**（实测辅种站 4646 个
+ * 种子只对应 2237 份数据），所以「种子声明占用」会把共享部分重复计
+ * N 次——实测 71.47 TB **大于**分区总量 28.33 TB。
+ *
+ * 因此：
+ * - 卡片标签用「种子声明占用」而**不是**「辅种实际占用」（后者是错的）
+ * - 区块内加口径说明 alert，讲清两个数字的范畴差异
+ * - 标题行带抓取时间；数据超过一个抓取周期（30 分钟）时给提示 + 刷新入口
+ */
+test('辅种统计页 - 空间区块口径标注与时间标记', async ({ page }) => {
+  await login(page)
+  await page.goto('/cross-seed')
+
+  const tabs = page.locator('.ant-tabs-tab')
+  await expect(tabs.first()).toBeVisible({ timeout: 15000 }).catch(() => { /* 无下载器 */ })
+  if ((await tabs.count()) === 0) {
+    console.log('  ✓ 无辅种下载器：跳过空间区块标注断言')
+    return
+  }
+
+  // 找有快照的 tab
+  let pane = page.locator('.ant-tabs-tabpane-active')
+  let found = false
+  for (let i = 0; i < (await tabs.count()); i++) {
+    await tabs.nth(i).click()
+    pane = page.locator('.ant-tabs-tabpane-active')
+    try {
+      await expect(pane.locator('.space-block').first()).toBeVisible({ timeout: 5000 })
+      found = true
+      break
+    } catch {
+      // 该 tab 没快照 → 试下一个
+    }
+  }
+  if (!found) {
+    console.log('  ✓ 还没有快照：跳过空间区块标注断言')
+    return
+  }
+
+  const spaceBlock = pane.locator('.space-block').filter({ hasText: 'SPACE' }).first()
+
+  // 标题行带抓取时间
+  const header = spaceBlock.locator('.space-block__header')
+  await expect(header).toBeVisible()
+  const timeMark = header.locator('.dim.mono')
+  await expect(timeMark).toBeVisible()
+  expect((await timeMark.innerText())).toContain('抓取于')
+  console.log('  ✓ 标题行显示抓取时间:', (await timeMark.innerText()).replace(/\s+/g, ' '))
+
+  // 口径说明
+  const caliber = spaceBlock.locator('.ant-alert').filter({ hasText: '口径说明' })
+  await expect(caliber).toBeVisible()
+  console.log('  ✓ 口径说明 alert 已显示')
+
+  // 标签用「种子声明占用」，**不是**「辅种实际占用」
+  const labels = await spaceBlock.locator('.space-tile__label').allTextContents()
+  expect(labels.join('|')).toContain('种子声明占用')
+  expect(labels.join('|')).not.toContain('辅种实际占用')
+  console.log('  ✓ 卡片标签:', labels.join(' | '))
+
+  // 进度条标为「分区已用」——整个分区的口径，含非辅种数据
+  const progress = spaceBlock.locator('.space-progress__header')
+  if ((await progress.count()) > 0) {
+    expect((await progress.innerText())).toContain('分区已用')
+    console.log('  ✓ 进度条标签:', (await progress.innerText()).replace(/\s+/g, ' '))
+  }
+})

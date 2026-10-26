@@ -73,9 +73,10 @@ class SnapshotHeaderOut(BaseModel):
     disk_free_bytes: int | None = None
     #: 磁盘总量（字节）；None = 该下载器不提供（qBittorrent）
     disk_total_bytes: int | None = None
-    #: 辅种实际占用（字节）
+    #: 种子声明占用（字节）——各种子 ``completed_bytes`` 求和。
+    #: ⚠️ 含**共享数据重复计入**，不等于磁盘真实占用。
     used_bytes: int = 0
-    #: 辅种总大小（字节，理论值）
+    #: 种子总大小（字节，理论值）——同样含共享重复计入。
     total_size_bytes: int = 0
 
 
@@ -106,11 +107,12 @@ class RefreshResultOut(BaseModel):
     disk_free_bytes: int | None = None
     #: 磁盘总量（字节）；None = 该下载器不提供（qBittorrent）
     disk_total_bytes: int | None = None
-    #: 辅种实际占用（字节）
+    #: 种子声明占用（字节）——各种子 ``completed_bytes`` 求和。
+    #: ⚠️ 含**共享数据重复计入**，不等于磁盘真实占用。
     used_bytes: int = 0
-    #: 辅种总大小（字节，理论值）
+    #: 种子总大小（字节，理论值）——同样含共享重复计入。
     total_size_bytes: int = 0
-    #: 按下载目录的占用分布
+    #: 按下载目录的声明占用分布
     by_dir: list[dict[str, Any]] = []
     stats: list[dict[str, Any]]
     anomalies: list[dict[str, Any]]
