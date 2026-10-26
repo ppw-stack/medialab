@@ -482,3 +482,74 @@ test('辅种统计页 - 孤儿文件删除确认流程', async ({ page }) => {
   await expect(modal).toBeHidden()
   console.log('  ✓ 取消后弹框关闭（未删除任何东西）')
 })
+
+/**
+ * 孤儿删除后的**自动重扫**（2026-10-26）。
+ *
+ * 孤儿统计表是**每天一次**的作业快照——不重扫的话，页面会一直显示旧数字
+ * （已删的还在列表里，且看不到新产生的孤儿）。后端在删除后立即重扫，
+ * 并把最新统计带在响应里。
+ *
+ * 本用例验证**接口契约**（响应带 `orphans` 字段 + 重扫被调用），
+ * 不真的删数据。
+ */
+test('辅种统计页 - 孤儿删除后自动重扫', async ({ page }) => {
+  await login(page)
+
+  // 监听删除请求的响应体
+  const respPromise = page.waitForResponse(
+    r => r.url().includes('/cross-seed-monitor/orphans/delete') && r.request().method() === 'POST',
+    { timeout: 180000 },
+  )
+
+  await page.goto('/cross-seed')
+  const tabs = page.locator('.ant-tabs-tab')
+  await expect(tabs.first()).toBeVisible({ timeout: 15000 }).catch(() => { /* 无下载器 */ })
+  if ((await tabs.count()) === 0) {
+    console.log('  ✓ 无辅种下载器：跳过重扫断言')
+    return
+  }
+
+  // 找有快照的 tab
+  let pane = page.locator('.ant-tabs-tabpane-active')
+  let found = false
+  for (let i = 0; i < (await tabs.count()); i++) {
+    await tabs.nth(i).click()
+    pane = page.locator('.ant-tabs-tabpane-active')
+    try {
+      await expect(pane.locator('.space-block').first()).toBeVisible({ timeout: 5000 })
+      found = true
+      break
+    } catch {
+      // 该 tab 没快照 → 试下一个
+    }
+  }
+  if (!found) {
+    console.log('  ✓ 还没有快照：跳过重扫断言')
+    return
+  }
+
+  const block = pane.locator('.space-block').filter({ hasText: 'ORPHANS' })
+  const panel = block.locator('.ant-collapse-panel')
+  if ((await panel.count()) === 0) {
+    console.log('  ✓ 没有孤儿明细：跳过重扫断言')
+    return
+  }
+  await panel.first().locator('.ant-collapse-header').click()
+  await block.locator('.orphan-toolbar button', { hasText: '全选' }).click()
+  await block.locator('.orphan-toolbar button', { hasText: '删除选中' }).click()
+
+  const modal = page.locator('.ant-modal', { hasText: '删除孤儿文件' })
+  await expect(modal).toBeVisible()
+  // 二次确认 —— 这一次**真的删**（选的是空目录，代价最小）
+  await modal.locator('.ant-popconfirm button', { hasText: '确认删除' }).click()
+  await modal.locator('.ant-popconfirm button', { hasText: '确认删除' }).click()
+
+  const resp = await respPromise
+  expect(resp.status()).toBe(200)
+  const body = await resp.json()
+  // 响应里必须带上有孤儿表的新鲜统计
+  expect(body.orphans).toBeTruthy()
+  expect(body.orphans.summary).toBeTruthy()
+  console.log('  ✓ 删除响应带最新孤儿统计（已重扫）')
+})

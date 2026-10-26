@@ -371,6 +371,15 @@ export interface CrossSeedOrphanDeleteResult {
   error: string | null
   /** 判定不完整的警告（部分下载器拉取失败）。 */
   warning?: string
+  /** 删除后重扫失败的原因（null = 重扫成功）。 */
+  rescan_error?: string | null
+  /**
+   * 删除后**重扫**得到的最新孤儿统计。
+   *
+   * 孤儿统计表是每天一次的作业快照，不重扫页面会一直显示旧数字
+   * （已删的还在列表里、且看不到新产生的孤儿）。
+   */
+  orphans?: CrossSeedOrphanSummary
 }
 
 /** 辅种空间汇总（`GET /cross-seed-monitor/space`）。 */

@@ -712,6 +712,78 @@ async def test_cross_seed_orphans_delete_without_scan_dirs(
 
 
 
+async def test_cross_seed_orphans_delete_rescans(
+    client: httpx.AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """删除后**自动重扫**——响应里带最新的孤儿统计。
+
+    孤儿统计表是每天一次的作业快照，不重扫页面会一直显示旧数字
+    （已删的还在列表里、且看不到新产生的孤儿）。
+    """
+    from app.core.config import get_settings
+
+    scan_root = tmp_path / "aux"
+    scan_root.mkdir()
+    (scan_root / "orphan").mkdir()
+    (scan_root / "orphan" / "a.mkv").write_bytes(b"\0" * 100)
+
+    monkeypatch.setattr(get_settings(), "cross_seed_scan_dirs", str(scan_root))
+
+    rescanned = {"n": 0}
+
+    async def _fake_scan() -> dict[str, object]:
+        rescanned["n"] += 1
+        return {"orphan_count": 0, "orphan_bytes": 0, "summary": "ok"}
+
+    monkeypatch.setattr(
+        "app.services.cross_seed_orphan.run_scan_orphans", _fake_scan
+    )
+
+    resp = await client.post(
+        "/api/v1/cross-seed-monitor/orphans/delete",
+        json={"paths": [str(scan_root / "orphan")]},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["succeeded"] == 1
+    assert rescanned["n"] == 1, "删除后必须重扫一次"
+    # 响应里带上有孤儿表的新鲜统计
+    assert "orphans" in data
+    assert "summary" in data["orphans"]
+    assert data["rescan_error"] is None
+
+
+async def test_cross_seed_orphans_delete_rescan_failure_is_reported(
+    client: httpx.AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """重扫失败**不影响删除结果**——删除成功，但记 ``rescan_error``。"""
+    from app.core.config import get_settings
+
+    scan_root = tmp_path / "aux"
+    scan_root.mkdir()
+    (scan_root / "orphan").mkdir()
+
+    monkeypatch.setattr(get_settings(), "cross_seed_scan_dirs", str(scan_root))
+
+    async def _boom() -> dict[str, object]:
+        raise RuntimeError("扫描炸了")
+
+    monkeypatch.setattr(
+        "app.services.cross_seed_orphan.run_scan_orphans", _boom
+    )
+
+    resp = await client.post(
+        "/api/v1/cross-seed-monitor/orphans/delete",
+        json={"paths": [str(scan_root / "orphan")]},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["succeeded"] == 1, "删除本身成功了"
+    assert data["rescan_error"] is not None
+    assert "扫描炸了" in data["rescan_error"]
+
+
+
 async def test_cross_seed_space_with_snapshot(client: httpx.AsyncClient) -> None:
     """空间汇总：含磁盘剩余与辅种占用。"""
     from app.db.models import CrossSeedSnapshot

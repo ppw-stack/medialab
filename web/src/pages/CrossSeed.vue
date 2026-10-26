@@ -306,9 +306,18 @@ async function doDeleteOrphans() {
     } else {
       message.success(parts.join('，') || '没有可删除的条目')
     }
+    // 后端删除后**已重扫**并把最新统计带回来了——直接用，省一次请求。
+    // （孤儿统计本来是每天一次的作业快照，不重扫页面会一直显示旧数字）
+    if (r.orphans) {
+      orphanSummary.value = r.orphans
+    } else {
+      // 后端重扫失败（rescan_error）→ 退回自己拉一次
+      if (r.rescan_error) {
+        message.warning('重扫失败，统计可能不是最新：' + r.rescan_error)
+      }
+      await loadOrphans()
+    }
     selectedOrphanPaths.value = []
-    // 重新拉孤儿统计 → UI 反映最新状态
-    await loadOrphans()
   } catch (e) {
     message.error('删除失败：' + errMsg(e))
   } finally {

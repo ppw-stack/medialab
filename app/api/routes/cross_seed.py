@@ -262,21 +262,7 @@ async def list_orphans() -> dict[str, Any]:
 
     没有记录 = 还没扫过（或该环境没挂载辅种目录）。
     """
-    from app.services.cross_seed_orphan import list_orphans as _list
-
-    rows = await _list()
-    total_count = sum(r.orphan_count for r in rows)
-    total_bytes = sum(r.orphan_bytes for r in rows)
-    empty_count = sum(r.empty_dir_count for r in rows)
-    return {
-        "summary": {
-            "downloaders": len(rows),
-            "orphan_count": total_count,
-            "orphan_bytes": total_bytes,
-            "empty_dir_count": empty_count,
-        },
-        "downloaders": [r.to_dict() for r in rows],
-    }
+    return await _orphan_summary_payload()
 
 
 @router.post("/orphans/delete", summary="删除孤儿文件（不可逆）")
@@ -294,8 +280,19 @@ async def delete_orphan_files(payload: DeleteOrphansIn) -> dict[str, Any]:
 
     逐条删除，单条失败不中断其余条目。复核不通过的会被**跳过**
     （记在 ``skipped`` 里），不会删。
+
+    **删除后自动重扫**：孤儿统计表是**每天一次**的作业快照，删完不重扫，
+    页面会一直显示旧数字（已删的还在列表里、且看不到新产生的孤儿）。
+    故删除后**立即重扫**并把最新统计带在响应里（``orphans`` 字段），
+    前端据此刷新，不用再等下一个 cron。
+
+    重扫失败**不影响删除结果**（数据已删，只是统计没更新）——记
+    ``rescan_error``，前端提示用户可稍后手动重扫。
     """
-    from app.services.cross_seed_orphan import collect_owned_names
+    from app.services.cross_seed_orphan import (
+        collect_owned_names,
+        run_scan_orphans,
+    )
     from app.services.orphan_deleter import delete_orphans
 
     scan_dirs = parse_scan_dirs(get_settings().cross_seed_scan_dirs)
@@ -313,7 +310,35 @@ async def delete_orphan_files(payload: DeleteOrphansIn) -> dict[str, Any]:
         out["warning"] = (
             f"以下下载器拉取失败，判定可能不完整：{'、'.join(pull_failed)}"
         )
+
+    # 删除后重扫：让页面立刻反映最新状态（已删的不再出现、
+    # 新产生的孤儿也能看到）。失败不影响删除结果。
+    try:
+        await run_scan_orphans()
+        out["rescan_error"] = None
+    except Exception as exc:  # 重扫失败不该掩盖删除结果（数据已删）
+        logger.warning("删除后重扫孤儿统计失败：%s", exc)
+        out["rescan_error"] = str(exc) or type(exc).__name__
+
+    # 带上有孤儿表的新鲜统计（前端直接用，不用再发一次请求）
+    out["orphans"] = await _orphan_summary_payload()
     return out
+
+
+async def _orphan_summary_payload() -> dict[str, Any]:
+    """孤儿统计的汇总载荷（与 ``GET /orphans`` 同结构）。"""
+    from app.services.cross_seed_orphan import list_orphans as _list
+
+    rows = await _list()
+    return {
+        "summary": {
+            "downloaders": len(rows),
+            "orphan_count": sum(r.orphan_count for r in rows),
+            "orphan_bytes": sum(r.orphan_bytes for r in rows),
+            "empty_dir_count": sum(r.empty_dir_count for r in rows),
+        },
+        "downloaders": [r.to_dict() for r in rows],
+    }
 
 
 @router.get("/downloaders/{downloader_id}/snapshot", summary="单个辅种下载器快照")
