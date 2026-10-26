@@ -104,6 +104,25 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         options=((0, "按进度升序"), (1, "随机")),
         note="档位（未封顶/无信号/已封顶）始终是主排序，本项只决定同档内怎么排",
     ),
+    ParamSpec(
+        key="disk_rotation_threshold_pct",
+        label="磁盘使用率阈值(%)",
+        default=90,
+        min=50,
+        max=99,
+        job="disk_rotation",
+        note="辅种下载器磁盘使用率超过此值时触发流转（按价值低→高删种子）",
+    ),
+    ParamSpec(
+        key="disk_rotation_action",
+        label="命中时删除",
+        default=1,
+        min=0,
+        max=1,
+        job="disk_rotation",
+        options=((0, "仅删任务"), (1, "删任务+删数据")),
+        note="删磁盘数据不可恢复，删除前会记审计日志",
+    ),
 )
 
 

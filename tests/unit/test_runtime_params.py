@@ -79,9 +79,13 @@ def test_continuous_params_have_no_options() -> None:
 
 
 def test_enum_specs_are_the_zero_one_ones() -> None:
-    """当前只有两个 0/1 枚举参数——新增枚举参数时同步更新本断言。"""
+    """当前所有 0/1 枚举参数——新增枚举参数时同步更新本断言."""
     enum_keys = {s.key for s in PARAM_SPECS if s.options is not None}
-    assert enum_keys == {"monitor_delete_expired", "push_within_bucket_order"}
+    assert enum_keys == {
+        "monitor_delete_expired",
+        "push_within_bucket_order",
+        "disk_rotation_action",
+    }
 
 
 def test_monitor_delete_expired_options() -> None:

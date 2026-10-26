@@ -1093,6 +1093,59 @@ async def test_job_runs_empty(client: httpx.AsyncClient) -> None:
     assert data["items"] == []
 
 
+async def test_disk_rotation_params_roundtrip(client: httpx.AsyncClient) -> None:
+    """disk_rotation 作业的运行参数：归属 + 默认值 + 可改 + 越界被拒.
+
+    钉住契约（AGENTS.md「枚举型运行参数用单选按钮组」）：
+    - ``disk_rotation_threshold_pct`` 连续数值参数（50-99，默认 90）
+    - ``disk_rotation_action`` 枚举参数（0=仅删任务 / 1=删任务+删数据，默认 1）
+    """
+    from app.services.runtime_params import specs_for_job
+
+    # 1) 归属 disk_rotation 作业
+    keys = [s.key for s in specs_for_job("disk_rotation")]
+    assert "disk_rotation_threshold_pct" in keys
+    assert "disk_rotation_action" in keys
+
+    # 2) 默认值（threshold=90，action=1=删数据）
+    resp = await client.get("/api/v1/scheduler/runtime-params")
+    assert resp.status_code == 200
+    params = resp.json()["params"]
+    assert params["disk_rotation_threshold_pct"] == 90
+    assert params["disk_rotation_action"] == 1
+
+    # 3) 枚举参数透出 options（前端渲染单选按钮组）
+    specs = {s["key"]: s for s in resp.json()["specs"]}
+    action_spec = specs["disk_rotation_action"]
+    assert action_spec["options"] == [[0, "仅删任务"], [1, "删任务+删数据"]]
+    assert action_spec["note"], "删数据模式必须提示不可恢复"
+
+    # 连续数值参数不带 options（前端渲染数字输入框）
+    assert specs["disk_rotation_threshold_pct"]["options"] is None
+
+    # 4) 改 threshold 并持久化
+    resp = await client.put(
+        "/api/v1/scheduler/runtime-params",
+        json={"disk_rotation_threshold_pct": 80},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["params"]["disk_rotation_threshold_pct"] == 80
+
+    # 5) 越界值被拒（400）
+    resp = await client.put(
+        "/api/v1/scheduler/runtime-params",
+        json={"disk_rotation_threshold_pct": 40},  # < 50
+    )
+    assert resp.status_code == 400
+
+    # 6) 改回 90，避免污染后续用例
+    resp = await client.put(
+        "/api/v1/scheduler/runtime-params",
+        json={"disk_rotation_threshold_pct": 90},
+    )
+    assert resp.status_code == 200
+
+
 # ------------------------------------------------------------------ 手动推送
 
 async def test_push_missing_index_404(client: httpx.AsyncClient) -> None:

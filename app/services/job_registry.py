@@ -13,6 +13,8 @@
 - ``scan_cross_seed`` — 定时抓取辅种下载器，落库快照 + 暂停 tracker 未注册 / 数据丢失的种子
 - ``drain_task_queue`` — 排空任务队列：崩溃恢复（僵死 running 回收）+ 退避重试
 - ``daily_checkin`` — 对支持签到的站点执行每日签到（hhanclub / soulvoice / hdhome）
+- ``scan_orphans`` — 扫描辅种下载器的孤儿文件（磁盘有、任务没了）
+- ``disk_rotation`` — 磁盘使用率超阈时按价值低→高删辅种种子（独苗优先删，多副本保留）
 """
 from __future__ import annotations
 
@@ -50,6 +52,10 @@ DEFAULT_CRON: dict[str, str] = {
     # 孤儿文件扫描：辅种站全量扫盘实测 39 秒（1669 目录 / 3.6 万文件），
     # 每天一次足够——孤儿不会快速变化。分钟位 7 避开所有多 5 分钟的作业。
     "scan_orphans": "7 4 * * *",
+    # 磁盘空间流转：每 2 小时一次——磁盘不会瞬间涨满，2 小时检查一次足够。
+    # 分钟位 17 避开所有多 5 分钟的作业（fetch_all_sites */10、push/refresh */30、
+    # monitor 5,15,…、drain */5）与 scan_cross_seed（2,32）。
+    "disk_rotation": "17 */2 * * *",
 }
 
 
@@ -104,6 +110,12 @@ def register_jobs(factory: AdapterFactory) -> None:
         "scan_orphans",
         lambda: _run_and_return(_run_scan_orphans()),
         "辅种孤儿文件扫描",
+    )
+    _register(
+        "disk_rotation",
+        lambda: _run_and_return(_run_disk_rotation()),
+        "磁盘空间流转",
+        extra="（按价值低→高删种子，把使用率压回阈值以下）",
     )
 
 
@@ -203,6 +215,13 @@ async def _run_scan_orphans() -> dict[str, object]:
     from app.services.cross_seed_orphan import run_scan_orphans
 
     return await run_scan_orphans()
+
+
+async def _run_disk_rotation() -> dict[str, object]:
+    """执行磁盘空间流转（按价值低→高删种子，压回使用率阈值以下）。"""
+    from app.services.disk_rotation import run_disk_rotation
+
+    return await run_disk_rotation()
 
 
 async def _run_and_return(result: Awaitable[object]) -> object:

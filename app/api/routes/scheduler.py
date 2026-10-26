@@ -158,6 +158,8 @@ class RuntimeParamsUpdateIn(BaseModel):
     monitor_delete_expired: int | None = None
     push_download_interval_ms: int | None = None
     push_within_bucket_order: int | None = None
+    disk_rotation_threshold_pct: int | None = None
+    disk_rotation_action: int | None = None
 
 
 def _assert_params_model_covers_specs() -> None:
