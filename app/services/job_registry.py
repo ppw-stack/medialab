@@ -18,8 +18,8 @@
 """
 from __future__ import annotations
 
-from collections.abc import Awaitable
-from typing import Any
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 from app.core.logging import get_logger
 from app.services.factory import AdapterFactory
@@ -59,6 +59,130 @@ DEFAULT_CRON: dict[str, str] = {
 }
 
 
+def _current_pre_pause_minutes() -> int:
+    """当前生效的"提前暂停分钟数"（DB 运行时参数优先，回退到默认值）。
+
+    作业实际用的是 runtime_params（DB）里的值，不是启动期的初始值——
+    启动日志若打初始值会与实际行为不符。
+
+    取不到时回退到 :attr:`PARAM_SPECS` 里的默认值（而不是 0），否则日志
+    会显示 "pre_pause=0min" 而实际生效的是 spec 的分钟数。
+    """
+    from app.services.runtime_params import get_runtime_params, lookup_spec
+
+    try:
+        return get_runtime_params().get_int("monitor_pre_pause_minutes")
+    except Exception:
+        spec = lookup_spec("monitor_pre_pause_minutes")
+        return spec.default if spec is not None else 10
+
+
+@dataclass(frozen=True, slots=True)
+class JobMeta:
+    """作业的展示元数据 + 执行入口。
+
+    **中文名与描述的唯��真源**：以前前端硬编码了一份 job → 中文名的
+    映射表（调度页 + 仪表盘各一份），每加一个作业就要手改前端，漏一处
+    就在调度页显示原始 job 名（如 ``scan_orphans``）和 "—" 描述。
+
+    改为由后端随作业一起下发（:meth:`SchedulerCenter.list_jobs`），
+    新增作业只需在这张表里加一行。
+    """
+
+    name: str
+    #: 中文名（页面标题）
+    title: str
+    #: 一句话说明（页面标题下方）
+    description: str
+    #: 作业执行入口工厂：接收 :class:`AdapterFactory`（作业自己按需建
+    #: adapter），返回一个**无参可调用**（调度器按零参调用它）。
+    make_func: Callable[[AdapterFactory], Callable[[], Awaitable[object]]]
+    #: 追加到注册日志末尾的补充说明（如参数回显）
+    log_extra: str = ""
+
+
+#: 全部作业的元数据（**新增作业只需在这里加一行**）。
+#:
+#: cron 在 :data:`DEFAULT_CRON`（独立常量，便于测试断言覆盖）。
+JOB_META: tuple[JobMeta, ...] = (
+    JobMeta(
+        name="fetch_all_sites",
+        title="站点拉取",
+        description=(
+            "遍历所有启用站点拉取种子列表（API/HTML），写入 torrent_index 表"
+        ),
+        make_func=lambda f: _job_fn(lambda: _run_fetch_all_sites(f)),
+    ),
+    JobMeta(
+        name="push_free_torrents",
+        title="免费种推送",
+        description="从 torrent_index 选免费种 → 默认下载器（每 30 分钟）",
+        make_func=lambda f: _job_fn(lambda: _run_push_free(f)),
+    ),
+    JobMeta(
+        name="monitor_free_window",
+        title="免费窗口监测",
+        description=(
+            "巡检已推免费种，临近 free_end_at 自动暂停下载器（pre_pause=10 min）"
+        ),
+        make_func=lambda f: _job_fn(lambda: _run_monitor_free_window(f)),
+        log_extra=f" (pre_pause={_current_pre_pause_minutes()}min)",
+    ),
+    JobMeta(
+        name="refresh_user_data",
+        title="站点信息获取",
+        description=(
+            "拉取 9 站上传/下载/做种数/下载中数 + 时魔（每小时站点积分）"
+            "→ 写入 site_user_data 表"
+        ),
+        make_func=lambda f: _job_fn(lambda: _run_refresh_user_data(f)),
+    ),
+    JobMeta(
+        name="scan_cross_seed",
+        title="辅种巡查",
+        description=(
+            "定时抓取 is_cross_seed 下载器 → 落库快照，"
+            "检测 tracker 未注册/数据丢失 → 自动暂停（每 30 分钟）"
+        ),
+        make_func=lambda f: _job_fn(_run_scan_cross_seed),
+        log_extra="（定时抓取 + 落库快照）",
+    ),
+    JobMeta(
+        name="drain_task_queue",
+        title="任务队列排空",
+        description="回收崩溃残留的僵死任务 + 重试退避到期的推送任务（每 5 分钟）",
+        make_func=lambda f: _job_fn(lambda: _run_drain_task_queue(f)),
+    ),
+    JobMeta(
+        name="daily_checkin",
+        title="每日签到",
+        description=(
+            "对支持签到的站点自动完成每日签到"
+            "（hhanclub / soulvoice / hdhome / hdsky）"
+        ),
+        make_func=lambda f: _job_fn(lambda: _run_daily_checkin(f)),
+    ),
+    JobMeta(
+        name="scan_orphans",
+        title="辅种孤儿文件扫描",
+        description=(
+            "扫描辅种下载目录，找出「磁盘有文件但任务已删」的孤儿数据（每天一次）"
+        ),
+        make_func=lambda f: _job_fn(_run_scan_orphans),
+    ),
+    JobMeta(
+        name="disk_rotation",
+        title="磁盘空间流转",
+        description=(
+            "辅种磁盘使用率超阈时，按价值低→高删种子"
+            "（独苗优先删，多副本保留），把使用率压回阈值以下"
+        ),
+        make_func=lambda f: _job_fn(_run_disk_rotation),
+        log_extra="（按价值低→高删种子，把使用率压回阈值以下）",
+    ),
+)
+
+
 def register_jobs(factory: AdapterFactory) -> None:
     """注册全部周期性作业。
 
@@ -69,57 +193,11 @@ def register_jobs(factory: AdapterFactory) -> None:
     cron 用 :data:`DEFAULT_CRON` 里的代码默认值（DB 里的覆盖值由
     :meth:`SchedulerCenter.apply_overrides` 在注册**之前**灌入）。
     """
-    _register(
-        "fetch_all_sites",
-        lambda: _run_and_return(_run_fetch_all_sites(factory)),
-        "站点拉取",
-    )
-    _register(
-        "push_free_torrents",
-        lambda: _run_and_return(_run_push_free(factory)),
-        "免费种推送",
-    )
-    _register(
-        "monitor_free_window",
-        lambda: _run_and_return(_run_monitor_free_window(factory)),
-        "免费窗口监测",
-        extra=f" (pre_pause={_current_pre_pause_minutes()}min)",
-    )
-    _register(
-        "refresh_user_data",
-        lambda: _run_and_return(_run_refresh_user_data(factory)),
-        "站点用户数据",
-    )
-    _register(
-        "scan_cross_seed",
-        lambda: _run_and_return(_run_scan_cross_seed()),
-        "辅种巡查",
-        extra="（定时抓取 + 落库快照）",
-    )
-    _register(
-        "drain_task_queue",
-        lambda: _run_and_return(_run_drain_task_queue(factory)),
-        "任务队列排空",
-    )
-    _register(
-        "daily_checkin",
-        lambda: _run_and_return(_run_daily_checkin(factory)),
-        "站点签到",
-    )
-    _register(
-        "scan_orphans",
-        lambda: _run_and_return(_run_scan_orphans()),
-        "辅种孤儿文件扫描",
-    )
-    _register(
-        "disk_rotation",
-        lambda: _run_and_return(_run_disk_rotation()),
-        "磁盘空间流转",
-        extra="（按价值低→高删种子，把使用率压回阈值以下）",
-    )
+    for meta in JOB_META:
+        _register(meta, factory)
 
 
-def _register(name: str, func: Any, desc: str, *, extra: str = "") -> None:
+def _register(meta: JobMeta, factory: AdapterFactory) -> None:
     """注册单个作业并记录**实际生效**的 cron。
 
     日志必须打**生效值**（DB 覆盖后的），不是 :data:`DEFAULT_CRON` 里的
@@ -127,10 +205,18 @@ def _register(name: str, func: Any, desc: str, *, extra: str = "") -> None:
     15,45 跑"）。
     """
     scheduler_center.register(
-        JobSpec(name=name, func=func, cron=DEFAULT_CRON[name])
+        JobSpec(
+            name=meta.name,
+            func=meta.make_func(factory),
+            cron=DEFAULT_CRON[meta.name],
+            # 中文名 + 描述随作业一起下发——前端不再硬编码映射表
+            title=meta.title,
+            description=meta.description,
+        )
     )
-    effective = scheduler_center.list_job_cron(name)
-    logger.info("已注册作业：%s cron=%r%s", desc, effective, extra)
+    effective = scheduler_center.list_job_cron(meta.name)
+    logger.info("已注册作业：%s cron=%r%s", meta.title, effective, meta.log_extra)
+
 
 # ============================================================ 作业入口
 async def _run_fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
@@ -164,24 +250,7 @@ async def _run_monitor_free_window(
     return asdict(result)
 
 
-def _current_pre_pause_minutes() -> int:
-    """当前生效的"提前暂停分钟数"（DB 运行时参数优先，回退到默认值）。
-
-    作业实际用的是 runtime_params（DB）里的值，不是启动期的初始值——
-    启动日志若打初始值会与实际行为不符。
-
-    取不到时回退到 :attr:`PARAM_SPECS` 里的默认值（而不是 0），否则日志
-    会显示 "pre_pause=0min" 而实际生效的是 spec 的分钟数。
-    """
-    from app.services.runtime_params import get_runtime_params, lookup_spec
-
-    try:
-        return get_runtime_params().get_int("monitor_pre_pause_minutes")
-    except Exception:
-        spec = lookup_spec("monitor_pre_pause_minutes")
-        return spec.default if spec is not None else 10
-
-
+# ============================================================ 作业入口
 async def _run_refresh_user_data(factory: AdapterFactory) -> dict[str, object]:
     """执行站点用户数据刷新。"""
     from app.services.user_data import refresh_all_sites
@@ -224,6 +293,18 @@ async def _run_disk_rotation() -> dict[str, object]:
     return await run_disk_rotation()
 
 
-async def _run_and_return(result: Awaitable[object]) -> object:
-    """await 作业函数并把返回值透传出去，供 manual run 展示详情。"""
-    return await result
+def _job_fn(
+    coro_factory: Callable[[], Awaitable[object]],
+) -> Callable[[], Awaitable[object]]:
+    """把作业函数包成调度器的零参调用约定。
+
+    作业函数返回 ``Awaitable``，但调度器按**零参**调用——故这里包一层
+    lambda，把「调函数」和「await 结果」分开：coroutine 在**被调用时**
+    才创建（不是注册时），否则注册阶段就创建了未 await 的 coroutine，
+    会被 Python 警告「coroutine was never awaited」。
+    """
+
+    async def _run() -> object:
+        return await coro_factory()
+
+    return _run

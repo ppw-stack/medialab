@@ -11,16 +11,6 @@ import { message } from 'ant-design-vue'
 import SchedulerConfigModal from '../../components/SchedulerConfigModal.vue'
 import SchedulerHistoryModal from '../../components/SchedulerHistoryModal.vue'
 
-const JOB_LABELS: Record<string, { name: string; desc: string }> = {
-  fetch_all_sites:     { name: '站点拉取',     desc: '遍历所有启用站点拉取种子列表（API/HTML），写入 torrent_index 表' },
-  push_free_torrents:  { name: '免费种推送',   desc: '从 torrent_index 选免费种 → 默认下载器（每 30 分钟）' },
-  monitor_free_window: { name: '免费窗口监测', desc: '巡检已推免费种，临近 free_end_at 自动暂停下载器（pre_pause=10 min）' },
-  refresh_user_data:   { name: '站点信息获取', desc: '拉取 9 站上传/下载/做种数/下载中数 + 时魔（每小时站点积分）→ 写入 site_user_data 表（FR-1.6 站点用户数据契约）' },
-  scan_cross_seed:     { name: '辅种巡查',     desc: '定时抓取 is_cross_seed 下载器 → 落库快照, 检测 tracker 未注册/数据丢失 → 自动暂停 (每 30 分钟)' },
-  drain_task_queue:    { name: '任务队列排空', desc: '回收崩溃残留的僵死任务 + 重试退避到期的推送任务（每 5 分钟）' },
-  daily_checkin:       { name: '每日签到',     desc: '对支持签到的站点自动完成每日签到（hhanclub / soulvoice / hdhome / hdsky）' },
-}
-
 const data = ref<SchedulerInfo | null>(null)
 const runningJob = ref<string | null>(null)
 
@@ -32,8 +22,23 @@ const configJobName = ref('')
 const historyOpen = ref(false)
 const historyJobName = ref('')
 
-function jobLabel(name: string) {
-  return JOB_LABELS[name]
+/**
+ * 作业的中文名 + 描述**由后端下发**（`JobSpec.title` / `description`）。
+ *
+ * 以前这里是前端硬编码的映射表——每加一个作业就要手改前端，漏一处就
+ * 在调度页显示原始 job 名（如 "scan_orphans"）和 "—" 描述。
+ */
+function jobTitle(job: { title?: string; name: string }): string {
+  return job.title || job.name
+}
+
+function jobDesc(job: { description?: string }): string {
+  return job.description || '—'
+}
+
+/** 按 job 名取中文名（弹框标题用）——从后端下发的作业列表里查。 */
+function jobTitleByName(name: string): string {
+  return data.value?.jobs.find(j => j.name === name)?.title || name
 }
 
 async function loadRuns() {
@@ -161,10 +166,10 @@ function formatRunFull(s: string): string {
                 class="live-dot"
                 :class="{ 'live-dot--idle': !job.running }"
               />
-              <span class="job-item__name">{{ jobLabel(job.name)?.name || job.name }}</span>
+              <span class="job-item__name">{{ jobTitle(job) }}</span>
               <span class="job-item__id mono">{{ job.name }}</span>
             </div>
-            <div class="job-item__desc">{{ jobLabel(job.name)?.desc || '—' }}</div>
+            <div class="job-item__desc">{{ jobDesc(job) }}</div>
             <div class="job-item__cron">
               <span class="job-item__cron-label dim mono">cron</span>
               <span class="job-item__cron-text mono">{{ job.cron }}</span>
@@ -235,13 +240,13 @@ function formatRunFull(s: string): string {
       <SchedulerConfigModal
         v-model:open="configOpen"
         :job-name="configJobName"
-        :job-label="jobLabel(configJobName)?.name || configJobName"
+        :job-label="jobTitleByName(configJobName)"
         @saved="() => { load(); loadRuns() }"
       />
       <SchedulerHistoryModal
         v-model:open="historyOpen"
         :job-name="historyJobName"
-        :job-label="jobLabel(historyJobName)?.name || historyJobName"
+        :job-label="jobTitleByName(historyJobName)"
       />
     </div>
   </div>

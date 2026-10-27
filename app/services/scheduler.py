@@ -38,6 +38,15 @@ class JobSpec:
     #: cron 表达式（5 字段：分 时 日 月 星期）；错峰通过分钟位表达
     cron: str
     enabled: bool = True
+    #: 中文名（如「辅种巡查」）——前端展示用。
+    #:
+    #: **后端是唯一真源**：前端曾硬编码一份 job → 中文名的映射表，
+    #: 每加一个作业就要手改前端，漏一处就在调度页显示原始 job 名
+    #: （如 "scan_orphans"）和 "—" 描述。改为由后端下发后，新增
+    #: 作业只需改 :mod:`app.services.job_registry` 一处。
+    title: str = ""
+    #: 一句话说明这个作业做什么（前端展示在标题下方）
+    description: str = ""
 
 
 @dataclass(slots=True)
@@ -265,6 +274,9 @@ class SchedulerCenter:
                 "cron": spec.cron,
                 "enabled": spec.enabled,
                 "running": name in self._running,
+                # 中文名 + 描述：前端直接展示，不再硬编码映射表
+                "title": spec.title,
+                "description": spec.description,
             }
             for name, spec in self._specs.items()
         ]

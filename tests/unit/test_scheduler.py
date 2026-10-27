@@ -148,6 +148,53 @@ def test_default_cron_covers_all_registered_jobs() -> None:
     }
 
 
+def test_job_meta_covers_all_jobs() -> None:
+    """每个作业都要有中文名 + 描述（前端直接展示，不硬编码映射表）。
+
+    漏了 title/description → 调度页显示原始 job 名（如 ``scan_orphans``）
+    和 "—" 描述。这正是本条契约要防的回归：以前前端硬编码一份
+    job → 中文名的映射表，每加一个作业就要手改前端，漏一处就露馅。
+    """
+    from app.services.job_registry import DEFAULT_CRON, JOB_META
+
+    meta_names = {m.name for m in JOB_META}
+    assert meta_names == set(DEFAULT_CRON), "JOB_META 与 DEFAULT_CRON 必须一致"
+
+    for meta in JOB_META:
+        assert meta.title.strip(), f"{meta.name} 缺中文名"
+        assert meta.description.strip(), f"{meta.name} 缺描述"
+
+
+def test_list_jobs_includes_title_and_description() -> None:
+    """``GET /scheduler`` 的每个作业都要带 title + description。
+
+    前端据此渲染标题与说明——前端不再硬编码映射表，故后端必须给全。
+    """
+    from app.services.factory import AdapterFactory
+    from app.services.job_registry import JOB_META, register_jobs
+
+    center = SchedulerCenter()
+    for meta in JOB_META:
+        center.register(
+            JobSpec(
+                name=meta.name,
+                func=meta.make_func(AdapterFactory()),
+                cron="*/10 * * * *",
+                title=meta.title,
+                description=meta.description,
+            )
+        )
+
+    jobs = center.list_jobs()
+    assert len(jobs) == len(JOB_META)
+    for job in jobs:
+        assert job["title"].strip(), f"{job['name']} 没下发 title"
+        assert job["description"].strip(), f"{job['name']} 没下发 description"
+
+    # register_jobs 走真实路径也要带上（防止只测构造不测注册）
+    assert callable(register_jobs)
+
+
 def test_default_cron_values_are_valid() -> None:
     """默认 cron 必须是合法的 5 字段表达式（否则启动时 APScheduler 抛错）。"""
     from app.services.job_registry import DEFAULT_CRON

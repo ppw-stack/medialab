@@ -88,14 +88,14 @@ const staleSeconds = computed(() => {
   return Math.floor((now.value.getTime() - lastOkAt.value.getTime()) / 1000)
 })
 
-const JOB_LABELS: Record<string, string> = {
-  fetch_all_sites: '站点拉取',
-  push_free_torrents: '免费种推送',
-  monitor_free_window: '免费窗口监测',
-  refresh_user_data: '站点信息获取',
-  scan_cross_seed: '辅种巡查',
-  drain_task_queue: '队列排空',
-  daily_checkin: '每日签到',
+/**
+ * 作业的中文名**由后端下发**（`JobSpec.title`）。
+ *
+ * 以前这里是前端硬编码的映射表——每加一个作业就要手改前端，漏一处就
+ * 显示原始 job 名（如 `scan_orphans`）。
+ */
+function jobTitle(job: { title?: string; name: string }): string {
+  return job.title || job.name
 }
 </script>
 
@@ -189,14 +189,14 @@ const JOB_LABELS: Record<string, string> = {
         row-key="name"
         size="middle"
       >
-        <template #bodyCell="{ record }: { record: { name: string; enabled: boolean; running: boolean; cron: string } }">
+        <template #bodyCell="{ record }: { record: { name: string; title?: string; enabled: boolean; running: boolean; cron: string } }">
           <div class="job-row">
             <span
               class="live-dot"
               :class="{ 'live-dot--idle': !record.running }"
             />
             <span class="job-row__name">
-              {{ JOB_LABELS[record.name] || record.name }}
+              {{ jobTitle(record) }}
             </span>
             <span class="job-row__cron mono">{{ record.cron }}</span>
             <span class="job-row__state">

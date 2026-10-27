@@ -487,6 +487,15 @@ export interface SchedulerJob {
   cron: string
   enabled: boolean
   running: boolean
+  /**
+   * 中文名（页面标题）——**后端下发**（`JobSpec.title`）。
+   *
+   * 前端不再硬编码 job → 中文名的映射表：每加一个作业就要手改前端，
+   * 漏一处就在调度页显示原始 job 名（如 `scan_orphans`）。
+   */
+  title?: string
+  /** 一句话说明（页面标题下方）——后端下发（`JobSpec.description`）。 */
+  description?: string
 }
 
 /** 调度中心状态（`GET /scheduler`）。 */

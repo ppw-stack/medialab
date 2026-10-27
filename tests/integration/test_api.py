@@ -911,6 +911,42 @@ async def test_scheduler_status(client: httpx.AsyncClient) -> None:
     assert "inflight" in data
 
 
+async def test_scheduler_jobs_carry_title_and_description(
+    client: httpx.AsyncClient,
+) -> None:
+    """每个作业都要带 title + description（前端直接展示）。
+
+    前端曾硬编码 job → 中文名映射表，每加一个作业就要手改前端，漏一处
+    就在调度页显示原始 job 名（如 ``scan_orphans``）和 "—" 描述。
+    改为后端下发后，这条契约保证新增作业**自动**有中文名。
+
+    注：测试环境的 ``scheduler_enabled=False`` → lifespan 不注册作业，
+    故这里显式注册一遍（走真实的 :func:`register_jobs` 路径）。
+    """
+    from app.services.factory import AdapterFactory
+    from app.services.job_registry import register_jobs
+    from app.services.scheduler import scheduler_center
+
+    register_jobs(AdapterFactory())
+    try:
+        resp = await client.get("/api/v1/scheduler")
+        assert resp.status_code == 200
+        jobs = resp.json()["jobs"]
+        assert jobs, "应至少注册了一个作业"
+        for job in jobs:
+            assert job["title"].strip(), f"{job['name']} 缺中文名"
+            assert job["description"].strip(), f"{job['name']} 缺描述"
+
+        # 新增的作业也不能漏（回归点）
+        titles = {j["name"]: j["title"] for j in jobs}
+        for name in ("scan_orphans", "disk_rotation"):
+            assert name in titles, f"{name} 未注册"
+            assert titles[name].strip(), f"{name} 缺中文名"
+    finally:
+        # 清掉注册（避免污染其它用例的 scheduler_center 状态）
+        scheduler_center._specs.clear()
+
+
 async def test_run_unknown_job_reports_failure(client: httpx.AsyncClient) -> None:
     """未知作业：返回 200 + ok=False（不是 404）。
 
