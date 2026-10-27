@@ -27,7 +27,7 @@ from app.adapters.downloaders.base import (
     TorrentState,
 )
 from app.core.logging import get_logger
-from app.db.models import CrossSeedSnapshot, DownloaderInstance
+from app.db.models import CrossSeedOrphan, CrossSeedSnapshot, DownloaderInstance
 from app.db.session import session_scope
 from app.services.errors import ServiceError
 from app.services.factory import get_factory, invalidate_downloader
@@ -330,16 +330,23 @@ async def update_downloader(
 
 
 async def delete_downloader(downloader_id: int) -> int:
-    """删除下载器配置（**级联清理**辅种快照）。
+    """删除下载器配置（**级联清理**辅种关联数据）。
 
-    关联数据一张表：``cross_seed_snapshot``（辅种扫描快照，
-    ``downloader_id`` FK → ``downloader_instances.id``，无
-    ``ON DELETE CASCADE``）。
+    关联数据两张表（都是 ``downloader_id`` FK → ``downloader_instances.id``，
+    **无** ``ON DELETE CASCADE``）：
+
+    - ``cross_seed_snapshot`` —— 辅种扫描快照
+    - ``cross_seed_orphan`` —— 辅种孤儿文件统计
 
     **为什么必须级联删**（而不是让 FK 报错拦住）：
-    快照行是该下载器的**当前状态**，下载器没了它就是孤儿数据。
+    这些行是该下载器的**当前状态**，下载器没了它们就是孤儿数据。
     FK 故意不带 CASCADE 就是当守卫——漏删会 IntegrityError，
-    宁可失败也不留孤儿行。故删除流程在同一事务里先删快照再删父行。
+    宁可失败也不留孤儿行。故删除流程在同一事务里先删子表再删父行。
+
+    ⚠️ **两张表都要删**：``cross_seed_orphan`` 是后加的表（孤儿文件统计），
+    最初只删了 ``cross_seed_snapshot`` → 删有孤儿统计行的下载器直接
+    IntegrityError 500（实测 dev 环境删 tr-172 复现）。新增任何
+    ``downloader_id`` FK 表时**必须**同步加进这里的级联删除。
 
     ``TorrentIndex`` 没有 ``downloader_id`` 列（推送状态记录的是"种子级"
     而非"下载器级"），故无法按下载器维度做引用计数。已在下载器里运行的
@@ -355,10 +362,15 @@ async def delete_downloader(downloader_id: int) -> int:
         ).scalar_one_or_none()
         if row is None:
             raise ServiceError("下载器不存在", status=404)
-        # 先删子表（FK 守卫：cross_seed_snapshot.downloader_id → 本表）
+        # 先删子表（FK 守卫：两张表的 downloader_id → 本表）
         await session.execute(
             delete(CrossSeedSnapshot).where(
                 CrossSeedSnapshot.downloader_id == downloader_id
+            )
+        )
+        await session.execute(
+            delete(CrossSeedOrphan).where(
+                CrossSeedOrphan.downloader_id == downloader_id
             )
         )
         await session.execute(

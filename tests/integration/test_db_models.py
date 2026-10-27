@@ -160,6 +160,40 @@ async def test_deleting_downloader_cascades_snapshot(db: None) -> None:
         assert rows == [], "删下载器后不该留下孤儿快照行"
 
 
+async def test_deleting_downloader_cascades_orphan_stats(db: None) -> None:
+    """删下载器 → 同事务删掉孤儿统计行（不留孤儿行）。
+
+    ``cross_seed_orphan`` 是**后加**的表（孤儿文件统计），FK 同样不带
+    ``ON DELETE CASCADE``。删除流程最初只删了 ``cross_seed_snapshot``
+    → 删有孤儿统计行的下载器直接 IntegrityError 500（实测 dev 环境
+    删 tr-172 复现）。
+
+    新增任何 ``downloader_id`` FK 表时**必须**同步加进级联删除，
+    本测试就是那道守卫。
+    """
+    from app.services.downloader_service import delete_downloader
+
+    async with session_scope() as session:
+        dl = DownloaderInstance(
+            name="dl1", type="qbittorrent", url="http://x", is_cross_seed=True
+        )
+        session.add(dl)
+        await session.flush()
+        dl_id = dl.id
+        # 两张子表各一行——两张都必须被级联删
+        session.add(CrossSeedSnapshot(downloader_id=dl_id))
+        session.add(CrossSeedOrphan(downloader_id=dl_id))
+        await session.flush()
+
+    await delete_downloader(dl_id)
+
+    async with session_scope() as session:
+        snaps = (await session.execute(select(CrossSeedSnapshot))).scalars().all()
+        orphans = (await session.execute(select(CrossSeedOrphan))).scalars().all()
+        assert snaps == [], "删下载器后不该留下孤儿快照行"
+        assert orphans == [], "删下载器后不该留下孤儿统计行"
+
+
 async def test_unmarking_cross_seed_deletes_snapshot(db: None) -> None:
     """取消辅种标记 → 删掉快照（不再是辅种，快照无意义）。"""
     from app.services.downloader_service import update_downloader
