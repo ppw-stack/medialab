@@ -87,6 +87,9 @@ _FIELDS_ALL: tuple[str, ...] = (
 #: ``haveValid`` / ``downloadDir`` 用于辅种空间统计（实际占用 + 按目录
 #: 分布）——与 :meth:`list_torrents` 的 ``_FIELDS_ALL`` 口径一致。
 #:
+#: ``addedDate`` 用于 disk_rotation 同档内「先删加入更早的种子」——
+#: 不额外增加请求成本（torrent-get 本就是按 fields 列表拉）。
+#:
 #: **不含** ``files``：文件列表的响应体极大（辅种站 15.8 万个文件条目，
 #: 占响应体 98%），而本方法只要 status / 占用。顶层名（孤儿统计用）
 #: 由 :meth:`list_torrent_file_names` 单独拉取。
@@ -102,6 +105,7 @@ _FIELDS_WITH_ERRORS: tuple[str, ...] = (
     "rateUpload",
     "haveValid",       # 已校验有效的字节数（= 磁盘实际占用）
     "downloadDir",     # 下载目录（按目录统计占用用）
+    "addedDate",       # 加入下载器的 unix 秒（disk_rotation 同档内先删旧的）
 )
 
 #: 孤儿文件统计专用：拉顶层名所需的字段。
@@ -506,6 +510,9 @@ class TransmissionAdapter(DownloaderAdapter):
                 "completed_bytes": int(row.get("haveValid") or 0),
                 # 下载目录（按目录统计占用用）
                 "save_path": row.get("downloadDir") or None,
+                # 加入下载器的 unix 秒（disk_rotation 同档内先删旧的）
+                # TR 的 addedDate=0 表示"未知"——归一为 None（与缺失等价）
+                "added_at": int(row.get("addedDate") or 0) or None,
             })
         return out
 

@@ -274,6 +274,9 @@ class QbittorrentAdapter(DownloaderAdapter):
                 "completed_bytes": int(row.get("completed") or 0),
                 # 下载目录（按目录统计占用用）
                 "save_path": row.get("save_path") or None,
+                # 加入下载器的 unix 秒（disk_rotation 同档内先删旧的）
+                # qB 的 added_on=0 也归一为 None（与 TR addedDate=0 等价）
+                "added_at": int(row.get("added_on") or 0) or None,
             })
         return out
 

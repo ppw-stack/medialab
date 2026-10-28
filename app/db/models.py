@@ -368,7 +368,10 @@ class CrossSeedSnapshot(Base):
     #: 按下载目录分布（JSON 数组：
     #: ``[{dir, count, bytes, total_bytes}]``，bytes = 声明占用）
     by_dir: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
-    #: 分组统计明细（JSON 数组：``[{name, size_gb, count, sample_hash}]``）
+    #: 分组统计明细（JSON 数组：``[{name, size_gb, count, sample_hash,
+    #: hashes, added_at}]``）。``added_at`` 是 ``{hash: unix秒}`` 映射，
+    #: 只存有时间的种子（disk_rotation 同档内先删旧的）；旧快照行没有
+    #: 该 key，排序时全部降级（行为与加此特性前一致）。
     stats: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
     #: 异常种子明细（JSON 数组：``[{id, hash, name, size_gb, status,
     #: anomaly_type, error_code, error_string}]``）

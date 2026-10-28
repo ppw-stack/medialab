@@ -343,6 +343,66 @@ async def test_tr_list_with_errors_returns_space_fields() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tr_list_with_errors_returns_added_at() -> None:
+    """TR：``list_torrents_with_errors`` 必须带 ``added_at``（disk_rotation 同档先删旧的）。
+
+    - ``addedDate`` 为正整数 → 原样返回
+    - ``addedDate=0``（TR 的"未知"哨兵）→ 归一为 ``None``（与缺失等价）
+    - 请求字段里必须带上 ``addedDate``
+    """
+    from app.adapters.downloaders.transmission import TransmissionAdapter
+
+    _TR_REQUESTED_FIELDS.clear()
+    with respx.mock(assert_all_mocked=False) as router:
+        router.post(TR_URL).mock(
+            side_effect=_tr_side_effect(
+                [
+                    _tr_row(hashString="a" * 40, addedDate=1700000000),
+                    _tr_row(hashString="b" * 40, addedDate=0),  # 0 = 未知
+                ]
+            )
+        )
+        adapter = TransmissionAdapter("tr", TR_BASE_URL, "u", "p")
+        rows = await adapter.list_torrents_with_errors()
+
+    assert len(rows) == 2
+    by_hash = {r["hash"]: r for r in rows}
+    assert by_hash["a" * 40]["added_at"] == 1700000000
+    assert by_hash["b" * 40]["added_at"] is None, "addedDate=0 应归一为 None"
+    # 请求的字段里必须带上 addedDate
+    assert "addedDate" in _TR_REQUESTED_FIELDS[0]
+
+
+@pytest.mark.asyncio
+async def test_qb_list_with_errors_returns_added_at() -> None:
+    """qB：``list_torrents_with_errors`` 必须带 ``added_at``。
+
+    零额外请求——/torrents/info 本就返回 added_on。
+
+    - ``added_on`` 为正整数 → 原样返回
+    - ``added_on=0`` → 归一为 ``None``
+    """
+    from app.adapters.downloaders.qbittorrent import QbittorrentAdapter
+
+    with respx.mock(assert_all_mocked=False) as router:
+        router.get(f"{QB_URL}/api/v2/torrents/info").mock(
+            return_value=httpx_response(
+                [
+                    _qb_row(hash="a" * 40, added_on=1700000000),
+                    _qb_row(hash="b" * 40, added_on=0),
+                ]
+            )
+        )
+        adapter = QbittorrentAdapter("qb", QB_URL, "u", "p")
+        rows = await adapter.list_torrents_with_errors()
+
+    assert len(rows) == 2
+    by_hash = {r["hash"]: r for r in rows}
+    assert by_hash["a" * 40]["added_at"] == 1700000000
+    assert by_hash["b" * 40]["added_at"] is None, "added_on=0 应归一为 None"
+
+
+@pytest.mark.asyncio
 async def test_qb_get_disk_space_has_no_total() -> None:
     """qB：只给剩余空间，**总量为 None**（不是 0——0 会被画成「磁盘已满」）。"""
     from app.adapters.downloaders.qbittorrent import QbittorrentAdapter

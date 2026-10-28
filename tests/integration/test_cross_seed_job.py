@@ -89,6 +89,7 @@ def _torrent(
     tid: int = 0,
     completed_bytes: int | None = None,
     save_path: str | None = None,
+    added_at: int | None = None,
 ) -> dict[str, object]:
     """构造一条 adapter 契约形状的种子记录。"""
     return {
@@ -102,6 +103,7 @@ def _torrent(
         "state": state,
         "completed_bytes": completed_bytes if completed_bytes is not None else size,
         "save_path": save_path,
+        "added_at": added_at,
     }
 
 
@@ -270,6 +272,38 @@ async def test_stats_hashes_are_omitted_when_torrent_has_no_hash(
 
     rows = await _snapshots()
     assert rows[0].stats[0]["hashes"] == ["a" * 40]
+
+
+async def test_stats_store_added_at_mapping(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """每个分组存下 ``hash → added_at`` 映射（disk_rotation 同档先删旧的用）。
+
+    - 有时间的种子进映射
+    - ``added_at=None`` 的种子**不进**映射（排序时回落到无时间档）
+    - ``added_at=0`` 也归一为 None，不进映射（与适配器层一致）
+    - 旧快照行（没有 added_at key）也能正常读取（默认空 dict）
+    """
+    dl_id = await _add_downloader("dl1")
+    adapter = _FakeAdapter(
+        [
+            _torrent("a" * 40, "Group", 1024**3, added_at=1700000000),
+            _torrent("b" * 40, "Group", 1024**3, added_at=None),  # 缺失
+            _torrent("c" * 40, "Group", 1024**3, added_at=0),  # 0 = 未知
+            _torrent("d" * 40, "Other", 1024**3, added_at=1700000001),
+        ]
+    )
+    svc = _svc(_factory_with({dl_id: adapter}), monkeypatch)
+
+    await svc.refresh_downloader(dl_id)
+
+    rows = await _snapshots()
+    stats = {s["name"]: s for s in rows[0].stats}
+    group = stats["Group"]
+    # 只有 a 进映射（b 缺失、c=0 都不进）
+    assert group["added_at"] == {"a" * 40: 1700000000}
+    # Other 组的单个种子也进映射
+    assert stats["Other"]["added_at"] == {"d" * 40: 1700000001}
 
 
 async def test_snapshot_is_upserted_not_duplicated(

@@ -232,6 +232,14 @@ export interface CrossSeedStatsRow {
    * 旧快照行没有这个字段 → 空数组 → 删除按钮置灰（提示重新抓取）。
    */
   hashes?: string[]
+  /**
+   * 该组内有加入时间的种子的 ``hash → added_at(unix 秒)`` 映射。
+   *
+   * disk_rotation 同档（count 相同）内**先删加入更早的**种子需要它。
+   * 旧快照行没有这个字段 → 排序时全部降级（与加此特性前一致）。
+   * 前端目前只透传不展示，留作未来排序/展示扩展用。
+   */
+  added_at?: Record<string, number>
 }
 
 /** 辅种异常种子（快照里的异常明细）。 */

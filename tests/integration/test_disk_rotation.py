@@ -101,10 +101,13 @@ def _stat(
     size_gb: float,
     count: int,
     hashes: list[str],
+    *,
+    added_at: dict[str, int] | None = None,
 ) -> dict[str, object]:
     """构造一条 stats 项.
 
     hashes 必须是 40 位完整 hex（删除要用）。
+    added_at: hash → unix 秒映射（可选；disk_rotation 同档先删旧的用）。
     """
     return {
         "name": name,
@@ -112,6 +115,7 @@ def _stat(
         "count": count,
         "sample_hash": hashes[0][:12] if hashes else "",
         "hashes": hashes,
+        "added_at": added_at or {},
     }
 
 
@@ -479,3 +483,169 @@ async def test_old_snapshot_without_hashes_skipped(
     assert result["triggered_downloaders"] == 1
     assert result["deleted"] == 0
     assert adapter.removed == []
+
+
+# ------------------------------------------------------------------ 11. 同档先删旧的
+async def test_same_bucket_deletes_oldest_first(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同档（count 相同）内**先删加入更早的**（2026-10-28 加入）.
+
+    构造（total=100GB used=99GB → 需释放 9GB）：
+    - 独苗 A：5 GB，added_at=100（**早**）→ 应**先**删
+    - 独苗 B：5 GB，added_at=200（晚）
+    - 独苗 C：10 GB，added_at=300（最晚，最大）→ 旧规则会先删它（大优先），
+      新规则先删 A（旧优先）
+
+    需释放 9GB：删 A(5) 不够 → 还要删 B(5) 共 10GB 才达标。
+    若按旧规则（size 降序）会先删 C(10) 一次达标——本测试就是要锁住
+    「同档内 added_at 优先于 size」这个新行为。
+    """
+    stats = [
+        _stat("Solo.A", 5.0, 1, [_hash("a", 1)], added_at={_hash("a", 1): 100}),
+        _stat("Solo.B", 5.0, 1, [_hash("b", 1)], added_at={_hash("b", 1): 200}),
+        _stat("Solo.C", 10.0, 1, [_hash("c", 1)], added_at={_hash("c", 1): 300}),
+    ]
+    dl_id = await _add_downloader("dl1")
+    await _add_snapshot(
+        dl_id,
+        "dl1",
+        disk_free=1 * 1024**3,
+        disk_total=100 * 1024**3,
+        stats=stats,
+    )
+    adapter = _FakeAdapter()
+    _svc(_factory_with({dl_id: adapter}), monkeypatch)
+
+    result = await run_disk_rotation()
+
+    # 删 A(5) + B(5) = 10GB ≥ 9GB 需求；C 不该被删（虽然它最大）
+    assert result["deleted"] == 2
+    removed_hashes = [h for batch in adapter.removed for h in batch[0]]
+    assert _hash("a", 1) in removed_hashes, "应先删早加入的 A"
+    assert _hash("b", 1) in removed_hashes, "A 不够再删 B"
+    assert _hash("c", 1) not in removed_hashes, "C（最大但最新）不应被删"
+
+
+# ------------------------------------------------------------------ 12. 缺失时间不当旧
+async def test_missing_added_at_not_treated_as_oldest(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """缺失 ``added_at`` 的种子排在有时间的**之后**（不当成最旧）.
+
+    构造（total=100GB used=99GB → 需释放 9GB）：
+    - 独苗 A：5 GB，added_at 缺失（无时间档）
+    - 独苗 B：10 GB，added_at=100（有时间，最早）
+    - 独苗 C：10 GB，added_at=200（有时间，较晚）
+
+    需释放 9GB：按新规则先删 B(10) 一次达标。
+    若「缺失当成最旧」会先删 A(5) → 不够 → 再删 B(10) 共 15GB，
+    这是**错误**行为，本测试要锁住降级规则。
+    """
+    stats = [
+        _stat("Solo.A", 5.0, 1, [_hash("a", 1)]),  # 无 added_at
+        _stat("Solo.B", 10.0, 1, [_hash("b", 1)], added_at={_hash("b", 1): 100}),
+        _stat("Solo.C", 10.0, 1, [_hash("c", 1)], added_at={_hash("c", 1): 200}),
+    ]
+    dl_id = await _add_downloader("dl1")
+    await _add_snapshot(
+        dl_id,
+        "dl1",
+        disk_free=1 * 1024**3,
+        disk_total=100 * 1024**3,
+        stats=stats,
+    )
+    adapter = _FakeAdapter()
+    _svc(_factory_with({dl_id: adapter}), monkeypatch)
+
+    result = await run_disk_rotation()
+
+    # 删 B(10) 一次达标；A（无时间）与 C 都不该被删
+    assert result["deleted"] == 1
+    assert adapter.removed[0][0] == [_hash("b", 1)], "应删有时间的最早者 B"
+
+
+# ------------------------------------------------------------------ 13. 旧快照降级
+async def test_old_snapshot_without_added_at_falls_back(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """旧快照 stats 项没有 ``added_at`` 字段 → 排序退化为原行为.
+
+    构造（total=100GB used=99GB → 需释放 9GB）：
+    - 独苗 A：5 GB（无 added_at 字段）
+    - 独苗 B：10 GB（无 added_at 字段）
+
+    旧规则：size 降序 → 先删 B(10) 一次达标。
+    降级后行为应与旧规则**完全一致**——锁住「不改变现有行为」。
+    """
+    stats: list[dict[str, object]] = [
+        # 旧快照形状：没有 added_at key
+        {
+            "name": "Solo.A",
+            "size_gb": 5.0,
+            "count": 1,
+            "sample_hash": _hash("a", 1)[:12],
+            "hashes": [_hash("a", 1)],
+        },
+        {
+            "name": "Solo.B",
+            "size_gb": 10.0,
+            "count": 1,
+            "sample_hash": _hash("b", 1)[:12],
+            "hashes": [_hash("b", 1)],
+        },
+    ]
+    dl_id = await _add_downloader("dl1")
+    await _add_snapshot(
+        dl_id,
+        "dl1",
+        disk_free=1 * 1024**3,
+        disk_total=100 * 1024**3,
+        stats=stats,
+    )
+    adapter = _FakeAdapter()
+    _svc(_factory_with({dl_id: adapter}), monkeypatch)
+
+    result = await run_disk_rotation()
+
+    # 降级到 size 降序 → 先删 B(10) 一次达标
+    assert result["deleted"] == 1
+    assert adapter.removed[0][0] == [_hash("b", 1)], "降级后应删大种子 B"
+
+
+# ------------------------------------------------------------------ 14. 档位优先不被打破
+async def test_bucket_priority_preserved_with_added_at(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """档位（count）优先于 added_at —— ``count=1`` 档内再新，也排在 ``count=3`` 档之前.
+
+    构造（total=100GB used=99GB → 需释放 9GB）：
+    - 独苗 A：10 GB，added_at=999（很新）→ count=1 档，应**先**删
+    - 多副本 B：10 GB，count=3，added_at=1（很旧）→ 多副本保留
+
+    即使 B 比 A 旧得多，count 升序是主排序，独苗优先删。
+    """
+    stats = [
+        _stat("Solo.A", 10.0, 1, [_hash("a", 1)], added_at={_hash("a", 1): 999}),
+        _stat(
+            "Multi.B", 10.0, 3,
+            [_hash("b", 1), _hash("b", 2), _hash("b", 3)],
+            added_at={_hash("b", 1): 1, _hash("b", 2): 1, _hash("b", 3): 1},
+        ),
+    ]
+    dl_id = await _add_downloader("dl1")
+    await _add_snapshot(
+        dl_id,
+        "dl1",
+        disk_free=1 * 1024**3,
+        disk_total=100 * 1024**3,
+        stats=stats,
+    )
+    adapter = _FakeAdapter()
+    _svc(_factory_with({dl_id: adapter}), monkeypatch)
+
+    result = await run_disk_rotation()
+
+    # 删独苗 A(10) 一次达标；多副本 B 不该被删
+    assert result["deleted"] == 1
+    assert adapter.removed[0][0] == [_hash("a", 1)], "档位优先：独苗先删"

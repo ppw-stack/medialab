@@ -307,6 +307,10 @@ class DownloaderAdapter(ABC):
         - ``completed_bytes``: int（**已校验有效**的字节数——磁盘实际
           占用。qB 取 ``completed``、TR 取 ``haveValid``）
         - ``save_path``: str | None（下载目录，用于按目录统计占用）
+        - ``added_at``: int | None（**加入下载器的 unix 秒**；TR
+          ``addedDate`` / qB ``added_on``。``0`` 与缺失统一归一为
+          ``None``——下有人会写 0 表示"未知"）。disk_rotation 用它在
+          同一价值档（count 相同）内**先删加入更早的种子**。
 
         与 :meth:`list_torrents` 的区别：本方法**不做状态归一**（保留
         下载器原生的错误码/错误描述，供巡查逻辑按具体错误类型判定），

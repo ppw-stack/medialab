@@ -173,6 +173,14 @@ class StatsRow:
     #:
     #: 旧快照行没有这个字段 → 前端据此把删除按钮置灰（提示重新抓取）。
     hashes: list[str] = field(default_factory=list)
+    #: 该组内**有加入时间**的种子的 ``hash → added_at(unix 秒)`` 映射。
+    #:
+    #: disk_rotation 同档（count 相同）内**先删加入更早的种子**需要它。
+    #: 只存有时间的种子（``added_at`` 为 None 的不入映射）；缺失时间的
+    #: 种子在排序时回落到「无时间档」，排到有时间的之后（不当成最旧）。
+    #: 旧快照行没有这个字段 → 排序时**全部回落**到 size 降序（与加此特性
+    #: 前的行为一致，优雅降级）。
+    added_at: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -181,6 +189,7 @@ class StatsRow:
             "count": self.count,
             "sample_hash": self.sample_hash,
             "hashes": self.hashes,
+            "added_at": self.added_at,
         }
 
 
@@ -737,10 +746,17 @@ class CrossSeedMonitorService:
                     # 完整 40 位 hash 列表——删除该组时要用到
                     # （sample_hash 是 12 位截断的，删不了）
                     "hashes": [],
+                    # hash → added_at(unix 秒) 映射（disk_rotation 同档先删旧的）。
+                    # 只存有时间的种子，缺失时间的不入映射（排序时回落到无时间档）
+                    "added_at": {},
                 }
             groups[key]["count"] += 1
             if t_hash:
                 groups[key]["hashes"].append(t_hash)
+                # 加入时间归一：None / 0 都不入映射（与适配器层一致）
+                added_raw = t.get("added_at")
+                if isinstance(added_raw, (int, float)) and added_raw:
+                    groups[key]["added_at"][t_hash] = int(added_raw)
 
         stats = sorted(
             (StatsRow(**g) for g in groups.values()),

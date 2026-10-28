@@ -12,7 +12,12 @@
 - ``count = 该组种子数 = 辅种副本数``：
     - count 高（多站辅种）→ 价值高 → **保留**
     - count=1（独苗）→ 价值最低 → **优先删**
-- 同 count 内按 ``size_bytes`` 降序——大种子优先让位，释放空间快
+- 同 count 内（即同一价值档）按 ``added_at`` 升序——**先删加入更早的**
+  种子（2026-10-28 加入）。新加的种子优先保，老的优先让位。
+  缺失 ``added_at`` 的种子降级到「无时间档」（排在有时间的之后，不当
+  成最旧）—— 旧快照没有这个字段时全降级，排序退化为 ``count 升序 +
+  size 降序``，与加此特性前**完全一致**。
+- 同档同加入时间内按 ``size_bytes`` 降序——大种子优先让位，释放空间快
 
 设计要点：
 
@@ -373,7 +378,16 @@ def _select_candidates(
     价值口径（生产 tr-172 实测验证）：
 
     - 主排序：``count`` 升序——独苗（count=1）优先删，多副本优先保
-    - 次排序：``size_bytes`` 降序——同档内大种子优先让位，释放空间快
+    - 次排序：``added_at`` 升序——同档（count 相同）内**先删加入更早的**
+      种子（2026-10-28 加入）。新加的种子优先保，老的优先让位。
+    - 三级排序：``size_bytes`` 降序——同档同加入时间内大种子优先让位，
+      释放空间快
+
+    **缺失 ``added_at`` 的种子降级**：排在所有有时间的种子**之后**
+    （不当成「最旧」——0 / 缺失表示「未知」，归一为「无时间档」）。
+    旧快照（整个 stats 没有 added_at 字段）→ 全部进无时间档 → 排序
+    退化为 ``count 升序 + size 降序``，与加此特性前的行为**完全一致**
+    （优雅降级，不改变现有行为）。
 
     候选范围：**所有种子都进候选池**，由累计释放量截断决定删多少。
     暂停 / 异常 / 校验中种子的过滤**不在此处做**——快照 stats 不带
@@ -383,7 +397,10 @@ def _select_candidates(
     :param stats: ``cross_seed_snapshot.stats`` 字段
     :return: ``(infohash, size_bytes)`` 列表，按价值低→高排
     """
-    items: list[tuple[int, int, str]] = []  # (count, size_bytes, hash)
+    # (count, has_ts, added_at, -size_bytes, hash)
+    # has_ts: 0=有时间(优先), 1=无时间(降级)——bool 反过来排是因为
+    # Python sort 升序，False(0) 排在 True(1) 之前
+    items: list[tuple[int, int, int, int, str]] = []
     for s in stats:
         count = int(s.get("count") or 0)
         if count <= 0:
@@ -393,6 +410,8 @@ def _select_candidates(
         hashes = s.get("hashes") or []
         if not hashes:
             continue
+        # 该组内 hash → added_at 映射（缺失时为空 dict，全部降级到无时间档）
+        added_map = s.get("added_at") or {}
         # 一个组里有 count 个种子，全部进候选池
         # count = 辅种价值——同组内副本删其一不影响"还在做种"的数量（只要留一个）
         # 但本作业的目标是释放空间，删独苗（count=1）后这一份数据就没了
@@ -401,11 +420,19 @@ def _select_candidates(
             if len(h_str) != 40:
                 # 旧快照可能含截断的 hash → 跳过（adapter 会拒绝非 40 位 hash）
                 continue
-            items.append((count, size_bytes, h_str.lower()))
+            ts = added_map.get(h_str)
+            if isinstance(ts, (int, float)) and ts:
+                # 有时间：has_ts=0（排在无时间之前），added_at=ts
+                items.append((count, 0, int(ts), -size_bytes, h_str.lower()))
+            else:
+                # 无时间：降级到无时间档，added_at 用 maxsize 占位（不影响档内顺序）
+                # has_ts=1 → 排在有时间的之后；同档内仍按 -size_bytes 排（大种子先）
+                items.append((count, 1, 0, -size_bytes, h_str.lower()))
 
-    # 排序：count 升序（独苗优先） → size 降序（大种子优先）
-    items.sort(key=lambda x: (x[0], -x[1]))
-    return [(h, size) for _, size, h in items]
+    # 排序：count 升序（独苗优先） → has_ts 升序（有时间的先）
+    #  → added_at 升序（先删旧的） → -size_bytes 升序（即 size 降序，大种子优先）
+    items.sort()
+    return [(h, -neg_size) for _, _, _, neg_size, h in items]
 
 
 # ============================================================ 批量删除

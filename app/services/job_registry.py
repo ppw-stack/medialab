@@ -14,7 +14,8 @@
 - ``drain_task_queue`` — 排空任务队列：崩溃恢复（僵死 running 回收）+ 退避重试
 - ``daily_checkin`` — 对支持签到的站点执行每日签到（hhanclub / soulvoice / hdhome）
 - ``scan_orphans`` — 扫描辅种下载器的孤儿文件（磁盘有、任务没了）
-- ``disk_rotation`` — 磁盘使用率超阈时按价值低→高删辅种种子（独苗优先删，多副本保留）
+- ``disk_rotation`` — 磁盘使用率超阈时按价值低→高删辅种种子
+  （独苗优先删，多副本保留；同档内先删加入更早的）
 """
 from __future__ import annotations
 
@@ -175,10 +176,11 @@ JOB_META: tuple[JobMeta, ...] = (
         title="磁盘空间流转",
         description=(
             "辅种磁盘使用率超阈时，按价值低→高删种子"
-            "（独苗优先删，多副本保留），把使用率压回阈值以下"
+            "（独苗优先删，多副本保留），同档内先删加入更早的，"
+            "把使用率压回阈值以下"
         ),
         make_func=lambda f: _job_fn(_run_disk_rotation),
-        log_extra="（按价值低→高删种子，把使用率压回阈值以下）",
+        log_extra="（按价值低→高删种子，同档先删旧的，把使用率压回阈值以下）",
     ),
 )
 
