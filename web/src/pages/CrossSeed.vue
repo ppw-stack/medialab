@@ -353,7 +353,11 @@ async function doDeleteOrphans() {
     if (r.warning) {
       message.warning(r.warning)
     }
-    if (r.failed > 0) {
+    if (r.permission_denied > 0) {
+      // 权限失败：error 字段已含可行动提示（NAS 端改属主/权限或换挂载账号）
+      // ——用 error 级（红色）醒目，区别于普通失败的 warning
+      message.error(r.error || `${r.permission_denied} 个条目因权限不足删除失败`)
+    } else if (r.failed > 0) {
       message.warning(parts.join('，'))
     } else {
       message.success(parts.join('，') || '没有可删除的条目')

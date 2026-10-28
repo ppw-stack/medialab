@@ -8,11 +8,15 @@
    **跳过**（不删）
 3. **逐条删除，单条失败不中断**其余条目
 4. **审计日志**——删了什么必须能查到
+5. **权限失败单独识别**——``Permission denied``（errno 13）单独计入
+   ``permission_denied``，``error`` 文案含可行动提示（NAS 端改属主/权限
+   或换挂载账号）；非权限失败走通用文案
 """
 from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from app.adapters.downloaders.base import TorrentFileNames
 from app.services.orphan_deleter import delete_orphans, verify_deletable
 
@@ -236,3 +240,115 @@ def test_result_items_record_each_path(tmp_path: Path) -> None:
     assert result.items[0]["path"] == str(tmp_path / "a")
     assert result.items[0]["status"] == "deleted"
     assert result.items[0]["bytes"] == 100
+
+
+# ------------------------------------------------------------------ 权限失败识别
+
+
+def test_permission_denied_counted_separately(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``Permission denied``（errno 13）失败单独计入 ``permission_denied``.
+
+    用 monkeypatch 把 ``_remove`` 换成始终报权限错误的桩——避免依赖 OS
+    真造权限失败（macOS 与 Linux 的权限位语义不同，CI 也不一定可复现）。
+    """
+    _make(tmp_path, {"orphan/file.mkv": 1000})
+
+    import app.services.orphan_deleter as mod
+
+    def _fake_remove(path: Path) -> tuple[bool, int, str | None, bool]:
+        return False, 0, "[Errno 13] Permission denied", True
+
+    monkeypatch.setattr(mod, "_remove", _fake_remove)
+
+    result = delete_orphans([str(tmp_path / "orphan")], _owned([]), [str(tmp_path)])
+
+    assert result.succeeded == 0
+    assert result.failed == 1
+    assert result.permission_denied == 1, "权限失败应单独计数"
+    assert result.items[0]["status"] == "failed"
+    assert result.items[0]["permission_denied"] is True
+    assert "Permission denied" in result.items[0]["reason"]
+
+
+def test_permission_denied_error_has_actionable_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """权限失败时 ``error`` 文案含**可行动提示**（改属主/权限/换挂载账号）.
+
+    重试无意义，故提示要够具体到能动手——不能只是「失败 N 个」。
+    """
+    _make(tmp_path, {"a/file.mkv": 1, "b/file.mkv": 1})
+
+    import app.services.orphan_deleter as mod
+
+    def _fake_remove(path: Path) -> tuple[bool, int, str | None, bool]:
+        return False, 0, "[Errno 13] Permission denied", True
+
+    monkeypatch.setattr(mod, "_remove", _fake_remove)
+
+    result = delete_orphans(
+        [str(tmp_path / "a"), str(tmp_path / "b")], _owned([]), [str(tmp_path)]
+    )
+
+    assert result.permission_denied == 2
+    assert result.error is not None
+    # 必须含可行动关键词，让用户知道下一步该做什么
+    assert "属主" in result.error or "权限" in result.error
+    assert "chown" in result.error or "chmod" in result.error or "挂载账号" in result.error
+
+
+def test_non_permission_failure_not_counted_as_permission_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """非权限失败（如 I/O 错误）不计入 ``permission_denied``，走通用文案.
+
+    区分意义：权限失败需用户在 NAS 端动手；其它失败可能只是临时占用，
+    重试可能成功——前端文案不同。
+    """
+    _make(tmp_path, {"orphan/file.mkv": 1})
+
+    import app.services.orphan_deleter as mod
+
+    def _fake_remove(path: Path) -> tuple[bool, int, str | None, bool]:
+        # errno 5 = EIO（Input/output error），不是权限问题
+        return False, 0, "[Errno 5] Input/output error", False
+
+    monkeypatch.setattr(mod, "_remove", _fake_remove)
+
+    result = delete_orphans([str(tmp_path / "orphan")], _owned([]), [str(tmp_path)])
+
+    assert result.failed == 1
+    assert result.permission_denied == 0, "I/O 错误不是权限失败"
+    assert result.error is not None
+    assert "权限不足" not in result.error, "非权限失败不应触发权限提示文案"
+
+
+def test_mixed_permission_and_normal_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """混合失败：1 个权限失败 + 1 个 I/O 失败 → permission_denied=1, failed=2.
+
+    error 文案优先报权限失败（更有行动价值），同时 failed 总数仍含全部失败。
+    """
+    _make(tmp_path, {"perm/file.mkv": 1, "io/file.mkv": 1})
+
+    import app.services.orphan_deleter as mod
+
+    def _fake_remove(path: Path) -> tuple[bool, int, str | None, bool]:
+        if path.name == "perm":
+            return False, 0, "[Errno 13] Permission denied", True
+        return False, 0, "[Errno 5] Input/output error", False
+
+    monkeypatch.setattr(mod, "_remove", _fake_remove)
+
+    result = delete_orphans(
+        [str(tmp_path / "perm"), str(tmp_path / "io")], _owned([]), [str(tmp_path)]
+    )
+
+    assert result.failed == 2
+    assert result.permission_denied == 1
+    # 混合时优先报权限提示（可行动性强）
+    assert result.error is not None
+    assert "权限不足" in result.error

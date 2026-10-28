@@ -21,6 +21,13 @@
    路径 + 大小 + 文件数 + 时间。
 
 **逐条删除，单条失败不中断其余条目**——尽可能多删，失败数计入结果。
+
+**权限失败单独识别**（2026-10-28 加入）：删磁盘数据时若 NAS 端目录属主
+非挂载账号、权限位不含写，会报 ``Permission denied``（errno 13）。这种
+失败**重试无意义**——需用户在 NAS 端改属主（chown）或权限（chmod g+w）
+或更换挂载账号。本模块把这类失败单独计入 ``permission_denied``，
+``error`` 文案给出可行动提示，与普通失败（文件被占用、临时不可写等）
+区分开。
 """
 from __future__ import annotations
 
@@ -61,6 +68,12 @@ class OrphanDeleteResult:
     items: list[dict[str, Any]] = field(default_factory=list)
     #: 整体错误（如目录不可写）
     error: str | None = None
+    #: **因权限不足**失败的条目数（``Permission denied``，errno 13）。
+    #:
+    #: 单独计数是因为权限问题与普通失败的处理方式不同——前者需要用户
+    #: 去 NAS 端改属主或换挂载账号，重试无意义；后者可能只是临时占用，
+    #: 重试可能成功。前端据此给出不同的提示文案。
+    permission_denied: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -71,6 +84,7 @@ class OrphanDeleteResult:
             "freed_bytes": self.freed_bytes,
             "items": self.items,
             "error": self.error,
+            "permission_denied": self.permission_denied,
         }
 
 
@@ -137,18 +151,27 @@ def verify_deletable(
     return ok, skipped
 
 
-def _remove(path: Path) -> tuple[bool, int, str | None]:
-    """删除一个条目（目录递归 / 单文件），返回 ``(成功, 字节数, 错误)``。"""
+def _remove(path: Path) -> tuple[bool, int, str | None, bool]:
+    """删除一个条目（目录递归 / 单文件）。
+
+    :returns: ``(成功, 字节数, 错误描述, 是否权限错误)``
+        - 权限错误（errno 13 / ``Permission denied``）单独标记，供上层
+          给出可行动提示（NAS 端属主/权限问题，需改属主或换挂载账号）
+    """
     try:
         if path.is_dir() and not path.is_symlink():
             size = _dir_size(path)
             shutil.rmtree(path)
-            return True, size, None
+            return True, size, None, False
         size = path.stat().st_size
         path.unlink()
-        return True, size, None
+        return True, size, None, False
     except OSError as exc:
-        return False, 0, str(exc)
+        # errno 13 = EACCES（Permission denied）。CIFS 侧报 Permission denied
+        # 也走这里（OSError 子类）。某些 CIFS 错误是 errno 1（EPERM）也归为
+        # 权限问题——服务端拒绝，与本地权限位无关。
+        is_perm = exc.errno in (13, 1) or "permission denied" in str(exc).lower()
+        return False, 0, str(exc), is_perm
 
 
 def _dir_size(path: Path) -> int:
@@ -204,7 +227,7 @@ def delete_orphans(
         logger.warning(
             "删除孤儿文件：path=%s bytes=%d", raw, _dir_size(p) if p.is_dir() else 0
         )
-        success, size, err = _remove(p)
+        success, size, err, is_perm = _remove(p)
         if success:
             result.succeeded += 1
             result.freed_bytes += size
@@ -219,9 +242,25 @@ def delete_orphans(
                 "path": raw,
                 "status": "failed",
                 "reason": err or "未知错误",
+                "permission_denied": is_perm,
             })
-            logger.warning("删除孤儿文件失败：path=%s error=%s", raw, err)
+            if is_perm:
+                result.permission_denied += 1
+            logger.warning(
+                "删除孤儿文件失败：path=%s error=%s permission_denied=%s",
+                raw, err, is_perm,
+            )
 
-    if result.failed:
+    # 失败时构造 error 文案：权限失败单独给可行动提示（重试无意义，
+    # 需用户在 NAS 端改属主/权限或换挂载账号）；其它失败走通用文案
+    if result.permission_denied > 0:
+        result.error = (
+            f"{result.permission_denied} 个条目因权限不足删除失败"
+            f"（NAS 端目录属主非挂载账号，权限位不含写）——"
+            f"需在 NAS 上把这些目录的属主改为挂载账号（chown），"
+            f"或给组加写权限（chmod g+w），或更换挂载账号为属主；"
+            f"改后重试即可。"
+        )
+    elif result.failed > 0:
         result.error = f"{result.failed} 个条目删除失败"
     return result

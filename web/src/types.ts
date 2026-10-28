@@ -372,6 +372,12 @@ export interface CrossSeedOrphanDeleteItem {
   status: 'deleted' | 'skipped' | 'failed'
   bytes?: number
   reason?: string
+  /**
+   * 失败是否因**权限不足**（NAS 端属主非挂载账号、权限位不含写）。
+   * true = 重试无意义，需在 NAS 端改属主/权限或换挂载账号。
+   * 仅 status=failed 时有意义。
+   */
+  permission_denied?: boolean
 }
 
 /** 孤儿手动扫描结果（`POST /cross-seed-monitor/orphans/scan`）。 */
@@ -396,6 +402,8 @@ export interface CrossSeedOrphanDeleteResult {
   freed_bytes: number
   items: CrossSeedOrphanDeleteItem[]
   error: string | null
+  /** 因权限不足（NAS 端属主/权限）失败的条目数——重试无意义。 */
+  permission_denied: number
   /** 判定不完整的警告（部分下载器拉取失败）。 */
   warning?: string
   /** 删除后重扫失败的原因（null = 重扫成功）。 */
