@@ -1,51 +1,54 @@
-# 生产环境（部署在 192.168.0.128 — Unraid Tower，端口 8091，独立配置 .env.prod）
-# 与 docker-compose.yml (dev — 本机) 共享同一镜像但完全独立的数据/配置：
-# - 不同主机（dev:192.168.0.92 本机 / prod:192.168.0.128 Unraid）
-# - 不同端口（dev:8080 / prod:8091）
-# - 不同 SQLite DB（dev:./data-dev / prod:/mnt/user/appdata/seedhelper/data）
-# - 不同日志（dev:./logs-dev / prod:/mnt/user/appdata/seedhelper/logs）
-# - 不同 WEB_TOKEN（互不授权）
+# 生产环境（部署在 192.168.0.128 — Unraid Tower）部署编排。
 #
-# 镜像通过 GH Actions 自动构建并推 Docker Hub（docker.io/ppw111/seedhelper，public）。
-# 128 端正常 docker pull 即用（不需要本机 save/scp 预置）。
+# 与根目录的 docker-compose.yml 的差别：
+#   · **不 build**——服务器上只有编排文件与 .env.prod，没有源码；
+#     镜像来自 CI（.github/workflows/docker-image.yml 构建推送）
+#   · 卷用宿主机**绝对路径**（appdata 惯例），不用 ./data-dev 这类相对路径
+#   · 容器名 medialab（不带 -dev）
 #
-# 启动（从本机推代码后，在 128 上执行）：
-#   cd /mnt/user/appdata/seedhelper/app
-#   docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d
-# 或：
-#   ./scripts/deploy.sh prod
+# **两个业务域合并在同一个容器里**（辅种域 + 媒体库域）。
 #
-# 容器网络：Unraid docker bridge (172.17.0.0/16) 无 LAN 隔离，容器直连 192.168.0.0/24。
-# 推送时 qB (192.168.0.172:9090) 直接可达；save_path 是 qB 自身路径 (/share/Public/...)，
-# seedhelper 容器不需挂 172 共享（本地不进行下载）。
+# 用法（在服务器 /mnt/user/appdata/medialab 下）：
+#
+#     docker compose -f docker-compose.yml --env-file .env.prod up -d
+#
+# ⚠️ TAG 默认 latest。若要用某个确定版本，显式传 TAG=sha-xxxxxxx。
+#    （CI 会同时推 latest / main / sha-<7位> 三个 tag）
+
+name: medialab
 
 services:
-  seedhelper-prod:
-    image: docker.io/ppw111/seedhelper:${TAG:-0.1.0}
-    container_name: seedhelper-prod
+  medialab:
+    image: ${IMAGE:-docker.io/ppw111/medialab}:${TAG:-latest}
+    container_name: medialab
     restart: unless-stopped
     ports:
-      - "8091:8080"           # 主机 8091 → 容器 8080（避开 8081 qB / 8080 immich）
-    environment:
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      LOG_JSON: ${LOG_JSON:-true}
-      WEB_USERNAME: ${WEB_USERNAME:-admin}
-      WEB_PASSWORD: ${WEB_PASSWORD}
-      WEB_TOKEN: ${WEB_TOKEN}
-      # SQLite 日志模式：DELETE（与 dev 一致）
-      # WAL 会在数据目录留 -wal/-shm 文件，Unraid 上备份/替换 .db 时
-      # 容易漏掉这两个文件导致数据不一致。DELETE 模式每次提交即落盘。
-      DB_JOURNAL_MODE: ${DB_JOURNAL_MODE:-DELETE}
-      # 辅种孤儿文件扫描的目录（容器内路径，对应上面挂载的 NAS 目录）
-      # 辅种孤儿文件扫描的目录（容器内路径 = 172 上的 downloadDir 同路径）
-      # 逗号分隔多个目录，每个目录独立扫描。路径必须与 downloadDir 完全一致。
-      CROSS_SEED_SCAN_DIRS: ${CROSS_SEED_SCAN_DIRS:-/share/Public/home/downloads/辅种}
+      # 主机 8099：8080 / 8091 / 8096 / 9527 已被 immich / seedhelper / emby /
+      # cloud-media-sync 占用。
+      - "${HOST_PORT:-8099}:8080"
     env_file:
       - .env.prod
     volumes:
-      - /mnt/user/appdata/seedhelper/config:/app/config
-      - /mnt/user/appdata/seedhelper/data:/app/data       # SQLite 库文件（prod 独立）
-      # 辅种站(172)的下载目录——用于统计孤儿文件（只读挂载）。
+      # SQLite 与日志：appdata 惯例，Unraid 备份会覆盖到
+      - ${APPDATA_DIR:-/mnt/user/appdata/medialab}/data:/app/data
+      - ${APPDATA_DIR:-/mnt/user/appdata/medialab}/logs:/app/logs
+      - ${APPDATA_DIR:-/mnt/user/appdata/medialab}/config:/app/config
+      # STRM 输出目录。刻意与 cloud-media-sync 的 embyLibrary 并列而不共用，
+      # 否则两个服务会对同一部片各写一个 strm，Emby 里出现重复版本。
+      # 走 172 的 Public 共享（128 上已 CIFS 挂载），Emby 因此无需改挂载，
+      # 只要在 Emby 里加一个库路径即可。
+      - ${LIBRARY_DIR:?LIBRARY_DIR 必须指向 STRM 输出目录}:/app/library
+      # 上传任务的监听目录（可选）。容器看不到宿主机任意路径——
+      # 要监听的目录必须挂进来，且**容器内外路径要一致**
+      # （面板上按容器内路径选）。
+      #
+      # ⚠️ 128 上的 /mnt/user 是 shfs/FUSE，**不支持 inotify**——
+      #    故 UPLOAD_WATCH_POLLING 必须保持 true（默认即是）。
+      #
+      # **读写挂载**：开了任务的「同步成功后删除本地文件」就需要容器能删
+      # 本地文件。只读挂载（:ro）时删除会失败（会记日志，不影响上传）。
+      - ${WATCH_DIR:-/dev/null}:${WATCH_DIR:-/dev/null}:rw
+      # 辅种站的下载目录——用于统计孤儿文件（只读挂载）。
       #
       # ⚠️ 挂载点必须与下载器里的 downloadDir **完全同路径**
       # （172 上是 /share/Public/home/downloads）。这样任务的绝对路径
@@ -56,18 +59,19 @@ services:
       # 删除有三重安全闸（目录范围 / 二次复核 / 审计日志），
       # 见 app/services/orphan_deleter.py。
       - /mnt/remotes/192.168.0.172_Public/home/downloads:/share/Public/home/downloads:rw
-      - /mnt/user/appdata/seedhelper/logs:/app/logs
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 15s
+    # 配合 SIGTERM 优雅停机（等在途作业 / 扫描任务收尾）
     stop_grace_period: 60s
     deploy:
       resources:
         limits:
-          memory: 1G              # 生产给稍大（多一组调度作业并发）
+          # 合并后单进程要装下两个域（辅种调度 + 媒体库扫描/中转）
+          memory: 1536M
           cpus: "2.0"
         reservations:
           memory: 256M

@@ -1,45 +1,75 @@
 services:
-  # 开发环境（端口 8080，数据 ./data-dev/）
-  seedhelper-dev:
+  # 本地开发环境（端口 8099，数据 ./data-dev/）
+  #
+  # **两个业务域跑在同一个容器里**：
+  # - 辅种域：站点拉取 / 辅种 / 免费种窗口
+  # - 媒体库域：STRM 生成 / 302 中转 / WebDAV / 上传
+  #
+  # 端口说明：8080 / 8081 已被本机其它容器占用，故用 8099。
+  # 容器内固定 8080（与 app/main.py 的 CMD 一致），只映射主机端口。
+  medialab-dev:
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        PY_IMAGE: ${PY_IMAGE:-python:3.12-slim}
-    image: docker.io/ppw111/seedhelper:${TAG:-main}
-    container_name: seedhelper-dev
+        PY_IMAGE: ${PY_IMAGE:-python:3.13-slim}
+        NODE_IMAGE: ${NODE_IMAGE:-node:22-slim}
+    image: docker.io/ppw111/medialab:${TAG:-main}
+    container_name: medialab-dev
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "${HOST_PORT:-8099}:8080"
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      LOG_JSON: ${LOG_JSON:-true}
+      LOG_JSON: ${LOG_JSON:-false}
       WEB_USERNAME: ${WEB_USERNAME:-admin}
       WEB_PASSWORD: ${WEB_PASSWORD}
       WEB_TOKEN: ${WEB_TOKEN}
-      # 关闭 WAL：commit 后数据立即落盘主文件，避免重启后 WAL 缓冲未 checkpoint 丢失（推送后 info_hash 写入）
+      # 关闭 WAL：commit 后数据立即落盘主文件，避免重启后 WAL 缓冲未 checkpoint 丢失
       DB_JOURNAL_MODE: ${DB_JOURNAL_MODE:-DELETE}
+      # -- 辅种域 --
+      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-true}
+      # -- 媒体库域 --
+      # 中转 URL 的签名密钥（必填）
+      SIGNING_SECRET: ${SIGNING_SECRET}
+      # 115 / 光鸭凭据加密密钥（必填，扫码登录时用）
+      CREDENTIAL_ENCRYPTION_SECRET: ${CREDENTIAL_ENCRYPTION_SECRET}
+      # 写进 STRM 的对外地址——**必须是播放器能访问到的地址**
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      UA_POLICY: ${UA_POLICY:-fallback_default}
+      UPLOAD_WATCH_POLLING: ${UPLOAD_WATCH_POLLING:-true}
     env_file:
       - .env
     volumes:
-      - ./config:/app/config
-      - ./data-dev:/app/data         # SQLite WAL 文件（dev 独立）
+      # SQLite 数据库与运行时数据
+      - ./data-dev:/app/data
       - ./logs-dev:/app/logs
-      - /data/torrents:/data/torrents   # 共享下载目录（空间统计 + 回收站 rename 目标）
+      # 生成的 STRM 库（挂出来才能在宿主机上看到文件）
+      - ./library-dev:/app/library
+      # 上传任务的监听目录（可选）。容器看不到宿主机任意路径——
+      # 要监听的目录必须挂进来，且**容器内外路径要一致**
+      # （面板上按容器内路径选）。
+      # 例：WATCH_DIR=/mnt/user/downloads → 挂到容器的同名路径
+      #
+      # **读写挂载**：开了任务的「同步成功后删除本地文件」就需要容器能删
+      # 本地文件。只读挂载（:ro）时删除会失败（会记日志，不影响上传）。
+      - ${WATCH_DIR:-/dev/null}:${WATCH_DIR:-/dev/null}:rw
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 15s
-    stop_grace_period: 60s        # 配合 SIGTERM 优雅停机（FR-8.2）
+    # 配合 SIGTERM 优雅停机（等在途作业）
+    stop_grace_period: 60s
     deploy:
       resources:
         limits:
-          memory: 512M
-          cpus: "1.0"
+          # 合并后单进程要装下两个域（辅种调度 + 媒体库扫描/中转）
+          memory: 1G
+          cpus: "2.0"
         reservations:
-          memory: 128M
+          memory: 256M
     logging:
       driver: json-file
       options:

@@ -46,7 +46,7 @@ jobs:
 
       - name: Install dependencies
         # --frozen：用 uv.lock 里的精确版本，不用 pyproject 的浮动范围
-        run: uv sync --extra dev --frozen
+        run: uv sync --extra dev --extra p115 --extra guangya --frozen
 
       - name: Ruff
         run: uv run ruff check app/ tests/
@@ -82,9 +82,11 @@ jobs:
         working-directory: web
         run: npm ci
 
-      - name: Type check
+      - name: Type check + build
+        # npm run build = `vue-tsc -b && vite build`——类型检查与构建一次覆盖，
+        # 不需要再单独跑 vue-tsc（重复且慢）。
         working-directory: web
-        run: npx vue-tsc -b
+        run: npm run build
 
       - name: Type placement check
         # API 契约类型必须集中在 web/src/types.ts（Phase 4）。
@@ -95,3 +97,19 @@ jobs:
       - name: Lint
         working-directory: web
         run: npx oxlint .
+
+  compose:
+    name: compose (配置语法)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Validate docker-compose.yml
+        # 只校验语法与变量插值，**不启动**任何容器。
+        # 用 .env.example 充当 .env——CI 里没有真实 .env（也不该有）。
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          echo "compose 配置校验通过"
