@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 
 from app.core.timeutils import BJ_TZ, bj_now, bj_now_dt, format_bj, parse_bj, to_bj
 
@@ -81,3 +82,28 @@ def test_parse_format_roundtrip() -> None:
     dt = parse_bj(original)
     assert dt is not None
     assert format_bj(dt) == original
+
+
+def test_bj_string_lexicographic_order_matches_chronology() -> None:
+    """北京时间字符串的字典序与时序一致。
+
+    ``media_files.mtime`` 等列从 unix 秒改为字符串后，增量扫描的比较
+    从 int 大小比较变为字符串字典序比较。``%Y-%m-%d %H:%M:%S`` 格式
+    保证字典序与时序一致——本测试守住这条不变量（格式漂移会立刻失败）。
+    """
+    # 跨年 / 跨月 / 跨日 / 跨时 / 同分不同秒
+    samples = [
+        "2025-12-31 23:59:58",
+        "2025-12-31 23:59:59",
+        "2026-01-01 00:00:00",
+        "2026-10-30 09:00:00",
+        "2026-10-30 18:03:33",
+        "2026-10-30 18:03:34",
+    ]
+    sorted_lex = sorted(samples)
+    sorted_chrono = sorted(samples, key=lambda s: parse_bj(s))  # type: ignore[arg-type]
+    assert sorted_lex == sorted_chrono == samples
+    # 字符串比较与 datetime 比较逐对一致
+    for earlier, later in pairwise(samples):
+        assert earlier < later
+        assert parse_bj(earlier) < parse_bj(later)  # type: ignore[operator]

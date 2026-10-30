@@ -229,7 +229,7 @@ ssh mp "cd /mnt/user/appdata/medialab/data && \
 ssh mp "cd /mnt/user/appdata/medialab/app && docker compose -f docker-compose.prod.128.yml stop"
 
 # 2) 备份式拷贝（保持事务一致）
-ssh mp "cd /mnt/user/appdata/medialab/data && sqlite3 medialab.db \".backup './medialab.db.bak.migrate'\""
+ssh mp "cd /mnt/user/appdata/medialab/data && sqlite3 medialab.db \".backup './medialab.db.bak.\$(date +%Y%m%d_%H%M%S)'\""
 scp ./data-dev/medialab.db mp:/mnt/user/appdata/medialab/data/medialab.db
 
 # 3) 起 prod

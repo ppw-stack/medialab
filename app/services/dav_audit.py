@@ -20,13 +20,14 @@ loop**。进程级单例跨 loop 使用（如测试里每个用例一个新 loop
 from __future__ import annotations
 
 import asyncio
-import time
 from dataclasses import dataclass
+from datetime import timedelta
 
 from sqlalchemy import delete
 
 from app.core.config import AppSettings, get_settings
 from app.core.logging import get_logger
+from app.core.timeutils import bj_now, bj_now_dt, format_bj
 from app.db.models import DavAuditLog
 from app.db.session import session_scope
 
@@ -52,7 +53,7 @@ class AuditEntry:
     remote_addr: str = ""
     duration_ms: int = 0
     item_count: int = 0
-    created_at: int = 0
+    created_at: str = ""
 
 
 class DavAuditor:
@@ -125,7 +126,7 @@ class DavAuditor:
             remote_addr=remote_addr[:64],
             duration_ms=duration_ms,
             item_count=item_count,
-            created_at=int(time.time()),
+            created_at=bj_now(),
         )
         try:
             queue.put_nowait(entry)
@@ -222,7 +223,7 @@ async def cleanup_audit(settings: AppSettings | None = None) -> int:
     if days <= 0:
         return 0
 
-    cutoff = int(time.time()) - days * 86400
+    cutoff = format_bj(bj_now_dt() - timedelta(days=days))
     async with session_scope() as db:
         result = await db.execute(delete(DavAuditLog).where(DavAuditLog.created_at < cutoff))
         deleted = int(getattr(result, "rowcount", 0) or 0)

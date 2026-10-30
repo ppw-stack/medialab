@@ -4,6 +4,9 @@
 事故来源，因此本模块强制 **北京时间字符串内部表示**：
 
 - 数据库与业务逻辑内部一律使用 **北京时间字符串**（``yyyy-MM-dd HH:mm:ss``）。
+  DB 时间列（``created_at`` / ``updated_at`` / ``last_*_at`` / ``probed_at`` /
+  ``mtime`` 等）一律用 :func:`bj_now` 写入；协议侧时刻（``link_cache.expires_at``
+  等）保留 unix 秒，在 service 层消费时用 :func:`format_bj` 转换。
 - 展示层直接使用字符串，无需额外时区转换。
 - naive datetime 一律视为北京时间（见 :func:`to_bj`），绝不隐式猜测。
 

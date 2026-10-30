@@ -28,6 +28,7 @@ from sqlalchemy import delete, select
 from app.core.config import AppSettings
 from app.core.logging import get_logger
 from app.core.singleflight import SingleFlight
+from app.core.timeutils import bj_now
 from app.db.models import LinkCacheEntry
 from app.db.session import session_scope
 
@@ -137,7 +138,7 @@ class LinkCache:
     async def _l2_put(
         self, media_id: int, ua_hash: str, url: str, expires_at: int
     ) -> None:
-        now = int(time.time())
+        now = bj_now()
         async with session_scope() as db:
             existing = (
                 await db.execute(

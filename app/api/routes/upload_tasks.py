@@ -80,9 +80,9 @@ class UploadTaskOut(BaseModel):
     enabled: bool
     delete_after_upload: bool
     concurrency: int
-    created_at: int
-    updated_at: int
-    last_sync_at: int | None
+    created_at: str
+    updated_at: str
+    last_sync_at: str | None
     last_uploaded_count: int
     last_error: str | None
     #: 运行态（监听中？正在传什么？）

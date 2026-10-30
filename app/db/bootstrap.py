@@ -202,7 +202,6 @@ class DbBootstrap:
         from app.db.migrations import (
             backfill_discount_pct,
             migrate_adapter_values,
-            migrate_datetime_to_bj_str,
         )
         from app.db.models import Base
 
@@ -219,8 +218,6 @@ class DbBootstrap:
                 except Exception as exc:
                     logger.error("创建索引失败（%s）：%s", stmt, exc)
         logger.info("数据表已就绪")
-        # 迁移历史 DateTime 列 → 北京时间字符串
-        await migrate_datetime_to_bj_str()
         await backfill_discount_pct()
         await migrate_adapter_values()
         # 媒体库域的幂等迁移（补列 / 删废弃列 / 删废弃表）
@@ -264,7 +261,7 @@ class DbBootstrap:
             ("data_exts", "TEXT", "''"),
             ("min_size_mb", "INTEGER", "0"),
             ("include_subdirs", "INTEGER", "1"),
-            ("last_scan_at", "INTEGER", None),
+            ("last_scan_at", "VARCHAR(32)", None),
             ("last_synced_count", "INTEGER", "0"),
         )
         await self._add_columns("drivers", columns)

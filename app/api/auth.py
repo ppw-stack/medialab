@@ -168,6 +168,10 @@ async def require_session(
 
     两种口径的判定都走 :func:`app.core.auth.verify_bearer` / 同名 cookie
     校验，实现只有一份。
+
+    ⚠️ **CLI 长期使用应存 ``WEB_TOKEN`` 而非 session cookie 值**——
+    后者 24h 过期，存下来会突然 401。session 值口径仅为面板/CLI 同源
+    便利，非长期凭据。
     """
     settings: AppSettings = get_settings()
     auth = request.headers.get("Authorization", "")

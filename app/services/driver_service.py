@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import os
-import time
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -34,6 +33,7 @@ from app.adapters.drivers.p115 import P115Driver, reset_clients
 from app.adapters.drivers.p115_credential import SECRET_ENV, decode_credential
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.core.timeutils import bj_now
 from app.db.models import Driver, ProbeResult
 from app.db.session import session_scope
 from app.domain.device_types import (
@@ -97,8 +97,8 @@ class DriverRow:
     min_size_mb: int
     #: 是否包含子目录
     include_subdirs: bool
-    #: 上次扫描时间（unix 秒）
-    last_scan_at: int | None
+    #: 上次扫描时间（北京时间字符串，NULL = 从未扫描）
+    last_scan_at: str | None
     #: 上次扫描新增 / 更新的条目数
     last_synced_count: int
 
@@ -199,7 +199,7 @@ async def create_driver(
     其它驱动（光鸭）没有这个概念 → 存 None，否则界面上会出现
     「光鸭盘的设备类型是 115android」这种 nonsensical 的值。
     """
-    now = int(time.time())
+    now = bj_now()
     resolved_device = device_type if driver_type == "p115" else None
     row = Driver(
         type=driver_type,
@@ -253,7 +253,7 @@ async def store_credential(
     row.credential = encrypted
     if device_type:
         row.device_type = device_type
-    row.updated_at = int(time.time())
+    row.updated_at = bj_now()
     await db.commit()
     await db.refresh(row)
     # 凭据变了 → 缓存的 115 客户端实例失效
@@ -286,7 +286,7 @@ async def record_probe(
         used_gb=used_gb,
         total_gb=total_gb,
         available=available,
-        probed_at=int(time.time()),
+        probed_at=bj_now(),
     )
     db.add(row)
     await db.commit()
@@ -355,7 +355,7 @@ async def update_driver(
                     "该存储源不支持设备类型设置", status_code=400
                 )
             row.device_type = device_type
-        row.updated_at = int(time.time())
+        row.updated_at = bj_now()
         await db.commit()
         await db.refresh(row)
         return to_driver_row(row)
@@ -392,7 +392,7 @@ async def update_driver_config(
         row.data_exts = data_exts or ""
         row.min_size_mb = min_size_mb
         row.include_subdirs = include_subdirs
-        row.updated_at = int(time.time())
+        row.updated_at = bj_now()
         await db.commit()
         await db.refresh(row)
         return to_driver_row(row)

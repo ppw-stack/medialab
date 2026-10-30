@@ -19,7 +19,7 @@ from app.db.models import (
 )
 from app.db.session import session_scope
 from app.domain.enums import FreeType, PushStatus
-from sqlalchemy import inspect, select, text
+from sqlalchemy import inspect, select
 from sqlalchemy.exc import IntegrityError
 
 # ------------------------------------------------------------------ 建表
@@ -298,24 +298,6 @@ async def test_backfill_discount_pct_is_idempotent(db: None) -> None:
         assert row.discount_pct == 100
 
 
-async def test_datetime_migration_batches_are_ordered(db: None) -> None:
-    """迁移批次必须按序号递增（新批次追加，不改旧批次）。"""
-    from app.db.migrations import _DATETIME_MIGRATION_BATCHES
-
-    numbers = sorted(_DATETIME_MIGRATION_BATCHES)
-    assert numbers == list(range(1, len(numbers) + 1))
-    for batch_no, tables in _DATETIME_MIGRATION_BATCHES.items():
-        for table, columns in tables.items():
-            assert columns, f"批次 {batch_no} 的表 {table} 迁移列不能为空"
-
-
-async def test_user_version_marker_written(db: None) -> None:
-    """时间迁移完成后应写 user_version 幂等标记。"""
-    async with session_scope() as session:
-        ver = (await session.execute(text("PRAGMA user_version"))).scalar_one()
-    assert int(ver or 0) >= 1
-
-
 # ------------------------------------------------------------------ 模块拆分
 
 async def test_session_module_has_no_migration_logic(db: None) -> None:
@@ -327,8 +309,8 @@ async def test_session_module_has_no_migration_logic(db: None) -> None:
 
     src = Path("app/db/session.py").read_text(encoding="utf-8")
     assert "ALTER TABLE" not in src
-    assert "_DATETIME_MIGRATION_BATCHES" not in src
     assert "discount_pct" not in src
+    assert "migrate_datetime" not in src
 
 
 async def test_bootstrap_module_exists_and_exports(db: None) -> None:

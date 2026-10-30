@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import secrets
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import AppSettings
 from app.core.logging import get_logger
+from app.core.timeutils import bj_now
 from app.db.models import MediaFile
 from app.services.signing import build_redirect_url, sign
 from app.services.strm_writer import write_strm
@@ -96,7 +96,7 @@ async def rotate_secret(
         )
 
     result = RotationResult(new_secret=secret)
-    now = int(time.time())
+    now = bj_now()
 
     rows = (await db.execute(select(MediaFile))).scalars().all()
     for media in rows:
@@ -147,7 +147,7 @@ async def resign_single(
         return False
 
     media.signature = sign(secret.get_secret_value(), media.id)
-    media.updated_at = int(time.time())
+    media.updated_at = bj_now()
     if media.strm_path:
         url = build_redirect_url(
             settings.resolved_public_base_url,

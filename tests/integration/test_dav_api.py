@@ -64,9 +64,9 @@ async def dav_client(settings: AppSettings, db_engine, library: Path):
                 username="alice",
                 password_hash=hash_password("secret"),
                 is_active=True,
-                last_login_at=0,
-                created_at=0,
-                updated_at=0,
+                last_login_at=None,
+                created_at="2026-10-30 12:00:00",
+                updated_at="2026-10-30 12:00:00",
             )
         )
 

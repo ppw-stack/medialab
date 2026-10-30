@@ -15,10 +15,10 @@
 from __future__ import annotations
 
 import os
-import time
 from dataclasses import dataclass
 
 from app.core.logging import get_logger
+from app.core.timeutils import bj_now
 from app.services.dav_auth import dav_authenticator, hash_password
 
 logger = get_logger(__name__)
@@ -43,8 +43,8 @@ class DavUserRow:
     id: int
     username: str
     is_active: bool
-    last_login_at: int
-    created_at: int
+    last_login_at: str | None
+    created_at: str
 
 
 @dataclass(slots=True)
@@ -61,7 +61,7 @@ class DavAuditRow:
     remote_addr: str
     duration_ms: int
     item_count: int
-    created_at: int
+    created_at: str
 
 
 @dataclass(slots=True)
@@ -137,12 +137,12 @@ async def create_dav_user(username: str, password: str) -> DavUserRow:
                 f"用户名已存在：{username}", status_code=409, kind="conflict"
             )
 
-        now = int(time.time())
+        now = bj_now()
         row = DavUser(
             username=username,
             password_hash=hash_password(password),
             is_active=True,
-            last_login_at=0,
+            last_login_at=None,
             created_at=now,
             updated_at=now,
         )
@@ -185,10 +185,10 @@ async def update_dav_user(
 
         if password is not None:
             row.password_hash = hash_password(password)
-            row.updated_at = int(time.time())
+            row.updated_at = bj_now()
         if is_active is not None:
             row.is_active = is_active
-            row.updated_at = int(time.time())
+            row.updated_at = bj_now()
 
         if password is not None or is_active is not None:
             # 凭据或状态变了 → 旧缓存立即作废

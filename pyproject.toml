@@ -88,6 +88,8 @@ ignore = ["S101", "B008", "B027", "B017", "RUF001", "RUF002", "RUF003", "ASYNC23
 "app/db/bootstrap.py" = ["E501"]
 # WebDAV 鉴权说明里有宽 Markdown 表格（列多，天然超行宽）
 "app/services/dav_auth.py" = ["E501"]
+# 一次性迁移脚本：docstring 里的示例命令行 + CASE WHEN SQL 天然超行宽
+"scripts/migrate_legacy_db.py" = ["E501"]
 # 测试代码：pytest 用例名（中文）+ 多个 fixture 参数很容易超行宽
 # ——不影响可读性，不强求
 "tests/*" = ["E501"]

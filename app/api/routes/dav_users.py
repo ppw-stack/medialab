@@ -71,8 +71,8 @@ class DavUserOut(BaseModel):
     id: int
     username: str
     is_active: bool
-    last_login_at: int
-    created_at: int
+    last_login_at: str | None
+    created_at: str
 
 
 class DavAuditOut(BaseModel):
@@ -88,7 +88,7 @@ class DavAuditOut(BaseModel):
     remote_addr: str
     duration_ms: int
     item_count: int
-    created_at: int
+    created_at: str
 
 
 class DavAuditPage(BaseModel):

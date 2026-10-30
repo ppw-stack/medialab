@@ -117,9 +117,9 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 ** i).toFixed(i === 0 ? 0 : 2)} ${units[i]}`
 }
 
-function formatTime(ts: number): string {
+function formatTime(ts: string | null | undefined): string {
   if (!ts) return "—"
-  return new Date(ts * 1000).toLocaleString("zh-CN")
+  return ts
 }
 </script>
 

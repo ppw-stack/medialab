@@ -20,7 +20,7 @@
 用法::
 
     uv run python scripts/capture_mybonus_fixtures.py
-    uv run python scripts/capture_mybonus_fixtures.py --db /path/to/seedhelper.db
+    uv run python scripts/capture_mybonus_fixtures.py --db /path/to/medialab.db
 
 依赖 dev 库的站点 cookie（``sites.cookies``）——脚本不碰生产库。
 """
@@ -357,14 +357,14 @@ async def main() -> int:
     parser.add_argument(
         "--db",
         default=os.environ.get(
-            "SEEDHELPER_DB",
+            "MEDIALAB_DB",
             str(
                 pathlib.Path(__file__).resolve().parents[1]
                 / "data-dev"
-                / "seedhelper.db"
+                / "medialab.db"
             ),
         ),
-        help="dev 库路径（默认 data-dev/seedhelper.db）",
+        help="dev 库路径（默认 data-dev/medialab.db）",
     )
     args = parser.parse_args()
     db_path = pathlib.Path(args.db).expanduser()

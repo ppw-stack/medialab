@@ -18,6 +18,7 @@ from __future__ import annotations
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters.drivers.base import CloudFile, DriverError
 from app.core.config import AppSettings, get_settings
 from app.core.logging import get_logger
+from app.core.timeutils import bj_now, format_bj
 from app.db.models import Driver, MediaFile
 from app.services import attachments
 from app.services.driver_factory import build_driver
@@ -340,6 +342,13 @@ def target_attachment_path(driver: Driver, cloud_file: CloudFile) -> Path:
     return target_relative_dir(driver, cloud_file) / name
 
 
+def _cloud_mtime_to_bj(mtime: int) -> str | None:
+    """网盘返回的 unix 秒 mtime → 北京时间字符串；0/无值 → None。"""
+    if not mtime:
+        return None
+    return format_bj(datetime.fromtimestamp(mtime, UTC))
+
+
 async def _upsert_media(
     db: AsyncSession,
     *,
@@ -358,7 +367,7 @@ async def _upsert_media(
         )
     ).scalar_one_or_none()
 
-    now = int(time.time())
+    now = bj_now()
     if existing is None:
         media = MediaFile(
             driver_id=driver.id,
@@ -368,7 +377,7 @@ async def _upsert_media(
             size=cloud_file.size,
             strm_path=str(strm_path),
             signature=None,
-            mtime=cloud_file.mtime,
+            mtime=_cloud_mtime_to_bj(cloud_file.mtime),
             created_at=now,
             updated_at=now,
         )
@@ -381,7 +390,7 @@ async def _upsert_media(
     existing.name = cloud_file.name
     existing.size = cloud_file.size
     existing.strm_path = str(strm_path)
-    existing.mtime = cloud_file.mtime
+    existing.mtime = _cloud_mtime_to_bj(cloud_file.mtime)
     existing.updated_at = now
     return existing
 
@@ -549,7 +558,7 @@ async def scan_driver(
         stats.skipped_unknown += await _prune_orphans(
             db, driver, seen_remote_ids
         )
-    driver.last_scan_at = int(time.time())
+    driver.last_scan_at = bj_now()
     driver.last_synced_count = stats.created + stats.updated
     await db.commit()
 

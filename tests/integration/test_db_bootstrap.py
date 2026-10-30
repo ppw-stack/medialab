@@ -118,7 +118,6 @@ async def test_current_tables_survive(db_engine):
 
 async def test_dav_users_data_survives(db_engine):
     """``dav_users`` 里的数据不受删表影响。"""
-    import time
 
     from app.db.models import DavUser
     from app.db.session import session_scope
@@ -133,9 +132,9 @@ async def test_dav_users_data_survives(db_engine):
                 username="infuse",
                 password_hash="pbkdf2$600000$aa$bb",
                 is_active=True,
-                last_login_at=0,
-                created_at=int(time.time()),
-                updated_at=int(time.time()),
+                last_login_at=None,
+                created_at="2026-10-30 12:00:00",
+                updated_at="2026-10-30 12:00:00",
             )
         )
 

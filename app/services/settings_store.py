@@ -9,11 +9,10 @@
 
 from __future__ import annotations
 
-import time
-
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.timeutils import bj_now
 from app.db.models import Setting
 
 
@@ -27,7 +26,7 @@ async def get_value(db: AsyncSession, key: str) -> str | None:
 
 async def set_value(db: AsyncSession, key: str, value: str) -> None:
     """写一个键（存在则更新）。"""
-    now = int(time.time())
+    now = bj_now()
     row = (
         await db.execute(select(Setting).where(Setting.key == key))
     ).scalar_one_or_none()

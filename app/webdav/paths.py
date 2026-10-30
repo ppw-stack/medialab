@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
+from app.core.timeutils import bj_now
 from app.db.models import Driver, Setting
 from app.db.session import session_scope
 
@@ -126,7 +127,7 @@ async def set_root_driver_id(driver_id: int | None) -> None:
     切换后立即清缓存 —— 面板点了「应用」，用户不该再等 5 秒。
     """
     async with session_scope() as db:
-        now = int(time.time())
+        now = bj_now()
         row = (
             await db.execute(select(Setting).where(Setting.key == KEY_ROOT_DRIVER_ID))
         ).scalar_one_or_none()

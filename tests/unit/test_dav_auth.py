@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import time
 
 from app.core.config import AppSettings
 from app.db.models import DavUser
@@ -40,9 +39,9 @@ async def _make_user(username: str = "alice", password: str = "secret", **kw) ->
             username=username,
             password_hash=hash_password(password),
             is_active=kw.get("is_active", True),
-            last_login_at=0,
-            created_at=int(time.time()),
-            updated_at=int(time.time()),
+            last_login_at=None,
+            created_at="2026-10-30 12:00:00",
+            updated_at="2026-10-30 12:00:00",
         )
         db.add(row)
         await db.flush()
@@ -150,7 +149,7 @@ async def test_authenticate_updates_last_login(db_engine, settings: AppSettings)
         row = (
             await db.execute(select(DavUser).where(DavUser.username == "alice"))
         ).scalar_one()
-        assert row.last_login_at > 0
+        assert row.last_login_at is not None
 
 
 # --------------------------------------------------------------------------

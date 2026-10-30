@@ -46,6 +46,7 @@ from sqlalchemy import select
 
 from app.core.config import AppSettings
 from app.core.logging import get_logger
+from app.core.timeutils import bj_now
 from app.db.models import DavUser
 from app.db.session import session_scope
 
@@ -198,7 +199,7 @@ class DavAuthenticator:
                 return AuthResult(AUTH_INVALID, username=username)
 
             user_id = row.id
-            row.last_login_at = int(time.time())
+            row.last_login_at = bj_now()
 
         # ④ 成功：清失败计数 + 写缓存
         self._clear_failures(ip, username)

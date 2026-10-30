@@ -34,6 +34,7 @@ from sqlalchemy import select
 from app.adapters.drivers.base import DriverError
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.core.timeutils import bj_now
 from app.db.models import Driver
 from app.db.models import UploadTask as UploadTaskRow
 from app.db.session import session_scope
@@ -420,7 +421,7 @@ async def _mark_synced(task_id: int, uploaded: int, *, force: bool = False) -> N
             ).scalar_one_or_none()
             if row is None:
                 return
-            row.last_sync_at = int(time.time())
+            row.last_sync_at = bj_now()
             row.last_uploaded_count = uploaded
             row.last_error = None
     except Exception:

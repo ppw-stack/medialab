@@ -18,6 +18,7 @@ from typing import Any
 from sqlalchemy import select
 
 from app.core.logging import get_logger
+from app.core.timeutils import bj_now
 from app.db.models import UploadTask as UploadTaskRow
 from app.db.session import session_scope
 from app.services.upload_paths import PathGuardError, resolve_watch_dir
@@ -60,9 +61,9 @@ class UploadTaskView:
     enabled: bool
     delete_after_upload: bool
     concurrency: int
-    created_at: int
-    updated_at: int
-    last_sync_at: int | None
+    created_at: str
+    updated_at: str
+    last_sync_at: str | None
     last_uploaded_count: int
     last_error: str | None
     #: 运行态（监听中？正在传什么？）
@@ -235,7 +236,7 @@ async def create_task(
 
     watch_dir = _validate_watch_dir(watch_root)
 
-    now = int(time.time())
+    now = bj_now()
     row = UploadTaskRow(
         name=name,
         driver_id=driver_id,
@@ -287,7 +288,7 @@ async def update_task(db: Any, task_id: int, **fields: Any) -> UploadTaskRow:
         if key in fields and fields[key] is not None:
             setattr(row, key, fields[key])
 
-    row.updated_at = int(time.time())
+    row.updated_at = bj_now()
     await db.commit()
     await db.refresh(row)
     return row

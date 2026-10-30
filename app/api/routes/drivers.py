@@ -109,7 +109,7 @@ class DriverOut(BaseModel):
     data_exts: str = ""
     min_size_mb: int = 0
     include_subdirs: bool = True
-    last_scan_at: int | None = None
+    last_scan_at: str | None = None
     last_synced_count: int = 0
 
 

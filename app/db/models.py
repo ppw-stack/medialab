@@ -3,19 +3,23 @@
 **两个业务域共处一库**：
 
 - **辅种域**（ptHelper 基线）—— 站点、下载器、种子索引、调度。
-  时间列统一**北京时间字符串**（见 :func:`_bj_now`）。
 - **媒体库域**（strmmanger 并入）—— 存储源、STRM 条目、直链缓存、
   WebDAV 账号与审计、上传任务。表名与辅种域**零冲突**，外键各自闭环
   （辅种域 FK 指向 ``sites`` / ``downloader_instances``，媒体库域 FK 指向
   ``drivers``）。
 
-⚠️ **两域的时间列口径不同**（历史遗留，勿"顺手统一"）：
+**DB 时间列已统一为北京时间字符串**（``String(32)``，:func:`_bj_now`）：
 
-- 辅种域：``String(32)`` 北京时间字符串
-- 媒体库域：``Integer`` unix 时间戳
+- 两域所有「DB 记录时刻」类列（``created_at`` / ``updated_at`` /
+  ``last_*_at`` / ``probed_at`` / ``mtime`` 等）一律北京时间字符串。
+- **协议侧时刻**保留 unix 秒（``Integer``）——它们与 ``time.time()``
+  直接比较，语义是「绝对时刻/时间差」而非「DB 记录时刻」：
+    - ``link_cache.expires_at`` —— L2 缓存过期时刻
+    - ``cross_seed_snapshot.stats[].added_at`` —— 下载器入队时刻（JSON 内）
+    - 进程内 token 有效期（非 DB 列）
 
-统一口径需要改数据 + 改全部读写点，收益不抵风险。**新增表时按所在域
-选对应口径**，并在类 docstring 里注明。
+统一判据是**语义**，不是「属于哪个域」：辅种域的 ``added_at`` 是
+unix 秒（协议侧），媒体库域的 ``created_at`` 是字符串（DB 记录时刻）。
 
 注：领域枚举（``FreeType`` / ``PushStatus`` / ``FreeSource``）住在
 :mod:`app.domain.enums`——它们是业务概念，不属于数据库层。本模块
@@ -512,9 +516,9 @@ class SiteUserData(Base):
 
 # ================================================================ 媒体库域
 #
-# 以下 8 张表来自 strmmanger。**时间列口径与辅种域不同**：用
-# ``Integer`` 存 unix 秒（``0`` = 从未），而非北京时间字符串。
-# 见模块 docstring 的说明。
+# 以下 8 张表来自 strmmanger。时间列已与辅种域统一为北京时间字符串
+# （``String(32)``，:func:`_bj_now`）；协议侧时刻（``link_cache.expires_at``）
+# 保留 unix 秒，见模块 docstring 与各列注释。
 
 class Driver(Base):
     """存储源（网盘账号等）+ 其媒体库配置（**一对一**）。
@@ -534,8 +538,11 @@ class Driver(Base):
     #: 设备类型（115 扫码登录绑定的 app，如 ``115android``）
     device_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    created_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    updated_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 创建时间（北京时间字符串）
+    created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
+    updated_at: Mapped[str] = mapped_column(
+        String(32), default=_bj_now, onupdate=_bj_now
+    )
 
     # -- 媒体库配置（与存储源一对一）--
 
@@ -563,8 +570,8 @@ class Driver(Base):
     include_subdirs: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False
     )
-    #: 上次扫描时间
-    last_scan_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: 上次扫描时间（北京时间字符串，NULL = 从未扫描）
+    last_scan_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
     #: 上次扫描新增/更新的条目数
     last_synced_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
@@ -589,10 +596,13 @@ class MediaFile(Base):
     strm_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     #: 中转 URL 的 HMAC 签名（密钥轮换时批量重算）
     signature: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    #: 源文件 mtime（用于增量扫描判断是否变更）
-    mtime: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    created_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    updated_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 源文件 mtime（北京时间字符串，用于增量扫描判断是否变更；
+    #: 由网盘返回的 unix 秒经 ``format_bj`` 转换写入）
+    mtime: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
+    updated_at: Mapped[str] = mapped_column(
+        String(32), default=_bj_now, onupdate=_bj_now
+    )
 
     __table_args__ = (
         UniqueConstraint("driver_id", "remote_id", name="uq_media_files_driver_remote"),
@@ -619,9 +629,11 @@ class LinkCacheEntry(Base):
     #: User-Agent 的哈希（不存明文：UA 可能含设备指纹）
     ua_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     url: Mapped[str] = mapped_column(Text, nullable=False)
-    #: 过期时间戳（已扣除安全余量）
+    #: 过期时间戳（unix 秒，已扣除安全余量）——**协议侧时刻**，保留 Integer
+    #: 与 ``time.time()`` 直接比较；不参与「DB 时间列统一为北京时间字符串」。
     expires_at: Mapped[int] = mapped_column(Integer, nullable=False)
-    created_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 创建时间（北京时间字符串）
+    created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
 
     __table_args__ = (Index("idx_link_cache_expires", "expires_at"),)
 
@@ -633,7 +645,8 @@ class Setting(Base):
 
     key: Mapped[str] = mapped_column(String(128), primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)
-    updated_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 最近一次修改时间（北京时间字符串）
+    updated_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
 
 
 class DavUser(Base):
@@ -656,10 +669,12 @@ class DavUser(Base):
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     #: 是否启用（停用 = 立即失效，不用删账号）
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    #: 上次登录时间（unix 秒），0 = 从未登录
-    last_login_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    created_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    updated_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 上次登录时间（北京时间字符串，NULL = 从未登录）
+    last_login_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
+    updated_at: Mapped[str] = mapped_column(
+        String(32), default=_bj_now, onupdate=_bj_now
+    )
 
     __table_args__ = (Index("idx_dav_users_username", "username"),)
 
@@ -698,7 +713,8 @@ class DavAuditLog(Base):
     duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     #: PROPFIND 的条目数（明细为 0）
     item_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    created_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 审计时间（北京时间字符串）
+    created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
 
     __table_args__ = (
         Index("idx_dav_audit_user_time", "user_id", "created_at"),
@@ -756,10 +772,12 @@ class UploadTask(Base):
     )
     #: 同时进行的上传数
     concurrency: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    created_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    updated_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    #: 上次同步时间（unix 秒），0 = 从未
-    last_sync_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
+    updated_at: Mapped[str] = mapped_column(
+        String(32), default=_bj_now, onupdate=_bj_now
+    )
+    #: 上次同步时间（北京时间字符串，NULL = 从未同步）
+    last_sync_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
     #: 上次同步上传成功的文件数
     last_uploaded_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     #: 上次错误（展示用）
@@ -781,6 +799,7 @@ class ProbeResult(Base):
     used_gb: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     total_gb: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     available: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    probed_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 探测时间（北京时间字符串）
+    probed_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     __table_args__ = (Index("idx_probe_results_driver", "driver_id"),)

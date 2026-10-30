@@ -517,9 +517,9 @@ async function saveRoot() {
 
 // ---- 工具 ----
 
-function formatTime(ts: number): string {
+function formatTime(ts: string | null | undefined): string {
   if (!ts) return "从未"
-  return new Date(ts * 1000).toLocaleString("zh-CN")
+  return ts
 }
 
 function methodColor(method: string): string {

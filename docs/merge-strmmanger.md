@@ -49,7 +49,7 @@ PT 站 ──► 下载器 ──► 本地文件 ──► 网盘 ──► STR
 | C2 | 登录端点 | **统一到 `/api/v1/auth/*`**——删除 strm 的 `/api/auth/*`（含 `/me`）。登录态查询统一用 `/api/v1/auth/status` |
 | C3 | session 签名 payload | 统一为点分隔（`nonce.expires`）——旧 cookie 失效，重新登录一次 |
 | C4 | `app/services/factory.py` | strm 的改名 `svc_factory.py`（pt 的适配器工厂保留原名） |
-| C5 | `app/core/auth.py` | 取 strm 版（含明文自动升级）；Bearer 支持 **API Token + session 值**两种口径 |
+| C5 | `app/core/auth.py` | 取 strm 版（含明文自动升级）；Bearer 支持 **API Token + session 值**两种口径（session 值口径仅为面板/CLI 同源便利，**非长期凭据**——CLI 长期使用应存 `WEB_TOKEN`，session cookie 值 24h 过期） |
 | C6 | 前端 `/settings` | pt 保留（调度 + 环境变量）；strm 的签名密钥页 → `/media-settings` |
 | C7 | SPA 静态托管 | 统一到 `main._mount_frontend`（带 hash 缓存 + 真 404） |
 
@@ -97,60 +97,61 @@ ptHelper 的 `tests/unit/test_layering.py` 是**硬约束测试**，会直接判
 
 ## 数据迁移
 
-两个旧库 → 一个新库，用 SQLite `ATTACH` + **按列名映射**搬表。
+**2026-10-30 修订：原 `scripts/migrate_db.py` 已删除**——合并后的时间口径
+统一工程（见下方「时间口径统一」）让存量数据迁移失去意义：媒体库域 8 张
+表的 16 个时间列从 `Integer`（unix 秒）改为 `String(32)`（北京时间字符串），
+按列名映射搬表无法处理这种类型转换，且 `0 = 从未` 的语义要改为 `NULL`。
 
-```bash
-# 1. 备份（务必先做）
-cp strmmanger.db strmmanger.db.bak
-cp seedhelper.db  seedhelper.db.bak
+**后续做全新部署**：`create_all` 直接按新模型建最终态表结构，数据从零
+开始。dev 库若有过旧结构（datetime / unix 秒时间列），删掉 dev 库重建
+即可——`migrate_datetime_to_bj_str` 迁移函数已同步删除（见下文）。
 
-# 2. 建目标库（让应用自己建表结构——结构以代码为准）
-#    见下方「建目标库」
+### 历史记录（保留备查）
 
-# 3. 搬数据
-python scripts/migrate_db.py \
-    --strm /path/to/strmmanger.db \
-    --seed /path/to/seedhelper.db \
-    --out   /path/to/medialab.db
-```
+合并初期曾用 SQLite `ATTACH` + 按列名映射搬表，把两个旧库（`strmmanger.db`
++ `seedhelper.db`）合成 `medialab.db`。两个真实旧库 → 16 张表 / 27588 行，
+迁移后 ORM 读取字段全部正确。该脚本与那次迁移的实测结果仅供历史参考，
+不再可用（列类型已变）。
 
-### ⚠️ 为什么必须按列名映射
+## 时间口径统一（2026-10-30）
 
-源库与目标库的**列顺序可能不同**：
+合并时保留了两域时间列口径差异（辅种域 `String(32)` 北京时间字符串、
+媒体库域 `Integer` unix 秒），2026-10-30 统一为北京时间字符串。
 
-```sql
--- 源库（strmmanger / ptHelper 时期）
-CREATE TABLE sites (
-    ..., created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL,
-    breaker_until VARCHAR(32), ...
-);
+**统一范围**：媒体库域 8 张表的 16 个「DB 记录时刻」类列：
 
--- 目标库（合并后，create_all 建的）
-CREATE TABLE sites (
-    ..., breaker_until VARCHAR(32),
-    created_at VARCHAR(32) NOT NULL, updated_at VARCHAR(32) NOT NULL, ...
-);
-```
+| 表 | 列 |
+|---|---|
+| `drivers` | `created_at` / `updated_at` / `last_scan_at` |
+| `media_files` | `created_at` / `updated_at` / `mtime` |
+| `link_cache` | `created_at` |
+| `settings` | `updated_at` |
+| `dav_users` | `last_login_at` / `created_at` / `updated_at` |
+| `dav_audit_log` | `created_at` |
+| `upload_tasks` | `created_at` / `updated_at` / `last_sync_at` |
+| `probe_results` | `probed_at` |
 
-`INSERT INTO ... SELECT *` 按**位置**对应——`updated_at` 会收到
-`breaker_until` 的值，直接触发 NOT NULL 约束失败（或更糟：静默错位）。
+**保留 unix 秒的列**（协议侧时刻，与 `time.time()` 直接比较）：
 
-脚本因此显式列出**两库共有的列**（按目标库顺序）。
+- `link_cache.expires_at` —— L2 缓存过期时刻
+- `cross_seed_snapshot.stats[].added_at` —— 下载器入队时刻（JSON 内）
+- 进程内 token 有效期（非 DB 列）
 
-### 实测结果
+**语义变更**：`0 = 从未` → `NULL`（`last_*_at` 列 nullable）；代码里
+判断「有过」用 `is not None`，不用 `> 0`。
 
-两个真实旧库 → **16 张表 / 27588 行**：
+**`mtime` 处理**：网盘 adapter 返回的 `FileEntry.mtime` 仍是 unix 秒
+（协议契约），service 层消费时用 `format_bj(datetime.fromtimestamp(ts, UTC))`
+转换写入。增量扫描比较从 int 大小比较变为字符串字典序比较——`%Y-%m-%d
+%H:%M:%S` 格式保证字典序与时序一致（回归测试见
+`tests/unit/test_timeutils.py::test_bj_string_lexicographic_order_matches_chronology`）。
 
-```
-媒体库域：drivers 2 / media_files 7859 / link_cache 8 / settings 1
-           dav_users 3 / dav_audit_log 24
-辅种域：  sites 9 / downloader_instances 3 / torrent_index 14619
-         task_queue 930 / app_runtime_params 8 / app_env_settings 1
-         job_runs 4109 / scheduler_job_settings 2 / cross_seed_orphan 1
-         site_user_data 9
-```
+**迁移层处理**：原 `migrate_datetime_to_bj_str`（把历史 DateTime(UTC) 列
++8h 转为北京时间字符串）已删除——新模型 DB 时间列直接声明为 `String(32)`，
+`create_all` 建表即为最终态，无需运行时迁移。`app/db/migrations.py` 的
+`__all__` 与 `app/db/bootstrap.py` 的 `create_all` 同步移除调用。
 
-迁移后 ORM 读取字段全部正确，两个域的端点（含**两套登录端点**）HTTP 全通。
+**契约由 `tests/integration/test_db_models.py` + `tests/unit/test_timeutils.py` 固化**。
 
 ## 生产切换（可回滚）
 
@@ -185,7 +186,7 @@ docker start strmmanger && docker start seedhelper-prod
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| **DB 写锁竞争** | strm 扫描（长写事务）+ pt 调度作业 + `/302` 缓存写 → `database is locked` | 两边生产都是 `DB_JOURNAL_MODE=DELETE`（写事务独占整库）。**建议**：`link_cache` 写失败只记日志，不让 302 失败（缓存是派生数据，不该是正确性依赖） |
+| **DB 写锁竞争** | strm 扫描（长写事务）+ pt 调度作业 + `/302` 缓存写 → `database is locked` | 真正的写安全靠「短事务 + 不在事务内做网络 IO」的约定（见 AGENTS.md 与 `app/services/jobs.py`），非 `link_cache` 降级。`SingleWriterQueue` 已删除（单进程单 worker 下不需要）。`link_cache` 写失败只记日志、不让 302 失败（缓存是派生数据，不该是正确性依赖）——这是补充措施，非主要手段 |
 | **记忆体** | 单进程要装下两个域 | compose limits 提到 1G（dev）/ 1536M（prod），上线后实测 RSS |
 | **覆盖率** | 合并后代码量翻倍 | `fail_under` 重新定档，随补测试逐步抬高（只许升不许降） |
 | **旧 cookie 失效** | 用户需重新登录一次 | 刻意为之——两边的 cookie 签名算法不同，无法兼容解析 |

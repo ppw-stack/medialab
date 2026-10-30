@@ -25,7 +25,15 @@
   - `adapters` 层可独立单测（不依赖 db / services）
   - `domain` 层是业务概念与常量（如 `DeviceType` / `FreeType`），不依赖任何层
   - 改完跑 `uv run pytest tests/unit/test_layering.py` 验证
-- **两个域的时间列口径不同**（历史遗留，勿「顺手统一」）：辅种域是 `String(32)` 北京时间字符串，媒体库域是 `Integer` unix 时间戳。新增表按所在域选对应口径。
+- **时间口径已统一为北京时间字符串**（2026-10-30 修订，原「两个域的时间列口径不同，勿顺手统一」段废止）：
+  - 两域所有「DB 记录时刻」类列（`created_at` / `updated_at` / `last_*_at` / `probed_at` / `mtime` 等）一律 `String(32)` 北京时间字符串
+  - **协议侧时刻**保留 unix 秒（`Integer`）——它们与 `time.time()` 直接比较，语义是「绝对时刻/时间差」而非「DB 记录时刻」：
+    - `link_cache.expires_at` —— L2 缓存过期时刻
+    - `cross_seed_snapshot.stats[].added_at` —— 下载器入队时刻（JSON 内）
+    - 进程内 token 有效期（非 DB 列）
+  - 统一判据是**语义**，不是「属于哪个域」：辅种域的 `added_at` 是 unix 秒（协议侧），媒体库域的 `created_at` 是字符串（DB 记录时刻）
+  - `0 = 从未` 语义统一为 `NULL`（`last_*_at` 列 nullable）；代码里判断「有过」用 `is not None`，不用 `> 0`
+  - 网盘 adapter 返回的 `FileEntry.mtime` 仍是 unix 秒（协议契约），service 层消费时用 `format_bj(datetime.fromtimestamp(ts, UTC))` 转换写入
 - 改动窗口锚定（FR-3.4）或中止链路（FR-3.5）前，先确认需求基线与现状口径一致。
 - 数据删除以"不误删"为底线：hash 必须是 40 位 hex（拒绝 `all` / 通配），前端删除需确认，删磁盘数据单独开关并记审计日志。不引入回收站 / 保护期等未实现的机制。
 - **删除站点 = 级联删关联数据**（2026-10-23 决定）：`torrent_index`（拉取快照，可重建）+ `site_user_data`（用户数据快照）+ `task_queue`（该站推送队列行）在**同一事务**里删完再删父行。
@@ -34,6 +42,7 @@
   - 前缀必须带结尾的 `|`（`add_torrent|1|` 不匹配 `add_torrent|11|...`）
   - 契约由 `tests/integration/test_services.py` + `tests/integration/test_api.py` 固化
 - 站点适配层改动后用真实站点（测试环境 cookie）拉取验证，不使用 mock 数据测试。
+- **Bearer 长期凭据只用 `WEB_TOKEN`**（2026-10-30 加入）：`verify_bearer` 同时接受 API Token（`WEB_TOKEN`）与 session cookie 值两种口径，但 session cookie 值 24h 过期（`SESSION_MAX_AGE`）。CLI / 脚本长期使用应存 `WEB_TOKEN`，不可把 session cookie 值当长期 token 存储——后者会突然 401。session 值口径仅为面板/CLI 同源便利，非长期凭据。
 - **自动化 / 合规边界**（2026-10-22 修订，原「不引入未文档化的反爬对抗 / 验证码绕过（R2）」）：
   - ✅ **允许**对**自有账号**做站点自动化，含 AI 读图形验证码（`app/core/ai.py`）、真实浏览器交互
   - ❌ **禁止**伪造 / 破解站点**鉴权凭据**（如 soulvoice 的 JWT/HS256 downhash）、伪造站点签名、越权访问他人资源

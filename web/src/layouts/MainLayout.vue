@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
   DashboardOutlined,
@@ -26,15 +26,22 @@ const auth = useAuthStore()
 const collapsed = ref(false)
 
 /**
- * 侧边栏菜单（**两个业务域**）。
+ * 侧边栏菜单（**两个业务域，两级菜单**）。
  *
- * 分组渲染：辅种域在上、媒体库域在下——两个域的操作路径完全不同，
- * 混在一列里会让用户找不到东西。
+ * 一级 = 业务域（辅种 / 媒体库），可点击展开/收起；
+ * 二级 = 各域的叶子页面。
+ *
+ * 自动展开行为：当前路由所在的一级组始终展开，另一组可手动收起/展开。
+ * 切换路由时强制展开目标组（避免点了二级菜单但一级是收起的）。
+ *
+ * 辅种域含「设置」（/settings，调度作业 + 环境变量两个 tab）；媒体库域
+ * 的「签名密钥」用 /media-settings（避免与辅种域的 /settings 撞名）。
  */
 const menuGroups = [
   {
     key: 'seed',
     title: '辅种',
+    icon: SafetyOutlined,
     items: [
       { key: '/', icon: DashboardOutlined, label: '总览', sub: '仪表盘概览', iconColor: 'red' },
       { key: '/sites', icon: CloudServerOutlined, label: '站点', sub: 'NexusPHP 适配', iconColor: 'violet' },
@@ -43,11 +50,13 @@ const menuGroups = [
       { key: '/torrent-index', icon: DatabaseOutlined, label: '拉取索引', sub: '免费种源', iconColor: 'amber' },
       { key: '/user-data', icon: UserOutlined, label: '用户数据', sub: '9 站用量/HR/消息', iconColor: 'cyan' },
       { key: '/cross-seed', icon: SafetyOutlined, label: '辅种统计', sub: '按下载器分组展示', iconColor: 'gold' },
+      { key: '/settings', icon: SettingOutlined, label: '设置', sub: '调度作业 / 环境变量', iconColor: 'pink' },
     ],
   },
   {
     key: 'media',
     title: '媒体库',
+    icon: DatabaseFilled,
     items: [
       { key: '/drivers', icon: DatabaseFilled, label: '存储源', sub: '网盘账号', iconColor: 'violet' },
       { key: '/library', icon: FolderOpenOutlined, label: '媒体库', sub: 'STRM 条目', iconColor: 'blue' },
@@ -65,6 +74,35 @@ const allItems = computed(() => menuGroups.flatMap((g) => g.items))
 
 const selectedKeys = computed(() => [route.path])
 const activeMenu = computed(() => allItems.value.find((m) => m.key === route.path))
+
+/**
+ * 当前路由所属的一级组 key（用于自动展开）。
+ * '/' 属于辅种域（总览）。
+ */
+function groupOfPath(path: string): string {
+  const group = menuGroups.find((g) => g.items.some((it) => it.key === path))
+  return group?.key ?? 'seed'
+}
+
+/** 展开的一级组 key 列表。初始展开当前路由所在组。 */
+const openKeys = ref<string[]>([groupOfPath(route.path)])
+
+/**
+ * 路由变化时自动展开目标组。
+ *
+ * 用 watch 而非 computed：用户手动展开另一组的行为要保留（openKeys 是
+ * 可写的 ref），只在路由切换时**追加**目标组到 openKeys，不覆盖用户
+ * 已展开的其它组。
+ */
+watch(
+  () => route.path,
+  (path) => {
+    const target = groupOfPath(path)
+    if (!openKeys.value.includes(target)) {
+      openKeys.value = [...openKeys.value, target]
+    }
+  },
+)
 
 function onMenuClick({ key }: { key: string }) {
   router.push(key)
@@ -89,14 +127,20 @@ async function handleLogout() {
       </div>
       <a-menu
         mode="inline"
+        v-model:open-keys="openKeys"
         :selected-keys="selectedKeys"
         @click="onMenuClick"
       >
-        <a-menu-item-group
+        <a-sub-menu
           v-for="group in menuGroups"
           :key="group.key"
-          :title="collapsed ? undefined : group.title"
         >
+          <template #title>
+            <span class="menu-icon menu-icon--group">
+              <component :is="group.icon" />
+            </span>
+            <span v-if="!collapsed" class="menu-group-title">{{ group.title }}</span>
+          </template>
           <a-menu-item v-for="item in group.items" :key="item.key">
             <span class="menu-icon" :class="`menu-icon--${item.iconColor}`">
               <component :is="item.icon" />
@@ -106,7 +150,7 @@ async function handleLogout() {
               <span class="menu-label__sub">{{ item.sub }}</span>
             </span>
           </a-menu-item>
-        </a-menu-item-group>
+        </a-sub-menu>
       </a-menu>
     </a-layout-sider>
     <a-layout>
@@ -178,5 +222,13 @@ async function handleLogout() {
 .ant-menu-item-selected .menu-label__sub {
   color: var(--accent-red);
   opacity: 0.7;
+}
+
+/* 一级菜单组标题 */
+.menu-group-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: 0.02em;
 }
 </style>

@@ -136,6 +136,10 @@ def verify_bearer(token: str) -> bool:
     2. **Session cookie 值**（``<nonce>.<expires>.<sig>``）——媒体库域的
        约定，同一份凭据两种用法
 
+    ⚠️ **CLI 长期使用应存 ``WEB_TOKEN`` 而非 session cookie 值**——
+    后者 24h 过期（见 :data:`SESSION_MAX_AGE`），存下来会突然 401。
+    session 值口径仅为面板/CLI 同源便利，非长期凭据。
+
     返回 True 表示鉴权通过。
     """
     if not token:

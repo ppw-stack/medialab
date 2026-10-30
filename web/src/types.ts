@@ -652,7 +652,7 @@ export interface Driver {
   min_size_mb: number
   /** 是否包含子目录 */
   include_subdirs: boolean
-  last_scan_at: number | null
+  last_scan_at: string | null
   last_synced_count: number
 }
 
@@ -795,9 +795,9 @@ export interface UploadTask {
   /** 同步成功后清理本地文件（移到回收目录，可还原） */
   delete_after_upload: boolean
   concurrency: number
-  created_at: number
-  updated_at: number
-  last_sync_at: number | null
+  created_at: string
+  updated_at: string
+  last_sync_at: string | null
   last_uploaded_count: number
   last_error: string | null
   /** 运行态：监听器是否在跑 */
@@ -1045,9 +1045,9 @@ export interface DavUser {
   id: number
   username: string
   is_active: boolean
-  /** 上次登录时间（unix 秒），0 = 从未登录 */
-  last_login_at: number
-  created_at: number
+  /** 上次登录时间（北京时间字符串），null = 从未登录 */
+  last_login_at: string | null
+  created_at: string
 }
 
 /** 新建账号。 */
@@ -1074,7 +1074,7 @@ export interface DavAuditItem {
   remote_addr: string
   duration_ms: number
   item_count: number
-  created_at: number
+  created_at: string
 }
 
 /** 审计查询结果（分页）。 */
