@@ -21,12 +21,12 @@ from pathlib import Path
 
 import pytest
 from a2wsgi import WSGIMiddleware
-from app.webdav.app import build_dav_app
-from app.webdav.guard import DavGuard
 from app.core.config import AppSettings
 from app.db.models import DavUser
 from app.db.session import session_scope
 from app.services.dav_auth import hash_password
+from app.webdav.app import build_dav_app
+from app.webdav.guard import DavGuard
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 

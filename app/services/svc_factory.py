@@ -9,7 +9,7 @@ from __future__ import annotations
 from app.core.config import AppSettings, get_settings
 from app.core.logging import get_logger
 from app.services.link_cache import LinkCache
-from app.services.redirect import RedirectService
+from app.services.redirect import RedirectResult, RedirectService
 
 logger = get_logger(__name__)
 
@@ -47,3 +47,19 @@ def reset_services() -> None:
     global _link_cache, _redirect_service
     _link_cache = None
     _redirect_service = None
+
+
+async def resolve_redirect(
+    media_id: int, sig: str, request_ua: str
+) -> RedirectResult:
+    """解析中转请求，返回重定向目标（**自开事务**）。
+
+    API 层不碰 DB——它只调本函数。原先路由里直接 ``session_scope()``
+    再调 ``service.resolve(db, ...)``，违反了「``api`` 层不依赖 ``db``」
+    的分层约束（见 ``tests/unit/test_layering.py``）。
+    """
+    from app.db.session import session_scope
+
+    service = get_redirect_service()
+    async with session_scope() as db:
+        return await service.resolve(db, media_id, sig, request_ua)

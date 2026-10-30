@@ -25,10 +25,10 @@ from a2wsgi import WSGIMiddleware
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 
-from app.webdav.app import build_dav_app
-from app.webdav.guard import DavGuard
 from app.core.config import AppSettings
 from app.core.logging import get_logger
+from app.webdav.app import build_dav_app
+from app.webdav.guard import DavGuard
 
 logger = get_logger(__name__)
 
@@ -74,7 +74,11 @@ def mount_dav(app: FastAPI, settings: AppSettings) -> bool:
     # ``PROPFIND /dav 405``）。重定向到带斜杠的版本即可。
     #
     # 用 308 保持方法（**不能**用 301/302 —— 浏览器会把 PROPFIND 改成 GET）。
-    @app.api_route(mount_path, methods=["GET", "HEAD", "PROPFIND", "OPTIONS"], include_in_schema=False)
+    @app.api_route(
+        mount_path,
+        methods=["GET", "HEAD", "PROPFIND", "OPTIONS"],
+        include_in_schema=False,
+    )
     async def _dav_root_redirect() -> RedirectResponse:
         return RedirectResponse(url=f"{mount_path}/", status_code=308)
 

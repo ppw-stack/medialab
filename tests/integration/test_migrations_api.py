@@ -19,7 +19,8 @@ from httpx import ASGITransport, AsyncClient
 
 @pytest.fixture
 async def client(settings, db_engine):
-    from app.api.routes import media_auth as auth, migrations
+    from app.api.routes import media_auth as auth
+    from app.api.routes import migrations
     from app.core.auth import init_hmac_key
     from app.services.svc_factory import init_services, reset_services
     from fastapi import FastAPI
@@ -84,9 +85,11 @@ class TestBrowseSourcesFallback:
                 seen.append(str(cid))
                 return []
 
-        import app.api.routes.migrations as mod
+        # patch **service 层**——驱动构造已下沉到那里
+        # （API 层不碰适配层，见 tests/unit/test_layering.py）。
+        import app.services.migration as mod
 
-        monkeypatch.setattr(mod, "build_driver", lambda *a, **k: _FakeDriver())
+        monkeypatch.setattr(mod, "build_driver", lambda *a, **k: _FakeDriver(), raising=False)
 
         resp = await client.get("/api/migrations/sources?driver_id=1")
 
@@ -106,9 +109,9 @@ class TestBrowseSourcesFallback:
             async def list_dir_by_cid(self, cid, parent_path="", relative_dir=""):
                 raise AssertionError(f"不该被调用（cid={cid}）")
 
-        import app.api.routes.migrations as mod
+        import app.services.migration as mod
 
-        monkeypatch.setattr(mod, "build_driver", lambda *a, **k: _FakeDriver())
+        monkeypatch.setattr(mod, "build_driver", lambda *a, **k: _FakeDriver(), raising=False)
 
         resp = await client.get("/api/migrations/sources?driver_id=1")
 

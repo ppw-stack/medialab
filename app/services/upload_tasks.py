@@ -43,6 +43,66 @@ class UploadTaskError(Exception):
         self.kind = kind
 
 
+@dataclass(slots=True)
+class UploadTaskView:
+    """上传任务的对外形状（**API 层不认识 ORM**）。
+
+    附带运行态（监听中？正在传什么？）——运行态在内存里，与 DB 无关。
+    """
+
+    id: int
+    name: str
+    driver_id: int
+    target_file_id: str
+    target_path: str | None
+    watch_root: str
+    include_subdirs: bool
+    enabled: bool
+    delete_after_upload: bool
+    concurrency: int
+    created_at: int
+    updated_at: int
+    last_sync_at: int | None
+    last_uploaded_count: int
+    last_error: str | None
+    #: 运行态（监听中？正在传什么？）
+    listening: bool = False
+    current: str = ""
+    total_uploaded: int = 0
+    total_failed: int = 0
+    total_bytes: int = 0
+    #: 运行态的最近一次错误（**监听启动失败等**）——面板据此提示
+    runtime_error: str | None = None
+
+
+def to_task_view(row: UploadTaskRow) -> UploadTaskView:
+    """ORM 行 → :class:`UploadTaskView`（附带运行态）。"""
+    runtime = get_runtime(row.id)
+    return UploadTaskView(
+        id=row.id,
+        name=row.name,
+        driver_id=row.driver_id,
+        target_file_id=row.target_file_id,
+        target_path=row.target_path,
+        watch_root=row.watch_root,
+        include_subdirs=row.include_subdirs,
+        enabled=row.enabled,
+        delete_after_upload=row.delete_after_upload,
+        concurrency=row.concurrency,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        last_sync_at=row.last_sync_at,
+        last_uploaded_count=row.last_uploaded_count,
+        last_error=row.last_error,
+        listening=runtime.listening,
+        current=runtime.current,
+        total_uploaded=runtime.total_uploaded,
+        total_failed=runtime.total_failed,
+        total_bytes=runtime.total_bytes,
+        runtime_error=runtime.error,
+    )
+
+
 @dataclass
 class UploadRuntime:
     """一个任务的运行时状态。"""
@@ -241,6 +301,117 @@ async def delete_task(db: Any, task_id: int) -> None:
     await db.delete(row)
     await db.commit()
     logger.info("删除上传任务 id=%s", task_id)
+
+
+# --------------------------------------------------------------------------
+# 对外函数（自开事务）
+#
+# **API 层不碰 DB** —— 路由层只调这些。带 ``db`` 参数的 CRUD 是**内部**
+# 函数（供其它 service 复用）。
+# --------------------------------------------------------------------------
+
+
+async def list_task_views() -> list[UploadTaskView]:
+    """列出所有上传任务（附运行态）。"""
+    async with session_scope() as db:
+        rows = (
+            await db.execute(select(UploadTaskRow).order_by(UploadTaskRow.id))
+        ).scalars().all()
+        return [to_task_view(r) for r in rows]
+
+
+async def get_task_view(task_id: int) -> UploadTaskView:
+    """取单个任务（附运行态）。"""
+    async with session_scope() as db:
+        row = await get_task(db, task_id)
+        return to_task_view(row)
+
+
+async def create_task_view(**kwargs: Any) -> UploadTaskView:
+    """创建上传任务（自开事务）。"""
+    async with session_scope() as db:
+        row = await create_task(db, **kwargs)
+        return to_task_view(row)
+
+
+async def update_task_view(task_id: int, **fields: Any) -> UploadTaskView:
+    """修改任务（自开事务）。"""
+    async with session_scope() as db:
+        row = await update_task(db, task_id, **fields)
+        return to_task_view(row)
+
+
+async def delete_task_view(task_id: int) -> None:
+    """删除任务（自开事务）。"""
+    async with session_scope() as db:
+        await delete_task(db, task_id)
+
+
+async def browse_guangya_dirs(driver_id: int, parent_id: str = "") -> list[tuple[str, str]]:
+    """列出光鸭目录下的子目录（按 fileId 逐层浏览）。
+
+    返回 ``[(remote_id, name), ...]``——只含目录（文件不进目录浏览器）。
+
+    光鸭的目录**没有「路径 ↔ id」反查**（接口只接受 fileId），故只能
+    逐层往下走。
+
+    Raises:
+        UploadTaskError: 存储源不存在（404）/ 不是光鸭（400）/ 驱动不支持
+            按 id 浏览（400）/ 上游调用失败（400）。
+    """
+    from app.adapters.drivers.base import DriverError
+    from app.db.models import Driver
+    from app.services.driver_factory import build_driver
+    from app.services.migration import persist_guangya_credential
+
+    async with session_scope() as db:
+        driver_row = (
+            await db.execute(select(Driver).where(Driver.id == driver_id))
+        ).scalar_one_or_none()
+        if driver_row is None:
+            raise UploadTaskError(f"存储源不存在：{driver_id}", status_code=404, kind="not_found")
+        if driver_row.type != "guangya":
+            raise UploadTaskError(
+                f"该接口需要光鸭存储源（当前：{driver_row.type}）",
+                status_code=400,
+                kind="config",
+            )
+        credential = driver_row.credential
+        device_type = driver_row.device_type
+        row_id = driver_row.id
+
+    async def _on_refresh(cred: Any) -> None:
+        await persist_guangya_credential(row_id, cred)
+
+    driver = build_driver("guangya", credential, device_type, on_token_refresh=_on_refresh)
+    lister = getattr(driver, "list_dir_by_cid", None)
+    if lister is None:
+        raise UploadTaskError("该驱动不支持按 id 浏览目录", status_code=400, kind="config")
+    try:
+        entries = await lister(parent_id)
+    except DriverError as exc:
+        raise UploadTaskError(str(exc), status_code=400, kind="upstream") from exc
+    return [(e.remote_id, e.name) for e in entries if e.is_dir]
+
+
+async def sync_task_now(task_id: int) -> dict[str, Any]:
+    """立即跑一次全量同步（补偿事件流漏掉的文件）。
+
+    **异常转换**：service 层把适配层的 :class:`DriverError` 与路径守卫的
+    :class:`PathGuardError` 统一转成 :class:`UploadTaskError`——API 层
+    不认识适配层的异常类型（分层约束）。
+    """
+    from app.adapters.drivers.base import DriverError
+    from app.services import watch_manager
+    from app.services.upload_paths import PathGuardError
+
+    try:
+        result: dict[str, Any] = await watch_manager.sync_now(task_id)
+        return result
+    except DriverError as exc:
+        raise UploadTaskError(str(exc), status_code=400, kind="upstream") from exc
+    except PathGuardError as exc:
+        raise UploadTaskError(str(exc), status_code=400, kind="invalid") from exc
 
 
 def _validate_watch_dir(watch_root: str) -> Any:

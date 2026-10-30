@@ -2,39 +2,29 @@
 
 挂在 ``/api/upload-tasks``。目标目录浏览走 ``/targets``——按光鸭的
 **fileId** 逐层（光鸭没有「路径 ↔ id」反查，与迁移页一致）。
+
+**路由层只做参数校验与响应组装**——DB 与适配层的访问全在
+:mod:`app.services.upload_tasks`（分层约束见
+``tests/unit/test_layering.py``）。
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.adapters.drivers.base import CloudFile, DriverError
 from app.api.auth import require_session
-from app.db.models import UploadTask as UploadTaskRow
-from app.db.session import session_scope
 from app.services import upload_tasks, watch_manager
-from app.services.driver_factory import build_driver
-from app.services.upload_paths import PathGuardError
-from app.services.upload_tasks import UploadTaskError
+from app.services.upload_tasks import UploadTaskError, UploadTaskView
 
 router = APIRouter(
     prefix="/api/upload-tasks",
     tags=["upload-tasks"],
     dependencies=[Depends(require_session)],
 )
-
-
-async def _db() -> AsyncIterator[AsyncSession]:
-    """DB session 依赖。"""
-    async with session_scope() as db:
-        yield db
 
 
 class UploadTaskIn(BaseModel):
@@ -49,7 +39,6 @@ class UploadTaskIn(BaseModel):
     target_file_id: str = Field(default="", max_length=32)
     #: 监听目录（**完整路径**，面板上用目录浏览器选）
     watch_root: str = Field(..., min_length=1, max_length=1024)
-    #: 相对监听根的子路径（"" = 整个根）
     #: 是否递归子目录
     include_subdirs: bool = True
     #: 是否启用
@@ -106,9 +95,8 @@ class UploadTaskOut(BaseModel):
     runtime_error: str | None = None
 
 
-def _to_out(row: UploadTaskRow) -> UploadTaskOut:
-    """ORM → DTO（附带运行态）。"""
-    runtime = upload_tasks.get_runtime(row.id)
+def _to_out(row: UploadTaskView) -> UploadTaskOut:
+    """service 层 dataclass → 输出模型。"""
     return UploadTaskOut(
         id=row.id,
         name=row.name,
@@ -125,20 +113,19 @@ def _to_out(row: UploadTaskRow) -> UploadTaskOut:
         last_sync_at=row.last_sync_at,
         last_uploaded_count=row.last_uploaded_count,
         last_error=row.last_error,
-        listening=runtime.listening,
-        current=runtime.current,
-        total_uploaded=runtime.total_uploaded,
-        total_failed=runtime.total_failed,
-        total_bytes=runtime.total_bytes,
-        runtime_error=runtime.error,
+        listening=row.listening,
+        current=row.current,
+        total_uploaded=row.total_uploaded,
+        total_failed=row.total_failed,
+        total_bytes=row.total_bytes,
+        runtime_error=row.runtime_error,
     )
 
 
 @router.get("", response_model=list[UploadTaskOut])
-async def list_upload_tasks(db: AsyncSession = Depends(_db)) -> list[UploadTaskOut]:
+async def list_upload_tasks() -> list[UploadTaskOut]:
     """列出所有上传任务。"""
-    rows = await upload_tasks.list_tasks()
-    return [_to_out(row) for row in rows]
+    return [_to_out(row) for row in await upload_tasks.list_task_views()]
 
 
 @router.get("/local-dirs")
@@ -171,51 +158,19 @@ async def browse_local_dirs(path: str = "/") -> dict[str, Any]:
 @router.get("/targets")
 async def browse_targets(driver_id: int, parent_id: str = "") -> dict[str, Any]:
     """列出光鸭目录下的子目录（按 fileId 逐层浏览）。"""
-    from app.services.migration import persist_guangya_credential
-
-    async with session_scope() as db:
-        from app.db.models import Driver
-
-        driver_row = (
-            await db.execute(
-                select(Driver).where(Driver.id == driver_id)
-            )
-        ).scalar_one_or_none()
-        if driver_row is None:
-            raise HTTPException(status_code=404, detail=f"存储源不存在：{driver_id}")
-        if driver_row.type != "guangya":
-            raise HTTPException(
-                status_code=400,
-                detail=f"该接口需要光鸭存储源（当前：{driver_row.type}）",
-            )
-        credential = driver_row.credential
-        device_type = driver_row.device_type
-        row_id = driver_row.id
-
-    async def _on_refresh(cred: Any) -> None:
-        await persist_guangya_credential(row_id, cred)
-
-    driver = build_driver(
-        "guangya", credential, device_type, on_token_refresh=_on_refresh
-    )
-    lister = getattr(driver, "list_dir_by_cid", None)
-    if lister is None:
-        raise HTTPException(status_code=400, detail="该驱动不支持按 id 浏览目录")
     try:
-        entries: list[CloudFile] = await lister(parent_id)
-    except DriverError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        dirs = await upload_tasks.browse_guangya_dirs(driver_id, parent_id)
+    except UploadTaskError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return {
         "driver_id": driver_id,
         "parent_id": parent_id,
-        "dirs": [{"id": e.remote_id, "name": e.name} for e in entries if e.is_dir],
+        "dirs": [{"id": rid, "name": name} for rid, name in dirs],
     }
 
 
 @router.get("/{task_id}", response_model=UploadTaskOut)
-async def get_upload_task(
-    task_id: int, db: AsyncSession = Depends(_db)
-) -> UploadTaskOut:
+async def get_upload_task(task_id: int) -> UploadTaskOut:
     """取单个任务。
 
     **必须有这个路由**：否则 ``GET /api/upload-tasks/1`` 会落到 SPA 的
@@ -223,23 +178,20 @@ async def get_upload_task(
     JSON，实际拿到的是 SPA 页面。
     """
     try:
-        row = await upload_tasks.get_task(db, task_id)
+        row = await upload_tasks.get_task_view(task_id)
     except UploadTaskError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return _to_out(row)
 
 
 @router.post("", response_model=UploadTaskOut, status_code=201)
-async def create_upload_task(
-    payload: UploadTaskIn, db: AsyncSession = Depends(_db)
-) -> UploadTaskOut:
+async def create_upload_task(payload: UploadTaskIn) -> UploadTaskOut:
     """创建上传任务。
 
     创建后**立即启动监听**（若 ``enabled``）——不用重启服务。
     """
     try:
-        row = await upload_tasks.create_task(
-            db,
+        row = await upload_tasks.create_task_view(
             name=payload.name,
             driver_id=payload.driver_id,
             target_file_id=payload.target_file_id,
@@ -258,16 +210,14 @@ async def create_upload_task(
 
 
 @router.patch("/{task_id}", response_model=UploadTaskOut)
-async def update_upload_task(
-    task_id: int, payload: UploadTaskPatch, db: AsyncSession = Depends(_db)
-) -> UploadTaskOut:
+async def update_upload_task(task_id: int, payload: UploadTaskPatch) -> UploadTaskOut:
     """修改上传任务（含启停）。
 
     **启停会重启监听器**——改了监听目录 / 目标目录必须重启才生效。
     """
     fields = payload.model_dump(exclude_unset=True)
     try:
-        row = await upload_tasks.update_task(db, task_id, **fields)
+        row = await upload_tasks.update_task_view(task_id, **fields)
     except UploadTaskError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
@@ -276,12 +226,10 @@ async def update_upload_task(
 
 
 @router.delete("/{task_id}")
-async def delete_upload_task(
-    task_id: int, db: AsyncSession = Depends(_db)
-) -> dict[str, bool]:
+async def delete_upload_task(task_id: int) -> dict[str, bool]:
     """删除上传任务（先停监听）。"""
     try:
-        await upload_tasks.delete_task(db, task_id)
+        await upload_tasks.delete_task_view(task_id)
     except UploadTaskError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return {"ok": True}
@@ -291,11 +239,9 @@ async def delete_upload_task(
 async def sync_now(task_id: int) -> dict[str, Any]:
     """立即跑一次全量同步（补偿事件流漏掉的文件）。"""
     try:
-        return await watch_manager.sync_now(task_id)
-    except DriverError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except PathGuardError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return await upload_tasks.sync_task_now(task_id)
+    except UploadTaskError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @router.get("/{task_id}/status")
@@ -307,7 +253,7 @@ async def task_status(task_id: int) -> dict[str, Any]:
     return {**runtime.to_dict(), "watch": stats}
 
 
-async def _maybe_restart(row: UploadTaskRow) -> None:
+async def _maybe_restart(row: UploadTaskView) -> None:
     """按任务的启停状态重启监听器。
 
     失败只记日志与运行态的 error——**不抛给用户**：任务配置已经存好了，
@@ -326,7 +272,7 @@ async def _maybe_restart(row: UploadTaskRow) -> None:
             driver_id=row.driver_id,
             target_file_id=row.target_file_id,
             watch_root=row.watch_root,
-                include_subdirs=row.include_subdirs,
+            include_subdirs=row.include_subdirs,
             concurrency=row.concurrency,
             name=row.name,
             delete_after_upload=row.delete_after_upload,

@@ -149,7 +149,11 @@ async def resign_single(
     media.signature = sign(secret.get_secret_value(), media.id)
     media.updated_at = int(time.time())
     if media.strm_path:
-        url = build_redirect_url(settings.resolved_public_base_url, media.id, secret.get_secret_value())
+        url = build_redirect_url(
+            settings.resolved_public_base_url,
+            media.id,
+            secret.get_secret_value(),
+        )
         try:
             write_strm(Path(media.strm_path), url)
         except OSError as exc:

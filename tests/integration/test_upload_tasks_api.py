@@ -19,7 +19,8 @@ from httpx import ASGITransport, AsyncClient
 @pytest.fixture
 async def client(settings, db_engine, tmp_path):
     """带鉴权的测试客户端。"""
-    from app.api.routes import media_auth as auth, upload_tasks
+    from app.api.routes import media_auth as auth
+    from app.api.routes import upload_tasks
     from app.core.auth import init_hmac_key
     from app.services.svc_factory import init_services, reset_services
     from fastapi import FastAPI
@@ -45,7 +46,8 @@ async def client(settings, db_engine, tmp_path):
 @pytest.fixture
 async def anon_client(settings, db_engine):
     """未登录的客户端（测 401）。"""
-    from app.api.routes import media_auth as auth, upload_tasks
+    from app.api.routes import media_auth as auth
+    from app.api.routes import upload_tasks
     from app.core.auth import init_hmac_key
     from fastapi import FastAPI
 

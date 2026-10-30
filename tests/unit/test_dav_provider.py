@@ -260,8 +260,8 @@ def test_propfind_does_not_call_disk_usage(lib, monkeypatch):
 
     monkeypatch.setattr(shutil, "disk_usage", _tracking)
 
-    from app.webdav.app import build_dav_app
     from app.core.config import AppSettings
+    from app.webdav.app import build_dav_app
 
     settings = AppSettings(env="test", web_token="t", signing_secret="s")
     dav_app = build_dav_app(settings, str(lib))

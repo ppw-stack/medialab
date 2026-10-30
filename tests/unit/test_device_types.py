@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import pytest
-from app.adapters.drivers.device_types import (
+from app.domain.device_types import (
     ALL_DEVICE_TYPE_VALUES,
     ALL_DEVICE_TYPES,
     DEFAULT_DEVICE_TYPE,

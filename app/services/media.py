@@ -22,11 +22,11 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.drivers.base import CloudFile, DriverError
-from app.core.config import AppSettings
+from app.core.config import AppSettings, get_settings
 from app.core.logging import get_logger
 from app.db.models import Driver, MediaFile
 from app.services import attachments
@@ -37,6 +37,7 @@ from app.services.naming import (
     sanitize,
     strm_filename,
 )
+from app.services.rotation import RotationResult, resign_single, rotate_secret
 from app.services.signing import build_redirect_url, sign
 from app.services.strm_writer import StrmWriteResult, delete_strm, write_strm
 
@@ -125,6 +126,154 @@ def _signing_secret(settings: AppSettings) -> str:
             kind="config",
         )
     return secret.get_secret_value()
+
+
+# ================================================================ 查询与操作
+#
+# 以下函数是 **API 层与 DB 之间的唯一通道**——路由层不碰 ``app.db``
+# （分层约束，见 ``tests/unit/test_layering.py``）。每个都**自开事务**。
+
+
+@dataclass(slots=True)
+class MediaRow:
+    """一条媒体条目（供 API 组装响应）。"""
+
+    id: int
+    driver_id: int
+    remote_id: str
+    path: str
+    name: str
+    size: int
+    strm_path: str | None
+    #: 当前中转 URL（前端可直接预览 / 复制）；未配置密钥/地址时为空串
+    strm_url: str
+
+
+@dataclass(slots=True)
+class MediaPage:
+    """媒体条目分页结果。"""
+
+    total: int
+    items: list[MediaRow]
+
+
+@dataclass(slots=True)
+class MediaStats:
+    """媒体库统计（仪表盘用）。"""
+
+    total: int
+    total_size: int
+    #: 按存储源分组的条目数
+    per_driver: list[tuple[int, int]]
+    server_time: int
+
+
+async def list_media(
+    *,
+    q: str | None = None,
+    driver_id: int | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> MediaPage:
+    """列出媒体条目（分页 + 可选关键字 / 存储源过滤）。"""
+    from sqlalchemy import select
+
+    from app.db.models import MediaFile
+    from app.db.session import session_scope
+
+    conditions: list[Any] = []
+    if q:
+        conditions.append(MediaFile.name.like(f"%{q}%"))
+    if driver_id is not None:
+        conditions.append(MediaFile.driver_id == driver_id)
+
+    settings = get_settings()
+    secret = settings.signing_secret
+    base_url = settings.resolved_public_base_url
+    secret_value = secret.get_secret_value() if secret else ""
+
+    async with session_scope() as db:
+        total = (
+            await db.execute(select(func.count()).select_from(MediaFile).where(*conditions))
+        ).scalar_one()
+        rows = (
+            await db.execute(
+                select(MediaFile)
+                .where(*conditions)
+                .order_by(MediaFile.path)
+                .limit(min(limit, 500))
+                .offset(offset)
+            )
+        ).scalars().all()
+
+    items = [
+        MediaRow(
+            id=r.id,
+            driver_id=r.driver_id,
+            remote_id=r.remote_id,
+            path=r.path,
+            name=r.name,
+            size=r.size,
+            strm_path=r.strm_path,
+            strm_url=(
+                build_redirect_url(base_url, r.id, secret_value)
+                if secret_value and base_url
+                else ""
+            ),
+        )
+        for r in rows
+    ]
+    return MediaPage(total=total, items=items)
+
+
+async def media_stats() -> MediaStats:
+    """媒体库统计（仪表盘用）。"""
+    from sqlalchemy import func, select
+
+    from app.db.models import MediaFile
+    from app.db.session import session_scope
+
+    async with session_scope() as db:
+        total = (await db.execute(select(func.count()).select_from(MediaFile))).scalar_one()
+        total_size = (
+            await db.execute(select(func.coalesce(func.sum(MediaFile.size), 0)))
+        ).scalar_one()
+        per_driver = (
+            await db.execute(
+                select(MediaFile.driver_id, func.count())
+                .group_by(MediaFile.driver_id)
+                .order_by(MediaFile.driver_id)
+            )
+        ).all()
+
+    return MediaStats(
+        total=total,
+        total_size=int(total_size or 0),
+        per_driver=[(d, c) for d, c in per_driver],
+        server_time=int(time.time()),
+    )
+
+
+async def resign_media(media_ids: list[int]) -> int:
+    """批量重签（用当前密钥）并重写 STRM 文件。返回成功数。"""
+    from app.db.session import session_scope
+
+    settings = get_settings()
+    ok = 0
+    async with session_scope() as db:
+        for media_id in media_ids:
+            if await resign_single(db, settings, media_id):
+                ok += 1
+    return ok
+
+
+async def rotate_signing_secret(new_secret: str | None = None) -> RotationResult:
+    """轮换签名密钥（并批量重签 + 重写 STRM）。"""
+    from app.db.session import session_scope
+
+    settings = get_settings()
+    async with session_scope() as db:
+        return await rotate_secret(db, settings, new_secret)
 
 
 def build_strm_url(settings: AppSettings, media_id: int) -> str:

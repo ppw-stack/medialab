@@ -768,3 +768,133 @@ async def persist_guangya_credential(driver_id: int, cred: Any) -> None:
         logger.info("已写回刷新的光鸭凭据 driver_id=%s", driver_id)
     except Exception:
         logger.exception("写回刷新的光鸭凭据失败（本次任务不受影响）")
+
+
+# ================================================================ 目录浏览
+#
+# **API 层不碰 DB / 适配层** —— 路由层只调这些（分层约束，见
+# ``tests/unit/test_layering.py``）。
+
+
+class MigrationBrowseError(Exception):
+    """目录浏览失败。"""
+
+    def __init__(self, message: str, *, status_code: int = 400, kind: str = "invalid"):
+        super().__init__(message)
+        self.status_code = status_code
+        self.kind = kind
+
+
+async def _load_driver_row(driver_id: int, expected_type: str) -> Any:
+    """取存储源行并校验类型。
+
+    Raises:
+        MigrationBrowseError: 存储源不存在（404）/ 类型不符（400）。
+    """
+    from sqlalchemy import select
+
+    from app.db.models import Driver
+
+    async with session_scope() as db:
+        row = (
+            await db.execute(select(Driver).where(Driver.id == driver_id))
+        ).scalar_one_or_none()
+        if row is None:
+            raise MigrationBrowseError(
+                f"存储源不存在：{driver_id}", status_code=404, kind="not_found"
+            )
+        if row.type != expected_type:
+            raise MigrationBrowseError(
+                f"该接口需要 {expected_type} 存储源（当前：{row.type}）",
+                status_code=400,
+                kind="config",
+            )
+        return row
+
+
+def _default_source_cid(media_cid: str | None) -> str:
+    """115 浏览的兜底 cid —— **必须用媒体库 cid**。
+
+    不能用 ``"0"``：那是**115 账号根目录**，实测会列出「手机相册 / 资料 /
+    密钥 / 备份」等私人目录（实测输出见下方注释）。存储源没配媒体库 cid 时
+    应报错，而不是把账号根目录暴露给迁移页面——用户可能误把私人目录当
+    媒体库迁走。
+
+    实测 ``parent_id=0`` 的返回::
+
+        影视 / 手机相册 / 资料 / 密钥 / 备份 / …
+    """
+    cid = (media_cid or "").strip()
+    if not cid:
+        raise MigrationBrowseError(
+            "该存储源未配置媒体库 cid，请先在「存储源」里配置后再浏览目录",
+            status_code=400,
+            kind="config",
+        )
+    return cid
+
+
+async def _list_by_cid(driver: Any, cid: str) -> list[Any]:
+    """按 id 列直接子项。
+
+    ``list_dir_by_cid`` 不在 :class:`CloudDriver` 协议里（115 / 光鸭都有，
+    但协议只要求 ``list_dir``），故用 ``getattr`` 取——顺带给出友好报错。
+    """
+    from app.adapters.drivers.base import DriverError
+
+    lister = getattr(driver, "list_dir_by_cid", None)
+    if lister is None:
+        raise MigrationBrowseError(
+            "该存储源驱动不支持按 id 浏览目录", status_code=400, kind="config"
+        )
+    try:
+        entries: list[Any] = await lister(cid)
+        return entries
+    except DriverError as exc:
+        raise MigrationBrowseError(str(exc), status_code=400, kind="upstream") from exc
+
+
+async def browse_source_dirs(
+    driver_id: int, parent_id: str = ""
+) -> list[tuple[str, str]]:
+    """列出 115 目录下的子目录（按 cid 逐层浏览）。
+
+    返回 ``[(remote_id, name), ...]``——只含目录。
+    """
+    row = await _load_driver_row(driver_id, "p115")
+    cid = parent_id or _default_source_cid(row.media_cid)
+    driver = build_driver(row.type, row.credential, row.device_type)
+    entries = await _list_by_cid(driver, cid)
+    return [(e.remote_id, e.name) for e in entries if e.is_dir]
+
+
+async def browse_target_dirs(
+    driver_id: int, parent_id: str = ""
+) -> list[tuple[str, str]]:
+    """列出光鸭目录下的子目录（按 fileId 逐层浏览）。
+
+    返回 ``[(remote_id, name), ...]``——只含目录。
+    """
+    row = await _load_driver_row(driver_id, "guangya")
+
+    async def _on_refresh(cred: Any) -> None:
+        await persist_guangya_credential(row.id, cred)
+
+    driver = build_driver(
+        row.type, row.credential, row.device_type, on_token_refresh=_on_refresh
+    )
+    entries = await _list_by_cid(driver, parent_id or "")
+    return [(e.remote_id, e.name) for e in entries if e.is_dir]
+
+
+async def validate_migration_drivers(
+    source_driver_id: int, target_driver_id: int
+) -> None:
+    """校验迁移的源 / 目标存储源（类型必须对）。
+
+    Raises:
+        MigrationBrowseError: 存储源不存在（404）/ 类型不符（400）。
+    """
+    await _load_driver_row(source_driver_id, "p115")
+    await _load_driver_row(target_driver_id, "guangya")
+

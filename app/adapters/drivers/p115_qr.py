@@ -25,13 +25,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from app.adapters.drivers.device_types import (
+from app.adapters.drivers.qr_render import render_qr_png
+from app.core.logging import get_logger
+from app.domain.device_types import (
     DEFAULT_DEVICE_TYPE,
     describe_qr_incapable,
     is_qr_capable,
 )
-from app.adapters.drivers.qr_render import render_qr_png
-from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 

@@ -10,7 +10,6 @@ index.html，报「网络异常」。
 from __future__ import annotations
 
 import base64
-import re
 from pathlib import Path
 
 import pytest
@@ -31,8 +30,8 @@ def _basic(user: str, pwd: str) -> dict[str, str]:
 @pytest.fixture
 async def mounted_app(settings: AppSettings, db_engine, tmp_path: Path, monkeypatch):
     """构造一个挂了 DAV 的完整应用（含 SPA 兜底）。"""
-    from app.webdav import paths
     from app.main import create_app
+    from app.webdav import paths
 
     library = tmp_path / "library"
     (library / "电影").mkdir(parents=True)

@@ -65,6 +65,37 @@ class HealthReport:
         }
 
 
+async def db_available() -> bool:
+    """DB 是否可用（能 SELECT 1 即认为可用）。
+
+    API 层的探针端点用它——路由层不碰 ``app.db``（分层约束）。
+    """
+    from sqlalchemy import text
+
+    from app.db.session import get_engine
+
+    try:
+        async with get_engine().connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    except Exception:
+        return False
+    return True
+
+
+async def library_health_report() -> HealthReport:
+    """跑一次全库健康检查（**自开事务**）。
+
+    API 层不碰 DB——它只调本函数。原先路由里直接 ``session_scope()``
+    再调 :func:`check_library`，违反了「``api`` 层不依赖 ``db``」的分层
+    约束（见 ``tests/unit/test_layering.py``）。
+    """
+    from app.core.config import get_settings
+    from app.db.session import session_scope
+
+    async with session_scope() as db:
+        return await check_library(db, get_settings())
+
+
 async def check_library(
     db: AsyncSession, settings: AppSettings
 ) -> HealthReport:

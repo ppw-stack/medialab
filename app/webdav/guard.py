@@ -22,13 +22,13 @@ from collections.abc import Awaitable, Callable
 from starlette.requests import Request
 from starlette.types import Message, Receive, Scope, Send
 
-from app.webdav.paths import resolve_dav_root
-from app.webdav.provider import HEADER_ROOT, HEADER_USER
 from app.core.config import AppSettings, get_settings
 from app.core.logging import get_logger
 from app.services.dav_audit import dav_auditor
 from app.services.dav_auth import AUTH_LOCKED, dav_authenticator
 from app.services.dav_ratelimit import DavRateLimiter, dav_rate_limiter
+from app.webdav.paths import resolve_dav_root
+from app.webdav.provider import HEADER_ROOT, HEADER_USER
 
 logger = get_logger(__name__)
 

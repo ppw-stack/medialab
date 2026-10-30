@@ -149,9 +149,8 @@ async def require_session(
     """
     settings: AppSettings = get_settings()
     auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        if verify_bearer(auth[7:].strip()):
-            return "token"
+    if auth.startswith("Bearer ") and verify_bearer(auth[7:].strip()):
+        return "token"
     if session and verify_session(session):
         return settings.web_username
     raise HTTPException(status_code=401, detail="未登录")

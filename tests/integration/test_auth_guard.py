@@ -7,7 +7,8 @@
 from __future__ import annotations
 
 import pytest
-from app.api.routes import media_auth as auth, drivers, health, media, system
+from app.api.routes import drivers, health, media, system
+from app.api.routes import media_auth as auth
 from app.core.auth import SESSION_COOKIE, make_session
 
 

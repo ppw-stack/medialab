@@ -18,7 +18,8 @@ from sqlalchemy import select
 @pytest.fixture
 async def client(settings: AppSettings, db_engine):
     """已登录的面板客户端。"""
-    from app.api.routes import media_auth as auth, dav_users
+    from app.api.routes import dav_users
+    from app.api.routes import media_auth as auth
     from app.core.auth import init_hmac_key
     from fastapi import FastAPI
 

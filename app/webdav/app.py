@@ -21,10 +21,10 @@ from wsgidav.http_authenticator import HTTPAuthenticator
 from wsgidav.request_resolver import RequestResolver
 from wsgidav.wsgidav_app import WsgiDAVApp
 
-from app.webdav.domain_controller import DavDomainController
-from app.webdav.provider import ENV_USER, DavProvider
 from app.core.config import AppSettings
 from app.core.logging import get_logger
+from app.webdav.domain_controller import DavDomainController
+from app.webdav.provider import ENV_USER, DavProvider
 
 logger = get_logger(__name__)
 

@@ -17,7 +17,8 @@ from httpx import ASGITransport, AsyncClient
 
 @pytest.fixture
 async def client(settings, db_engine):
-    from app.api.routes import media_auth as auth, system
+    from app.api.routes import media_auth as auth
+    from app.api.routes import system
     from app.core.auth import init_hmac_key
     from app.services.svc_factory import init_services, reset_services
     from fastapi import FastAPI

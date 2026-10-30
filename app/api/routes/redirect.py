@@ -12,9 +12,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from app.core.logging import get_logger
-from app.db.session import session_scope
-from app.services.svc_factory import get_redirect_service
 from app.services.redirect import RedirectError
+from app.services.svc_factory import resolve_redirect
 
 logger = get_logger(__name__)
 
@@ -28,10 +27,8 @@ async def redirect_302(media_id: int, sig: str, request: Request) -> Response:
     播放器跟随这个 302 后，**GB 级的媒体字节流直连网盘 CDN，不经过本服务器**。
     """
     ua = request.headers.get("user-agent", "")
-    service = get_redirect_service()
     try:
-        async with session_scope() as db:
-            result = await service.resolve(db, media_id, sig, ua)
+        result = await resolve_redirect(media_id, sig, ua)
     except RedirectError as exc:
         logger.warning("中转失败 media_id=%s kind=%s: %s", media_id, exc.kind, exc)
         # 直接返回错误状态码比 302 到不可达地址更清晰。

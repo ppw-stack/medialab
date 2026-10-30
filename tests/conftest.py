@@ -35,14 +35,13 @@ import pytest
 import pytest_asyncio
 import respx
 from app.adapters.drivers.fake import FakeDriver
-from fastapi import FastAPI
 from app.core.config import AppSettings, set_settings
 from app.db.bootstrap import db_bootstrap
 from app.db.session import dispose_db, reset_db_for_test
 from app.services.driver_factory import register_driver
 from app.services.factory import AdapterFactory
+from fastapi import FastAPI
 from pydantic import SecretStr
-
 
 #: 测试用签名密钥（媒体库域的 STRM 中转签名）
 TEST_SIGNING_SECRET = "test-signing-secret"
@@ -318,10 +317,9 @@ async def app_client(
     挂载**媒体库域**的路由（认证 / 系统 / 中转），用 ASGITransport
     直连应用（不跑完整 lifespan——服务单例由 ``services`` fixture 管）。
     """
-    from httpx import ASGITransport, AsyncClient
-
     from app.api.routes import media_auth, redirect, system
     from app.services.svc_factory import init_services, reset_services
+    from httpx import ASGITransport, AsyncClient
 
     reset_services()
     init_services(app_settings)
