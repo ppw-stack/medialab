@@ -2,10 +2,30 @@
 
 ## 必读文档
 1. `README.md` — 现状与命令。
-2. `app/adapters/sites/user_data.py` + `app/adapters/sites/parsers/nexus_php.py` — FR-1.6 站点用户数据契约。
-3. `app/adapters/sites/parsers/attendance.py` — FR-3.6 站点签到解析 helper。
+2. `docs/merge-strmmanger.md` — **合并 strmmanger 的方案与实施记录**（含冲突清单与返工范围）。
+3. `app/adapters/sites/user_data.py` + `app/adapters/sites/parsers/nexus_php.py` — FR-1.6 站点用户数据契约。
+4. `app/adapters/sites/parsers/attendance.py` — FR-3.6 站点签到解析 helper。
+
+## 项目定位
+
+**一个应用装下两个业务域**，共用一套面板、一个 SQLite、一个 SPA：
+
+- **辅种域**（原 ptHelper）—— PT 站点拉取 / 免费种窗口 / 辅种巡检 / 孤儿清理
+- **媒体库域**（原 strmmanger）—— 网盘 STRM 生成 / 302 中转 / WebDAV / 上传
+
+**两个域的 API 前缀天然不冲突**：辅种域 `/api/v1/*`，媒体库域 `/api/*`。
 
 ## 工作准则
+- **分层约束是硬性的**（`tests/unit/test_layering.py` 固化）：
+  ```
+  domain → core → db → adapters → services → api
+  ```
+  - `api` 层**不碰 DB、不碰适配层**——业务逻辑全在 service 层
+  - `services` 层**不 import fastapi**，抛 `ServiceError` 由 API 层翻译成 HTTP 状态码
+  - `adapters` 层可独立单测（不依赖 db / services）
+  - `domain` 层是业务概念与常量（如 `DeviceType` / `FreeType`），不依赖任何层
+  - 改完跑 `uv run pytest tests/unit/test_layering.py` 验证
+- **两个域的时间列口径不同**（历史遗留，勿「顺手统一」）：辅种域是 `String(32)` 北京时间字符串，媒体库域是 `Integer` unix 时间戳。新增表按所在域选对应口径。
 - 改动窗口锚定（FR-3.4）或中止链路（FR-3.5）前，先确认需求基线与现状口径一致。
 - 数据删除以"不误删"为底线：hash 必须是 40 位 hex（拒绝 `all` / 通配），前端删除需确认，删磁盘数据单独开关并记审计日志。不引入回收站 / 保护期等未实现的机制。
 - **删除站点 = 级联删关联数据**（2026-10-23 决定）：`torrent_index`（拉取快照，可重建）+ `site_user_data`（用户数据快照）+ `task_queue`（该站推送队列行）在**同一事务**里删完再删父行。

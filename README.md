@@ -1,21 +1,79 @@
-# PT SeedHelper
+# MediaLab
 
-> 辅种自动化、免费种窗口看护与种子健康度监测。Python 3.12 + FastAPI + SQLite，Docker 一键部署。
+> 网盘媒体库治理（STRM 生成 / 整理 / 302 中转 / WebDAV / 上传）+ PT 辅种自动化
+> （免费种窗口看护 / 辅种巡检 / 孤儿清理）。
+> Python 3.13 + FastAPI + SQLite + Vue 3，Docker 一键部署。
+
+## 定位
+
+一个应用装下**两个业务域**，共用一套面板、一个 SQLite、一个 SPA。
+
+```
+                    ┌──────────────────────────────┐
+ 播放器 ──/302/…───▶│                              │
+ Infuse ──/dav/**───▶│   统一 FastAPI 应用            │
+                    │  ┌────────────────────────┐  │
+ 浏览器 ─────/──────▶│  │ 媒体库域               │  │
+                    │  │ /api/*  /302  /dav    │  │
+                    │  ├────────────────────────┤  │
+                    │  │ 辅种域                 │  │
+                    │  │ /api/v1/*  /metrics    │  │
+                    │  └────────────────────────┘  │
+                    │   统一 SPA（侧边栏两组菜单）    │
+                    │   统一 SQLite（19 张表）       │
+                    └──────────────────────────────┘
+```
+
+**媒体库域的核心主张不变**：媒体字节流**不经过本服务器**。
+
+```
+播放器 ──GET /302/<id>/<sig>──▶ 你的服务器（几 KB）
+       ◀──302 Location: cdn.115.com/...──┘
+       ──GET cdn.115.com/...──▶ 网盘 CDN   ← GB 级流量在此，完全不经服务器
+```
 
 ## 现状
 
-**M1 基础设施 + 核心功能**已落地：
+### 媒体库域（来自 strmmanger）
 
-- **M1**：项目骨架、配置中心、SQLite WAL + 短事务约定、下载器/站点双适配层、日志与审计、FastAPI 应用 + `/healthz` + `/metrics` + 完整 REST 骨架
+| Phase | 内容 | 状态 |
+|---|---|---|
+| P0 | 骨架：配置 / DB 迁移 / 驱动接口 / fake driver / 契约测试 | ✅ |
+| P1 | 中转：HMAC 签名 + L1/L2 本地直链缓存 + 单飞 + `/302` | ✅ |
+| P2 | 115 驱动：扫码登录 + cookie 加密 + 列目录 + 换直链 | ✅ **已实测** |
+| P2b | 光鸭盘驱动：扫码 / 短信登录 + Token 自动刷新 + 列目录 + 换直链 | ✅ **已实测** |
+| P3 | 生成：扫描 + STRM 写出 + 幂等 + 孤儿清理 + **附件同步** | ✅ **已实测** |
+| P4 | Web 应用：5 个模块 | ✅ |
+| P5 | 监控：健康检查 + 批量重签/重建 + 密钥轮换 | ✅ |
+| P6 | Docker 部署：多阶段构建 + compose 测试环境 | ✅ |
+| P7 | 迁移：115 → 光鸭盘（流式边扫边迁 + 幂等预检 + 失败即跳过） | ✅ **已实测** |
+| P8 | WebDAV：wsgidav 协议层 + 多用户 + 限流 + 审计 | ✅ **已实测** |
+| P9 | 上传：监听本地目录 → 光鸭盘（秒传不依赖 / 分片上传 / 幂等比对 / 覆盖进回收站 / 可选删本地） | ✅ **已实测** |
+
+### 辅种域（来自 ptHelper）
+
+- **M1**：项目骨架、配置中心、SQLite WAL + 短事务约定、下载器/站点双适配层、日志与审计
 - **F1 站点拉取**：9 站适配器（mteam / hdsky / hhanclub / audiences / hdhome / hddolby / ourbits / soulvoice / springsunday）拉取免费种 + RSS 清理
-- **F2 免费种窗口**：推送 + 监测 + 中止（push_free_torrents / monitor_free_window / FR-3.5 链路）
-- **FR-1.6 站点用户数据契约**（2026-10-18，2026-10-22 加时魔）：单方法 `get_user_snapshot` 拉 4 业务字段（上传/下载/做种数/下载中数）+ **时魔**（每小时获得的站点积分·合计口径，含是否封顶），刷新作业 `*/30 * * * *`（并发抓取，失败计入 failed 不写 0），Vue UI（`/user-data` 列表 + Sites drawer），API 端点 `/api/v1/user-data` 与 `/api/v1/sites/{id}/user-data`
-- **辅种快照**（2026-10-24）：辅种下载器种子量大（实测 3000+ 个），实时拉一次要 20s+ → 改为 `scan_cross_seed` 作业（cron `2,32 * * * *`）**定时抓取 → 落库 `cross_seed_snapshot` 表**，前端读快照而不打下载器接口。异常种子（tracker 未注册 / 数据丢失）**批量**暂停（按 100 个一批，不再逐个发指令）。同批抓取**辅种空间占用 + 磁盘剩余空间**（复用同一次拉取，不额外打接口）。异常明细与统计卡片均支持**批量删除**（不限数量，分批发送）
-- **辅种页两层 Tab**（2026-10-26）：外层按**下载器**分（数据维度），内层按**内容**分（概览 / 分组 / 异常 / 孤儿）。原本 4 块内容纵向堆叠有 4.1 屏，拆分后概览只占 1 屏
-- **辅种孤儿文件统计与清理**（2026-10-24）：把辅种站的下载目录**挂载**进容器，每天扫一次盘，找出「磁盘有、下载器里已无对应任务」的孤儿文件（用「仅删任务」清理种子时留下的）。实测辅种站 **63 个孤儿占 612.85 GB**（其中 39 个空目录）。支持**删除**孤儿文件（不可逆；删除前会重新扫描复核，有三重安全闸）
-- **FR-3.6 站点每日签到**（2026-10-22）：`daily_checkin` 作业（cron `37 8 * * *`）对 **4 站**自动签到 —— hhanclub / soulvoice / hdhome（NexusPHP `/attendance.php`）+ hdsky（自建 `showup.php`，**图形验证码走 AI 读码**，`app/core/ai.py`）。其余 5 站不支持（无此功能或需 Cloudflare Turnstile，后者实测服务端无法完成）
+- **F2 免费种窗口**：推送 + 监测 + 中止（push_free_torrents / monitor_free_window）
+- **FR-1.6 站点用户数据契约**：单方法 `get_user_snapshot` 拉 4 业务字段 + **时魔**，刷新作业 `*/30 * * * *`
+- **辅种快照**：`scan_cross_seed` 作业（cron `2,32 * * * *`）**定时抓取 → 落库 `cross_seed_snapshot`**，前端读快照而不打下载器接口
+- **辅种孤儿文件统计与清理**：把辅种站的下载目录**挂载**进容器，扫出「磁盘有、下载器里已无对应任务」的孤儿文件
+- **FR-3.6 站点每日签到**：`daily_checkin` 作业（cron `37 8 * * *`）对 **4 站**自动签到（图形验证码走 AI 读码）
 
-`F2 辅种引擎` / `F4 巡检` / `F5 清理` 自 **M2** 起实施。
+## 架构约束
+
+**依赖矩阵是干净的单向链**，由 `tests/unit/test_layering.py` 固化：
+
+```
+domain → core → db → adapters → services → api
+```
+
+- `domain` —— 业务概念与常量（`FreeType` / `PushStatus` / `DeviceType`），不依赖任何层
+- `api` —— **不碰 DB、不碰适配层**。业务逻辑全在 service 层
+- `services` —— **不 import fastapi**，抛 `ServiceError` 由 API 层翻译成 HTTP 状态码
+- `adapters` —— 可独立单测（不依赖 db / services）
+
+**两个业务域的 API 前缀天然不冲突**：辅种域 `/api/v1/*`，媒体库域 `/api/*`。
 
 ## 文档索引
 
@@ -25,14 +83,15 @@
 | `DEPLOY.md` | Docker 双环境部署流程 |
 | `LOCAL_ENV.md` | **本机 / prod 环境实况**：主机、工具链、端口、API 路径、凭据获取、部署链路 |
 | `AGENTS.md` | AI / 协作者行为规范 |
-| `docs/architecture-debt.md` | **架构债清单**：2026-10-21 全代码审查的发现（Phase 1~4 的输入） |
+| `docs/architecture-debt.md` | **架构债清单**：2026-10-21 全代码审查的发现 |
+| `docs/merge-strmmanger.md` | **合并 strmmanger 的方案与实施记录** |
 
 ## 快速开始
 
 ```bash
 # 1. 配置
 cp .env.example .env
-# 编辑 .env，填入面板凭据
+# 编辑 .env，填入面板凭据与签名密钥
 
 # 2. 启动
 docker compose up -d
@@ -45,8 +104,8 @@ curl http://localhost:8080/metrics | head
 ## 开发
 
 ```bash
-# 安装依赖（Python 3.12，由 uv 管理）
-uv sync --extra dev
+# 安装依赖（Python 3.13，由 uv 管理）
+uv sync --extra dev --extra p115 --extra guangya
 
 # 静态检查
 uv run ruff check app/ tests/
@@ -54,7 +113,10 @@ uv run mypy app/
 
 # 后端测试
 uv run pytest
-uv run pytest --cov=app          # 带覆盖率（当前基线 58%）
+uv run pytest --cov=app          # 带覆盖率
+
+# 前端
+cd web && npm install && npm run build
 ```
 
 ### 测试
