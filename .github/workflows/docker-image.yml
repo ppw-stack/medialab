@@ -25,7 +25,7 @@ on:
 
 env:
   REGISTRY: docker.io
-  IMAGE_NAME: ppw111/seedhelper
+  IMAGE_NAME: ppw111/medialab
 
 jobs:
   build:
@@ -83,8 +83,8 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           {
             echo "labels<<LABELS_EOF"
-            echo "org.opencontainers.image.title=seedhelper"
-            echo "org.opencontainers.image.description=PT 辅种自动化、免费种窗口看护与种子健康度监测"
+            echo "org.opencontainers.image.title=medialab"
+            echo "org.opencontainers.image.description=网盘媒体库治理(STRM/302/WebDAV/上传)+ PT 辅种自动化(免费种窗口/辅种巡检/孤儿清理)"
             echo "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}"
             echo "org.opencontainers.image.licenses=MIT"
             # revision 用**被测 commit**，不是 workflow_run 的 context.sha
