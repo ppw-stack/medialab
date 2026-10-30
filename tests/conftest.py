@@ -317,7 +317,8 @@ async def app_client(
     挂载**媒体库域**的路由（认证 / 系统 / 中转），用 ASGITransport
     直连应用（不跑完整 lifespan——服务单例由 ``services`` fixture 管）。
     """
-    from app.api.routes import media_auth, redirect, system
+    from app.api.auth import router as auth_router
+    from app.api.routes import redirect, system
     from app.services.svc_factory import init_services, reset_services
     from httpx import ASGITransport, AsyncClient
 
@@ -326,7 +327,7 @@ async def app_client(
 
     app = FastAPI()
     app.include_router(system.router)
-    app.include_router(media_auth.router)
+    app.include_router(auth_router)
     app.include_router(redirect.router)
 
     transport = ASGITransport(app=app)

@@ -19,7 +19,7 @@ from httpx import ASGITransport, AsyncClient
 @pytest.fixture
 async def client(settings, db_engine, tmp_path):
     """带鉴权的测试客户端。"""
-    from app.api.routes import media_auth as auth
+    from app.api.auth import router as auth
     from app.api.routes import upload_tasks
     from app.core.auth import init_hmac_key
     from app.services.svc_factory import init_services, reset_services
@@ -30,13 +30,13 @@ async def client(settings, db_engine, tmp_path):
     init_services(settings)
 
     app = FastAPI()
-    app.include_router(auth.router)
+    app.include_router(auth)
     app.include_router(upload_tasks.router)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         await c.post(
-            "/api/auth/login", json={"username": "tester", "password": "test-pass-123"}
+            "/api/v1/auth/login", json={"username": "tester", "password": "test-pass-123"}
         )
         yield c
 
@@ -46,7 +46,7 @@ async def client(settings, db_engine, tmp_path):
 @pytest.fixture
 async def anon_client(settings, db_engine):
     """未登录的客户端（测 401）。"""
-    from app.api.routes import media_auth as auth
+    from app.api.auth import router as auth
     from app.api.routes import upload_tasks
     from app.core.auth import init_hmac_key
     from fastapi import FastAPI
@@ -54,7 +54,7 @@ async def anon_client(settings, db_engine):
     init_hmac_key(settings.web_token.get_secret_value())
 
     app = FastAPI()
-    app.include_router(auth.router)
+    app.include_router(auth)
     app.include_router(upload_tasks.router)
 
     transport = ASGITransport(app=app)

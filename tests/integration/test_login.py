@@ -17,7 +17,7 @@ from httpx import ASGITransport, AsyncClient
 
 @pytest.fixture
 async def client(settings, db_engine):
-    from app.api.routes import media_auth as auth
+    from app.api.auth import router as auth
     from app.api.routes import system
     from app.core.auth import init_hmac_key
     from app.services.svc_factory import init_services, reset_services
@@ -29,7 +29,7 @@ async def client(settings, db_engine):
 
     app = FastAPI()
     app.include_router(system.router)
-    app.include_router(auth.router)
+    app.include_router(auth)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
@@ -42,7 +42,7 @@ class TestLoginFailure:
     async def test_wrong_password_returns_specific_message(self, client):
         """密码错误 → detail 是「用户名或密码错误」。"""
         resp = await client.post(
-            "/api/auth/login", json={"username": "tester", "password": "nope"}
+            "/api/v1/auth/login", json={"username": "tester", "password": "nope"}
         )
         assert resp.status_code == 401
         assert resp.json()["detail"] == "用户名或密码错误"
@@ -50,7 +50,7 @@ class TestLoginFailure:
     async def test_wrong_username_returns_same_message(self, client):
         """用户不存在 → **同样**的文案（不区分「用户不存在」）。"""
         resp = await client.post(
-            "/api/auth/login", json={"username": "nobody", "password": "admin"}
+            "/api/v1/auth/login", json={"username": "nobody", "password": "admin"}
         )
         assert resp.status_code == 401
         assert resp.json()["detail"] == "用户名或密码错误"
@@ -61,10 +61,10 @@ class TestLoginFailure:
         前端据此区分：前者显示在登录页，后者触发「清登录态 + 跳转」。
         """
         bad_login = await client.post(
-            "/api/auth/login", json={"username": "tester", "password": "nope"}
+            "/api/v1/auth/login", json={"username": "tester", "password": "nope"}
         )
         # 伪造一个无效 cookie 去访问受保护端点
-        resp = await client.get("/api/auth/me", headers={"Cookie": "medialab_session=garbage"})
+        resp = await client.get("/api/v1/auth/status", headers={"Cookie": "medialab_session=garbage"})
 
         assert bad_login.status_code == 401
         assert resp.status_code == 200  # /me 公开，返回未登录状态
@@ -72,14 +72,14 @@ class TestLoginFailure:
     async def test_missing_password_returns_401(self, client):
         """空密码 → 401（不 500）。"""
         resp = await client.post(
-            "/api/auth/login", json={"username": "tester", "password": ""}
+            "/api/v1/auth/login", json={"username": "tester", "password": ""}
         )
         assert resp.status_code == 401
 
     async def test_extra_fields_rejected(self, client):
         """多余字段被拒（防 typo 字段名静默生效）。"""
         resp = await client.post(
-            "/api/auth/login",
+            "/api/v1/auth/login",
             json={"username": "tester", "password": "test-pass-123", "admin": True},
         )
         assert resp.status_code == 422
@@ -88,7 +88,7 @@ class TestLoginFailure:
 class TestSessionFlow:
     async def test_login_success_sets_session_cookie(self, client):
         resp = await client.post(
-            "/api/auth/login", json={"username": "tester", "password": "test-pass-123"}
+            "/api/v1/auth/login", json={"username": "tester", "password": "test-pass-123"}
         )
         assert resp.status_code == 200
         assert resp.cookies.get(SESSION_COOKIE)
@@ -96,18 +96,18 @@ class TestSessionFlow:
     async def test_session_cookie_is_httponly_and_samesite_strict(self, client):
         """cookie 必须是 HttpOnly + SameSite=Strict。"""
         resp = await client.post(
-            "/api/auth/login", json={"username": "tester", "password": "test-pass-123"}
+            "/api/v1/auth/login", json={"username": "tester", "password": "test-pass-123"}
         )
         header = resp.headers.get("set-cookie", "")
         assert "httponly" in header.lower()
         assert "samesite=strict" in header.lower()
 
     async def test_me_reports_authenticated_after_login(self, client):
-        await client.post("/api/auth/login", json={"username": "tester", "password": "test-pass-123"})
-        resp = await client.get("/api/auth/me")
+        await client.post("/api/v1/auth/login", json={"username": "tester", "password": "test-pass-123"})
+        resp = await client.get("/api/v1/auth/status")
         assert resp.json()["authenticated"] is True
         assert resp.json()["username"] == "tester"
 
     async def test_me_reports_unauthenticated_without_cookie(self, client):
-        resp = await client.get("/api/auth/me")
+        resp = await client.get("/api/v1/auth/status")
         assert resp.json()["authenticated"] is False

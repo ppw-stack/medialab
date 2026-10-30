@@ -213,7 +213,6 @@ def _mount_routes(app: FastAPI) -> None:
         health,
         incremental_jobs,
         media,
-        media_auth,
         migrations,
         redirect,
         scan_jobs,
@@ -245,7 +244,6 @@ def _mount_routes(app: FastAPI) -> None:
     # 与辅种域的 ``/api/v1/*`` **零冲突**。
     for router in (
         system.router,
-        media_auth.router,
         drivers.router,
         media.router,
         health.router,

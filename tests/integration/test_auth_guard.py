@@ -1,14 +1,14 @@
 """面板鉴权的集成测试。
 
-**安全底线**：除 ``/api/auth/*`` 与 ``/302/*`` 外，所有 API 都必须要求登录。
+**安全底线**：除 ``/api/v1/auth/*`` 与 ``/302/*`` 外，所有 API 都必须要求登录。
 中转端点例外——它靠 URL 里的 HMAC 签名鉴权（播放器请求不带面板会话）。
 """
 
 from __future__ import annotations
 
 import pytest
+from app.api.auth import router as auth
 from app.api.routes import drivers, health, media, system
-from app.api.routes import media_auth as auth
 from app.core.auth import SESSION_COOKIE, make_session
 
 
@@ -26,7 +26,7 @@ async def protected_client(settings, db_engine, fake_driver):
 
     app = FastAPI()
     app.include_router(system.router)
-    app.include_router(auth.router)
+    app.include_router(auth)
     app.include_router(drivers.router)
     app.include_router(media.router)
     app.include_router(health.router)
@@ -57,7 +57,7 @@ class TestProtectedEndpoints:
     async def test_login_sets_cookie(self, protected_client):
         """登录成功下发 session cookie。"""
         resp = await protected_client.post(
-            "/api/auth/login", json={"username": "tester", "password": "test-pass-123"}
+            "/api/v1/auth/login", json={"username": "tester", "password": "test-pass-123"}
         )
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
@@ -65,20 +65,20 @@ class TestProtectedEndpoints:
 
     async def test_wrong_password_returns_401(self, protected_client):
         resp = await protected_client.post(
-            "/api/auth/login", json={"username": "tester", "password": "wrong"}
+            "/api/v1/auth/login", json={"username": "tester", "password": "wrong"}
         )
         assert resp.status_code == 401
 
     async def test_wrong_username_returns_401(self, protected_client):
         resp = await protected_client.post(
-            "/api/auth/login", json={"username": "nobody", "password": "admin"}
+            "/api/v1/auth/login", json={"username": "nobody", "password": "admin"}
         )
         assert resp.status_code == 401
 
     async def test_authenticated_can_access(self, protected_client):
         """登录后能访问受保护端点。"""
         await protected_client.post(
-            "/api/auth/login", json={"username": "tester", "password": "test-pass-123"}
+            "/api/v1/auth/login", json={"username": "tester", "password": "test-pass-123"}
         )
         resp = await protected_client.get("/api/drivers")
         assert resp.status_code == 200
@@ -94,17 +94,17 @@ class TestProtectedEndpoints:
     async def test_logout_clears_session(self, protected_client):
         """登出后 cookie 失效。"""
         await protected_client.post(
-            "/api/auth/login", json={"username": "tester", "password": "test-pass-123"}
+            "/api/v1/auth/login", json={"username": "tester", "password": "test-pass-123"}
         )
-        await protected_client.post("/api/auth/logout")
+        await protected_client.post("/api/v1/auth/logout")
         # 手动清 cookie（httpx 的 cookie jar 在响应里已删除）
         protected_client.cookies.delete(SESSION_COOKIE)
         resp = await protected_client.get("/api/drivers")
         assert resp.status_code == 401
 
-    async def test_me_endpoint_is_public(self, protected_client):
-        """``/api/auth/me`` 不需要登录（前端用它判断登录态）。"""
-        resp = await protected_client.get("/api/auth/me")
+    async def test_status_endpoint_is_public(self, protected_client):
+        """``/api/v1/auth/status`` 不需要登录（前端用它判断登录态）。"""
+        resp = await protected_client.get("/api/v1/auth/status")
         assert resp.status_code == 200
         assert resp.json()["authenticated"] is False
 

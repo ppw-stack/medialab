@@ -11,8 +11,8 @@ from httpx import ASGITransport, AsyncClient
 
 @pytest.fixture
 async def client(settings, db_engine):
+    from app.api.auth import router as auth
     from app.api.routes import drivers
-    from app.api.routes import media_auth as auth
     from app.core.auth import init_hmac_key
     from app.services.svc_factory import init_services, reset_services
     from fastapi import FastAPI
@@ -22,14 +22,14 @@ async def client(settings, db_engine):
     init_services(settings)
 
     app = FastAPI()
-    app.include_router(auth.router)
+    app.include_router(auth)
     app.include_router(drivers.router)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         # 登录
         await c.post(
-            "/api/auth/login", json={"username": "tester", "password": "test-pass-123"}
+            "/api/v1/auth/login", json={"username": "tester", "password": "test-pass-123"}
         )
         yield c
 

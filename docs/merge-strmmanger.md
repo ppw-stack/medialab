@@ -46,12 +46,24 @@ PT 站 ──► 下载器 ──► 本地文件 ──► 网盘 ──► STR
 | # | 冲突 | 处理 |
 |---|---|---|
 | C1 | session cookie 名 | 统一为 `medialab_session` |
-| C2 | 登录端点 | **两套都保留**：`/api/v1/auth/*`（辅种）+ `/api/auth/*`（媒体库），共用同一实现 |
+| C2 | 登录端点 | **统一到 `/api/v1/auth/*`**——删除 strm 的 `/api/auth/*`（含 `/me`）。登录态查询统一用 `/api/v1/auth/status` |
 | C3 | session 签名 payload | 统一为点分隔（`nonce.expires`）——旧 cookie 失效，重新登录一次 |
 | C4 | `app/services/factory.py` | strm 的改名 `svc_factory.py`（pt 的适配器工厂保留原名） |
 | C5 | `app/core/auth.py` | 取 strm 版（含明文自动升级）；Bearer 支持 **API Token + session 值**两种口径 |
 | C6 | 前端 `/settings` | pt 保留（调度 + 环境变量）；strm 的签名密钥页 → `/media-settings` |
 | C7 | SPA 静态托管 | 统一到 `main._mount_frontend`（带 hash 缓存 + 真 404） |
+
+### 认证收敛：取更严的契约
+
+合并前两边各有认证实现，行为有 4 处差异。**统一时取更严的那一边**
+（改实现，不改测试）：
+
+| 项 | strmmanger | ptHelper | 采用 | 理由 |
+|---|---|---|---|---|
+| `SameSite` | `strict` | `lax` | **strict** | 挡 CSRF。面板同源部署 + 全 fetch，无 form 提交，Strict 不会误伤 |
+| 空密码 | 401 | 422 | **401** | 「密码错误」不是「参数格式错」——前端该显示"用户名或密码错误" |
+| 多余字段 | 422（`extra="forbid"`） | 200 | **422** | 防 typo 字段名静默失效（前端写成 `passwd` 却"登录成功"） |
+| 响应体 | `{ok, username}` | `{status, username}` | **`{ok, username}`** | 布尔语义更直白；前端只读 `detail`（错误路径）与 `authenticated`（status 端点），不受影响 |
 
 ## 返工范围（选 ptHelper 基线的唯一代价）
 

@@ -9,11 +9,10 @@
 from __future__ import annotations
 
 import asyncio
-import hmac
 import threading
 
 from fastapi import APIRouter, Cookie, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.auth import (
     SESSION_COOKIE,
@@ -32,14 +31,34 @@ router = APIRouter(tags=["auth"])
 
 
 class LoginIn(BaseModel):
+    #: 多余字段直接拒（防 typo 字段名静默失效——比如前端写成
+    #: ``passwd``，少了 ``password`` 却因为默认值而"登录成功"）
+    model_config = ConfigDict(extra="forbid")
+
     #: 长度上限防超大请求体拖垮 PBKDF2 校验
     username: str = Field(..., min_length=1, max_length=64)
-    password: str = Field(..., min_length=1, max_length=1024)
+    #: **允许空串**（长度下限 0）——空密码是「密码错误」而非
+    #: 「参数格式错」，返回 401 更贴合语义（前端显示"用户名或密码错误"）。
+    #: 但**不能是缺字段**（缺字段由 pydantic 拦下 → 422）。
+    password: str = Field(..., max_length=1024)
 
 
 class StatusOut(BaseModel):
     authenticated: bool
     username: str | None = None
+
+
+class LoginOut(BaseModel):
+    """登录结果。"""
+
+    ok: bool
+    username: str
+
+
+class LogoutOut(BaseModel):
+    """登出结果。"""
+
+    ok: bool
 
 
 #: 时序均衡用的虚拟 PBKDF2 哈希（用户名不存在时也跑同样迭代）。
@@ -68,24 +87,24 @@ async def auth_status(
     request: Request,
     session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
 ) -> StatusOut:
-    """轻量级状态查询——前端启动时拉一次。"""
+    """轻量级状态查询——前端启动时拉一次。
+
+    **这是唯一的登录态查询端点**（合并前 strmmanger 有个同功能的
+    ``/api/auth/me``，现已并入本端点）。
+    """
     settings: AppSettings = get_settings()
-    # 也接受 Bearer Token（CLI / 脚本入口，FR-6.1）
-    if request.headers.get("Authorization", "").startswith("Bearer "):
-        provided = request.headers["Authorization"][7:]
-        if settings.web_token and hmac.compare_digest(
-            provided, settings.web_token.get_secret_value()
-        ):
-            return StatusOut(authenticated=True, username="token")
+    # 也接受 Bearer Token（CLI / 脚本入口，FR-6.1）——token 可以是
+    # API Token（WEB_TOKEN 本身）或 session cookie 值。
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer ") and verify_bearer(auth[7:].strip()):
+        return StatusOut(authenticated=True, username="token")
     if session and verify_session(session):
         return StatusOut(authenticated=True, username=settings.web_username)
     return StatusOut(authenticated=False)
 
 
-@router.post("/api/v1/auth/login")
-async def login(
-    payload: LoginIn, response: Response
-) -> dict[str, str]:
+@router.post("/api/v1/auth/login", response_model=LoginOut)
+async def login(payload: LoginIn, response: Response) -> LoginOut:
     settings: AppSettings = get_settings()
     # 防用户名枚举时序侧信道：无论用户名是否正确，都跑一次 PBKDF2 验证
     # （用户名不存在时对一个虚拟哈希跑同样 600k 迭代），让两条失败路径
@@ -117,18 +136,21 @@ async def login(
         value=token,
         max_age=SESSION_MAX_AGE,
         httponly=True,
-        samesite="lax",
+        # **SameSite=Strict**——面板是同源部署，且所有写操作都走
+        # fetch + 自定义 header（没有 form 提交），Strict 不会误伤。
+        # 它挡住的是「别的站点拿浏览器发跨站请求」——CSRF 的主路径。
+        samesite="strict",
         # 生产由反向代理加 HTTPS 时通过 WEB_COOKIE_SECURE=true 开启
         secure=settings.web_cookie_secure,
         path="/",
     )
-    return {"status": "ok", "username": settings.web_username}
+    return LoginOut(ok=True, username=settings.web_username)
 
 
-@router.post("/api/v1/auth/logout")
-async def logout(response: Response) -> dict[str, str]:
+@router.post("/api/v1/auth/logout", response_model=LogoutOut)
+async def logout(response: Response) -> LogoutOut:
     response.delete_cookie(SESSION_COOKIE, path="/")
-    return {"status": "ok"}
+    return LogoutOut(ok=True)
 
 
 async def require_session(

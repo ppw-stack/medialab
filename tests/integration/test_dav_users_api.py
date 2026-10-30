@@ -18,22 +18,22 @@ from sqlalchemy import select
 @pytest.fixture
 async def client(settings: AppSettings, db_engine):
     """已登录的面板客户端。"""
+    from app.api.auth import router as auth
     from app.api.routes import dav_users
-    from app.api.routes import media_auth as auth
     from app.core.auth import init_hmac_key
     from fastapi import FastAPI
 
     init_hmac_key(settings.web_token.get_secret_value())
 
     app = FastAPI()
-    app.include_router(auth.router)
+    app.include_router(auth)
     app.include_router(dav_users.router)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         # 登录
         resp = await c.post(
-            "/api/auth/login", json={"username": "tester", "password": "test-pass-123"}
+            "/api/v1/auth/login", json={"username": "tester", "password": "test-pass-123"}
         )
         assert resp.status_code == 200, resp.text
         yield c
