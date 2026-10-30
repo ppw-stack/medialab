@@ -15,7 +15,7 @@
 # ⚠️ 生产环境（192.168.0.128 Unraid）**不走本脚本**：
 #    - CI 只构建推送镜像，不部署（见 .github/workflows/docker-image.yml）
 #    - 128 上手动执行：
-#      cd /mnt/user/appdata/seedhelper/app
+#      cd /mnt/user/appdata/medialab
 #      TAG=latest docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d
 #    - 完整链路见 LOCAL_ENV.md §9「prod（128）的真实部署链路」
 #
@@ -41,8 +41,8 @@ shift || true
 
 # -- dev 环境配置 --
 ENV_FILE=".env"
-CONTAINER="seedhelper-dev"
-PORT=8080
+CONTAINER="medialab-dev"
+PORT=8092
 dev_compose() { echo "docker compose -f docker-compose.yml --env-file .env"; }
 
 # -- 前置检查 --
@@ -133,7 +133,7 @@ command:
 
 ⚠️ 生产环境（192.168.0.128 Unraid）不走本脚本：
    CI 只构建推送镜像不部署；在 128 上手动执行
-     cd /mnt/user/appdata/seedhelper/app
+     cd /mnt/user/appdata/medialab
      TAG=latest docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d
    完整链路见 LOCAL_ENV.md §9。
 EOF

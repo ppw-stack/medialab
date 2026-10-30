@@ -2,10 +2,10 @@
 
 两套环境**跑在两台不同的机器上**：
 
-- **dev** — 本机（192.168.0.92，arm64），本地 `build` 镜像，端口 8080
-- **prod** — 远端 128（192.168.0.128，Unraid Tower，x86_64），拉 Docker Hub 镜像，端口 8091
+- **dev** — 本机（192.168.0.92，arm64），本地 `build` 镜像，端口 8092
+- **prod** — 远端 128（192.168.0.128，Unraid Tower，x86_64），拉 Docker Hub 镜像，端口 8092
 
-镜像由 GitHub Actions 构建并推送到 Docker Hub（`docker.io/ppw111/seedhelper`，public）。
+镜像由 GitHub Actions 构建并推送到 Docker Hub（`docker.io/ppw111/medialab`，public）。
 **CI 只构建推送，不部署** —— 部署是手动两步（见 §4）。
 
 ## 0. 安全声明（先读）
@@ -18,7 +18,7 @@
 > 公网直连 **强烈建议** 在反代后做 HTTPS（cookie `Secure` 标志 + Let's Encrypt）。
 
 **未实现的项**（用户已确认）：
-- HTTPS / 反代（仅暴露 HTTP 8080/8091）
+- HTTPS / 反代（仅暴露 HTTP 8092）
 - 数据库自动备份（用户自备份）
 - 监控告警（仅暴露 `/healthz` + `/metrics` 端点）
 - 滚动发布 / 多实例（SQLite 单进程单 worker，每套环境单容器）
@@ -28,14 +28,14 @@
 | | dev | prod |
 |---|---|---|
 | 位置 | 本机 `192.168.0.92`（arm64） | 远端 `192.168.0.128`（Unraid Tower, x86_64） |
-| 端口 | **8080** | **8091** |
-| 容器名 | `seedhelper-dev` | `seedhelper-prod` |
-| 镜像 | 本地 `docker compose build` | `ppw111/seedhelper:latest`（Docker Hub） |
+| 端口 | **8092** | **8092** |
+| 容器名 | `medialab-dev` | `medialab-prod` |
+| 镜像 | 本地 `docker compose build` | `ppw111/medialab:latest`（Docker Hub） |
 | Compose 文件 | `docker-compose.yml` | `docker-compose.prod.128.yml` |
-| 数据目录 | `./data-dev/` | `/mnt/user/appdata/seedhelper/data` |
-| 日志目录 | `./logs-dev/` | `/mnt/user/appdata/seedhelper/logs` |
+| 数据目录 | `./data-dev/` | `/mnt/user/appdata/medialab/data` |
+| 日志目录 | `./logs-dev/` | `/mnt/user/appdata/medialab/logs` |
 | 凭据文件 | `.env` | `.env.prod` |
-| 资源上限 | 512MB / 1 核 | 1GB / 2 核 |
+| 资源上限 | 1GB / 2 核 | 1536MB / 2 核 |
 
 两套**完全独立**：不同机器、不同端口、不同 SQLite DB、不同 Web Token。
 数据不自动同步，需要时手工迁移（见 §7）。
@@ -49,7 +49,7 @@
 |---|---|---|
 | Docker Engine | 24.0+ | `docker --version` |
 | Docker Compose v2 | 2.20+ | `docker compose version` |
-| 主机端口 | 8080 空闲（dev） | `lsof -i :8080` |
+| 主机端口 | 8092 空闲（dev） | `lsof -i :8092` |
 | 磁盘 | >= 5 GB 可用 | `df -h .` |
 
 生产机（128）另需 SSH 访问：`ssh mp`（`~/.ssh/config` 别名 → `root@192.168.0.128`）。
@@ -97,7 +97,7 @@ cp .env.example .env.prod
 # 用上面的 secrets 命令生成 2 个新值，覆盖 .env.prod 里的占位
 ```
 
-`.env.prod` 需要同步到 128 的 `/mnt/user/appdata/seedhelper/app/`。
+`.env.prod` 需要同步到 128 的 `/mnt/user/appdata/medialab/app/`。
 
 > `.env` 和 `.env.prod` 都已在 `.gitignore`，不会进 git。
 > 但应**额外备份到密码管理器**。
@@ -126,10 +126,10 @@ docker compose up -d
 git push origin main
 
 # 2) 等 docker-image workflow 完成（确认镜像已推上去），然后 128 上拉新镜像
-ssh mp "docker pull ppw111/seedhelper:latest"
+ssh mp "docker pull ppw111/medialab:latest"
 
 # 3) 128 上重建容器
-ssh mp "cd /mnt/user/appdata/seedhelper/app && TAG=latest docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d"
+ssh mp "cd /mnt/user/appdata/medialab/app && TAG=latest docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d"
 ```
 
 > **CI 是有依赖链的**（2026-10-23 改）：`push` → `ci`（ruff/mypy/pytest/
@@ -141,7 +141,7 @@ ssh mp "cd /mnt/user/appdata/seedhelper/app && TAG=latest docker compose -f dock
 > 而 Docker Hub 上只有 `latest` 和 `main`，`0.1.0` 不存在，直接 `up -d` 会拉取失败。
 >
 > ⚠️ 若容器是旧版本手动创建的（没有 compose label），`up -d` 不会替换它，
-> 需先 `docker stop -t 60 seedhelper-prod && docker rm seedhelper-prod`。
+> 需先 `docker stop -t 60 medialab-prod && docker rm medialab-prod`。
 > 60s 宽限期对应 `stop_grace_period`，让在途作业收尾。
 
 启动后等待 15 秒让 healthcheck 通过。
@@ -150,18 +150,18 @@ ssh mp "cd /mnt/user/appdata/seedhelper/app && TAG=latest docker compose -f dock
 
 ```bash
 # dev
-curl -fsS http://localhost:8080/healthz
-# 期望：{"status":"ok","db":true,"version":"0.1.0"}
+curl -fsS http://localhost:8092/healthz
+# 期望：{"status":"ok","db":true,"version":"0.2.0"}
 
 # prod（远端）
-ssh mp "curl -fsS http://localhost:8091/healthz"
+ssh mp "curl -fsS http://localhost:8092/healthz"
 
 # 指标端点
-curl -fsS http://localhost:8080/metrics | head
+curl -fsS http://localhost:8092/metrics | head
 
 # Web UI
-open http://localhost:8080          # dev
-open http://192.168.0.128:8091      # prod
+open http://localhost:8092          # dev
+open http://192.168.0.128:8092      # prod
 # 浏览器登录：用户名=WEB_USERNAME、密码=WEB_PASSWORD
 
 # 状态总览
@@ -175,8 +175,8 @@ open http://192.168.0.128:8091      # prod
 git push origin main
 
 # 2) 128 上拉镜像 + 重建
-ssh mp "docker pull ppw111/seedhelper:latest"
-ssh mp "cd /mnt/user/appdata/seedhelper/app && TAG=latest docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d"
+ssh mp "docker pull ppw111/medialab:latest"
+ssh mp "cd /mnt/user/appdata/medialab/app && TAG=latest docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d"
 ```
 
 `stop_grace_period: 60s` 保证 SIGTERM 优雅停机（FR-8.2：等待在途作业收敛）。
@@ -186,14 +186,14 @@ SQLite 数据文件在各自的数据目录，**升级不会丢数据**。
 
 | 现象 | 排查 |
 |---|---|
-| 容器启动后立即 Exit 1 | `docker logs seedhelper-dev` 看 WEB_PASSWORD / WEB_TOKEN 是否缺失 |
+| 容器启动后立即 Exit 1 | `docker logs medialab-dev` 看 WEB_PASSWORD / WEB_TOKEN 是否缺失 |
 | `curl /healthz` connection refused | `docker compose ps` 看是否 healthy；`docker logs` 看启动日志 |
-| `db: false` in /healthz | SQLite 文件权限：`ls -la ./data-dev/`；`docker exec seedhelper-dev ls -la /app/data` |
+| `db: false` in /healthz | SQLite 文件权限：`ls -la ./data-dev/`；`docker exec medialab-dev ls -la /app/data` |
 | 浏览器登录后 session 立即丢失 | 检查浏览器是否禁用第三方 cookie；本机 HTTP 部署下应为同站 cookie，**不会**因 Secure 标志被拒 |
-| 调度作业不执行 | `curl -H "Authorization: Bearer $WEB_TOKEN" http://localhost:8080/api/v1/scheduler` 看 `jobs[].enabled`；`docker logs seedhelper-dev \| grep "已注册"` |
+| 调度作业不执行 | `curl -H "Authorization: Bearer $WEB_TOKEN" http://localhost:8092/api/v1/scheduler` 看 `jobs[].enabled`；`docker logs medialab-dev \| grep "已注册"` |
 | 某作业重启后又启用了 | 启停状态持久化在 `scheduler_job_settings` 表（2026-10-21 起）。用 UI toggle 或 API 改，不要直接改内存 |
 | 推送失败 | UI 设置 → 调度作业 → 立即执行 `push_free_torrents`；查容器日志 |
-| 容器内存超限被 kill | `docker stats seedhelper-dev`；`deploy.resources.limits.memory` 调到 1G |
+| 容器内存超限被 kill | `docker stats medialab-dev`；`deploy.resources.limits.memory` 调到 1G |
 | `git push` 报 HTTP2 framing error | 不是网络问题，`git config http.version HTTP/1.1` 后重试 |
 | prod 拉不到镜像 | compose 默认 tag `0.1.0` 不存在，必须显式 `TAG=latest` |
 | push 后没有新镜像 | 闸门红了就不构建镜像（2026-10-23 起 CI 有依赖链）。看 `ci` workflow 是否红；或 `docker-image` 被 `workflow_run` 的 job 级 `if` 跳过了（PR 分支不构建） |
@@ -201,19 +201,19 @@ SQLite 数据文件在各自的数据目录，**升级不会丢数据**。
 
 ## 8. 数据备份（手工）
 
-不自动备份，`seedhelper.db` 需用户自备份。
+不自动备份，`medialab.db` 需用户自备份。
 
 ### dev
 
 ```bash
-sqlite3 ./data-dev/seedhelper.db ".backup './backups/$(date +%Y%m%d)/seedhelper.db'"
+sqlite3 ./data-dev/medialab.db ".backup './backups/$(date +%Y%m%d)/medialab.db'"
 ```
 
 ### prod（远端）
 
 ```bash
-ssh mp "cd /mnt/user/appdata/seedhelper/data && \
-  sqlite3 seedhelper.db \".backup './seedhelper.db.bak.\$(date +%Y%m%d_%H%M%S)'\""
+ssh mp "cd /mnt/user/appdata/medialab/data && \
+  sqlite3 medialab.db \".backup './medialab.db.bak.\$(date +%Y%m%d_%H%M%S)'\""
 ```
 
 > 远程查库时加 `PRAGMA busy_timeout=8000;` 防锁；SQL 里的字符串用**单引号**
@@ -226,14 +226,14 @@ ssh mp "cd /mnt/user/appdata/seedhelper/data && \
 
 ```bash
 # 1) 停 prod 防写中
-ssh mp "cd /mnt/user/appdata/seedhelper/app && docker compose -f docker-compose.prod.128.yml stop"
+ssh mp "cd /mnt/user/appdata/medialab/app && docker compose -f docker-compose.prod.128.yml stop"
 
 # 2) 备份式拷贝（保持事务一致）
-ssh mp "cd /mnt/user/appdata/seedhelper/data && sqlite3 seedhelper.db \".backup './seedhelper.db.bak.migrate'\""
-scp ./data-dev/seedhelper.db mp:/mnt/user/appdata/seedhelper/data/seedhelper.db
+ssh mp "cd /mnt/user/appdata/medialab/data && sqlite3 medialab.db \".backup './medialab.db.bak.migrate'\""
+scp ./data-dev/medialab.db mp:/mnt/user/appdata/medialab/data/medialab.db
 
 # 3) 起 prod
-ssh mp "cd /mnt/user/appdata/seedhelper/app && docker compose -f docker-compose.prod.128.yml start"
+ssh mp "cd /mnt/user/appdata/medialab/app && docker compose -f docker-compose.prod.128.yml start"
 ```
 
 ## 9. 目录约定
@@ -256,7 +256,7 @@ ssh mp "cd /mnt/user/appdata/seedhelper/app && docker compose -f docker-compose.
 ### prod（128）
 
 ```
-/mnt/user/appdata/seedhelper/
+/mnt/user/appdata/medialab/
 ├── app/
 │   ├── docker-compose.prod.128.yml   # 手工同步（不是 git 仓库）
 │   └── .env.prod                     # 手工同步

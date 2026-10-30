@@ -41,11 +41,11 @@
 | | dev | prod |
 |---|---|---|
 | 位置 | 本机（192.168.0.92） | 远端 `192.168.0.128`（Unraid Tower, x86_64） |
-| 端口 | **8080** | **8091** |
-| 容器名 | `seedhelper-dev` | `seedhelper-prod` |
-| 镜像 | `seedhelper:dev-arm64`（本地构建） | `ppw111/seedhelper:latest`（Docker Hub） |
-| 数据目录 | `./data-dev/` | `/mnt/user/appdata/seedhelper/data` |
-| 日志目录 | `./logs-dev/` | `/mnt/user/appdata/seedhelper/logs` |
+| 端口 | **8092** | **8092** |
+| 容器名 | `medialab-dev` | `medialab-prod` |
+| 镜像 | `medialab:dev-arm64`（本地构建） | `ppw111/medialab:latest`（Docker Hub） |
+| 数据目录 | `./data-dev/` | `/mnt/user/appdata/medialab/data` |
+| 日志目录 | `./logs-dev/` | `/mnt/user/appdata/medialab/logs` |
 | 凭据文件 | `.env` | `.env.prod` |
 | Compose | `docker-compose.yml` | `docker-compose.prod.128.yml` |
 | 用途 | 开发调试 | 生产运行 |
@@ -56,8 +56,8 @@
 >
 > | 文件 | 目标 | 端口 | 数据 | 启动方式 |
 > |---|---|---|---|---|
-> | `docker-compose.yml` | dev（本机） | 8080 | `./data-dev` | `build` 本地构建 |
-> | `docker-compose.prod.128.yml` | **远端** prod（128） | 8091 | `/mnt/user/appdata/seedhelper/data` | 拉 Docker Hub 镜像，无 `build` |
+> | `docker-compose.yml` | dev（本机） | 8092 | `./data-dev` | `build` 本地构建 |
+> | `docker-compose.prod.128.yml` | **远端** prod（128） | 8092 | `/mnt/user/appdata/medialab/data` | 拉 Docker Hub 镜像，无 `build` |
 >
 > `scripts/deploy.sh` **只管 dev**（原来还有 `prod` / `all` 分支指向已删除的
 > 本机 prod compose，那个分支会把人引到错误的地方）。
@@ -116,8 +116,8 @@
 | qBittorrent（容器） | `http://192.168.0.92:8081` | 本机 qB 容器，宿主 8081 → 容器 8080 |
 | Transmission | `http://192.168.0.92:9092` | `tr-local`，仪表盘日志显示**当前不可达** |
 | Transmission | `http://192.168.0.172:9091` | `tr-172`，**间歇性超时**（已知现象） |
-| dev seedhelper | http://localhost:8080 | |
-| prod seedhelper | http://192.168.0.128:8091 | |
+| dev medialab | http://localhost:8092 | |
+| prod medialab | http://192.168.0.128:8092 | |
 
 下载器实例存在 DB 表 `downloader_instances`（字段 `id` / `name` / `type` / `url` / `username` / `password` / `save_path` / `is_default` / `enabled` / `verify_tls` / `is_cross_seed`），
 共 4 条：`qb-local`(qbittorrent) / `tr-local`(transmission) / `mock-cs` / `tr-172`(transmission)。
@@ -127,7 +127,7 @@
 
 ### 辅种站的 NAS 挂载（孤儿文件统计用）
 
-辅种数据在 **192.168.0.172**（NAS）上，seedhelper 容器看不到它——
+辅种数据在 **192.168.0.172**（NAS）上，medialab 容器看不到它——
 除非把目录**只读挂载**进来。下载器本身**没有**浏览文件系统的接口
 （TR 的 RPC spec 不提供 filesystem 浏览，qB 也没有列目录 API）。
 
@@ -196,7 +196,7 @@ python -c "import secrets; print('WEB_TOKEN=' + secrets.token_urlsafe(32))"
 除登录页的 cookie 方案外，脚本 / CLI 走 Bearer Token：
 
 ```bash
-curl -H "Authorization: Bearer $WEB_TOKEN" http://localhost:8080/api/v1/scheduler
+curl -H "Authorization: Bearer $WEB_TOKEN" http://localhost:8092/api/v1/scheduler
 ```
 
 ## 6. 调度作业（8 个）
@@ -414,9 +414,9 @@ uv run python scripts/capture_mybonus_fixtures.py --db <dev 库路径>
 
 | 项 | 位置 |
 |---|---|
-| dev SQLite | `data-dev/seedhelper.db`（另有 1 个 `.bak.*`） |
-| prod SQLite | 远端 `/mnt/user/appdata/seedhelper/data/` |
-| 日志 | `logs-dev/` / 远端 `/mnt/user/appdata/seedhelper/logs/` |
+| dev SQLite | `data-dev/medialab.db`（另有 1 个 `.bak.*`） |
+| prod SQLite | 远端 `/mnt/user/appdata/medialab/data/` |
+| 日志 | `logs-dev/` / 远端 `/mnt/user/appdata/medialab/logs/` |
 | 下载目录 | `/data/torrents`（dev 挂载） |
 
 - SQLite 默认走 **WAL**，但 dev / prod compose 都设了 `DB_JOURNAL_MODE=DELETE`
@@ -425,7 +425,7 @@ uv run python scripts/capture_mybonus_fixtures.py --db <dev 库路径>
 - `user_version` 迁移为**批次制**，老库不会重复 +8h，重复执行幂等。
 - 配置目录 `config/` 挂载进容器（`local.yaml` 属本地配置，已 gitignore）。
 - **备份无自动轮转**（按决策不引入新机制）：备份文件靠人工清理。
-  2026-10-21 已清理一轮 —— dev 只留 `seedhelper.db` + 1 个 `.bak.*`；
+  2026-10-21 已清理一轮 —— dev 只留 `medialab.db` + 1 个 `.bak.*`；
   prod 留 3 个（最新两次部署前 + `predeploy` 基线）。
   清理前务必逐个 `PRAGMA integrity_check` 确认，**损坏的副本没有抢救价值**
   （`.recover` 早已做过），可直接删。
@@ -440,17 +440,17 @@ uv run mypy app/
 cd web && npx vue-tsc -b
 cd web && npx vite build
 
-# 前端测试（需先起 dev 容器 localhost:8080）
+# 前端测试（需先起 dev 容器 localhost:8092）
 cd web && npx playwright test
 
 # 部署（脚本只管 dev；prod 见下方「真实部署链路」）
-./scripts/deploy.sh                 # dev：build + up + healthcheck（本机 8080）
+./scripts/deploy.sh                 # dev：build + up + healthcheck（本机 8092）
 ./scripts/deploy.sh status          # 查状态
 ./scripts/deploy.sh logs            # 跟日志
 
 # 远端操作
-ssh mp "docker ps --filter name=seedhelper"
-ssh mp "docker logs -f seedhelper-prod --tail 100"
+ssh mp "docker ps --filter name=medialab"
+ssh mp "docker logs -f medialab-prod --tail 100"
 ```
 
 ### 本机构建镜像给 prod 用
@@ -458,7 +458,7 @@ ssh mp "docker logs -f seedhelper-prod --tail 100"
 本机是 arm64，prod（128）是 x86_64，**不能直接 `docker save` 搬运**。需要跨架构时用 buildx：
 
 ```bash
-docker buildx build --platform linux/amd64 -t ppw111/seedhelper:latest --push .
+docker buildx build --platform linux/amd64 -t ppw111/medialab:latest --push .
 ```
 
 通常走 CI 即可：push 到 `main` → GitHub Actions 自动构建并推 Docker Hub → 128 上 `docker pull` 后重建。
@@ -472,14 +472,14 @@ CI **只构建推送镜像，不部署**（无 ssh/deploy job）。实际链路�
 git push origin main
 
 # 2) 128 上拉新镜像
-ssh mp "docker pull ppw111/seedhelper:latest"
+ssh mp "docker pull ppw111/medialab:latest"
 
 # 3) 128 上重建容器（注意用 .128.yml 那个文件 + TAG=latest）
-ssh mp "cd /mnt/user/appdata/seedhelper/app && TAG=latest docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d"
+ssh mp "cd /mnt/user/appdata/medialab/app && TAG=latest docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d"
 ```
 
 > ⚠️ **第 3 步必须带 `TAG=latest`**（2026-10-22 实测确认）。
-> `docker-compose.prod.128.yml` 里写的是 `image: docker.io/ppw111/seedhelper:${TAG:-0.1.0}`，
+> `docker-compose.prod.128.yml` 里写的是 `image: docker.io/ppw111/medialab:${TAG:-0.1.0}`，
 > 而 `.env.prod` **没有** `TAG` 键 → compose 会解析成 `0.1.0`，
 > 部署的是**旧镜像**（`0.1.0` 标签自 10 月起就没更新过），
 > 容器却会显示"重建成功"，**极易误判成部署成功**。
@@ -487,7 +487,7 @@ ssh mp "cd /mnt/user/appdata/seedhelper/app && TAG=latest docker compose -f dock
 >
 > ⚠️ **部署前先备份 DB**（手工，见 DEPLOY.md §8）：
 > ```bash
-> ssh mp "cd /mnt/user/appdata/seedhelper/data && sqlite3 seedhelper.db \".backup './seedhelper.db.bak.\$(date +%Y%m%d_%H%M%S)'\""
+> ssh mp "cd /mnt/user/appdata/medialab/data && sqlite3 medialab.db \".backup './medialab.db.bak.\$(date +%Y%m%d_%H%M%S)'\""
 > ```
 > 备份后用 `PRAGMA integrity_check;` 确认（损坏的副本没有抢救价值）。
 >
@@ -501,7 +501,7 @@ ssh mp "cd /mnt/user/appdata/seedhelper/app && TAG=latest docker compose -f dock
 > 判断镜像有没有推上去仍要看 Docker Hub 的 tag `last_updated`，
 > 不要只看 workflow 的红绿灯。
 
-> ⚠️ 128 上的 `/mnt/user/appdata/seedhelper/app/` **不是 git 仓库**，且代码副本已陈旧
+> ⚠️ 128 上的 `/mnt/user/appdata/medialab/app/` **不是 git 仓库**，且代码副本已陈旧
 > （仍是 10 月 14 日的版本）。容器真正跑的是 Docker Hub 镜像里的代码，
 > 挂载到容器的只有 `config/` `data/` `logs/` 三个目录。
 > **不要以为改 128 上的 `app/` 目录就能生效** —— 改 compose 文件需同步在 128 上落地。
@@ -540,7 +540,7 @@ push main ──→ ci（ruff+mypy+pytest / vue-tsc+oxlint）──全绿──�
      （`Compute image tags` 步骤），OCI `revision` 标签也用被测 commit
 - 产物 tag：`latest` + `main` + `sha-<short>`；命中 `v*` semver tag 时额外
   产出版本号 tag（`v1.2.3` → `1.2.3` 与 `1.2`）
-- 产物：`docker.io/ppw111/seedhelper`（public，构建后校验匿名可拉）
+- 产物：`docker.io/ppw111/medialab`（public，构建后校验匿名可拉）
 - 基镜像：`python:3.12-slim`
 - 缓存：`type=gha`
 - 已硬化（`a82cd10`）：timeout、concurrency、`set -euo pipefail`、jq 安全构造 JWT、凭据不回显

@@ -134,13 +134,17 @@ source = ["app"]
 branch = true
 
 [tool.coverage.report]
-# 覆盖率门槛（当前实测 58%）。
+# 覆盖率门槛。
 #
-# 这里设 0（不阻断）—— 门槛随测试补充**逐步抬高，且只许升不许降**。
-# 当前 58% 远低于原定的 70%，硬套会让 CI 一上来就红，等于没有闸门。
+# **当前实测 69%**（合并 strmmanger 后——它那侧的测试覆盖率高，把
+# 整体从 58% 抬上来了）。
+#
+# 门槛随测试补充**逐步抬高，且只许升不许降**。这里设 65（留 4 个点
+# 缓冲）——既能防覆盖率大幅下滑，又不至于因为合理的小重构（比如删掉
+# 一段被大量测试覆盖的死代码）莫名变红。
 #
 # 每次补测试后：跑 `uv run pytest --cov=app` 看实际值，
 # 把这个数字往上调（不低于当前实测值）。
-fail_under = 0
+fail_under = 65
 show_missing = true
 exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "raise NotImplementedError"]
