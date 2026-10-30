@@ -11,6 +11,18 @@
 - **禁止真实网络**：``no_network`` autouse fixture 用 respx 接管全部
   httpx 传输层，未 mock 的请求直接抛错（respx 的
   ``AllMockedAssertionError``）。用例需要发 HTTP 时用 respx 显式 mock。
+
+**合并说明（strmmanger 并入）**：
+
+两侧原本各有 ``conftest.py``，``settings`` fixture **同名但语义不同**
+（辅种域是 session 级、指向固定临时目录；媒体库域是 function 级、每用例
+一份）。合并后**统一用辅种域的 session 级版本**（下方 ``settings``）：
+
+- 媒体库域用例依赖的 ``signing_secret`` / ``public_base_url`` 已并入
+  同一个 settings 对象；
+- 媒体库域原本的 ``db_engine`` / ``db_session`` fixture 保留为**别名**，
+  指向辅种域的 ``db`` fixture（同一套 engine，只是返回形式不同），
+  故 strm 的测试代码**零改动**即可运行。
 """
 
 from __future__ import annotations
@@ -22,11 +34,18 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 import respx
+from app.adapters.drivers.fake import FakeDriver
+from fastapi import FastAPI
 from app.core.config import AppSettings, set_settings
 from app.db.bootstrap import db_bootstrap
 from app.db.session import dispose_db, reset_db_for_test
+from app.services.driver_factory import register_driver
 from app.services.factory import AdapterFactory
 from pydantic import SecretStr
+
+
+#: 测试用签名密钥（媒体库域的 STRM 中转签名）
+TEST_SIGNING_SECRET = "test-signing-secret"
 
 
 @pytest.fixture(scope="session")
@@ -36,10 +55,10 @@ def settings(tmp_path_factory: pytest.TempPathFactory) -> AppSettings:
     ``scheduler_enabled=False`` 是关键 —— 否则 APScheduler 会在测试里
     真的去拉站点 / 推下载器。
     """
-    root: Path = tmp_path_factory.mktemp("seedhelper")
+    root: Path = tmp_path_factory.mktemp("medialab")
     return AppSettings(
         env="test",
-        app_name="SeedHelperTest",
+        app_name="MediaLabTest",
         data_dir=root,
         log_dir=root / "logs",
         db_path=root / "test.db",
@@ -49,6 +68,9 @@ def settings(tmp_path_factory: pytest.TempPathFactory) -> AppSettings:
         scheduler_enabled=False,
         log_json=False,
         log_level="WARNING",
+        # -- 媒体库域 --
+        signing_secret=SecretStr(TEST_SIGNING_SECRET),
+        public_base_url="http://localhost:8080",
     )
 
 
@@ -60,23 +82,62 @@ def app_settings(settings: AppSettings) -> Iterator[AppSettings]:
     set_settings(None)
 
 
+@pytest.fixture
+def settings_copy(settings: AppSettings) -> AppSettings:
+    """settings 的**独立副本**——给会**就地改**配置的服务用。
+
+    ⚠️ ``settings`` 是 **session 级**对象，被所有用例共享。会改配置的
+    服务（如 :func:`app.services.rotation.rotate_secret` 轮换签名密钥时
+    会**就地**写 ``settings.signing_secret``）若直接用共享对象，改动会
+    **泄漏到后续所有用例**——表现为后面随机冒出的 403「签名无效」。
+
+    故这类用例必须用本 fixture 拿副本，改动随用例结束而消失。
+    """
+    return settings.model_copy(deep=True)
+
+
 @pytest_asyncio.fixture
-async def db(app_settings: AppSettings) -> AsyncIterator[None]:
-    """重建 DB engine + 建表（function 级 —— 见模块 docstring）。
+async def db_engine(app_settings: AppSettings) -> AsyncIterator[object]:
+    """重建 DB engine + 建表，产出 ``(engine, session_factory)``。
+
+    **function 级** —— 见模块 docstring（aiosqlite 连接池绑定创建它的
+    event loop，跨用例复用会抛 ``InterfaceError``）。
+
+    这是**唯一**真正重置 engine 的 fixture。辅种域的 :func:`db` 与
+    媒体库域的 :func:`db_engine` / :func:`db_session` 都建立在它之上
+    ——**只建一次**，避免两个 fixture 交替时把对方的 engine 换掉
+    （那会让先跑的用例拿到已废弃的 engine，报出难懂的 DB 错误）。
+    """
+    _remove_db_files(app_settings)
+    await reset_db_for_test(app_settings)
+    await db_bootstrap.create_all()
+    from app.db.session import get_engine, get_session_factory
+
+    yield get_engine(), get_session_factory()
+    await dispose_db()
+
+
+@pytest_asyncio.fixture
+async def db(db_engine) -> AsyncIterator[None]:
+    """辅种域的 DB fixture（**基于** :func:`db_engine`，不重复建库）。
 
     建表走 :meth:`app.db.bootstrap.DbBootstrap.create_all`（与生产同一条路径），
-    它还包含 22 条幂等 ALTER 迁移 —— 测试与生产的表结构必须一致，
+    它还包含全部幂等 ALTER 迁移 —— 测试与生产的表结构必须一致，
     否则「测试过了但 prod 崩」这类问题会被漏掉。
 
     **每个用例前删库文件**：``settings`` 是 session 级（DB 路径固定），
     不删的话上一个用例的行会漏进下一个（``task_queue`` 的 ``idem_key``
     唯一约束会直接让「幂等入队」用例互相干扰）。
     """
-    _remove_db_files(app_settings)
-    await reset_db_for_test(app_settings)
-    await db_bootstrap.create_all()
     yield
-    await dispose_db()
+
+
+@pytest_asyncio.fixture
+async def db_session(db_engine) -> AsyncIterator[object]:
+    """媒体库域测试用的独立 DB session。"""
+    _engine, factory = db_engine
+    async with factory() as session:
+        yield session
 
 
 def _remove_db_files(settings: AppSettings) -> None:
@@ -99,6 +160,38 @@ def no_network() -> Iterator[respx.MockRouter]:
     """
     with respx.mock(assert_all_mocked=True) as router:
         yield router
+
+
+@pytest.fixture(autouse=True)
+def no_rate_limit() -> Iterator[None]:
+    """测试里关掉全局限速——否则每个用例都慢 1 秒。
+
+    限速器本身的测试见 ``tests/unit/test_rate_limit.py``（那里显式构造）。
+    """
+    from app.core.rate_limit import rate_limiter
+
+    original = rate_limiter.default_interval
+    rate_limiter.set_interval(0.0)
+    yield
+    rate_limiter.set_interval(original)
+
+
+@pytest.fixture(autouse=True)
+def reset_dav_rate_limiter() -> Iterator[None]:
+    """每个用例前清空 WebDAV 限流器的桶（autouse）。
+
+    **为什么需要**：``dav_rate_limiter`` 是**进程级单例**，按 IP + 按用户
+    各记一个令牌桶。不清的话上一个用例消耗的令牌会**留给下一个用例**——
+    用例一多就会撞上限流阈值，表现为莫名其妙的 **429**。
+
+    strmmanger 单库时测试文件少、顺序凑巧没触发；合并后用例数翻倍，
+    立刻暴露。本 fixture 让每个用例从「零消耗」开始，与用例顺序无关。
+    """
+    from app.services.dav_ratelimit import dav_rate_limiter
+
+    dav_rate_limiter.reset()
+    yield
+    dav_rate_limiter.reset()
 
 
 @pytest.fixture(autouse=True)
@@ -141,6 +234,108 @@ def factory() -> Iterator[AdapterFactory]:
     f = factory_mod.init_factory()
     yield f
     factory_mod._factory = prev
+
+
+@pytest.fixture
+def fake_driver() -> FakeDriver:
+    """假驱动实例，并注册到驱动工厂（type = ``fake``）。
+
+    注册的工厂**返回同一个实例**——否则服务层每次构造驱动都会拿到空驱动，
+    测试里 ``add_file`` 加的文件就找不到了。
+    """
+    driver = FakeDriver()
+    register_driver("fake", lambda credential=None, device_type=None: driver)
+    return driver
+
+
+# 上传相关的固件放在 ``tests/unit/upload_fakes.py``——那里也有一个叫
+# ``fake_driver`` 的固件，**同名会冲突**，故这里显式导入上传那套并改名。
+from tests.unit.upload_fakes import (  # noqa: E402
+    FakeDriver as UploadFakeDriver,
+)
+from tests.unit.upload_fakes import (  # noqa: E402
+    FakeUploader as UploadFakeUploader,
+)
+
+
+@pytest.fixture
+def upload_driver() -> UploadFakeDriver:
+    """上传用的假光鸭驱动（内存目录树）。"""
+    return UploadFakeDriver()
+
+
+@pytest.fixture
+def upload_uploader() -> UploadFakeUploader:
+    """上传用的假上传器（记录调用，不真传）。"""
+    return UploadFakeUploader()
+
+
+@pytest.fixture
+def http_mock():
+    """构造带 ``MockTransport`` 的 httpx.AsyncClient（附件下载测试用）。
+
+    用法::
+
+        async with http_mock(b"JPEG") as client:
+            ...
+    """
+    from contextlib import asynccontextmanager
+
+    import httpx
+
+    @asynccontextmanager
+    async def _make(
+        body: bytes = b"", status: int = 200
+    ) -> AsyncIterator[httpx.AsyncClient]:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(status, content=body)
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), follow_redirects=True
+        ) as client:
+            yield client
+
+    return _make
+
+
+@pytest.fixture
+def services(app_settings: AppSettings) -> Iterator[None]:
+    """初始化服务单例（直链缓存 + 中转服务）。"""
+    from app.services.svc_factory import init_services, reset_services
+
+    reset_services()
+    init_services(app_settings)
+    yield
+    reset_services()
+
+
+@pytest_asyncio.fixture
+async def app_client(
+    app_settings: AppSettings, db_engine, fake_driver
+) -> AsyncIterator[object]:
+    """已初始化 lifespan 依赖的测试客户端（媒体库域专用）。
+
+    挂载**媒体库域**的路由（认证 / 系统 / 中转），用 ASGITransport
+    直连应用（不跑完整 lifespan——服务单例由 ``services`` fixture 管）。
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    from app.api.routes import media_auth, redirect, system
+    from app.services.svc_factory import init_services, reset_services
+
+    reset_services()
+    init_services(app_settings)
+
+    app = FastAPI()
+    app.include_router(system.router)
+    app.include_router(media_auth.router)
+    app.include_router(redirect.router)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
+
+    reset_services()
 
 
 @pytest.fixture(autouse=True)

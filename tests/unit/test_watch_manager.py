@@ -1,0 +1,258 @@
+"""watch_manager 的单元测试。
+
+**不真的起 watchfiles**——测的是编排逻辑：队列投递、去重、worker 处理、
+``sync_now`` 的全量比对。
+"""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import pytest
+from app.adapters.drivers.base import DriverError
+from app.services import watch_manager
+from app.services.cloud_index import CloudDirIndex
+from app.services.uploader import SyncContext
+
+from tests.unit.upload_fakes import FakeDriver, FakeUploader
+
+
+@pytest.fixture(autouse=True)
+def _clean_manager():
+    """每个用例前后清空管理器状态。"""
+    watch_manager._WATCHERS.clear()
+    watch_manager._WORKERS.clear()
+    watch_manager._QUEUES.clear()
+    watch_manager._CONTEXTS.clear()
+    yield
+    watch_manager._WATCHERS.clear()
+    watch_manager._WORKERS.clear()
+    watch_manager._QUEUES.clear()
+    watch_manager._CONTEXTS.clear()
+
+
+def _ctx(driver: FakeDriver, uploader: FakeUploader, root: Path) -> SyncContext:
+    return SyncContext(
+        driver=driver,
+        uploader=uploader,
+        index=CloudDirIndex(driver, "root"),
+        root=root,
+        delete_retries=2,
+        delete_delay=0.01,
+    )
+
+
+async def test_投递到队列(tmp_path: Path):
+    """dispatcher 把文件塞进队列。"""
+    queue: asyncio.Queue[Path] = asyncio.Queue(maxsize=10)
+    dispatch = watch_manager._make_dispatcher(1, queue)
+
+    await dispatch(tmp_path / "a.mkv")
+
+    assert queue.qsize() == 1
+    assert queue.get_nowait().name == "a.mkv"
+
+
+async def test_队列满时丢弃不阻塞(tmp_path: Path):
+    """队列满 → 丢弃并记日志（不阻塞监听）。"""
+    queue: asyncio.Queue[Path] = asyncio.Queue(maxsize=1)
+    dispatch = watch_manager._make_dispatcher(1, queue)
+
+    await dispatch(tmp_path / "a.mkv")
+    await dispatch(tmp_path / "b.mkv")  # 满了 → 丢弃
+
+    assert queue.qsize() == 1
+
+
+async def test_worker处理文件(tmp_path: Path):
+    """worker 从队列取文件并上传。"""
+    driver = FakeDriver()
+    uploader = FakeUploader()
+    ctx = _ctx(driver, uploader, tmp_path)
+
+    path = tmp_path / "a.mkv"
+    path.write_bytes(b"x" * 100)
+
+    queue: asyncio.Queue[Path] = asyncio.Queue()
+    await queue.put(path)
+
+    worker = asyncio.create_task(
+        watch_manager._worker_loop(1, queue, ctx, 1)
+    )
+    await asyncio.sleep(0.1)
+    worker.cancel()
+    await asyncio.gather(worker, return_exceptions=True)
+
+    assert uploader.uploaded == [("a.mkv", 100)]
+
+
+async def test_同步已存在则跳过(tmp_path: Path):
+    """云端已有同名同大小 → 跳过。"""
+    driver = FakeDriver()
+    uploader = FakeUploader()
+    driver.add_file("root", "a.mkv", 100)
+    ctx = _ctx(driver, uploader, tmp_path)
+
+    path = tmp_path / "a.mkv"
+    path.write_bytes(b"x" * 100)
+
+    await watch_manager._process_one(1, ctx, path)
+
+    assert uploader.uploaded == []
+
+
+async def test_同步跳过临时文件(tmp_path: Path):
+    """临时文件不进上传流程。"""
+    driver = FakeDriver()
+    uploader = FakeUploader()
+    ctx = _ctx(driver, uploader, tmp_path)
+
+    path = tmp_path / "a.mkv.part"
+    path.write_bytes(b"x")
+
+    await watch_manager._process_one(1, ctx, path)
+
+    assert uploader.uploaded == []
+
+
+async def test_sync_now全量比对(tmp_path: Path):
+    """``sync_now`` 全量遍历并比对。"""
+    from app.services.watcher import Watcher
+
+    driver = FakeDriver()
+    uploader = FakeUploader()
+    ctx = _ctx(driver, uploader, tmp_path)
+
+    (tmp_path / "a.mkv").write_bytes(b"x" * 100)
+    (tmp_path / "b.mkv").write_bytes(b"y" * 200)
+    (tmp_path / "c.mkv.part").write_bytes(b"z")
+
+    # 云端已有同名同大小
+    driver.add_file("root", "a.mkv", 100)
+
+    watcher = Watcher(root=tmp_path)
+    watch_manager._WATCHERS[1] = watcher
+    watch_manager._CONTEXTS[1] = ctx
+
+    result = await watch_manager.sync_now(1)
+
+    assert result["unchanged"] == 1
+    assert result["uploaded"] == 1
+    assert uploader.uploaded == [("b.mkv", 200)]
+
+
+async def test_sync_now有文件级日志(tmp_path: Path):
+    """**回归测试**：全量同步必须逐文件记日志。
+
+    曾经只有「开始全量同步…」和「全量同步完成：…」两行——92 个文件
+    传十几分钟，面板上完全看不出在干什么（像卡死了）。
+    """
+    from app.services.upload_tasks import get_runtime
+    from app.services.watcher import Watcher
+
+    driver = FakeDriver()
+    uploader = FakeUploader()
+    ctx = _ctx(driver, uploader, tmp_path)
+
+    (tmp_path / "a.mkv").write_bytes(b"x" * 100)
+    (tmp_path / "b.mkv").write_bytes(b"y" * 200)
+
+    watcher = Watcher(root=tmp_path)
+    watch_manager._WATCHERS[1] = watcher
+    watch_manager._CONTEXTS[1] = ctx
+
+    await watch_manager.sync_now(1)
+
+    logs = get_runtime(1).logs
+    # 每个文件至少一行（处理中）
+    assert any("a.mkv" in line for line in logs)
+    assert any("b.mkv" in line for line in logs)
+    # 带进度序号
+    assert any("[1/2]" in line for line in logs)
+    assert any("[2/2]" in line for line in logs)
+    # 结果行
+    assert any("全量同步完成" in line for line in logs)
+
+
+async def test_sync_now任务未运行报错():
+    """任务没在跑 → 报错。"""
+    with pytest.raises(DriverError, match="未在运行"):
+        await watch_manager.sync_now(999)
+
+
+async def test_停用会取消全量同步(tmp_path: Path):
+    """**回归测试**：停用任务必须**真的停掉**全量同步。
+
+    曾经「停用」只停了监听器，``sync_now`` 是独立协程 → 上传还在继续
+    （生产实测：用户点了停用，7GB 仍在传）。
+    """
+    from app.services.upload_tasks import get_runtime
+    from app.services.watcher import Watcher
+
+    driver = FakeDriver()
+    uploader = FakeUploader()
+    ctx = _ctx(driver, uploader, tmp_path)
+
+    # 造 20 个文件
+    for i in range(20):
+        (tmp_path / f"f{i:03d}.mkv").write_bytes(b"x" * 100)
+
+    # **让上传变慢** —— 否则瞬间传完，来不及停
+    original_upload = uploader.upload_file
+
+    async def _slow_upload(p, parent_id, *, name=None, progress=None):
+        await asyncio.sleep(0.05)
+        return await original_upload(p, parent_id, name=name, progress=progress)
+
+    uploader.upload_file = _slow_upload  # type: ignore[method-assign]
+
+    watcher = Watcher(root=tmp_path)
+    watch_manager._WATCHERS[1] = watcher
+    watch_manager._CONTEXTS[1] = ctx
+
+    # 起一个后台同步
+    task = asyncio.create_task(watch_manager.sync_now(1))
+    await asyncio.sleep(0.1)
+
+    # 同步已注册
+    assert 1 in watch_manager._SYNC_TASKS
+
+    # 停用 → 必须取消
+    await watch_manager.stop_watcher(1)
+    await asyncio.sleep(0.1)
+
+    assert task.done() or task.cancelled()
+    assert get_runtime(1).syncing is False
+
+
+async def test_启动监听器会登记进_WATCHERS(tmp_path: Path, monkeypatch):
+    """``start_watcher`` 必须把 watcher 登记进 ``_WATCHERS``。
+
+    **回归测试**：曾经只放进 ``runtime.watcher``，导致 ``get_watcher`` /
+    ``sync_now`` / ``stop_all`` 都查不到 →「立即全量同步」误报
+    「任务未在运行」。
+    """
+    driver = FakeDriver()
+    uploader = FakeUploader()
+
+    async def _fake_clients(_driver_id: int):
+        return driver, uploader
+
+    monkeypatch.setattr(watch_manager, "_build_clients", _fake_clients)
+
+    watcher = await watch_manager.start_watcher(
+        task_id=42,
+        driver_id=1,
+        target_file_id="root",
+        watch_root=str(tmp_path),
+        include_subdirs=True,
+        concurrency=1,
+        name="测试",
+    )
+
+    assert watch_manager.get_watcher(42) is watcher
+    assert 42 in watch_manager.active_task_ids()
+
+    await watch_manager.stop_watcher(42)
+    assert watch_manager.get_watcher(42) is None

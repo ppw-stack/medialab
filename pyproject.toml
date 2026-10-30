@@ -1,7 +1,7 @@
 [project]
-name = "seedhelper"
-version = "0.1.0"
-description = "PT SeedHelper — 辅种自动化、免费种窗口看护与种子健康度监测"
+name = "medialab"
+version = "0.2.0"
+description = "MediaLab — 网盘媒体库治理（STRM 生成/整理/302 中转/WebDAV/上传）+ PT 辅种自动化"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -16,11 +16,21 @@ dependencies = [
     "httpx>=0.27",
     "prometheus-client>=0.21",
     "python-multipart>=0.0.12",
-    "pyyaml>=6.0",
     "beautifulsoup4>=4.12",
     "parsel>=1.9",
     # 图形验证码放大（FR-3.6 AI 读码）。纯 wheel、无系统依赖。
     "pillow>=11.0",
+    # 凭据加密（AES-128-CBC + HMAC，驱动 cookie 落盘）
+    "cryptography>=43.0",
+    # WebDAV 协议实现（MIT）。只用它的**协议层**，认证/限流/审计走本项目
+    # 自己的 ASGI 中间件（见 app/webdav/）。
+    "wsgidav>=4.4",
+    # WSGI → ASGI 桥接。**不要用 starlette.middleware.wsgi**——已废弃
+    # （StarletteDeprecationWarning），官方指向 a2wsgi。
+    "a2wsgi>=1.10",
+    # 本地目录监听（上传任务）。此前靠 uvicorn[standard] 传递引入——
+    # 直接 import 的库不该靠传递依赖，显式声明。
+    "watchfiles>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +42,25 @@ dev = [
     "respx>=0.21",
     "ruff>=0.8",
     "mypy>=1.13",
+]
+
+# 115 驱动依赖。
+#
+# **必须是 optional-dependencies**——写在 `[project.dependencies-115]`
+# 不是合法的 PEP 508 字段，uv 会**静默忽略**它（曾因此 p115client 一直没装上）。
+# 装法：uv sync --extra p115
+p115 = [
+    "p115client>=0.0.9.4.6.1",
+    "p115cipher>=0.0.5.4",
+    "p115pickcode>=0.0.5.4",
+    "qrcode[pil]>=7.4",
+]
+
+# 光鸭盘驱动依赖。装法：uv sync --extra guangya
+guangya = [
+    "guangyaclient>=0.0.2",
+    "httpx[http2]>=0.27",
+    "qrcode[pil]>=7.4",
 ]
 
 [build-system]
@@ -72,6 +101,19 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = ["sqlalchemy.*"]
 disable_error_code = ["no-untyped-call", "no-untyped-def", "union-attr", "misc", "operator"]
+
+# 无类型存根的第三方包（PyPI 上的纯 Python 包）
+[[tool.mypy.overrides]]
+module = ["p115client.*", "p115cipher.*", "p115pickcode.*", "qrcode.*", "cryptography.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["guangyaclient.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["wsgidav.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

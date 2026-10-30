@@ -10,21 +10,24 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from app import __version__
-from app.core.auth import hash_password, init_hmac_key
+from app.core.auth import hash_password, init_hmac_key, is_hashed
 from app.core.config import AppSettings, get_settings, set_settings
 from app.core.logging import configure_logging, get_logger
 from app.core.metrics import render_metrics, state
 from app.db.bootstrap import db_bootstrap
 from app.db.session import dispose_db, init_db
+from app.services.dav_audit import dav_auditor
 from app.services.factory import AdapterFactory, init_factory
 from app.services.job_registry import register_jobs
 from app.services.scheduler import scheduler_center
+from app.webdav.mount import mount_dav
 
 logger = get_logger(__name__)
 
@@ -32,7 +35,11 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: AppSettings = get_settings()
-    configure_logging(settings.log_level, json_output=settings.log_json)
+    configure_logging(
+        settings.log_level,
+        json_output=settings.log_json,
+        log_dir=settings.log_dir,
+    )
     logger.info("启动 %s v%s env=%s", settings.app_name, __version__, settings.env)
 
     grace = float(settings.shutdown_grace_seconds)
@@ -48,9 +55,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 首次启动：明文密码升级为 PBKDF2 哈希（与 web_password 字段存储兼容）
     from pydantic import SecretStr
 
-    if settings.web_password and not settings.web_password.get_secret_value().startswith(
-        "pbkdf2$"
-    ):
+    if settings.web_password and not is_hashed(settings.web_password.get_secret_value()):
         try:
             plain = settings.web_password.get_secret_value()
             settings.web_password = SecretStr(hash_password(plain))
@@ -59,7 +64,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.warning("密码升级失败：%s", exc)
 
     init_db(settings)
-    # 建表 + 全部迁移（幂等）。含 FR-1.5 adapter 值迁移。
+    # 建表 + 全部迁移（幂等）。含 FR-1.5 adapter 值迁移 + 媒体库域的迁移。
     await db_bootstrap.create_all()
     state["db_healthy"].set(1 if await db_bootstrap.healthcheck() else 0)
 
@@ -102,9 +107,35 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         scheduler_center.start()
         register_jobs(factory)
 
+    # ============================================================ 媒体库域
+    #
+    # 中转服务（直链缓存 + /302）——媒体库域的服务单例。
+    from app.services.svc_factory import init_services
+
+    init_services(settings)
+
+    # 媒体库域的请求限速（115 / 光鸭分桶）。
+    from app.core.rate_limit import configure_provider_rate_limit, configure_rate_limit
+
+    configure_rate_limit(settings.rate_limit_interval_sec)
+    configure_provider_rate_limit("guangya", settings.guangya_rate_limit_interval_sec)
+
+    # WebDAV 审计后台协程（批量落库）
+    if settings.dav_enabled:
+        dav_auditor.start()
+
+    # 上传任务监听器（进程内常驻协程）
+    #
+    # DB 是真相源：启动时按 ``upload_tasks`` 表拉起所有启用的任务。
+    # 监听失败不阻塞启动——面板上能看到错误，改配置后重启即可。
+    from app.services import watch_manager
+
+    await watch_manager.start_all()
+
     try:
         yield
     finally:
+        logger.info("停机中…")
         scheduler_center.accepting_new_work = False
         pending = scheduler_center.inflight_count()
         logger.info("收到停机信号，等待在途作业 %d 个（上限 %.0fs）", pending, grace)
@@ -112,6 +143,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await scheduler_center.drain(timeout=grace)
         await scheduler_center.shutdown(grace_seconds=int(grace))
         await factory.aclose_all()
+        # WebDAV 审计队列里剩余的条目落库
+        if settings.dav_enabled:
+            await dav_auditor.close()
+        await watch_manager.stop_all()
         await dispose_db()
         logger.info("已停机")
 
@@ -151,12 +186,18 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
             allow_headers=["Authorization", "Content-Type"],
         )
 
-    from app.api.auth import install_static
     from app.api.errors import install_exception_handlers
 
     _mount_routes(app)
     install_exception_handlers(app)
-    install_static(app, path=str(get_settings().frontend_dist))
+
+    # WebDAV —— **必须在 SPA 兜底之前挂载**。
+    #
+    # 路由按注册顺序匹配，而 SPA 的 ``/{full_path:path}`` 会吞掉一切路径。
+    # 挂晚了 DAV 就被 SPA 吞掉（返回 index.html），客户端报「网络异常」。
+    mount_dav(app, get_settings())
+
+    _mount_frontend(app, get_settings().frontend_dist)
     return app
 
 
@@ -165,14 +206,26 @@ def _mount_routes(app: FastAPI) -> None:
     from app.api.routes import (
         cross_seed,
         dashboard,
+        dav_users,
         downloaders,
+        drivers,
         env_settings,
+        health,
+        incremental_jobs,
+        media,
+        media_auth,
+        migrations,
+        redirect,
+        scan_jobs,
         scheduler,
         sites,
+        system,
         torrent_index,
+        upload_tasks,
         user_data,
     )
 
+    # -- 辅种域（/api/v1/*）--
     for router in (
         dashboard.router,
         sites.router,
@@ -186,21 +239,99 @@ def _mount_routes(app: FastAPI) -> None:
         app.include_router(router, prefix="/api/v1")
     app.include_router(auth_router)  # 自身已含 /api/v1 前缀
 
-    @app.get("/healthz", tags=["ops"], summary="健康检查（FR-8.2）")
-    async def healthz() -> dict[str, object]:
-        """容器健康检查端点。数据库异常时返回 unhealthy 以触发重启。"""
-        healthy = await db_bootstrap.healthcheck()
-        state["db_healthy"].set(1 if healthy else 0)
-        return {
-            "status": "ok" if healthy else "unhealthy",
-            "version": __version__,
-            "db": healthy,
-        }
+    # -- 媒体库域（/api/*）--
+    #
+    # 这批路由**自带 prefix**（如 ``/api/media``），故不再传 prefix。
+    # 与辅种域的 ``/api/v1/*`` **零冲突**。
+    for router in (
+        system.router,
+        media_auth.router,
+        drivers.router,
+        media.router,
+        health.router,
+        scan_jobs.router,
+        incremental_jobs.router,
+        migrations.router,
+        upload_tasks.router,
+        dav_users.router,
+        # 中转路由挂根路径：/302/<media_id>/<sig>
+        redirect.router,
+    ):
+        app.include_router(router)
 
     @app.get("/metrics", tags=["ops"], summary="Prometheus 指标（FR-8.3）")
     async def metrics() -> Response:
         payload, content_type = render_metrics()
         return Response(content=payload, media_type=content_type)
+
+
+def _mount_frontend(app: FastAPI, dist_dir: Path) -> None:
+    """挂载前端静态资源（SPA）。
+
+    **必须处理 history 模式的深链接**——``/library``、``/settings`` 这些
+    前端路由在浏览器刷新时是**服务端路径**，若直接 404，用户一刷新就白屏。
+
+    用自定义 handler 而不是 ``StaticFiles(html=True)``：后者只对**目录**
+    回退到 index.html，路径下的**文件**（如 ``/library``）仍会 404。
+    """
+    path = Path(dist_dir)
+    if not path.is_dir():
+        logger.info("前端资源目录不存在，跳过挂载：%s", path)
+        return
+
+    index_file = path / "index.html"
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_fallback(full_path: str) -> Response:
+        """静态资源优先；找不到就回 index.html（交给前端路由）。
+
+        **静态资源与 index.html 要分开处理**：
+
+        - **带 hash 的资源**（``/assets/index-xxxx.js``）→ **长缓存 + 不可变**
+          （内容变了 hash 就会变，URL 变了就不该再缓存旧的）
+        - **不存在的资源** → **真 404**，**不能**回 index.html！
+
+          回 index.html 会让浏览器把 HTML 当 JS 解析 → 整页白屏。
+          这正是「更新服务后浏览器访问失败」的原因：浏览器缓存了旧
+          index.html → 引用旧 hash 的 JS → 该文件已删 → fallback 返回
+          HTML → JS 解析失败。
+        """
+        # API 与运维路径**不接管**——它们由 FastAPI 自身处理。
+        # 未匹配到的 API 路径返回 JSON 404，而不是 index.html。
+        #
+        # ⚠️ **``assets`` 不在此列**——它是前端构建产物的真实目录
+        # （``/assets/index-xxxx.js``），必须正常返回（见下方 is_file 分支）。
+        if full_path.startswith(
+            ("api/", "healthz", "readyz", "metrics", "docs", "openapi")
+        ):
+            return JSONResponse({"detail": "not found"}, status_code=404)
+
+        if full_path:
+            # 防目录穿越：解析后必须仍在 dist 目录内
+            candidate = (path / full_path).resolve()
+            try:
+                candidate.relative_to(path.resolve())
+            except ValueError:
+                return Response(status_code=404)
+            if candidate.is_file():
+                # 带 hash 的构建产物 → 不可变缓存
+                if full_path.startswith("assets/"):
+                    return FileResponse(
+                        candidate,
+                        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+                    )
+                return FileResponse(candidate)
+
+            # **资源不存在** → 真 404（不能回 index.html —— 见 docstring）
+            if full_path.startswith("assets/"):
+                return Response(status_code=404, content="资源不存在")
+
+        if not index_file.is_file():
+            return Response(status_code=404, content="前端资源缺失")
+        # index.html 本身**不缓存** —— 保证下次刷新能拿到新的资源引用
+        return FileResponse(index_file, headers={"Cache-Control": "no-store"})
+
+    logger.info("已挂载前端资源：%s", path)
 
 
 app = create_app()

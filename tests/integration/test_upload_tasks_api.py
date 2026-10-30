@@ -1,0 +1,278 @@
+"""上传任务 API 的集成测试。
+
+覆盖点：
+
+- 监听目录不存在 → 400
+- 目标存储源不是光鸭 → 400
+- CRUD 基本流程
+- 需要登录（401）
+"""
+
+from __future__ import annotations
+
+import time
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+
+@pytest.fixture
+async def client(settings, db_engine, tmp_path):
+    """带鉴权的测试客户端。"""
+    from app.api.routes import media_auth as auth, upload_tasks
+    from app.core.auth import init_hmac_key
+    from app.services.svc_factory import init_services, reset_services
+    from fastapi import FastAPI
+
+    init_hmac_key(settings.web_token.get_secret_value())
+    reset_services()
+    init_services(settings)
+
+    app = FastAPI()
+    app.include_router(auth.router)
+    app.include_router(upload_tasks.router)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        await c.post(
+            "/api/auth/login", json={"username": "tester", "password": "test-pass-123"}
+        )
+        yield c
+
+    reset_services()
+
+
+@pytest.fixture
+async def anon_client(settings, db_engine):
+    """未登录的客户端（测 401）。"""
+    from app.api.routes import media_auth as auth, upload_tasks
+    from app.core.auth import init_hmac_key
+    from fastapi import FastAPI
+
+    init_hmac_key(settings.web_token.get_secret_value())
+
+    app = FastAPI()
+    app.include_router(auth.router)
+    app.include_router(upload_tasks.router)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+async def _add_driver(db_session, **kwargs) -> int:
+    """加一个存储源，返回 id。"""
+    from app.db.models import Driver
+
+    defaults = {
+        "type": "guangya",
+        "name": "光鸭盘",
+        "credential": None,
+        "device_type": None,
+        "enabled": True,
+        "created_at": int(time.time()),
+        "updated_at": int(time.time()),
+    }
+    defaults.update(kwargs)
+    row = Driver(**defaults)
+    db_session.add(row)
+    await db_session.commit()
+    return row.id
+
+
+class TestAuth:
+    async def test_列表需要登录(self, anon_client) -> None:
+        """未登录 → 401。"""
+        resp = await anon_client.get("/api/upload-tasks")
+        assert resp.status_code == 401
+
+
+class TestWhitelist:
+    async def test_目标必须是光鸭(self, client, db_session, tmp_path) -> None:
+        """目标存储源不是光鸭 → 400。"""
+        driver_id = await _add_driver(db_session, type="p115")
+        resp = await client.post(
+            "/api/upload-tasks",
+            json={
+                "name": "测试",
+                "driver_id": driver_id,
+                "target_file_id": "123",
+                "watch_root": str(tmp_path),
+            },
+        )
+        assert resp.status_code == 400
+        assert "光鸭" in resp.json()["detail"]
+
+    async def test_存储源不存在(self, client, tmp_path) -> None:
+        """存储源 id 不存在 → 404。"""
+        resp = await client.post(
+            "/api/upload-tasks",
+            json={
+                "name": "测试",
+                "driver_id": 9999,
+                "target_file_id": "123",
+                "watch_root": str(tmp_path),
+            },
+        )
+        assert resp.status_code == 404
+
+
+class TestCrud:
+    async def test_创建与列出(self, client, db_session, tmp_path) -> None:
+        """创建后能列出来。"""
+        driver_id = await _add_driver(db_session)
+        watch = tmp_path / "watch"
+        watch.mkdir()
+
+        resp = await client.post(
+            "/api/upload-tasks",
+            json={
+                "name": "测试任务",
+                "driver_id": driver_id,
+                "target_file_id": "1962124234139361322",
+                "watch_root": str(watch),
+                "target_path": "/影视",
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        data = resp.json()
+        assert data["name"] == "测试任务"
+        assert data["watch_root"] == str(watch)
+
+        listing = await client.get("/api/upload-tasks")
+        assert listing.status_code == 200
+        assert len(listing.json()) == 1
+
+    async def test_修改与删除(self, client, db_session, tmp_path) -> None:
+        """改名 → 删掉。"""
+        driver_id = await _add_driver(db_session)
+        watch = tmp_path / "watch"
+        watch.mkdir()
+
+        created = await client.post(
+            "/api/upload-tasks",
+            json={
+                "name": "原名",
+                "driver_id": driver_id,
+                "target_file_id": "1",
+                "watch_root": str(watch),
+            },
+        )
+        task_id = created.json()["id"]
+
+        patched = await client.patch(
+            f"/api/upload-tasks/{task_id}", json={"name": "新名"}
+        )
+        assert patched.status_code == 200
+        assert patched.json()["name"] == "新名"
+
+        deleted = await client.delete(f"/api/upload-tasks/{task_id}")
+        assert deleted.status_code == 200
+
+        listing = await client.get("/api/upload-tasks")
+        assert listing.json() == []
+
+    async def test_修改不存在的任务(self, client) -> None:
+        """改不存在的任务 → 404。"""
+        resp = await client.patch("/api/upload-tasks/9999", json={"name": "x"})
+        assert resp.status_code == 404
+
+    async def test_删除不存在的任务(self, client) -> None:
+        """删不存在的任务 → 404。"""
+        resp = await client.delete("/api/upload-tasks/9999")
+        assert resp.status_code == 404
+
+    async def test_浏览本地目录(self, client, tmp_path) -> None:
+        """``/local-dirs`` 列出本地子目录（用于选监听目录）。"""
+        base = tmp_path / "browse"
+        base.mkdir()
+        (base / "movies").mkdir()
+        (base / ".hidden").mkdir()
+
+        resp = await client.get(
+            "/api/upload-tasks/local-dirs", params={"path": str(base)}
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["path"] == str(base)
+        # 隐藏目录不列
+        assert [d["name"] for d in body["dirs"]] == ["movies"]
+        # **id 必须是完整路径**（前端拿它当下一层路径直接请求）
+        assert body["dirs"][0]["id"] == str(base / "movies")
+
+    async def test_浏览本地目录_不存在(self, client, tmp_path) -> None:
+        """目录不存在 → 400。"""
+        resp = await client.get(
+            "/api/upload-tasks/local-dirs", params={"path": str(tmp_path / "nope")}
+        )
+        assert resp.status_code == 400
+
+    async def test_静态路由不被参数化路由吃掉(self, client) -> None:
+        """**回归测试**：静态路径必须排在 ``/{task_id}`` **之前**。
+
+        FastAPI 按注册顺序匹配。``/local-dirs`` / ``/targets`` 若排在
+        ``/{task_id}`` 之后，会先被 ``/{task_id}`` 匹配 → 422
+        （"local-dirs" 解析成 int 失败）→ 目录浏览直接挂掉。
+        """
+        resp = await client.get("/api/upload-tasks/local-dirs?path=/")
+        assert resp.status_code == 200
+        assert "dirs" in resp.json()
+
+    async def test_取单个任务(self, client, db_session, tmp_path) -> None:
+        """``GET /api/upload-tasks/{id}`` 返回任务详情。
+
+        **必须有这个路由**：否则会落到 SPA 的 catch-all → 返回
+        index.html（HTTP 200 + HTML），调用方以为拿到了 JSON。
+        """
+        driver_id = await _add_driver(db_session)
+        watch = tmp_path / "watch"
+        watch.mkdir()
+        created = await client.post(
+            "/api/upload-tasks",
+            json={
+                "name": "详情测试",
+                "driver_id": driver_id,
+                "target_file_id": "1",
+                "watch_root": str(watch),
+                "enabled": False,
+            },
+        )
+        task_id = created.json()["id"]
+
+        resp = await client.get(f"/api/upload-tasks/{task_id}")
+
+        assert resp.status_code == 200
+        # 必须是 JSON（不是 SPA 的 HTML）
+        assert resp.headers["content-type"].startswith("application/json")
+        assert resp.json()["name"] == "详情测试"
+
+    async def test_取不存在的任务(self, client) -> None:
+        """不存在的任务 → 404。"""
+        resp = await client.get("/api/upload-tasks/9999")
+        assert resp.status_code == 404
+
+    async def test_状态接口(self, client, db_session, tmp_path) -> None:
+        """状态接口返回运行态。"""
+        driver_id = await _add_driver(db_session)
+        watch = tmp_path / "watch"
+        watch.mkdir()
+        created = await client.post(
+            "/api/upload-tasks",
+            json={
+                "name": "任务",
+                "driver_id": driver_id,
+                "target_file_id": "1",
+                "watch_root": str(watch),
+                # 禁用：不启动监听（避免测试里真的去连网盘）
+                "enabled": False,
+            },
+        )
+        task_id = created.json()["id"]
+
+        resp = await client.get(f"/api/upload-tasks/{task_id}/status")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["task_id"] == task_id
+        assert body["listening"] is False
+        assert "logs" in body

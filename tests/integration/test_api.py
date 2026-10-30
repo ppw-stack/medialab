@@ -61,7 +61,7 @@ async def _add_site(name: str = "s1", **kw: object) -> int:
 # ------------------------------------------------------------------ 认证
 
 async def test_login_success_sets_cookie(client: httpx.AsyncClient) -> None:
-    assert "seedhelper_session" in client.cookies
+    assert "medialab_session" in client.cookies
 
 
 async def test_login_wrong_password_401(app_settings: AppSettings) -> None:

@@ -1,6 +1,21 @@
 """ORM 模型（§8 关键数据模型）。
 
-M1 建立全部表结构（M2~M5 只填充逻辑）。时间列统一北京时间字符串。
+**两个业务域共处一库**：
+
+- **辅种域**（ptHelper 基线）—— 站点、下载器、种子索引、调度。
+  时间列统一**北京时间字符串**（见 :func:`_bj_now`）。
+- **媒体库域**（strmmanger 并入）—— 存储源、STRM 条目、直链缓存、
+  WebDAV 账号与审计、上传任务。表名与辅种域**零冲突**，外键各自闭环
+  （辅种域 FK 指向 ``sites`` / ``downloader_instances``，媒体库域 FK 指向
+  ``drivers``）。
+
+⚠️ **两域的时间列口径不同**（历史遗留，勿"顺手统一"）：
+
+- 辅种域：``String(32)`` 北京时间字符串
+- 媒体库域：``Integer`` unix 时间戳
+
+统一口径需要改数据 + 改全部读写点，收益不抵风险。**新增表时按所在域
+选对应口径**，并在类 docstring 里注明。
 
 注：领域枚举（``FreeType`` / ``PushStatus`` / ``FreeSource``）住在
 :mod:`app.domain.enums`——它们是业务概念，不属于数据库层。本模块
@@ -32,13 +47,27 @@ __all__ = [
     "Base",
     "CrossSeedOrphan",
     "CrossSeedSnapshot",
+    "DavAuditLog",
+    "DavUser",
     "DownloaderInstance",
+    "Driver",
     "JobRun",
+    "LinkCacheEntry",
+    "MediaFile",
+    "ProbeResult",
     "SchedulerJobSetting",
+    "Setting",
     "Site",
     "SiteUserData",
     "TorrentIndex",
+    "UploadTask",
 ]
+
+#: 默认视频后缀（逗号分隔）——媒体库域的扫描依据。
+#:
+#: 存在**本模块**而非 :mod:`app.services.naming`——ORM 模型的默认值需要它，
+#: 而 naming 模块反过来依赖模型（会循环导入）。
+DEFAULT_VIDEO_EXTS = "mkv,mp4,avi,mov,wmv,flv,m4v,ts,m2ts,rmvb,rm,webm,iso"
 
 
 class Base(DeclarativeBase):
@@ -479,3 +508,279 @@ class SiteUserData(Base):
     updated_at: Mapped[str] = mapped_column(
         String(32), default=_bj_now, onupdate=_bj_now
     )
+
+
+# ================================================================ 媒体库域
+#
+# 以下 8 张表来自 strmmanger。**时间列口径与辅种域不同**：用
+# ``Integer`` 存 unix 秒（``0`` = 从未），而非北京时间字符串。
+# 见模块 docstring 的说明。
+
+class Driver(Base):
+    """存储源（网盘账号等）+ 其媒体库配置（**一对一**）。
+
+    配置直接放在本表——「一个存储源 = 一套媒体库配置」，两张表纯属冗余。
+    """
+
+    __tablename__ = "drivers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: 驱动类型标识，如 ``p115``。后续加 ``aliyun`` / ``quark`` / ``webdav``
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    #: 展示名
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    #: 加密后的凭据（115 cookie 等）。密文格式自带 scheme 前缀。
+    credential: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 设备类型（115 扫码登录绑定的 app，如 ``115android``）
+    device_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # -- 媒体库配置（与存储源一对一）--
+
+    #: 115 媒体库 cid（**字符串**）。
+    #:
+    #: 用 cid 而非路径：115 的目录 id 在改名后**不变**，路径会失效
+    #: （``dir_getid`` 抛 ``P115FileNotFoundError``）。且 cid 只需 1 次
+    #: ``iterdir``，路径要 ``dir_getid`` + ``iterdir``。
+    media_cid: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    #: 媒体库路径（**只读展示**）——保存时用 cid 实时解析填入
+    media_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 本地媒体库目录（STRM 输出根）
+    output_dir: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 视频文件后缀（逗号分隔，如 ``mkv,mp4``）——**扫描依据**
+    video_exts: Mapped[str] = mapped_column(
+        Text, nullable=False, default=DEFAULT_VIDEO_EXTS
+    )
+    #: 媒体图片后缀（逗号分隔）——当前**忽略**（不生成 strm）
+    image_exts: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    #: 媒体数据后缀（逗号分隔）——当前**忽略**（不生成 strm）
+    data_exts: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    #: 最小视频体积（MB）——小于此值的文件跳过（过滤样片）；0 = 不过滤
+    min_size_mb: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 是否包含子目录（cid 指向媒体库根时，是否递归其下所有子目录）
+    include_subdirs: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False
+    )
+    #: 上次扫描时间
+    last_scan_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: 上次扫描新增/更新的条目数
+    last_synced_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class MediaFile(Base):
+    """媒体条目：一条 STRM 对应一个存储源文件。"""
+
+    __tablename__ = "media_files"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    driver_id: Mapped[int] = mapped_column(
+        ForeignKey("drivers.id", ondelete="CASCADE"), nullable=False
+    )
+    #: 存储源内的文件标识（115 为 pickcode）。不出现在对外 URL 里。
+    remote_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    #: 完整路径（存储源内）
+    path: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 文件名（含扩展名，不含目录）
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    size: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: STRM 文件落盘路径（宿主机绝对路径）
+    strm_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 中转 URL 的 HMAC 签名（密钥轮换时批量重算）
+    signature: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: 源文件 mtime（用于增量扫描判断是否变更）
+    mtime: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    __table_args__ = (
+        UniqueConstraint("driver_id", "remote_id", name="uq_media_files_driver_remote"),
+        Index("idx_media_files_driver_path", "driver_id", "path"),
+        Index("idx_media_files_strm_path", "strm_path"),
+    )
+
+
+class LinkCacheEntry(Base):
+    """本地直链缓存（L2，持久化）。
+
+    主键 ``(media_id, ua_hash)``——UA 分桶是正确性要求，不是性能优化。
+
+    表名 ``link_cache``；类名带 ``Entry`` 后缀以避开服务层
+    :class:`app.services.link_cache.LinkCache` 的命名冲突。
+
+    ``media_id`` **不建外键**：缓存是派生数据，媒体条目被删除后残留的
+    缓存行应能被独立清理；加外键会让「删条目」必须先删缓存，徒增耦合。
+    """
+
+    __tablename__ = "link_cache"
+
+    media_id: Mapped[int] = mapped_column(primary_key=True)
+    #: User-Agent 的哈希（不存明文：UA 可能含设备指纹）
+    ua_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 过期时间戳（已扣除安全余量）
+    expires_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    __table_args__ = (Index("idx_link_cache_expires", "expires_at"),)
+
+
+class Setting(Base):
+    """KV 配置（业务级配置，不走环境变量）。"""
+
+    __tablename__ = "settings"
+
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class DavUser(Base):
+    """WebDAV 账号。
+
+    **与面板账号分离**：面板是单管理员（``WEB_USERNAME``/``WEB_PASSWORD``
+    走环境变量），WebDAV 账号是「给播放器用的凭证」——它们不该能开面板，
+    面板也不该暴露给拿到播放器的第三方。
+
+    **密码哈希**：PBKDF2-HMAC-SHA256（600k 次迭代），格式与
+    :mod:`app.core.auth` 的面板密码一致，便于复用校验逻辑。
+    """
+
+    __tablename__ = "dav_users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: 登录名（唯一）
+    username: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    #: PBKDF2 哈希：``pbkdf2$<iters>$<salt_hex>$<dk_hex>``
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 是否启用（停用 = 立即失效，不用删账号）
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    #: 上次登录时间（unix 秒），0 = 从未登录
+    last_login_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    __table_args__ = (Index("idx_dav_users_username", "username"),)
+
+
+class DavAuditLog(Base):
+    """WebDAV 请求审计。
+
+    **只记「谁动了什么」**，不记所有 HTTP 请求 —— 否则 Infuse 扫一次库
+    就是几百条，表会迅速膨胀。
+
+    粒度：
+
+    - ``GET`` / ``HEAD`` —— **逐条明细**（谁拿了哪个文件）
+    - ``PROPFIND`` —— **汇总**一条（带 ``item_count``）
+    - 认证失败 —— 逐条（IP + 用户名 + UA）
+    """
+
+    __tablename__ = "dav_audit_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: 用户 id；认证失败时用户可能不存在 → 0
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 当时的用户名（**快照**——用户被删后审计仍可读）
+    username: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    #: HTTP 方法（PROPFIND / GET / HEAD / OPTIONS）
+    method: Mapped[str] = mapped_column(String(16), nullable=False, default="")
+    #: 请求路径（相对 DAV 根）
+    path: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    #: HTTP 状态码
+    status: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 客户端标识（User-Agent，截断）
+    client: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    #: 来源 IP
+    remote_addr: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    #: 处理耗时（毫秒）
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: PROPFIND 的条目数（明细为 0）
+    item_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    __table_args__ = (
+        Index("idx_dav_audit_user_time", "user_id", "created_at"),
+        Index("idx_dav_audit_time", "created_at"),
+        Index("idx_dav_audit_path", "path"),
+    )
+
+
+class UploadTask(Base):
+    """上传任务：把本地目录的文件同步到光鸭盘。
+
+    **一个任务 = 一个监听目录 + 一个光鸭目标目录**。
+
+    刻意**不建上传记录表**（每个文件一行）——与「迁移」同哲学：
+    **光鸭目标目录就是唯一真相源**。幂等判断用「同名 + 同大小」即可，
+    不依赖本地状态，容器重启不丢进度。代价是「本地文件删了」这类信息
+    无从察觉（设计取舍：本地删除**不联动**云端，见 ``docs/upload.md``）。
+
+    **监听目录没有白名单**——完全由用户在面板上配（目录浏览器逐层选）。
+    故 ``watch_root`` 是**完整路径**（不再拆「根 + 子路径」）。
+    """
+
+    __tablename__ = "upload_tasks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: 任务名（展示用）
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    #: 目标存储源（**必须是 guangya**）。删存储源时级联删任务。
+    driver_id: Mapped[int] = mapped_column(
+        ForeignKey("drivers.id", ondelete="CASCADE"), nullable=False
+    )
+    #: 光鸭目标目录的 fileId
+    target_file_id: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    #: 光鸭目标目录路径（**只读展示**——光鸭没有「路径 ↔ id」反查）
+    target_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 监听目录（容器内绝对路径，**完整路径**——不再拆根 + 子路径）
+    watch_root: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 是否递归子目录
+    include_subdirs: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    #: 是否启用（停用 = 不监听，但任务配置保留）
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    #: 同步成功后是否清理本地文件。
+    #:
+    #: **破坏性操作**——故有三重保护：
+    #:
+    #: 1. 只对 ``uploaded`` / ``overwritten`` 生效（``unchanged`` 不删：
+    #:    本地文件是唯一原件）
+    #: 2. 云端大小必须与本地一致
+    #: 3. 移进**回收目录**（``<监听根>/.strmmanger-trash/``）而不是 ``unlink``
+    #:    —— 可手动还原
+    #:
+    #: 默认 ``False``：新任务默认不删本地，需要用户显式开启。
+    delete_after_upload: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    #: 同时进行的上传数
+    concurrency: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 上次同步时间（unix 秒），0 = 从未
+    last_sync_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: 上次同步上传成功的文件数
+    last_uploaded_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 上次错误（展示用）
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (Index("idx_upload_tasks_driver", "driver_id"),)
+
+
+class ProbeResult(Base):
+    """存储源可用性探测结果（登录态、容量等）。"""
+
+    __tablename__ = "probe_results"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    driver_id: Mapped[int] = mapped_column(
+        ForeignKey("drivers.id", ondelete="CASCADE"), nullable=False
+    )
+    account_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    used_gb: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    total_gb: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    available: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    probed_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    __table_args__ = (Index("idx_probe_results_driver", "driver_id"),)

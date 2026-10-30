@@ -1,0 +1,156 @@
+"""迁移 API 的集成测试。
+
+覆盖点：
+
+- ``/api/migrations/sources`` 的**兜底 cid**：必须用媒体库 cid，
+  **不能**用 ``"0"``（那是 115 账号根目录，会列出「手机相册 / 资料 /
+  密钥 / 备份」等私人目录）
+- 存储源没配媒体库 cid 时应**报错**，而不是退化成账号根目录
+- ``/api/migrations/run`` 的参数校验
+"""
+
+from __future__ import annotations
+
+import time
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+
+@pytest.fixture
+async def client(settings, db_engine):
+    from app.api.routes import media_auth as auth, migrations
+    from app.core.auth import init_hmac_key
+    from app.services.svc_factory import init_services, reset_services
+    from fastapi import FastAPI
+
+    init_hmac_key(settings.web_token.get_secret_value())
+    reset_services()
+    init_services(settings)
+
+    app = FastAPI()
+    app.include_router(auth.router)
+    app.include_router(migrations.router)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        await c.post(
+            "/api/auth/login", json={"username": "tester", "password": "test-pass-123"}
+        )
+        yield c
+
+    reset_services()
+
+
+async def _add_driver(db_session, **kwargs) -> None:
+    from app.db.models import Driver
+
+    defaults = {
+        "type": "p115",
+        "name": "115",
+        "credential": None,
+        "device_type": None,
+        "enabled": True,
+        "media_cid": "111",
+        "media_path": "/影视",
+        "output_dir": None,
+        "video_exts": "mkv,mp4",
+        "image_exts": "",
+        "data_exts": "",
+        "min_size_mb": 0,
+        "include_subdirs": True,
+        "created_at": int(time.time()),
+        "updated_at": int(time.time()),
+    }
+    defaults.update(kwargs)
+    db_session.add(Driver(**defaults))
+    await db_session.commit()
+
+
+class TestBrowseSourcesFallback:
+    async def test_uses_media_cid_not_account_root(
+        self, client, db_session, monkeypatch
+    ) -> None:
+        """空 parent_id 时必须用**媒体库 cid**，不是账号根目录 ``"0"``。"""
+        await _add_driver(db_session, id=1, media_cid="999888")
+
+        seen: list[str] = []
+
+        class _FakeDriver:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            async def list_dir_by_cid(self, cid, parent_path="", relative_dir=""):
+                seen.append(str(cid))
+                return []
+
+        import app.api.routes.migrations as mod
+
+        monkeypatch.setattr(mod, "build_driver", lambda *a, **k: _FakeDriver())
+
+        resp = await client.get("/api/migrations/sources?driver_id=1")
+
+        assert resp.status_code == 200
+        assert seen == ["999888"], f"兜底 cid 错了：{seen}（'0' = 115 账号根目录）"
+
+    async def test_errors_when_media_cid_missing(
+        self, client, db_session, monkeypatch
+    ) -> None:
+        """没配媒体库 cid 时**报错**，不暴露账号根目录。"""
+        await _add_driver(db_session, id=1, media_cid=None)
+
+        class _FakeDriver:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            async def list_dir_by_cid(self, cid, parent_path="", relative_dir=""):
+                raise AssertionError(f"不该被调用（cid={cid}）")
+
+        import app.api.routes.migrations as mod
+
+        monkeypatch.setattr(mod, "build_driver", lambda *a, **k: _FakeDriver())
+
+        resp = await client.get("/api/migrations/sources?driver_id=1")
+
+        assert resp.status_code == 400
+        assert "媒体库" in resp.json()["detail"]
+
+
+class TestRunValidation:
+    async def test_rejects_submit_interval_out_of_range(self, client) -> None:
+        resp = await client.post(
+            "/api/migrations/run",
+            json={
+                "source_driver_id": 1,
+                "source_cid": "123",
+                "target_driver_id": 2,
+                "target_file_id": "",
+                "submit_interval_sec": 9999,
+            },
+        )
+        assert resp.status_code == 422
+
+    async def test_rejects_concurrency_out_of_range(self, client) -> None:
+        resp = await client.post(
+            "/api/migrations/run",
+            json={
+                "source_driver_id": 1,
+                "source_cid": "123",
+                "target_driver_id": 2,
+                "target_file_id": "",
+                "concurrency": 99,
+            },
+        )
+        assert resp.status_code == 422
+
+    async def test_requires_existing_driver(self, client, db_session) -> None:
+        resp = await client.post(
+            "/api/migrations/run",
+            json={
+                "source_driver_id": 999,
+                "source_cid": "123",
+                "target_driver_id": 2,
+                "target_file_id": "",
+            },
+        )
+        assert resp.status_code == 404

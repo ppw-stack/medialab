@@ -1,4 +1,10 @@
-"""认证与静态前端托管（FR-6.1 + FR-8.2）。"""
+"""认证路由（FR-6.1 + FR-8.2）。
+
+**前端静态托管已移出本模块**——合并 strmmanger 后，SPA 的静态资源挂载
+统一由 :func:`app.main._mount_frontend` 负责（它对带 hash 的构建产物做
+不可变缓存、对不存在的资源返**真 404**，比 ``StaticFiles(html=True)``
+更正确）。本模块只管认证。
+"""
 
 from __future__ import annotations
 
@@ -6,19 +12,14 @@ import asyncio
 import hmac
 import threading
 
-from fastapi import APIRouter, Cookie, FastAPI, HTTPException, Request
-from fastapi.responses import (
-    FileResponse,
-    JSONResponse,
-    Response,
-)
-from fastapi.staticfiles import StaticFiles
+from fastapi import APIRouter, Cookie, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from app.core.auth import (
     SESSION_COOKIE,
     SESSION_MAX_AGE,
     make_session,
+    verify_bearer,
     verify_password,
     verify_session,
 )
@@ -134,58 +135,24 @@ async def require_session(
     request: Request,
     session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
 ) -> str:
-    """依赖：保护所有管理端点（FR-6.1 面板需登录）。"""
+    """依赖：保护所有管理端点（FR-6.1 面板需登录）。
+
+    **两种鉴权口径**（合并说明）：
+
+    - ``Authorization: Bearer <token>`` —— token 可以是 **API Token**
+      （``WEB_TOKEN`` 本身，供 CLI / 脚本长期使用），也可以是
+      **session cookie 值**（媒体库域的约定：同一份凭据两种用法）
+    - ``Cookie: <session cookie>`` —— 面板用
+
+    两种口径的判定都走 :func:`app.core.auth.verify_bearer` / 同名 cookie
+    校验，实现只有一份。
+    """
     settings: AppSettings = get_settings()
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
-        token = settings.web_token.get_secret_value() if settings.web_token else ""
-        if token and hmac.compare_digest(auth[7:], token):
-            return "token" 
+        if verify_bearer(auth[7:].strip()):
+            return "token"
     if session and verify_session(session):
         return settings.web_username
     raise HTTPException(status_code=401, detail="未登录")
-
-
-def install_static(app: FastAPI, *, path: str = "/app/web/dist") -> None:
-    """挂载前端构建产物到 ``/``。
-
-    SPA fallback：未知路径返回 ``index.html``，由前端路由接管。
-    API 路径（``/api/*``、``/healthz``、``/metrics``）由 FastAPI 自身处理。
-    """
-    import os
-
-    if not os.path.isdir(path):
-        logger.info("前端构建产物不存在于 %s，跳过静态托管", path)
-        return
-
-    # 资产目录（js/css/img）直接挂载
-    app.mount(
-        "/assets",
-        StaticFiles(directory=os.path.join(path, "assets")),
-        name="assets",
-    )
-
-    async def spa_fallback(full_path: str) -> FileResponse | JSONResponse:
-        # API 与运维路径不接管
-        if full_path.startswith(
-            ("/api/", "/healthz", "/metrics", "/assets", "/docs", "/openapi")
-        ):
-            return JSONResponse({"detail": "not found"}, status_code=404)
-        index = os.path.join(path, "index.html")
-        if os.path.exists(index):
-            return FileResponse(index)
-        return JSONResponse({"detail": "frontend not built"}, status_code=404)
-
-    # 任何其他路径都返回 index.html
-
-    # 直接挂到根：当 FastAPI 路由表中没有该路径时，触发 SPA fallback
-    # 返回类型用 Response 基类——spa_fallback 可能返回 FileResponse
-    # （前端 index.html）或 JSONResponse（404 / 未构建），
-    # 二者都是 Response 子类；FastAPI 对 Response 子类不生成 response_model
-    async def root_handler(request: Request) -> Response:
-        return await spa_fallback(request.url.path)
-
-    app.add_route("/", root_handler, methods=["GET"])
-    app.add_route("/{full_path:path}", root_handler, methods=["GET"])
-    logger.info("前端 SPA 静态托管已挂载（来源：%s）", path)
 

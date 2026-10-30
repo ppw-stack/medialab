@@ -190,7 +190,12 @@ _EXTRA_INDEXES: tuple[str, ...] = (
 
 
 class DbBootstrap:
-    """建表 + 迁移编排。"""
+    """建表 + 迁移编排。
+
+    **无参**——engine 从全局 :func:`app.db.session.get_engine` 取。
+    与 ptHelper 基线保持一致（strmmanger 原版是 ``DbBootstrap(engine)``，
+    合并时统一为无参单例形式）。
+    """
 
     async def create_all(self) -> None:
         """建表 + 跑迁移（幂等，每次启动调用）。"""
@@ -218,6 +223,140 @@ class DbBootstrap:
         await migrate_datetime_to_bj_str()
         await backfill_discount_pct()
         await migrate_adapter_values()
+        # 媒体库域的幂等迁移（补列 / 删废弃列 / 删废弃表）
+        await self._run_media_migrations()
+
+    async def _run_media_migrations(self) -> None:
+        """媒体库域的幂等迁移（来自 strmmanger）。
+
+        ``create_all`` 只建**新表**，不给已有表加列——老库的列增删必须靠
+        这里补齐。所有操作都**幂等**（重复跑不报错）。
+
+        覆盖的变更：
+
+        - ``drivers`` 表补媒体库配置列（``media_cid`` / ``output_dir`` …）
+        - ``upload_tasks`` 表新增 ``delete_after_upload``、删除 ``watch_subdir``
+        - 删除废弃列 ``drivers.naming_rule``
+        - 删除废弃表 ``scan_rules`` / ``dav_acl`` / ``job_runs``
+
+        ⚠️ ``job_runs`` **是辅种域在用的表**（调度作业历史）——strmmanger
+        时代的 ``job_runs`` 是它自己的调度模块残留，两者**表名相同但语义
+        不同**。辅种域的 ``job_runs`` 有真实数据，**绝不能删**。
+        故此处**不删** ``job_runs``——见下方注释。
+        """
+        await self._migrate_driver_config()
+        await self._migrate_upload_tasks()
+        await self._drop_obsolete_columns()
+        await self._drop_obsolete_tables(("scan_rules", "dav_acl"))
+
+    async def _migrate_driver_config(self) -> None:
+        """给 ``drivers`` 表补齐媒体库配置列（幂等）。"""
+        columns: tuple[tuple[str, str, str | None], ...] = (
+            ("media_cid", "TEXT", None),
+            ("media_path", "TEXT", None),
+            ("output_dir", "TEXT", None),
+            (
+                "video_exts",
+                "TEXT",
+                "'mkv,mp4,avi,mov,wmv,flv,m4v,ts,m2ts,rmvb,rm,webm,iso'",
+            ),
+            ("image_exts", "TEXT", "''"),
+            ("data_exts", "TEXT", "''"),
+            ("min_size_mb", "INTEGER", "0"),
+            ("include_subdirs", "INTEGER", "1"),
+            ("last_scan_at", "INTEGER", None),
+            ("last_synced_count", "INTEGER", "0"),
+        )
+        await self._add_columns("drivers", columns)
+
+    async def _migrate_upload_tasks(self) -> None:
+        """给 ``upload_tasks`` 表做列变更（幂等）。
+
+        - 新增 ``delete_after_upload``（同步成功后清理本地文件）
+        - 删除 ``watch_subdir`` —— 去掉白名单后，监听目录改成**完整路径**
+          （``watch_root``），拆成「根 + 子路径」没有意义。
+        """
+        await self._add_columns(
+            "upload_tasks",
+            (("delete_after_upload", "INTEGER", "0"),),
+        )
+        await self._drop_column("upload_tasks", "watch_subdir")
+
+    async def _drop_obsolete_columns(self) -> None:
+        """删除已废弃的列（幂等）。
+
+        - ``drivers.naming_rule`` —— 命名规则已移除，``.strm`` 文件名
+          直接沿用网盘原文件名
+        """
+        await self._drop_column("drivers", "naming_rule")
+
+    async def _add_columns(
+        self,
+        table: str,
+        columns: tuple[tuple[str, str, str | None], ...],
+    ) -> None:
+        """给表补列（幂等）。``columns`` = (列名, DDL 类型, 默认值字面量)。"""
+        engine = get_engine()
+        async with engine.begin() as conn:
+            existing = {
+                row[1] for row in (await conn.execute(text(f"PRAGMA table_info({table})"))).all()
+            }
+            if not existing:
+                # 表还不存在（全新库）——``create_all`` 会建，这里跳过
+                return
+            added = 0
+            for name, ddl_type, default in columns:
+                if name in existing:
+                    continue
+                default_clause = f" DEFAULT {default}" if default is not None else ""
+                await conn.execute(
+                    text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl_type}{default_clause}")
+                )
+                added += 1
+            if added:
+                logger.info("%s 表新增 %d 个配置列", table, added)
+
+    async def _drop_column(self, table: str, column: str) -> None:
+        """删列（幂等）。老版本 SQLite（<3.35）不支持 DROP COLUMN——失败无害。"""
+        engine = get_engine()
+        async with engine.begin() as conn:
+            existing = {
+                row[1] for row in (await conn.execute(text(f"PRAGMA table_info({table})"))).all()
+            }
+            if column not in existing:
+                return
+            try:
+                await conn.execute(text(f"ALTER TABLE {table} DROP COLUMN {column}"))
+                logger.info("已删除废弃列 %s.%s", table, column)
+            except Exception as exc:
+                # 老版本 SQLite（<3.35）不支持 DROP COLUMN——
+                # 留着不影响功能（模型里已无该字段）
+                logger.warning("删除列 %s.%s 失败（不影响功能）：%s", table, column, exc)
+
+    async def _drop_obsolete_tables(self, names: tuple[str, ...]) -> None:
+        """删除废弃的表（幂等）。
+
+        删表是**不可逆**操作，故：
+
+        - 逐张表**单独检查**存在性，不存在直接跳过（幂等）
+        - 每张表一条 DELETE，不做批量
+        """
+        engine = get_engine()
+        async with engine.begin() as conn:
+            for name in names:
+                row = (
+                    await conn.execute(
+                        text(
+                            "SELECT name FROM sqlite_master "
+                            "WHERE type='table' AND name=:name"
+                        ),
+                        {"name": name},
+                    )
+                ).first()
+                if row is None:
+                    continue
+                await conn.execute(text(f"DROP TABLE {name}"))
+                logger.info("已删除废弃表 %s", name)
 
     async def _run_alter(self, conn: object, kind: str, stmt: str) -> None:
         """跑一条 ALTER，按类型区分「预期失败」与「真失败」。
