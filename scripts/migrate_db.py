@@ -167,7 +167,7 @@ def migrate(
             print(f"✗ 源库不存在：{label} → {path}", file=sys.stderr)
             return 1
 
-    print(f"源库：")
+    print("源库：")
     print(f"  媒体库域 {strm_path}")
     print(f"  辅种域    {seed_path}")
     print(f"目标库：{out_path}")
