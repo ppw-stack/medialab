@@ -1,0 +1,616 @@
+<template>
+  <div class="page">
+    <a-card size="small" title="迁移（115 → 光鸭盘）">
+      <template #extra>
+        <a-space>
+          <a-tag v-if="sourceDriver" color="blue">源：{{ sourceDriver.name }}</a-tag>
+          <a-tag v-if="targetDriver" color="cyan">目标：{{ targetDriver.name }}</a-tag>
+        </a-space>
+      </template>
+
+      <a-alert type="info" show-icon :closable="false" class="tip">
+        <template #message>
+          边扫边迁：不预先遍历整棵树，爬到合格文件就提交光鸭离线下载。
+          提交前会先查目标目录，<b>同名同大小直接跳过</b>，可以放心重复执行。
+          光鸭离线下载失败即跳过，不重试、不阻塞队列。
+        </template>
+      </a-alert>
+
+      <a-alert type="warning" show-icon :closable="false" class="tip">
+        <template #message>
+          115 对「短时间拉取不同文件」有频控，超限会返回 403
+          <span class="mono">115 pmt user</span>，光鸭记为<b>「云添加失败 code=8」</b>。
+          故提交必须<b>错开</b>——「提交间隔」越大越稳（默认 60 秒）。
+        </template>
+      </a-alert>
+
+      <a-row :gutter="12">
+        <a-col :span="12">
+          <DirBrowser
+            title="① 115 源目录"
+            :stack="sourceStack"
+            :dirs="sourceDirs"
+            :loading="loadingSource"
+            @open="openSource"
+            @go="goSource"
+          />
+        </a-col>
+        <a-col :span="12">
+          <DirBrowser
+            title="② 光鸭目标目录"
+            :stack="targetStack"
+            :dirs="targetDirs"
+            :loading="loadingTarget"
+            @open="openTarget"
+            @go="goTarget"
+          />
+        </a-col>
+      </a-row>
+
+      <a-divider style="margin: 12px 0" />
+
+      <a-form layout="inline" :model="form">
+        <a-form-item label="最小体积 (GB)">
+          <a-input-number v-model:value="form.minSizeGb" :min="0" :step="0.5" style="width: 100px" />
+        </a-form-item>
+        <a-form-item label="最大体积 (GB)">
+          <a-input-number v-model:value="form.maxSizeGb" :min="0" :step="1" style="width: 100px" />
+          <span class="hint">0 = 不限</span>
+        </a-form-item>
+        <a-form-item label="并发数">
+          <a-input-number v-model:value="form.concurrency" :min="1" :max="20" style="width: 80px" />
+          <span class="hint">1–20</span>
+        </a-form-item>
+        <a-form-item label="提交间隔">
+          <a-input-number
+            v-model:value="form.submitIntervalSec"
+            :min="0"
+            :max="600"
+            :step="10"
+            style="width: 90px"
+          />
+          <span class="hint">秒，0 = 不限速</span>
+        </a-form-item>
+        <a-form-item label="排除原盘">
+          <a-switch v-model:checked="form.excludeDisc" />
+          <span class="hint">iso / m2ts / BDMV</span>
+        </a-form-item>
+        <a-form-item>
+          <a-button type="primary" :loading="starting" :disabled="!canRun" @click="start">
+            开始迁移
+          </a-button>
+        </a-form-item>
+      </a-form>
+
+      <div v-if="sourceError || targetError" class="err">{{ sourceError || targetError }}</div>
+    </a-card>
+
+    <a-card v-if="job" size="small" class="mt" title="进度">
+      <template #extra>
+        <a-space>
+          <a-tag :color="stateColor(job.state)">{{ stateLabel(job.state) }}</a-tag>
+          <a-button
+            v-if="job.state === 'running'"
+            size="small"
+            danger
+            :loading="cancelling"
+            @click="cancel"
+          >
+            取消
+          </a-button>
+        </a-space>
+      </template>
+
+      <div class="mono truncate current" :title="job.current_path">
+        {{ job.current_path || "（等待第一个文件）" }}
+      </div>
+
+      <a-descriptions :column="4" size="small" bordered class="stats">
+        <a-descriptions-item label="已遍历目录">{{ job.dirs_walked }}</a-descriptions-item>
+        <a-descriptions-item label="已发现文件">{{ job.discovered }}</a-descriptions-item>
+        <a-descriptions-item label="在途任务">{{ job.in_flight }}</a-descriptions-item>
+        <a-descriptions-item label="已迁移体积">
+          {{ formatBytes(job.migrated_bytes) }}
+        </a-descriptions-item>
+
+        <a-descriptions-item label="成功">{{ job.success }}</a-descriptions-item>
+        <a-descriptions-item label="已存在跳过">{{ job.skipped_existing }}</a-descriptions-item>
+        <a-descriptions-item label="在途跳过">{{ job.skipped_inflight }}</a-descriptions-item>
+        <a-descriptions-item label="冲突">{{ job.conflicts }}</a-descriptions-item>
+
+        <a-descriptions-item label="失败">{{ job.failed }}</a-descriptions-item>
+        <a-descriptions-item label="阈值过滤">{{ job.filtered_small }}</a-descriptions-item>
+        <a-descriptions-item label="超上限过滤">{{ job.filtered_large }}</a-descriptions-item>
+        <a-descriptions-item label="后缀/原盘过滤">
+          {{ job.filtered_ext }}
+        </a-descriptions-item>
+      </a-descriptions>
+
+      <a-alert
+        v-if="job.legacy_inflight"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="mt-sm"
+        :message="`启动时检测到 ${job.legacy_inflight} 个上一轮遗留的在途任务，本轮跳过对应文件；实际光鸭并发 ≈ ${job.legacy_inflight + job.params.concurrency}`"
+      />
+
+      <a-alert
+        v-if="job.error"
+        type="error"
+        show-icon
+        :closable="false"
+        class="mt-sm"
+        :message="job.error"
+      />
+
+      <!-- 在途任务实时进度 -->
+      <template v-if="inFlightList.length">
+        <div class="section">在途任务（{{ inFlightList.length }}）</div>
+        <div v-for="t in inFlightList" :key="t.id" class="inflight">
+          <div class="inflight-head">
+            <span class="inflight-name" :title="t.path">{{ t.path }}</span>
+            <span class="muted">{{ progressText(t.progress) }}　{{ formatBytes(t.size) }}</span>
+          </div>
+          <a-progress
+            :percent="t.progress < 0 ? 0 : t.progress"
+            :show-info="false"
+            size="small"
+            :status="t.progress >= 100 ? 'success' : 'active'"
+          />
+        </div>
+      </template>
+
+      <template v-if="job.failed_items.length">
+        <div class="section">失败明细（{{ job.failed }})</div>
+        <a-table
+          :data-source="job.failed_items"
+          :columns="failedColumns"
+          row-key="path"
+          size="small"
+          :pagination="false"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'size'">
+              {{ record.size_gb }} GB
+            </template>
+          </template>
+        </a-table>
+      </template>
+
+      <template v-if="job.conflict_items.length">
+        <div class="section">同名不同大小（{{ job.conflicts }}）—— 未覆盖、未重传</div>
+        <a-table
+          :data-source="job.conflict_items"
+          :columns="conflictColumns"
+          row-key="path"
+          size="small"
+          :pagination="false"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'local'">{{ record.local_gb }} GB</template>
+            <template v-else-if="column.key === 'remote'">{{ record.remote_gb }} GB</template>
+          </template>
+        </a-table>
+      </template>
+
+      <div class="section">
+        日志
+        <span class="muted">（每 2 秒自动刷新）</span>
+      </div>
+      <div ref="logBox" class="logs">
+        <div v-for="(line, i) in job.logs" :key="i" class="log-line">
+          <span class="log-time">{{ logTime(line) }}</span>
+          <span class="log-text">{{ logText(line) }}</span>
+        </div>
+      </div>
+    </a-card>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue"
+import { message } from "ant-design-vue"
+import DirBrowser from "../../components/DirBrowser.vue"
+import { errMsg, mediaApi as api } from "../../api"
+import type { DirEntry, Driver, MigrationJob, MigrationRunInput } from "../../types"
+
+const drivers = ref<Driver[]>([])
+const sourceDriver = ref<Driver | null>(null)
+const targetDriver = ref<Driver | null>(null)
+
+const sourceStack = ref<DirEntry[]>([])
+const targetStack = ref<DirEntry[]>([])
+const sourceDirs = ref<DirEntry[]>([])
+const targetDirs = ref<DirEntry[]>([])
+const loadingSource = ref(false)
+const loadingTarget = ref(false)
+const sourceError = ref("")
+const targetError = ref("")
+
+const form = reactive({
+  minSizeGb: 0,
+  maxSizeGb: 0,
+  concurrency: 2,
+  submitIntervalSec: 60,
+  excludeDisc: true,
+})
+
+const job = ref<MigrationJob | null>(null)
+const starting = ref(false)
+const cancelling = ref(false)
+const logBox = ref<HTMLElement | null>(null)
+
+let timer: number | undefined
+
+const failedColumns = [
+  { title: "文件", dataIndex: "name", key: "name", ellipsis: true },
+  { title: "大小", key: "size", width: 100 },
+  { title: "原因", dataIndex: "reason", key: "reason", ellipsis: true },
+]
+
+const conflictColumns = [
+  { title: "文件", dataIndex: "name", key: "name", ellipsis: true },
+  { title: "115", key: "local", width: 110 },
+  { title: "光鸭", key: "remote", width: 110 },
+]
+
+const currentSource = computed(() => sourceStack.value[sourceStack.value.length - 1])
+const currentTarget = computed(() => targetStack.value[targetStack.value.length - 1])
+
+/** 在途任务（按进度降序） */
+const inFlightList = computed(() => {
+  const items = job.value?.in_flight_items ?? {}
+  return Object.entries(items)
+    .map(([id, v]) => ({
+      id,
+      path: v.path,
+      name: v.name,
+      progress: v.progress,
+      size: v.size,
+    }))
+    .sort((a, b) => b.progress - a.progress)
+})
+
+const canRun = computed(
+  () =>
+    !!sourceDriver.value &&
+    !!targetDriver.value &&
+    !!currentSource.value &&
+    currentTarget.value !== undefined &&
+    job.value?.state !== "running",
+)
+
+onMounted(async () => {
+  try {
+    drivers.value = await api.get<Driver[]>("/drivers")
+  } catch (e) {
+    message.error(errMsg(e, "加载存储源失败"))
+    return
+  }
+
+  sourceDriver.value = drivers.value.find((d) => d.type === "p115") ?? null
+  targetDriver.value = drivers.value.find((d) => d.type === "guangya") ?? null
+
+  if (sourceDriver.value) {
+    sourceStack.value = [
+      {
+        id: sourceDriver.value.media_cid || "0",
+        name: sourceDriver.value.media_path || "115 根目录",
+      },
+    ]
+    await loadSource()
+  }
+  if (targetDriver.value) {
+    targetStack.value = [{ id: "", name: "光鸭根目录" }]
+    await loadTarget()
+  }
+
+  // 找回最近一次任务（刷新页面后还能看到进度）
+  try {
+    const jobs = await api.get<MigrationJob[]>("/migrations/jobs")
+    if (jobs.length) {
+      job.value = jobs[0] as MigrationJob
+      if (job.value.state === "running") startPolling()
+    }
+  } catch {
+    // 没有任务不算错
+  }
+})
+
+onUnmounted(stopPolling)
+
+watch(
+  () => job.value?.logs.length,
+  async () => {
+    await nextTick()
+    if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight
+  },
+)
+
+// -- 目录浏览 --
+
+async function loadSource(): Promise<void> {
+  if (!sourceDriver.value || !currentSource.value) return
+  loadingSource.value = true
+  sourceError.value = ""
+  try {
+    const res = await api.get<{ dirs: DirEntry[] }>(
+      `/migrations/sources?driver_id=${sourceDriver.value.id}&parent_id=${encodeURIComponent(currentSource.value.id)}`,
+    )
+    sourceDirs.value = res.dirs
+  } catch (e) {
+    sourceError.value = errMsg(e, "读取 115 目录失败")
+    sourceDirs.value = []
+  } finally {
+    loadingSource.value = false
+  }
+}
+
+async function loadTarget(): Promise<void> {
+  if (!targetDriver.value || !currentTarget.value) return
+  loadingTarget.value = true
+  targetError.value = ""
+  try {
+    const res = await api.get<{ dirs: DirEntry[] }>(
+      `/migrations/targets?driver_id=${targetDriver.value.id}&parent_id=${encodeURIComponent(currentTarget.value.id)}`,
+    )
+    targetDirs.value = res.dirs
+  } catch (e) {
+    targetError.value = errMsg(e, "读取光鸭目录失败")
+    targetDirs.value = []
+  } finally {
+    loadingTarget.value = false
+  }
+}
+
+function openSource(dir: DirEntry): void {
+  sourceStack.value = [...sourceStack.value, dir]
+  void loadSource()
+}
+
+function goSource(index: number): void {
+  sourceStack.value = sourceStack.value.slice(0, index + 1)
+  void loadSource()
+}
+
+function openTarget(dir: DirEntry): void {
+  targetStack.value = [...targetStack.value, dir]
+  void loadTarget()
+}
+
+function goTarget(index: number): void {
+  targetStack.value = targetStack.value.slice(0, index + 1)
+  void loadTarget()
+}
+
+// -- 迁移 --
+
+async function start(): Promise<void> {
+  if (!sourceDriver.value || !targetDriver.value || !currentSource.value || !currentTarget.value) {
+    return
+  }
+  starting.value = true
+  try {
+    const payload: MigrationRunInput = {
+      source_driver_id: sourceDriver.value.id,
+      source_cid: currentSource.value.id,
+      source_path: sourceStack.value.map((c) => c.name).join("/"),
+      target_driver_id: targetDriver.value.id,
+      target_file_id: currentTarget.value.id,
+      target_path: targetStack.value.map((c) => c.name).join("/"),
+      min_size_mb: Math.round((form.minSizeGb || 0) * 1024),
+      max_size_mb: Math.round((form.maxSizeGb || 0) * 1024),
+      concurrency: form.concurrency,
+      submit_interval_sec: form.submitIntervalSec,
+      exclude_disc: form.excludeDisc,
+    }
+    const res = await api.post<{ job_id: string }>("/migrations/run", payload)
+    job.value = await api.get<MigrationJob>(`/migrations/jobs/${res.job_id}`)
+    startPolling()
+  } catch (e) {
+    message.error(errMsg(e, "启动迁移失败"))
+  } finally {
+    starting.value = false
+  }
+}
+
+async function cancel(): Promise<void> {
+  if (!job.value) return
+  cancelling.value = true
+  try {
+    await api.post(`/migrations/jobs/${job.value.id}/cancel`)
+    message.info("已请求取消（已提交的离线任务留在光鸭继续跑）")
+  } catch (e) {
+    message.error(errMsg(e, "取消失败"))
+  } finally {
+    cancelling.value = false
+  }
+}
+
+function startPolling(): void {
+  stopPolling()
+  timer = window.setInterval(() => void tick(), 2000)
+}
+
+function stopPolling(): void {
+  if (timer !== undefined) {
+    window.clearInterval(timer)
+    timer = undefined
+  }
+}
+
+async function tick(): Promise<void> {
+  if (!job.value) return
+  try {
+    job.value = await api.get<MigrationJob>(`/migrations/jobs/${job.value.id}`)
+    if (job.value.state !== "running") {
+      stopPolling()
+      if (job.value.state === "success") {
+        message.success(
+          `迁移结束：成功 ${job.value.success} 个，失败 ${job.value.failed} 个`,
+        )
+      }
+    }
+  } catch (e) {
+    message.error(errMsg(e, "查询迁移进度失败"))
+    stopPolling()
+  }
+}
+
+// -- 展示 --
+
+function stateLabel(state: string): string {
+  switch (state) {
+    case "running":
+      return "进行中"
+    case "success":
+      return "已完成"
+    case "failed":
+      return "失败"
+    case "cancelled":
+      return "已取消"
+    default:
+      return state
+  }
+}
+
+function stateColor(state: string): string {
+  switch (state) {
+    case "running":
+      return "processing"
+    case "success":
+      return "success"
+    case "failed":
+      return "error"
+    default:
+      return "default"
+  }
+}
+
+function formatBytes(bytes: number): string {
+  if (!bytes) return "0 B"
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"]
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+  return `${(bytes / 1024 ** i).toFixed(i === 0 ? 0 : 2)} ${units[i]}`
+}
+
+/** 进度文案：-1 = 光鸭还没开始下载（排队中）。 */
+function progressText(progress: number): string {
+  return progress < 0 ? "排队中" : `${progress}%`
+}
+
+/** 拆出日志行首的时间戳（``[00:41:37]``），没有就返回空串。 */
+function logTime(line: string): string {
+  const m = line.match(/^\[(\d{2}:\d{2}:\d{2})\]\s*/)
+  return m ? m[1] : ""
+}
+
+/** 去掉时间戳后的正文。 */
+function logText(line: string): string {
+  return line.replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, "")
+}
+</script>
+
+<style scoped>
+.tip {
+  margin-bottom: 12px;
+}
+
+.hint {
+  margin-left: 6px;
+  color: #999;
+  font-size: 12px;
+}
+
+.mt {
+  margin-top: 12px;
+}
+
+.mt-sm {
+  margin-top: 8px;
+}
+
+.current {
+  color: #666;
+  margin-bottom: 8px;
+}
+
+.stats {
+  margin-bottom: 8px;
+}
+
+.section {
+  margin: 12px 0 6px;
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.inflight {
+  margin-bottom: 6px;
+  padding: 6px 8px;
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  border-radius: 4px;
+}
+
+.inflight-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+
+/* 完整路径：不截断，在分隔符处换行 */
+.inflight-name {
+  flex: 1;
+  min-width: 0;
+  color: #555;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+.logs {
+  max-height: 320px;
+  overflow: auto;
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+/* 每条日志独立成行 */
+.log-line {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 1px 0;
+  /* 路径在分隔符处换行，而不是硬拆字符 */
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+/* 时间戳淡一点，便于区分事件与上下文 */
+.log-time {
+  flex: none;
+  color: #aaa;
+  font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.log-text {
+  color: #444;
+  min-width: 0;
+}
+
+.err {
+  margin-top: 8px;
+  color: #cf1322;
+  font-size: 12px;
+}
+</style>

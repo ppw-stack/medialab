@@ -1,4 +1,20 @@
+/**
+ * API 客户端。
+ *
+ * **两个业务域，两个前缀**（后端路由天然不冲突）：
+ *
+ * - `api`   —— 辅种域，`/api/v1/*`
+ * - `mediaApi` —— 媒体库域，`/api/*`
+ *
+ * 两边共用同一套 fetch 包装、同一套错误处理、**同一个 session cookie**
+ * ——所以一次登录即可访问两个域的面板。
+ */
+
+/** 辅种域的 API 前缀。 */
 const BASE = "/api/v1";
+
+/** 媒体库域的 API 前缀。 */
+const BASE_MEDIA = "/api";
 
 export class ApiError extends Error {
   status: number;
@@ -28,11 +44,18 @@ export function errMsg(e: unknown, fallback = "未知错误"): string {
   return fallback;
 }
 
-export async function apiFetch<T = unknown>(
+/**
+ * 发请求并解析响应。
+ *
+ * @param base API 前缀
+ * @param path 端点路径（**不带**前缀）
+ */
+async function request<T = unknown>(
+  base: string,
   path: string,
-  opts: RequestInit = {}
+  opts: RequestInit = {},
 ): Promise<T> {
-  const resp = await fetch(`${BASE}${path}`, {
+  const resp = await fetch(`${base}${path}`, {
     ...opts,
     headers: {
       "Content-Type": "application/json",
@@ -69,7 +92,25 @@ export async function apiFetch<T = unknown>(
   return resp.json();
 }
 
+/** 辅种域的请求（`/api/v1/*`）。 */
+export function apiFetch<T = unknown>(
+  path: string,
+  opts: RequestInit = {},
+): Promise<T> {
+  return request<T>(BASE, path, opts);
+}
+
+/** 媒体库域的请求（`/api/*`）。 */
+export function mediaFetch<T = unknown>(
+  path: string,
+  opts: RequestInit = {},
+): Promise<T> {
+  return request<T>(BASE_MEDIA, path, opts);
+}
+
 /**
+ * 辅种域的请求方法。
+ *
  * 以 GET / POST 为主（部分代理/防火墙会丢 PUT/DELETE）。
  * 删除走专用 POST 端点，id 放 body：
  *   POST /{resource}/update   body={id, ...fields}
@@ -88,4 +129,30 @@ export const api = {
       method: "PUT",
       body: body ? JSON.stringify(body) : undefined,
     }),
+};
+
+/**
+ * 媒体库域的请求方法。
+ *
+ * 媒体库域的端点用标准的 REST 动词（PATCH / DELETE）——没有辅种域
+ * 「代理会丢 PUT/DELETE」的历史包袱。
+ */
+export const mediaApi = {
+  get: <T = unknown>(path: string) => mediaFetch<T>(path),
+  post: <T = unknown>(path: string, body?: unknown) =>
+    mediaFetch<T>(path, {
+      method: "POST",
+      body: body ? JSON.stringify(body) : undefined,
+    }),
+  put: <T = unknown>(path: string, body?: unknown) =>
+    mediaFetch<T>(path, {
+      method: "PUT",
+      body: body ? JSON.stringify(body) : undefined,
+    }),
+  patch: <T = unknown>(path: string, body?: unknown) =>
+    mediaFetch<T>(path, {
+      method: "PATCH",
+      body: body ? JSON.stringify(body) : undefined,
+    }),
+  del: <T = unknown>(path: string) => mediaFetch<T>(path, { method: "DELETE" }),
 };

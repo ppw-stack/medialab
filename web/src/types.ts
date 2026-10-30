@@ -618,3 +618,483 @@ export interface DashboardSnap {
    */
   inflight_snapshot_at: string | null
 }
+
+// ==================================================================== 媒体库域
+//
+// 以下类型来自 strmmanger（媒体库域）。与辅种域的类型**零重名**——
+// ``Driver``（存储源）与 ``Downloader``（下载器）是不同的东西。
+
+// ---- 存储源 ----
+
+export interface Driver {
+  id: number
+  type: string
+  name: string
+  device_type: string | null
+  enabled: boolean
+  /** 凭据掩码（不回传明文） */
+  credential_masked: string
+
+  // -- 媒体库配置 --
+  /** 115 媒体库 cid（字符串） */
+  media_cid: string | null
+  /** 媒体库路径（只读展示） */
+  media_path: string | null
+  /** 本地媒体库目录 */
+  output_dir: string | null
+  /** 视频后缀（逗号分隔） */
+  video_exts: string
+  /** 媒体图片后缀（逗号分隔，当前忽略） */
+  image_exts: string
+  /** 媒体数据后缀（逗号分隔，当前忽略） */
+  data_exts: string
+  /** 最小视频体积（MB），0 = 不过滤 */
+  min_size_mb: number
+  /** 是否包含子目录 */
+  include_subdirs: boolean
+  last_scan_at: number | null
+  last_synced_count: number
+}
+
+/** 115 设备类型（后端是单一真源，前端不手写）。 */
+export interface DeviceType {
+  value: string
+  label: string
+  /** 能否用于扫码登录（实测：18 个里只有 10 个能取到二维码） */
+  qr_capable: boolean
+  note: string
+}
+
+export interface DriverInput {
+  type: string
+  name: string
+  device_type?: string | null
+}
+
+/** 修改存储源（只传要改的字段）。 */
+export interface DriverUpdate {
+  name?: string | null
+  device_type?: string | null
+}
+
+/** 媒体库配置（每个存储源一套）。 */
+export interface DriverConfig {
+  /** 115 媒体库 cid（字符串） */
+  media_cid: string
+  /** 媒体库路径（只读展示，后端按 cid 自动解析） */
+  media_path: string
+  /** 本地媒体库目录 */
+  output_dir: string
+  /** 视频后缀（数组形式，提交时转逗号分隔） */
+  video_exts: string[]
+  /** 媒体图片后缀（当前忽略） */
+  image_exts: string[]
+  /** 媒体数据后缀（当前忽略） */
+  data_exts: string[]
+  /** 最小视频体积（MB），0 = 不过滤 */
+  min_size_mb: number
+  /** 是否包含子目录 */
+  include_subdirs: boolean
+}
+
+/** 扫描统计。 */
+export interface ScanStats {
+  created: number
+  updated: number
+  unchanged: number
+  attachment_synced: number
+  attachment_unchanged: number
+  attachment_failed: number
+  skipped: number
+  skipped_unknown: number
+  skipped_small: number
+  failed: number
+  total: number
+  errors: string[]
+}
+
+/** 增量同步任务（115 生活事件流）。 */
+export interface IncrementalJob {
+  id: string
+  driver_id: number
+  driver_name: string
+  /** running / success / failed / cancelled */
+  state: string
+  started_at: number
+  finished_at: number | null
+  elapsed_sec: number
+  current_path: string
+  logs: string[]
+  error: string | null
+  /** 拉到的原始事件数 */
+  events_fetched: number
+  /** 落在媒体库内的事件数 */
+  events_in_scope: number
+  created: number
+  updated: number
+  unchanged: number
+  deleted: number
+  attachment_synced: number
+  attachment_unchanged: number
+  attachment_failed: number
+  /** 路径冲突（疑似目录改名）——已跳过 */
+  conflicts: number
+  skipped_unknown: number
+  skipped_deleted: number
+  failed: number
+  cursor_old: number
+  cursor_new: number
+  total: number
+}
+
+/** 扫描任务（后台任务 + 轮询进度）。 */
+export interface ScanJob {
+  id: string
+  driver_id: number
+  driver_name: string
+  /** running / success / failed / cancelled */
+  state: string
+  started_at: number
+  finished_at: number | null
+  elapsed_sec: number
+  /** 当前正在处理的文件路径 */
+  current_path: string
+  /** 已处理的文件数（含跳过） */
+  processed: number
+  dirs: number
+  created: number
+  updated: number
+  unchanged: number
+  attachment_synced: number
+  attachment_unchanged: number
+  attachment_failed: number
+  skipped_unknown: number
+  skipped_small: number
+  failed: number
+  /** 实时日志（环形，最多 500 条） */
+  logs: string[]
+  error: string | null
+}
+
+// ---- 上传任务（本地目录 → 光鸭盘）----
+
+/** 上传任务。 */
+export interface UploadTask {
+  id: number
+  name: string
+  /** 目标存储源（光鸭） */
+  driver_id: number
+  /** 光鸭目标目录 fileId */
+  target_file_id: string
+  /** 光鸭目标目录路径（只读展示） */
+  target_path: string | null
+  /** 监听目录（容器内绝对路径，完整路径） */
+  watch_root: string
+  include_subdirs: boolean
+  enabled: boolean
+  /** 同步成功后清理本地文件（移到回收目录，可还原） */
+  delete_after_upload: boolean
+  concurrency: number
+  created_at: number
+  updated_at: number
+  last_sync_at: number | null
+  last_uploaded_count: number
+  last_error: string | null
+  /** 运行态：监听器是否在跑 */
+  listening: boolean
+  /** 当前正在上传的文件 */
+  current: string
+  total_uploaded: number
+  total_failed: number
+  total_bytes: number
+  /** 运行态的最近一次错误（监听启动失败等） */
+  runtime_error: string | null
+}
+
+/** 上传任务的运行态（轮询用）。 */
+export interface UploadRuntime {
+  task_id: number
+  listening: boolean
+  current: string
+  last_event_at: number
+  total_uploaded: number
+  total_failed: number
+  total_bytes: number
+  logs: string[]
+  error: string | null
+  syncing: boolean
+  /** 监听器统计 */
+  watch: {
+    events?: number
+    dispatched?: number
+    filtered?: number
+    rejected?: number
+    last_event_at?: number
+  }
+}
+
+/** 立即全量同步的结果。 */
+export interface SyncNowResult {
+  uploaded: number
+  overwritten: number
+  unchanged: number
+  failed: number
+  conflicts: number
+  /** 本地已删除的文件数（delete_after_upload 开启时） */
+  deleted_local: number
+  uploaded_bytes: number
+}
+
+/** 存储源账号状态（测连结果）。 */
+export interface DriverStatus {
+  /** 凭据是否有效 */
+  logged_in: boolean
+  /**
+   * 状态：
+   * - `ok` —— 一切正常
+   * - `needs_verify` —— 登录态正常，但换直链被 115 账号安全验证挡住
+   * - `no_credential` —— 尚未扫码登录
+   * - `error` —— 其它问题
+   */
+  status: string
+  /** 可读说明（直接显示给用户） */
+  message: string
+  /** 账号 id（UID） */
+  account_id: string
+  /** 总容量（字节） */
+  total_bytes: number
+  /** 已用容量（字节） */
+  used_bytes: number
+  /** 剩余容量（字节） */
+  remain_bytes: number
+  /** 能否换到直链（最关键的一项） */
+  can_get_link: boolean
+}
+
+export interface QrStartResult {
+  session_id: string
+  qr_image_b64: string
+}
+
+export type QrStatusKind = 'waiting' | 'scanned' | 'confirmed' | 'expired' | 'error'
+
+export interface QrStatusResult {
+  kind: QrStatusKind
+  error_kind: string | null
+  error_msg: string | null
+  confirmed: boolean
+}
+
+/** 发送短信验证码的结果。 */
+export interface SmsSendResult {
+  captcha_token: string
+  /** 需要人机验证时给出 URL */
+  captcha_url: string
+}
+
+/** 校验短信验证码的结果。 */
+export interface SmsVerifyResult {
+  ok: boolean
+  message: string
+}
+
+// ---- 媒体库 ----
+
+export interface MediaItem {
+  id: number
+  driver_id: number
+  remote_id: string
+  path: string
+  name: string
+  size: number
+  strm_path: string | null
+  /** 当前中转 URL */
+  strm_url: string
+}
+
+export interface MediaList {
+  total: number
+  items: MediaItem[]
+}
+
+export interface MediaStats {
+  total: number
+  total_size: number
+  per_driver: { driver_id: number; count: number }[]
+  server_time: number
+}
+
+// ---- 健康检查 ----
+
+export interface HealthReport {
+  checked_at: number
+  healthy: boolean
+  stale_count: number
+  missing_files_count: number
+  orphan_files_count: number
+  invalid_signature_count: number
+  stale: number[]
+  missing_files: number[]
+  orphan_files: string[]
+  invalid_signature: number[]
+}
+
+// ---- 作业 ----
+
+// ---- 通用 ----
+
+export interface CacheStats {
+  l1_size: number
+  l1_capacity: number
+  hits: number
+  misses: number
+  hit_rate: number
+  in_flight: number
+}
+
+export interface ReadyResponse {
+  status: string
+  database: boolean
+  cache: CacheStats | null
+}
+
+// ---- 迁移（115 → 光鸭盘） ----
+
+/** 目录浏览项（115 用 cid，光鸭用 fileId）。 */
+export interface DirEntry {
+  id: string
+  name: string
+}
+
+/** 迁移失败 / 冲突明细。 */
+export interface MigrationJobItem {
+  name: string
+  path: string
+  size_gb?: number
+  reason?: string
+  local_gb?: number
+  remote_gb?: number
+}
+
+/** 一次迁移任务的进度快照。 */
+export interface MigrationJob {
+  id: string
+  state: "running" | "success" | "failed" | "cancelled"
+  started_at: number
+  finished_at: number | null
+  elapsed_sec: number
+  params: {
+    source_driver_id: number
+    source_cid: string
+    source_path: string
+    target_driver_id: number
+    target_file_id: string
+    target_path: string
+    min_size_mb: number
+    max_size_mb: number
+    concurrency: number
+    /** 两次提交给光鸭之间的最小间隔（秒） */
+    submit_interval_sec: number
+    exclude_disc: boolean
+  }
+  source_path: string
+  current_path: string
+  dirs_walked: number
+  discovered: number
+  in_flight: number
+  /** 在途任务实时进度：taskId → { 完整路径, 文件名, 进度%（-1 = 排队中）, 大小 } */
+  in_flight_items: Record<
+    string,
+    { path: string; name: string; progress: number; size: number }
+  >
+  success: number
+  failed: number
+  skipped_existing: number
+  skipped_inflight: number
+  conflicts: number
+  filtered_small: number
+  filtered_large: number
+  filtered_ext: number
+  migrated_bytes: number
+  legacy_inflight: number
+  failed_items: MigrationJobItem[]
+  conflict_items: MigrationJobItem[]
+  logs: string[]
+  error: string | null
+}
+
+/** 开跑参数。 */
+export interface MigrationRunInput {
+  source_driver_id: number
+  source_cid: string
+  source_path: string
+  target_driver_id: number
+  target_file_id: string
+  target_path: string
+  min_size_mb: number
+  max_size_mb: number
+  concurrency: number
+  submit_interval_sec: number
+  exclude_disc: boolean
+}
+
+// ---- WebDAV ----
+
+/** WebDAV 账号。 */
+export interface DavUser {
+  id: number
+  username: string
+  is_active: boolean
+  /** 上次登录时间（unix 秒），0 = 从未登录 */
+  last_login_at: number
+  created_at: number
+}
+
+/** 新建账号。 */
+export interface DavUserInput {
+  username: string
+  password: string
+}
+
+/** 修改账号（全部可选）。 */
+export interface DavUserUpdate {
+  password?: string
+  is_active?: boolean
+}
+
+/** 审计记录。 */
+export interface DavAuditItem {
+  id: number
+  user_id: number
+  username: string
+  method: string
+  path: string
+  status: number
+  client: string
+  remote_addr: string
+  duration_ms: number
+  item_count: number
+  created_at: number
+}
+
+/** 审计查询结果（分页）。 */
+export interface DavAuditPage {
+  items: DavAuditItem[]
+  total: number
+}
+
+/** 可选作为 DAV 根的存储源。 */
+export interface DavRootDriver {
+  id: number
+  name: string
+  output_dir: string | null
+  /** 能否作为 DAV 根（有 output_dir 且目录存在） */
+  usable: boolean
+}
+
+/** DAV 根配置。 */
+export interface DavRootConfig {
+  /** 当前指向的存储源 id；null = 自动（第一个可用） */
+  driver_id: number | null
+  drivers: DavRootDriver[]
+}

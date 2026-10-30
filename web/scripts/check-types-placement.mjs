@@ -25,6 +25,9 @@ const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
 const VIEW_LOCAL_ALLOWLIST = new Set([
   'utils/format.ts',
   'pages/TorrentIndex.vue',
+  // 媒体库域：目录树节点（TreeNode）与 tab 描述（Tab）是**视图内部**
+  // 结构——由 MediaItem 在前端组装而成，不是后端 DTO。
+  'pages/media/Library.vue',
 ])
 
 /** 递归列出 src 下的 .ts / .vue 文件 */

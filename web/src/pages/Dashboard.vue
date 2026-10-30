@@ -1,12 +1,16 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { api } from '../api'
-import type { DashboardSnap, SchedulerInfo } from '../types'
+import { api, mediaApi } from '../api'
+import type { DashboardSnap, MediaStats, ReadyResponse, SchedulerInfo } from '../types'
 
 const snap = ref<DashboardSnap | null>(null)
 const scheduler = ref<SchedulerInfo | null>(null)
 const now = ref(new Date())
 let timer: ReturnType<typeof setInterval> | null = null
+
+// -- 媒体库域（合并 strmmanger 后新增）--
+const mediaStats = ref<MediaStats | null>(null)
+const ready = ref<ReadyResponse | null>(null)
 
 // 失联检测：后端不可达时旧数据仍展示（不 blank），但顶部 banner 点名"已失联 +
 // 上次成功 N 秒前"。原先两处 catch {} 静默吞错，会让仪表盘冻在陈旧数据上
@@ -27,6 +31,19 @@ async function load() {
     ok = true
   } catch {
     /* 同上 */
+  }
+  // 媒体库域的数据**失败不影响**失联判定——辅种域通着就说明后端活着，
+  // 媒体库域单独故障不该让整个面板显示「失联」。
+  try {
+    mediaStats.value = await mediaApi.get<MediaStats>('/media/stats')
+  } catch {
+    /* 媒体库域不可用时留空 */
+  }
+  try {
+    const resp = await fetch('/readyz')
+    ready.value = (await resp.json()) as ReadyResponse
+  } catch {
+    ready.value = null
   }
   if (ok) {
     connected.value = true
@@ -96,6 +113,14 @@ const staleSeconds = computed(() => {
  */
 function jobTitle(job: { title?: string; name: string }): string {
   return job.title || job.name
+}
+
+/** 字节数 → 人类可读（媒体库域的媒体总大小）。 */
+function formatBytes(bytes: number): string {
+  if (!bytes) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+  return `${(bytes / 1024 ** i).toFixed(i === 0 ? 0 : 2)} ${units[i]}`
 }
 </script>
 
@@ -217,6 +242,49 @@ function jobTitle(job: { title?: string; name: string }): string {
         <div class="stat-tile__value">{{ inflightTorrents }}</div>
         <div class="stat-tile__hint">{{ inflightHint }}</div>
       </div>
+    </section>
+
+    <section class="section" v-if="mediaStats">
+      <div class="label-caps" style="margin-bottom: var(--sp-3)">媒体库 · MEDIA</div>
+      <a-row :gutter="[12, 12]">
+        <a-col :xs="12" :sm="6">
+          <div class="stat-tile" :class="{ 'stat-tile--active': mediaStats.total > 0 }">
+            <div class="stat-tile__label">媒体条目</div>
+            <div class="stat-tile__value">{{ mediaStats.total }}</div>
+            <div class="stat-tile__hint">STRM 条目</div>
+          </div>
+        </a-col>
+        <a-col :xs="12" :sm="6">
+          <div class="stat-tile">
+            <div class="stat-tile__label">媒体总大小</div>
+            <div class="stat-tile__value">{{ formatBytes(mediaStats.total_size) }}</div>
+            <div class="stat-tile__hint">源文件体积</div>
+          </div>
+        </a-col>
+        <a-col :xs="12" :sm="6">
+          <div class="stat-tile">
+            <div class="stat-tile__label">存储源</div>
+            <div class="stat-tile__value">{{ mediaStats.per_driver.length }}</div>
+            <div class="stat-tile__hint">115 · 光鸭</div>
+          </div>
+        </a-col>
+        <a-col :xs="12" :sm="6">
+          <div class="stat-tile">
+            <div class="stat-tile__label">缓存命中率</div>
+            <div class="stat-tile__value">
+              {{ ((ready?.cache?.hit_rate ?? 0) * 100).toFixed(1) }}%
+            </div>
+            <div class="stat-tile__hint">直链 L1/L2</div>
+          </div>
+        </a-col>
+      </a-row>
+      <a-alert
+        type="info"
+        show-icon
+        style="margin-top: var(--sp-3)"
+        message="媒体字节流不经过本服务"
+        description="播放器请求 /302 后直接跟随重定向到网盘 CDN，GB 级流量走玩家↔网盘，本服务只出网换取直链（几 KB）。"
+      />
     </section>
   </div>
 </template>
