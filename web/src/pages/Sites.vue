@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { api, errMsg } from '../api'
 import type {
   AdapterInfo,
@@ -51,6 +51,75 @@ const testingAll = ref(false)
 const testResults = ref<Record<number, { status: string; detail: string }>>({})
 const modalOpen = ref(false)
 const formRef = ref<FormInstance>()
+
+// ---- 用户数据汇总（跨站合计）----
+const refreshingUserData = ref(false)
+
+/**
+ * 跨站合计：做种数 / 上传量 / 下载量 / 时魔。
+ *
+ * 数据源是**站点列表本身**（`GET /sites` 已带出每站的 user_data 快照）——
+ * 不额外发请求。
+ */
+const userDataSummary = computed(() => {
+  const withData = data.value.filter((s) => s.has_data)
+  return {
+    total_seed: withData.reduce((s, d) => s + d.seeding_count, 0),
+    total_up: withData.reduce((s, d) => s + d.upload, 0),
+    total_dn: withData.reduce((s, d) => s + d.download, 0),
+    total_bonus: withData.reduce((s, d) => s + (d.hourly_bonus ?? 0), 0),
+    capped: withData.filter((d) => d.hourly_bonus_capped === true).length,
+    site_count: withData.length,
+  }
+})
+
+const summaryTiles = computed(() => [
+  { label: '做种中', value: String(userDataSummary.value.total_seed), hint: '跨站合计' },
+  { label: '总上传', value: fmtBytes(userDataSummary.value.total_up), hint: '累计' },
+  { label: '总下载', value: fmtBytes(userDataSummary.value.total_dn), hint: '累计' },
+  {
+    label: '时魔合计/小时',
+    value: userDataSummary.value.total_bonus.toFixed(1),
+    hint: userDataSummary.value.capped > 0
+      ? `${userDataSummary.value.capped} 站已封顶`
+      : '已封顶站越少越优先推',
+  },
+])
+
+/**
+ * 触发全局刷新（跑 `refresh_user_data` 作业重抓所有站点）。
+ *
+ * **POST 一返回后台作业就调度了**，数据要等作业跑完才更新——故延迟
+ * 10s 再重新加载，期间按钮持续 loading（避免用户以为已结束却没动静）。
+ */
+let userDataTimer: ReturnType<typeof setTimeout> | null = null
+
+async function refreshAllUserData() {
+  if (refreshingUserData.value) return
+  refreshingUserData.value = true
+  try {
+    await api.post('/scheduler/refresh_user_data/run')
+    message.success('已触发全局刷新，正在重新加载…')
+    if (userDataTimer) clearTimeout(userDataTimer)
+    userDataTimer = setTimeout(async () => {
+      try {
+        await load()
+      } finally {
+        refreshingUserData.value = false
+      }
+    }, 10000)
+  } catch (exc) {
+    message.error(exc instanceof Error ? exc.message : '触发失败')
+    refreshingUserData.value = false
+  }
+}
+
+onUnmounted(() => {
+  if (userDataTimer) {
+    clearTimeout(userDataTimer)
+    userDataTimer = null
+  }
+})
 
 const formState = reactive<Record<string, unknown>>({})
 
@@ -234,12 +303,26 @@ const columns = [
         <div class="page-header__sub">凭据脱敏展示 · 支持 9 类私有种子站点</div>
       </div>
       <a-space>
+        <a-button :loading="refreshingUserData" @click="refreshAllUserData">
+          刷新用户数据
+        </a-button>
         <a-button :loading="testingAll" @click="onTestAll">全部测连</a-button>
         <a-button type="primary" @click="onCreate">新增站点</a-button>
       </a-space>
     </header>
 
     <hr class="divider-hairline" style="margin: 0" />
+
+    <section class="section">
+      <div class="label-caps" style="margin-bottom: var(--sp-3)">汇总 · SUMMARY</div>
+      <div class="summary-grid">
+        <div v-for="t in summaryTiles" :key="t.label" class="stat-tile">
+          <div class="stat-tile__label">{{ t.label }}</div>
+          <div class="stat-tile__value">{{ t.value }}</div>
+          <div class="stat-tile__hint">{{ t.hint }}</div>
+        </div>
+      </div>
+    </section>
 
     <section class="section">
       <div class="panel">
@@ -471,5 +554,12 @@ const columns = [
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 汇总卡网格（页面结构与设计 token 已在 global.css 统一定义） */
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--sp-3);
 }
 </style>

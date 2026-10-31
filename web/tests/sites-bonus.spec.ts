@@ -8,14 +8,16 @@ async function login(page: any) {
   await page.waitForURL((url) => !url.pathname.startsWith('/login'), { timeout: 10000 })
 }
 
-/** 时魔列（FR-1.6 增补，2026-10-22）。
+/**
+ * 时魔列（FR-1.6 增补，2026-10-22；页面位置调整 2026-11-01）。
  *
- * 站点用户数据页要展示「时魔/小时」列——各站单位不同（魔力值 / 爆米花 /
- * 茉莉 / 憨豆），没有时魔的站显示「—」，达上限的站打「已封顶」标签。
+ * 「站点用户数据」页已移除——时魔列移到**站点列表页**展示（各站单位
+ * 不同：魔力值 / 爆米花 / 茉莉 / 憨豆），没有时魔的站显示「—」，达上限的
+ * 站打「已封顶」标签。
  */
-test('站点用户数据 - 展示时魔列（单位 / 封顶标记）', async ({ page }) => {
+test('站点列表 - 展示时魔列（单位 / 封顶标记）', async ({ page }) => {
   await login(page)
-  await page.goto('/user-data')
+  await page.goto('/sites')
   await page.waitForLoadState('networkidle')
 
   // 表头有时魔列（按表头文字定位列号，别写死第几列——加列会错位）
