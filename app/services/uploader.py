@@ -289,7 +289,13 @@ async def _maybe_cleanup_local(
         )
 
     # ③ 彻底删除（unlink —— 不可逆，故前面两道校验很关键）
-    result = upload_cleanup.delete_local_file(local_path, ctx.root)
+    #
+    # **必须 ``asyncio.to_thread``**：``unlink`` 在 CIFS / NFS 上是同步 IO，
+    # 删除大文件会阻塞事件循环（实测：CIFS 删除一个 mkv 卡住整个事件循环，
+    # healthcheck 超时、API 不可达）。放线程池里跑不阻塞 loop。
+    result = await asyncio.to_thread(
+        upload_cleanup.delete_local_file, local_path, ctx.root
+    )
     if result.status in (upload_cleanup.DELETE_OK, upload_cleanup.DELETE_MISSING):
         # MISSING = 文件已被别处删了，不算错
         return ""
