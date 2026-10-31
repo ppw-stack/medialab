@@ -64,6 +64,26 @@ export interface Site {
   has_cookies: boolean
   created_at: string
   updated_at: string
+  /** 是否有用户数据快照（site_user_data 有行）。false = 还没抓到 */
+  has_data: boolean
+  /** 上传量（字节） */
+  upload: number
+  /** 下载量（字节） */
+  download: number
+  /** 当前做种数 */
+  seeding_count: number
+  /** 当前下载/未完成数 */
+  leeching_count: number
+  /** 时魔：每小时获得的站点积分（合计口径）；null = 该站没有 */
+  hourly_bonus: number | null
+  /** 时魔单位（站点自称：魔力值 / 爆米花 / 茉莉 / 憨豆 / 积分） */
+  hourly_bonus_unit: string | null
+  /** 是否已达该站的获取上限（null = 该站页面不提供上限信号） */
+  hourly_bonus_capped: boolean | null
+  /** 站点进度百分比（>=100 表示封顶；口径由站点自己定） */
+  hourly_bonus_progress: number | null
+  /** 用户数据最近一次刷新时间（北京时间）；null = 从未刷新 */
+  user_data_seen_at: string | null
 }
 
 /** 站点连通性与窗口解析自检（`POST /sites/{id}/test`）。 */

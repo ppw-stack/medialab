@@ -75,6 +75,17 @@ class SiteOut(BaseModel):
     has_cookies: bool
     created_at: str
     updated_at: str
+    # -- 用户数据（FR-1.6 快照；has_data=false 时下面各值为默认）--
+    has_data: bool = False
+    upload: int = 0
+    download: int = 0
+    seeding_count: int = 0
+    leeching_count: int = 0
+    hourly_bonus: float | None = None
+    hourly_bonus_unit: str | None = None
+    hourly_bonus_capped: bool | None = None
+    hourly_bonus_progress: float | None = None
+    user_data_seen_at: str | None = None
 
 
 class SiteUserDataOut(BaseModel):

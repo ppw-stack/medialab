@@ -114,6 +114,21 @@ class SiteSnapshot:
     has_cookies: bool
     created_at: str
     updated_at: str
+    # -- 用户数据（FR-1.6）--
+    #
+    #: 是否有用户数据快照（``site_user_data`` 有行）。False = 还没抓到，
+    #: 此时下面各业务字段都是默认值 0 / None。
+    has_data: bool = False
+    upload: int = 0
+    download: int = 0
+    seeding_count: int = 0
+    leeching_count: int = 0
+    hourly_bonus: float | None = None
+    hourly_bonus_unit: str | None = None
+    hourly_bonus_capped: bool | None = None
+    hourly_bonus_progress: float | None = None
+    #: 用户数据最近一次刷新时间（北京时间）；None = 从未刷新
+    user_data_seen_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,7 +207,13 @@ def _mask_rss_url(url: str | None) -> str:
     return re.sub(r"(?i)((?:passkey|apikey|key|auth)=)[^&]+", r"\1***", url)
 
 
-def _to_snapshot(site: Site) -> SiteSnapshot:
+def _to_snapshot(
+    site: Site, user_data: SiteUserData | None = None
+) -> SiteSnapshot:
+    """站点 + 用户数据 → 对外 DTO。
+
+    ``user_data`` 为 None（没抓到 / 该站没数据行）→ 各业务字段取默认值。
+    """
     return SiteSnapshot(
         id=site.id,
         name=site.name,
@@ -204,6 +225,16 @@ def _to_snapshot(site: Site) -> SiteSnapshot:
         has_cookies=bool(site.cookies),
         created_at=site.created_at or "",
         updated_at=site.updated_at or "",
+        has_data=user_data is not None,
+        upload=user_data.upload if user_data else 0,
+        download=user_data.download if user_data else 0,
+        seeding_count=user_data.seeding_count if user_data else 0,
+        leeching_count=user_data.leeching_count if user_data else 0,
+        hourly_bonus=user_data.hourly_bonus if user_data else None,
+        hourly_bonus_unit=user_data.hourly_bonus_unit if user_data else None,
+        hourly_bonus_capped=user_data.hourly_bonus_capped if user_data else None,
+        hourly_bonus_progress=user_data.hourly_bonus_progress if user_data else None,
+        user_data_seen_at=user_data.last_seen_at if user_data else None,
     )
 
 
@@ -244,26 +275,39 @@ def list_adapters() -> list[AdapterInfo]:
 
 
 async def list_sites() -> list[SiteSnapshot]:
-    """所有站点（按 id 升序）。"""
+    """所有站点（按 id 升序）+ 用户数据快照。
+
+    **一次 outerjoin 拿两表**（``sites`` LEFT JOIN ``site_user_data``）——
+    不做 N+1 查询。
+    """
     async with session_scope() as session:
         rows = (
-            await session.execute(select(Site).order_by(Site.id.asc()))
-        ).scalars().all()
-    return [_to_snapshot(s) for s in rows]
+            await session.execute(
+                select(Site, SiteUserData)
+                .outerjoin(SiteUserData, SiteUserData.site_id == Site.id)
+                .order_by(Site.id.asc())
+            )
+        ).all()
+    return [_to_snapshot(site, ud) for site, ud in rows]
 
 
 async def get_site(site_id: int) -> SiteSnapshot:
-    """单站点详情。
+    """单站点详情（含用户数据快照）。
 
     :raises ServiceError: 404（站点不存在）
     """
     async with session_scope() as session:
-        site = (
-            await session.execute(select(Site).where(Site.id == site_id))
-        ).scalar_one_or_none()
-        if site is None:
+        row = (
+            await session.execute(
+                select(Site, SiteUserData)
+                .outerjoin(SiteUserData, SiteUserData.site_id == Site.id)
+                .where(Site.id == site_id)
+            )
+        ).first()
+        if row is None:
             raise ServiceError("站点不存在", status=404)
-        return _to_snapshot(site)
+        site, user_data = row
+        return _to_snapshot(site, user_data)
 
 
 async def create_site(
@@ -369,7 +413,15 @@ async def update_site(
     # 快照在**提交后**取：``updated_at`` 由 ``onupdate`` 在 flush 时写入，
     # 事务内读到的是旧值（提交前）。``expire_on_commit=False`` 保证
     # session 关闭后已加载属性仍可读。
-    out = _to_snapshot(site)
+    #
+    # 用户数据快照一并带出（该站可能已有 ``site_user_data`` 行）。
+    async with session_scope() as session:
+        user_data = (
+            await session.execute(
+                select(SiteUserData).where(SiteUserData.site_id == site_id)
+            )
+        ).scalar_one_or_none()
+    out = _to_snapshot(site, user_data)
 
     # 配置变了 → 丢弃缓存的适配器实例（否则 cron/推送仍用旧 cookies/apikey）
     invalidate_site(site_id)

@@ -278,6 +278,57 @@ async def test_list_adapters(client: httpx.AsyncClient) -> None:
 
 # ------------------------------------------------------------------ 用户数据
 
+
+async def test_list_sites_without_user_data(client: httpx.AsyncClient) -> None:
+    """站点列表带用户数据字段；没数据行时是默认值（has_data=false）。"""
+    site_id = await _add_site("s1")
+    resp = await client.get("/api/v1/sites")
+    assert resp.status_code == 200
+    row = next(s for s in resp.json() if s["id"] == site_id)
+    assert row["has_data"] is False
+    assert row["upload"] == 0
+    assert row["seeding_count"] == 0
+    assert row["hourly_bonus"] is None
+    assert row["user_data_seen_at"] is None
+
+
+async def test_list_sites_with_user_data(client: httpx.AsyncClient) -> None:
+    """站点列表带出 ``site_user_data`` 快照（列表页直接展示用量/时魔）。"""
+    site_id = await _add_site("s1")
+    async with session_scope() as session:
+        session.add(
+            SiteUserData(
+                site_id=site_id,
+                upload=1024**3,
+                download=2 * 1024**3,
+                seeding_count=120,
+                leeching_count=3,
+                hourly_bonus=92.9,
+                hourly_bonus_unit="魔力值",
+                hourly_bonus_capped=False,
+                hourly_bonus_progress=37.1,
+                last_seen_at="2026-10-30 12:00:00",
+            )
+        )
+        await session.commit()
+
+    resp = await client.get("/api/v1/sites")
+    assert resp.status_code == 200
+    row = next(s for s in resp.json() if s["id"] == site_id)
+    assert row["has_data"] is True
+    assert row["upload"] == 1024**3
+    assert row["download"] == 2 * 1024**3
+    assert row["seeding_count"] == 120
+    assert row["leeching_count"] == 3
+    assert row["hourly_bonus"] == 92.9
+    assert row["hourly_bonus_unit"] == "魔力值"
+    assert row["hourly_bonus_capped"] is False
+    assert row["hourly_bonus_progress"] == 37.1
+    assert row["user_data_seen_at"] == "2026-10-30 12:00:00"
+
+
+# ------------------------------------------------------------------ 用户数据
+
 async def test_list_user_data_empty(client: httpx.AsyncClient) -> None:
     resp = await client.get("/api/v1/user-data")
     assert resp.status_code == 200

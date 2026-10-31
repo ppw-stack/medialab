@@ -2,7 +2,7 @@
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { api, errMsg } from '../api'
 import type { UserData } from '../types'
-import { formatBytes as fmtBytes } from '../utils/format'
+import { formatBytes as fmtBytes, formatBonus as fmtBonus, formatBonusTooltip as bonusTooltip } from '../utils/format'
 import { message } from 'ant-design-vue'
 
 
@@ -89,24 +89,6 @@ const summaryTiles = computed(() => [
     hint: summary.value.capped > 0 ? `${summary.value.capped} 站已封顶` : '已封顶站越少越优先推',
   },
 ])
-
-/** 时魔文案：`92.9 魔力值`；没有时魔的站显示「—」。 */
-function fmtBonus(v: number | null, unit: string | null): string {
-  if (v === null || v === undefined) return '—'
-  return unit ? `${v.toFixed(1)} ${unit}` : v.toFixed(1)
-}
-
-/** 时魔提示：封顶状态 + 站点进度（进度是站点自己的口径）。 */
-function bonusTooltip(d: UserData): string {
-  if (d.hourly_bonus === null || d.hourly_bonus === undefined) return '该站没有时魔数据'
-  const parts: string[] = []
-  if (d.hourly_bonus_capped === true) parts.push('已达获取上限')
-  else if (d.hourly_bonus_capped === false) parts.push('未达上限')
-  if (d.hourly_bonus_progress !== null && d.hourly_bonus_progress !== undefined) {
-    parts.push(`站点进度 ${d.hourly_bonus_progress.toFixed(1)}%`)
-  }
-  return parts.join('，') || '站点未提供上限信息'
-}
 
 onMounted(load)
 

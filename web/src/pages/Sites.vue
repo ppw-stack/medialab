@@ -8,7 +8,11 @@ import type {
   SiteTestAllResult,
   SiteUserDataSummary as UserDataSummary,
 } from '../types'
-import { formatBytes as fmtBytes } from '../utils/format'
+import {
+  formatBytes as fmtBytes,
+  formatBonus as fmtBonus,
+  formatBonusTooltip as bonusTooltip,
+} from '../utils/format'
 import { message } from 'ant-design-vue'
 import type { FormInstance } from 'ant-design-vue'
 
@@ -214,6 +218,9 @@ const columns = [
   { title: '适配器', key: 'adapter' },
   { title: '域名', key: 'domain' },
   { title: '凭据', key: 'credentials' },
+  { title: '上传/下载', key: 'traffic', width: 170 },
+  { title: '做种/下载中', key: 'torrents', width: 110 },
+  { title: '时魔/小时', key: 'bonus', width: 150 },
   { title: '启用', key: 'enabled', width: 80 },
   { title: '', key: 'action', width: 280 },
 ]
@@ -279,6 +286,27 @@ async function openUserDataDrawer(s: Site) {
               <a-tag v-if="record.has_cookies" color="cyan">Cookies</a-tag>
               <a-tag v-if="!record.rss_url_masked && !record.has_apikey && !record.has_cookies">—</a-tag>
             </a-space>
+          </template>
+          <template v-else-if="column.key === 'traffic'">
+            <span v-if="record.has_data" class="mono">
+              {{ fmtBytes(record.upload) }} / {{ fmtBytes(record.download) }}
+            </span>
+            <span v-else class="muted">—</span>
+          </template>
+          <template v-else-if="column.key === 'torrents'">
+            <span v-if="record.has_data" class="mono">
+              {{ record.seeding_count }} / {{ record.leeching_count }}
+            </span>
+            <span v-else class="muted">—</span>
+          </template>
+          <template v-else-if="column.key === 'bonus'">
+            <a-tooltip v-if="record.has_data" :title="bonusTooltip(record)">
+              <a-space :size="4">
+                <span class="mono">{{ fmtBonus(record.hourly_bonus, record.hourly_bonus_unit) }}</span>
+                <a-tag v-if="record.hourly_bonus_capped === true" color="orange">已封顶</a-tag>
+              </a-space>
+            </a-tooltip>
+            <span v-else class="muted">—</span>
           </template>
           <template v-else-if="column.key === 'enabled'">
             <a-switch
