@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 from typing import Final, cast
@@ -44,6 +45,7 @@ __all__ = [
     "SiteFeedTestResult",
     "SiteSelfTestResult",
     "SiteSnapshot",
+    "SiteTestResult",
     "SiteUserDataSnapshot",
     "create_site",
     "delete_site",
@@ -53,6 +55,7 @@ __all__ = [
     "list_sites",
     "refresh_site_user_data",
     "self_test_site",
+    "test_all_sites",
     "test_site_feed",
     "update_site",
     "validate_adapter",
@@ -158,6 +161,21 @@ class SiteFeedTestResult:
     duration_ms: int = 0
     sample_titles: list[str] = field(default_factory=list)
     error: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class SiteTestResult:
+    """单站测连结果（``test_all_sites`` 返回的元素）。
+
+    与 :class:`SiteSelfTestResult` 的区别：这个只含连通性三字段，不含
+    窗口解析探针——「全部测连」只关心站点通不通，窗口解析是单站自检的事。
+    """
+
+    site_id: int
+    name: str
+    reachable: bool
+    logged_in: bool
+    detail: str
 
 
 # ==================================================================== 工具
@@ -575,6 +593,73 @@ async def self_test_site(site_id: int) -> SiteSelfTestResult:
         )
     finally:
         await adapter.close()
+
+
+# ==================================================================== 全部测连
+
+
+#: 全部测连的并发上限。
+#:
+#: 站点测连是 GET 首页（轻量），但站点对短时间多次请求敏感（频控 / 封禁），
+#: 故仍限并发——与 ``refresh_user_data`` 的上限 5 同量级，取 3 保守。
+_TEST_ALL_CONCURRENCY = 3
+
+
+async def test_all_sites() -> list[SiteTestResult]:
+    """对所有**启用**的站点并发测连。
+
+    **只测 enabled=True 的站点**（与 ``fetch_all_sites`` 作业一致）——
+    停用的站点不参与拉取，测它没意义。
+
+    **单站失败不中断**：某站抛 ``ServiceError`` / Exception → 折叠成
+    ``reachable=False`` 的结果，其余站点继续测。部分站点失败不该让整批失败。
+
+    **并发上限** ``_TEST_ALL_CONCURRENCY``：站点对短时间多次请求敏感，
+    限并发避免触发频控。
+    """
+    # 短事务读启用站点列表（网络 IO 在事务外）
+    async with session_scope() as session:
+        rows = (
+            await session.execute(
+                select(Site).where(Site.enabled.is_(True)).order_by(Site.id)
+            )
+        ).scalars().all()
+        site_specs = [(row.id, row.name) for row in rows]
+
+    sem = asyncio.Semaphore(_TEST_ALL_CONCURRENCY)
+
+    async def _test_one(site_id: int, name: str) -> SiteTestResult:
+        async with sem:
+            try:
+                r = await self_test_site(site_id)
+                return SiteTestResult(
+                    site_id=site_id,
+                    name=name,
+                    reachable=r.reachable,
+                    logged_in=r.logged_in,
+                    detail=r.detail,
+                )
+            except ServiceError as exc:
+                return SiteTestResult(
+                    site_id=site_id,
+                    name=name,
+                    reachable=False,
+                    logged_in=False,
+                    detail=str(exc),
+                )
+            except Exception as exc:
+                logger.exception("测连站点 %s 异常", name)
+                return SiteTestResult(
+                    site_id=site_id,
+                    name=name,
+                    reachable=False,
+                    logged_in=False,
+                    detail=f"内部错误：{exc}",
+                )
+
+    return await asyncio.gather(
+        *[_test_one(sid, name) for sid, name in site_specs]
+    )
 
 
 # ==================================================================== 拉取测试

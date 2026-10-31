@@ -305,6 +305,78 @@ async def test_site_self_test_closes_adapter(db: None, monkeypatch) -> None:
     assert closed == [True]
 
 
+# ==================================================================== 全部测连
+
+
+async def test_test_all_sites_only_enabled(db: None, monkeypatch) -> None:
+    """``test_all_sites`` 只测启用的站点（停用的不测）。"""
+    from app.adapters.sites.base import SiteHealth
+
+    await _add_site("on1")
+    await _add_site("on2")
+    await _add_site("off", enabled=False)
+
+    tested: list[str] = []
+
+    class _FakeAdapter:
+        def __init__(self, profile: object, **_: object) -> None:
+            tested.append(profile.name)
+
+        async def check_reachability(self) -> SiteHealth:
+            return SiteHealth(reachable=True, logged_in=True, detail="ok")
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        site_service, "resolve_site_adapter", lambda _name: _FakeAdapter
+    )
+
+    results = await site_service.test_all_sites()
+    # 只测了 on1 / on2（停用的 off 不测）
+    assert sorted(r.name for r in results) == ["on1", "on2"]
+    assert sorted(tested) == ["on1", "on2"]
+    assert all(r.reachable for r in results)
+
+
+async def test_test_all_sites_single_failure_does_not_abort(db: None, monkeypatch) -> None:
+    """单站测连失败不中断——其余站点继续测。"""
+    from app.adapters.sites.base import SiteHealth
+
+    await _add_site("ok1")
+    await _add_site("bad")
+    await _add_site("ok2")
+
+    class _FakeAdapter:
+        def __init__(self, profile: object, **_: object) -> None:
+            self._name = profile.name
+
+        async def check_reachability(self) -> SiteHealth:
+            if self._name == "bad":
+                raise RuntimeError("模拟站点故障")
+            return SiteHealth(reachable=True, logged_in=True, detail="ok")
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        site_service, "resolve_site_adapter", lambda _name: _FakeAdapter
+    )
+
+    results = await site_service.test_all_sites()
+    by_name = {r.name: r for r in results}
+    assert by_name["ok1"].reachable is True
+    assert by_name["ok2"].reachable is True
+    assert by_name["bad"].reachable is False
+    assert "模拟站点故障" in by_name["bad"].detail
+
+
+async def test_test_all_sites_empty(db: None, monkeypatch) -> None:
+    """无启用站点 → 返回空列表（不抛错）。"""
+    results = await site_service.test_all_sites()
+    assert results == []
+
+
 # ==================================================================== 站点用户数据
 
 

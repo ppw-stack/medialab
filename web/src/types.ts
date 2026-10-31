@@ -89,6 +89,21 @@ export interface FeedTestResult {
   error: string
 }
 
+/** 单站测连结果（`POST /sites/test-all` 返回的元素）。 */
+export interface SiteTestItem {
+  site_id: number
+  name: string
+  reachable: boolean
+  logged_in: boolean
+  detail: string
+}
+
+/** 全部测连结果（`POST /sites/test-all`）。 */
+export interface SiteTestAllResult {
+  results: SiteTestItem[]
+  summary: { total: number; reachable: number; failed: number }
+}
+
 /** 站点用户数据摘要（`GET /sites/{id}/user-data`）。 */
 export interface SiteUserDataSummary {
   site_id: number

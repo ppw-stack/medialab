@@ -118,6 +118,23 @@ class FeedTestResult(BaseModel):
     error: str = ""
 
 
+class SiteTestItemOut(BaseModel):
+    """单站测连结果（``test-all`` 返回的元素）。"""
+
+    site_id: int
+    name: str
+    reachable: bool
+    logged_in: bool
+    detail: str
+
+
+class SiteTestAllOut(BaseModel):
+    """全部测连结果。"""
+
+    results: list[SiteTestItemOut]
+    summary: dict[str, int]
+
+
 @router.get("/adapters", summary="列出已注册站点 adapter（前端下拉用）")
 async def list_adapters() -> list[AdapterInfoOut]:
     """返回所有内置 adapter 的 ``{name, label, domain}``。
@@ -129,6 +146,35 @@ async def list_adapters() -> list[AdapterInfoOut]:
         AdapterInfoOut(name=a.name, label=a.label, domain=a.domain)
         for a in site_service.list_adapters()
     ]
+
+
+@router.post("/test-all", summary="全部站点测连")
+async def test_all_sites() -> SiteTestAllOut:
+    """对所有**启用**的站点并发测连（连通性 + 登录态）。
+
+    **只测 enabled=True 的站点**——停用的不参与拉取，测它没意义。
+    单站失败不中断（折叠成 ``reachable=False``）。
+    并发上限 3（站点对短时间多次请求敏感）。
+    """
+    results = await site_service.test_all_sites()
+    reachable = sum(1 for r in results if r.reachable)
+    return SiteTestAllOut(
+        results=[
+            SiteTestItemOut(
+                site_id=r.site_id,
+                name=r.name,
+                reachable=r.reachable,
+                logged_in=r.logged_in,
+                detail=r.detail,
+            )
+            for r in results
+        ],
+        summary={
+            "total": len(results),
+            "reachable": reachable,
+            "failed": len(results) - reachable,
+        },
+    )
 
 
 @router.get("", summary="站点列表")

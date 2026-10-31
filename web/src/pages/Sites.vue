@@ -5,6 +5,7 @@ import type {
   AdapterInfo,
   FeedTestResult,
   Site,
+  SiteTestAllResult,
   SiteUserDataSummary as UserDataSummary,
 } from '../types'
 import { formatBytes as fmtBytes } from '../utils/format'
@@ -43,6 +44,7 @@ const data = ref<Site[]>([])
 const editing = ref<Site | null>(null)
 const creating = ref(false)
 const testingId = ref<number | null>(null)
+const testingAll = ref(false)
 const testResults = ref<Record<number, { status: string; detail: string }>>({})
 const modalOpen = ref(false)
 const formRef = ref<FormInstance>()
@@ -144,6 +146,32 @@ async function onTestRow(s: Site) {
   }
 }
 
+async function onTestAll() {
+  if (testingAll.value) return
+  testingAll.value = true
+  // 清旧结果（让圆点在测连过程中复位）
+  testResults.value = {}
+  try {
+    const r = await api.post<SiteTestAllResult>('/sites/test-all')
+    for (const item of r.results) {
+      testResults.value[item.site_id] = {
+        status: item.reachable ? 'ok' : 'error',
+        detail: item.detail,
+      }
+    }
+    const { total, reachable, failed } = r.summary
+    if (failed > 0) {
+      message.warning(`共 ${total} 站，可达 ${reachable}，失败 ${failed}`)
+    } else {
+      message.success(`共 ${total} 站全部可达`)
+    }
+  } catch (exc) {
+    message.error(exc instanceof Error ? exc.message : '全部测连失败')
+  } finally {
+    testingAll.value = false
+  }
+}
+
 // ---- 拉取测试（feed-test）----
 const feedTestId = ref<number | null>(null)
 const feedTestModalOpen = ref(false)
@@ -218,7 +246,10 @@ async function openUserDataDrawer(s: Site) {
         <h1 class="page-header__title">站点适配器</h1>
         <div class="page-header__sub">凭据脱敏展示 · 支持 9 类私有种子站点</div>
       </div>
-      <a-button type="primary" @click="onCreate">新增站点</a-button>
+      <a-space>
+        <a-button :loading="testingAll" @click="onTestAll">全部测连</a-button>
+        <a-button type="primary" @click="onCreate">新增站点</a-button>
+      </a-space>
     </header>
 
     <hr class="divider-hairline" style="margin: 0" />
