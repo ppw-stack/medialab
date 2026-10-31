@@ -425,7 +425,10 @@ async def _process_one(task_id: int, ctx: SyncContext, path: Path) -> None:
         )
         await _mark_synced(task_id, runtime.total_uploaded)
     elif outcome.status == RESULT_UNCHANGED:
-        runtime.log(f"⏭️ 已存在：{rel_path}")
+        note = "（本地已删除）" if outcome.local_deleted else (
+            f"（{outcome.reason}）" if outcome.reason else ""
+        )
+        runtime.log(f"⏭️ 已存在：{rel_path}{note}")
     elif outcome.status == RESULT_CONFLICT:
         runtime.total_failed += 1
         runtime.log(f"⚠️ 冲突：{rel_path}（{outcome.reason}）")
@@ -554,7 +557,12 @@ async def _sync_now_inner(task_id: int, runtime: Any, watcher: Any) -> dict[str,
                 )
             elif outcome.status == RESULT_UNCHANGED:
                 unchanged += 1
-                runtime.log(f"⏭️ [{index}/{total}] 已存在：{rel}")
+                if outcome.local_deleted:
+                    deleted_local += 1
+                note = "（本地已删除）" if outcome.local_deleted else (
+                    f"（{outcome.reason}）" if outcome.reason else ""
+                )
+                runtime.log(f"⏭️ [{index}/{total}] 已存在：{rel}{note}")
             elif outcome.status == RESULT_CONFLICT:
                 conflicts += 1
                 runtime.log(f"⚠️ [{index}/{total}] 冲突：{rel}（{outcome.reason}）")

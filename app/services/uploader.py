@@ -173,9 +173,28 @@ async def sync_file(
 
     remote = existing.get(file_name)
 
-    # ① 同名 + 同大小 → 已同步，跳过
+    # ① 同名 + 同大小 → 已同步。
+    #
+    # **开 ``delete_local`` 时也要删本地**（2026-10-31 修正）：
+    # 云端已有同名同大小文件 = 之前传过 = 本地是冗余。开关开着代表用户
+    # 已确认「云端是完整副本，本地可删」，故 UNCHANGED 也走清理。
+    # 复用 :func:`_maybe_cleanup_local` 的三重校验（fileId / 大小一致 /
+    # 路径合法）——不绕过。
     if remote is not None and remote.size == size:
-        return SyncOutcome(RESULT_UNCHANGED, rel_path, size=size)
+        outcome = SyncOutcome(
+            RESULT_UNCHANGED,
+            rel_path,
+            size=size,
+            cloud_file_id=remote.file_id,
+            cloud_size=remote.size,
+        )
+        if ctx.delete_local:
+            note = await _maybe_cleanup_local(ctx, local_path, outcome)
+            if note:
+                outcome.reason = note
+            else:
+                outcome.local_deleted = True
+        return outcome
 
     # ② 同名但云端是目录 → 冲突，不自动处理
     if remote is None and await _cloud_has_dir(ctx, dir_id, file_name):

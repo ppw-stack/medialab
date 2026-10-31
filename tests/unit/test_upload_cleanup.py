@@ -285,10 +285,12 @@ async def test_上传期间本地被移走(tmp_path: Path):
     assert outcome.reason == ""  # missing 不算错
 
 
-async def test_已存在unchanged不删本地(tmp_path: Path):
-    """``unchanged``（云端本来就有）→ **不删**本地。
+async def test_已存在unchanged开删本地则删(tmp_path: Path):
+    """``unchanged``（云端已有同名同大小）+ ``delete_local=True`` → **删本地**。
 
-    本地文件是唯一原件，云端已有不代表可以删。
+    云端已有同名同大小文件 = 之前传过 = 本地是冗余。开关开着代表用户
+    已确认「云端是完整副本，本地可删」——故 UNCHANGED 也走清理。
+    （2026-10-31 修正：原语义「不删」已废止。）
     """
     driver, uploader = FakeDriver(), FakeUploader()
     driver.add_file(ROOT_ID, "a.mkv", 100)
@@ -300,6 +302,26 @@ async def test_已存在unchanged不删本地(tmp_path: Path):
     )
 
     assert outcome.status == RESULT_UNCHANGED
+    assert outcome.local_deleted is True
+    assert not path.exists()
+
+
+async def test_已存在unchanged关删本地则不删(tmp_path: Path):
+    """``unchanged`` + ``delete_local=False`` → **不删**本地（保留原行为）。
+
+    没开「同步成功后删除本地」时，UNCHANGED 走纯跳过——本地文件保留。
+    """
+    driver, uploader = FakeDriver(), FakeUploader()
+    driver.add_file(ROOT_ID, "a.mkv", 100)
+    path = tmp_path / "a.mkv"
+    path.write_bytes(b"x" * 100)
+
+    outcome = await sync_file(
+        _ctx(driver, uploader, tmp_path, delete_local=False), path, "a.mkv"
+    )
+
+    assert outcome.status == RESULT_UNCHANGED
+    assert outcome.local_deleted is False
     assert path.exists()
 
 
