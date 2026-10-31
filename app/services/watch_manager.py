@@ -221,7 +221,44 @@ async def start_watcher(
     worker = asyncio.create_task(_worker_loop(task_id, queue, ctx, concurrency))
     _WORKERS[task_id] = worker
 
+    # **启动时先跑一次全量同步**——把监听目录里**已有的历史文件**同步上去。
+    #
+    # 为什么：容器重启期间、上次停机前的遗留文件、网络文件系统事件丢失，
+    # 都会让「事件流」漏文件。全量比对能补齐——「同名+同大小」自动跳过，
+    # 不会重复传。
+    #
+    # 异步触发，不阻塞启动：全量同步可能要几分钟（文件多），阻塞会让
+    # lifespan 超时 / 健康检查失败。失败只记日志（与 ``sync_now`` 同口径）。
+    #
+    # 注册进 ``_SYNC_TASKS``——``stop_watcher`` 能取消它；用户在启动同步
+    # 进行中点「立即全量同步」会收到「已有同步在跑」提示（合理，避免重复跑）。
+    initial = asyncio.create_task(_initial_sync(task_id))
+    _SYNC_TASKS[task_id] = initial
+
     return watcher
+
+
+async def _initial_sync(task_id: int) -> None:
+    """启动时的全量同步（异步触发，不阻塞启动）。
+
+    与 :func:`sync_now` 同逻辑，但：
+    - 不抛错（失败只记日志，启动不该因单个任务失败而红）
+    - 不查「已有同步在跑」（启动时不会有，且查了反而误拦）
+    - **不自己注册 ``_SYNC_TASKS``**——调用方（``start_watcher``）已注册
+    """
+    try:
+        runtime = get_runtime(task_id)
+        watcher = _WATCHERS.get(task_id)
+        if watcher is None:
+            return  # 已被停用
+        await _sync_now_inner(task_id, runtime, watcher)
+    except Exception:
+        logger.exception("启动全量同步失败（task_id=%s）", task_id)
+    finally:
+        # 完成后从 _SYNC_TASKS 摘掉（只摘自己——用户可能后续手动触发新的）
+        current = asyncio.current_task()
+        if current is not None and _SYNC_TASKS.get(task_id) is current:
+            _SYNC_TASKS.pop(task_id, None)
 
 
 async def stop_watcher(task_id: int) -> None:

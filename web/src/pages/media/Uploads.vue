@@ -293,6 +293,11 @@ async function reload(): Promise<void> {
   loading.value = true
   try {
     tasks.value = await api.get<UploadTask[]>("/upload-tasks")
+    // **默认展示第一个任务的详情**——用户打开页面不用再点一次。
+    // 只在没选中任何任务时自动选（避免覆盖用户已选中的任务）。
+    if (!current.value && tasks.value.length > 0) {
+      await openDetail(tasks.value[0])
+    }
   } catch (e) {
     message.error(errMsg(e, "加载上传任务失败"))
   } finally {
