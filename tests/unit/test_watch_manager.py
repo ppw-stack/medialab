@@ -25,11 +25,13 @@ def _clean_manager():
     watch_manager._WORKERS.clear()
     watch_manager._QUEUES.clear()
     watch_manager._CONTEXTS.clear()
+    watch_manager._SYNC_LOCKS.clear()
     yield
     watch_manager._WATCHERS.clear()
     watch_manager._WORKERS.clear()
     watch_manager._QUEUES.clear()
     watch_manager._CONTEXTS.clear()
+    watch_manager._SYNC_LOCKS.clear()
 
 
 def _ctx(driver: FakeDriver, uploader: FakeUploader, root: Path) -> SyncContext:
@@ -256,3 +258,51 @@ async def test_启动监听器会登记进_WATCHERS(tmp_path: Path, monkeypatch)
 
     await watch_manager.stop_watcher(42)
     assert watch_manager.get_watcher(42) is None
+
+
+async def test_同步锁让全量同步与worker串行(tmp_path: Path):
+    """``_SYNC_LOCKS`` 让全量同步与事件流 worker 互斥——同一时刻只有一个
+    协程在 ``sync_file`` 里。
+
+    用一个**慢 sync_file**（sleep 0.1s）验证：两个并发调 ``_process_one``
+    的协程不会同时进入 ``sync_file``（第二个的 ``enter`` 时间戳必须 ≥
+    第一个的 ``exit``）。
+    """
+    import time
+
+    from app.services.uploader import RESULT_UPLOADED, SyncOutcome
+
+    # 装一把锁（_process_one 会用它包住 sync_file 调用）
+    watch_manager._SYNC_LOCKS[1] = asyncio.Lock()
+
+    timeline: list[tuple[str, float]] = []
+
+    async def _slow_sync(ctx, path, rel_path, on_progress=None):
+        # 锁由 _process_one 外层持有，这里只记录时间线
+        t0 = time.monotonic()
+        timeline.append(("enter", t0))
+        await asyncio.sleep(0.1)
+        timeline.append(("exit", time.monotonic()))
+        return SyncOutcome(RESULT_UPLOADED, rel_path, size=10)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(watch_manager, "sync_file", _slow_sync)
+
+    driver, uploader = FakeDriver(), FakeUploader()
+    ctx = _ctx(driver, uploader, tmp_path)
+    path = tmp_path / "a.mkv"
+    path.write_bytes(b"x" * 10)
+
+    # 并发跑两个 _process_one
+    await asyncio.gather(
+        watch_manager._process_one(1, ctx, path),
+        watch_manager._process_one(1, ctx, path),
+    )
+
+    # 断言：两次 enter 之间夹着一个 exit（串行，不重叠）
+    enters = [t for tag, t in timeline if tag == "enter"]
+    exits = [t for tag, t in timeline if tag == "exit"]
+    assert len(enters) == 2 and len(exits) == 2
+    # 第二次进入必须在第一次退出之后（串行证据）
+    assert enters[1] >= exits[0]
+    monkeypatch.undo()

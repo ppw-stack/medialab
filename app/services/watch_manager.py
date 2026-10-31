@@ -66,6 +66,14 @@ _QUEUES: dict[int, asyncio.Queue[Path]] = {}
 #: 每个任务的上传上下文（``sync_now`` 要用同一个，否则缓存不共享）
 _CONTEXTS: dict[int, SyncContext] = {}
 
+#: 每个任务的**同步锁**：全量同步与事件流 worker 互斥（串行）。
+#:
+#: **为什么需要**：全量同步与事件流共享同一个 ``CloudDirIndex`` + 队列。
+#: 并行跑虽靠幂等判据不会传重，但 ``runtime.current`` 会互相覆盖、
+#: 日志交错难读、CIFS 删除集中爆发会拖慢响应。串行后：全量同步跑时
+#: worker 等它结束再处理队列里积压的新事件——新文件不会被漏，只是延后。
+_SYNC_LOCKS: dict[int, asyncio.Lock] = {}
+
 #: 正在跑的全量同步任务：task_id → asyncio.Task
 #:
 #: **必须单独记**：``sync_now`` 是独立协程（不由 worker 执行），
@@ -182,6 +190,8 @@ async def start_watcher(
         maxsize=settings.upload_queue_maxsize
     )
     _QUEUES[task_id] = queue
+    # 同步锁：全量同步与事件流 worker 互斥（串行），见 _SYNC_LOCKS 注释
+    _SYNC_LOCKS[task_id] = asyncio.Lock()
 
     watcher = Watcher(
         root=watch_dir,
@@ -282,6 +292,7 @@ async def stop_watcher(task_id: int) -> None:
         await asyncio.gather(sync_task, return_exceptions=True)
     _QUEUES.pop(task_id, None)
     _CONTEXTS.pop(task_id, None)
+    _SYNC_LOCKS.pop(task_id, None)
     runtime = get_runtime(task_id)
     runtime.listening = False
     runtime.watcher = None
@@ -397,12 +408,26 @@ async def _process_one(task_id: int, ctx: SyncContext, path: Path) -> None:
     except OSError:
         file_size = 0
 
-    outcome = await sync_file(
-        ctx,
-        path,
-        rel_path,
-        on_progress=_make_progress(runtime, rel_path, file_size),
-    )
+    # **与全量同步互斥**：同一时刻只有一个协程调 sync_file。
+    # 全量同步跑时 worker 在此等待——新事件不丢，只是延后处理。
+    # ``lock`` 可能为 None（测试环境直接调本函数，未走 start_watcher）→
+    # 退化为不互斥（测试本就是单协程串行）。
+    lock = _SYNC_LOCKS.get(task_id)
+    if lock is not None:
+        async with lock:
+            outcome = await sync_file(
+                ctx,
+                path,
+                rel_path,
+                on_progress=_make_progress(runtime, rel_path, file_size),
+            )
+    else:
+        outcome = await sync_file(
+            ctx,
+            path,
+            rel_path,
+            on_progress=_make_progress(runtime, rel_path, file_size),
+        )
 
     if outcome.status == RESULT_UPLOADED:
         runtime.total_uploaded += 1
@@ -521,6 +546,11 @@ async def _sync_now_inner(task_id: int, runtime: Any, watcher: Any) -> dict[str,
         total_bytes = 0
         deleted_local = 0
         total = len(files)
+        # **与事件流 worker 互斥**：同一时刻只有一个协程调 sync_file。
+        # 全量同步跑时 worker 在 _process_one 里等锁——新事件不丢，只是延后。
+        # ``lock`` 可能为 None（测试环境直接调本函数，未走 start_watcher）→
+        # 退化为不互斥（测试本就是单协程串行）。
+        lock = _SYNC_LOCKS.get(task_id)
         for index, path in enumerate(files, start=1):
             rel = watcher.relative(path)
             runtime.current = rel
@@ -531,12 +561,21 @@ async def _sync_now_inner(task_id: int, runtime: Any, watcher: Any) -> dict[str,
                 file_size = path.stat().st_size
             except OSError:
                 file_size = 0
-            outcome = await sync_file(
-                ctx,
-                path,
-                rel,
-                on_progress=_make_progress(runtime, rel, file_size),
-            )
+            if lock is not None:
+                async with lock:
+                    outcome = await sync_file(
+                        ctx,
+                        path,
+                        rel,
+                        on_progress=_make_progress(runtime, rel, file_size),
+                    )
+            else:
+                outcome = await sync_file(
+                    ctx,
+                    path,
+                    rel,
+                    on_progress=_make_progress(runtime, rel, file_size),
+                )
             if outcome.local_deleted:
                 deleted_local += 1
             if outcome.status == RESULT_UPLOADED:
