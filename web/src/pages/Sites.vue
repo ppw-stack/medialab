@@ -6,7 +6,6 @@ import type {
   FeedTestResult,
   Site,
   SiteTestAllResult,
-  SiteUserDataSummary as UserDataSummary,
 } from '../types'
 import {
   formatBytes as fmtBytes,
@@ -224,25 +223,6 @@ const columns = [
   { title: '启用', key: 'enabled', width: 80 },
   { title: '', key: 'action', width: 280 },
 ]
-
-const drawerOpen = ref(false)
-const drawerSite = ref<Site | null>(null)
-const drawerData = ref<UserDataSummary | null>(null)
-const drawerLoading = ref(false)
-
-async function openUserDataDrawer(s: Site) {
-  drawerSite.value = s
-  drawerData.value = null
-  drawerOpen.value = true
-  drawerLoading.value = true
-  try {
-    drawerData.value = await api.get<UserDataSummary>(`/sites/${s.id}/user-data`)
-  } catch (e) {
-    message.error('加载用户数据失败：' + errMsg(e))
-  } finally {
-    drawerLoading.value = false
-  }
-}
 </script>
 
 <template>
@@ -317,9 +297,6 @@ async function openUserDataDrawer(s: Site) {
           </template>
           <template v-else-if="column.key === 'action'">
             <a-space :size="4" align="center">
-              <a-button size="small" type="link" @click="openUserDataDrawer(record)">
-                数据
-              </a-button>
               <a-button
                 size="small"
                 type="link"
@@ -390,41 +367,6 @@ async function openUserDataDrawer(s: Site) {
         </template>
       </a-spin>
     </a-modal>
-
-    <a-drawer
-      :open="drawerOpen"
-      :title="drawerSite ? `用户数据 · ${drawerSite.name}` : '用户数据'"
-      :width="380"
-      @close="drawerOpen = false"
-    >
-      <a-spin :spinning="drawerLoading">
-        <template v-if="drawerData && drawerData.has_data">
-          <a-descriptions :column="1" bordered size="small">
-            <a-descriptions-item label="上传">{{ fmtBytes(drawerData.upload || 0) }}</a-descriptions-item>
-            <a-descriptions-item label="下载">{{ fmtBytes(drawerData.download || 0) }}</a-descriptions-item>
-            <a-descriptions-item label="做种">{{ drawerData.seeding_count }}</a-descriptions-item>
-            <a-descriptions-item label="时魔/小时">
-              <span v-if="drawerData.hourly_bonus !== null && drawerData.hourly_bonus !== undefined">
-                {{ drawerData.hourly_bonus.toFixed(1) }}
-                {{ drawerData.hourly_bonus_unit || '' }}
-                <a-tag v-if="drawerData.hourly_bonus_capped === true" color="orange">已封顶</a-tag>
-              </span>
-              <span v-else>—</span>
-            </a-descriptions-item>
-            <a-descriptions-item label="刷新于">{{ drawerData.last_seen_at }}</a-descriptions-item>
-          </a-descriptions>
-          <div style="margin-top: 16px">
-            <a-button
-              block
-              type="primary"
-              :loading="drawerLoading"
-              @click="openUserDataDrawer(drawerSite!)"
-            >刷新</a-button>
-          </div>
-        </template>
-        <a-empty v-else-if="!drawerLoading" description="尚无数据" />
-      </a-spin>
-    </a-drawer>
 
     <a-modal
       :open="modalOpen"
