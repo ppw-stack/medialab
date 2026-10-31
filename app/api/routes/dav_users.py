@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.api.auth import require_session
 from app.core.logging import get_logger
 from app.services.dav_users import (
+    DavUserRow,
     DavUserServiceError,
     clear_dav_audit,
     create_dav_user,
@@ -131,19 +132,25 @@ class DavRootUpdate(BaseModel):
 # --------------------------------------------------------------------------
 
 
+def _to_user_out(row: DavUserRow) -> DavUserOut:
+    """服务层 DTO → API 响应模型。
+
+    三处路由（列表 / 新建 / 更新）都要转同一组字段——集中在此，
+    避免加字段时漏改某处。
+    """
+    return DavUserOut(
+        id=row.id,
+        username=row.username,
+        is_active=row.is_active,
+        last_login_at=row.last_login_at,
+        created_at=row.created_at,
+    )
+
+
 @router.get("", response_model=list[DavUserOut])
 async def list_users() -> list[DavUserOut]:
     """列出所有 WebDAV 账号。"""
-    return [
-        DavUserOut(
-            id=r.id,
-            username=r.username,
-            is_active=r.is_active,
-            last_login_at=r.last_login_at,
-            created_at=r.created_at,
-        )
-        for r in await list_dav_users()
-    ]
+    return [_to_user_out(r) for r in await list_dav_users()]
 
 
 @router.post("", response_model=DavUserOut, status_code=201)
@@ -153,13 +160,7 @@ async def create_user(payload: DavUserIn) -> DavUserOut:
         row = await create_dav_user(payload.username, payload.password)
     except DavUserServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    return DavUserOut(
-        id=row.id,
-        username=row.username,
-        is_active=row.is_active,
-        last_login_at=row.last_login_at,
-        created_at=row.created_at,
-    )
+    return _to_user_out(row)
 
 
 # --------------------------------------------------------------------------
@@ -277,13 +278,7 @@ async def update_user(user_id: int, payload: DavUserUpdate) -> DavUserOut:
         )
     except DavUserServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    return DavUserOut(
-        id=row.id,
-        username=row.username,
-        is_active=row.is_active,
-        last_login_at=row.last_login_at,
-        created_at=row.created_at,
-    )
+    return _to_user_out(row)
 
 
 @router.delete("/{user_id}", status_code=204)

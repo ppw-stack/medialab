@@ -185,12 +185,10 @@ async def update_dav_user(
 
         if password is not None:
             row.password_hash = hash_password(password)
-            row.updated_at = bj_now()
         if is_active is not None:
             row.is_active = is_active
-            row.updated_at = bj_now()
-
         if password is not None or is_active is not None:
+            row.updated_at = bj_now()
             # 凭据或状态变了 → 旧缓存立即作废
             purged = dav_authenticator.purge_all_cache()
             logger.info("账号 %s 已更新，清空 %d 条认证缓存", row.username, purged)

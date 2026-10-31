@@ -115,16 +115,30 @@ def _columns(conn: sqlite3.Connection, schema: str, table: str) -> list[str]:
     return [r[1] for r in rows]
 
 
-def _copy_seed_tables(
+def _copy_tables(
     conn: sqlite3.Connection,
     src_schema: str,
     tables: tuple[str, ...],
     label: str,
+    *,
+    time_cols: dict[str, tuple[str, ...]] | None = None,
 ) -> tuple[int, int]:
-    """搬辅种域表:原样搬(值已是北京时间字符串,无需转换)。
+    """按表搬数据(两个域共用)。
 
-    按列名映射(只搬两库共有列,按目标库顺序)。源库缺的列用 NULL 占位。
+    **按列名映射,不按位置** —— 这是本脚本最容易出错的地方:
+    源库与目标库的**列顺序可能不同**。``INSERT ... SELECT *`` 按位置对应,
+    数据会静默错位。故这里显式列出**两库共有的列**(按目标库顺序)。
+
+    Args:
+        time_cols: 表 → 需做 unix 秒 → 北京时间字符串转换的列名。
+            为 None 时原样搬(辅种域的值已是北京时间字符串);
+            非 None 时这些列用 ``CASE WHEN`` 转换(``0/NULL → NULL``),
+            其它列原样搬。
+
+    Returns:
+        (复制的表数, 复制的行数)
     """
+    time_cols = time_cols or {}
     src_tables = _existing_tables(conn, src_schema)
     main_tables = _existing_tables(conn, "main")
     copied = 0
@@ -146,62 +160,7 @@ def _copy_seed_tables(
 
         src_cols = set(_columns(conn, src_schema, table))
         main_cols = _columns(conn, "main", table)
-        common = [c for c in main_cols if c in src_cols]
-        missing = [c for c in main_cols if c not in src_cols]
-        if missing:
-            print(
-                f"  ! {label}.{table}:目标库有源库没有的列 {missing}"
-                "(这些列将取默认值)"
-            )
-        if not common:
-            print(f"  跳过 {label}.{table}(两库无共有列)")
-            continue
-
-        col_list = ", ".join(f'"{c}"' for c in common)
-        conn.execute(
-            f"INSERT OR IGNORE INTO main.{table} ({col_list}) "
-            f"SELECT {col_list} FROM {src_schema}.{table}"
-        )
-        copied += 1
-        rows_total += src_count
-        print(f"  ✓ {label}.{table}({src_count} 行,{len(common)} 列)")
-    return copied, rows_total
-
-
-def _copy_media_tables(
-    conn: sqlite3.Connection,
-    src_schema: str,
-    tables: tuple[str, ...],
-    label: str,
-) -> tuple[int, int]:
-    """搬媒体库域表:时间列做 unix 秒 → 北京时间字符串转换。
-
-    - 时间列(在 :data:`MEDIA_TIME_COLS` 里):``0/NULL → NULL``;否则
-      ``strftime('%Y-%m-%d %H:%M:%S', ts, 'unixepoch', '+8 hours')``
-    - 非时间列:原样搬
-    - ``link_cache.expires_at`` 保留 INTEGER(不在时间列清单里)
-    """
-    src_tables = _existing_tables(conn, src_schema)
-    main_tables = _existing_tables(conn, "main")
-    copied = 0
-    rows_total = 0
-    for table in tables:
-        if table not in src_tables:
-            print(f"  跳过 {label}.{table}(源库无此表)")
-            continue
-        if table not in main_tables:
-            print(f"  跳过 {label}.{table}(目标库无此表——先建好表结构)")
-            continue
-
-        src_count = conn.execute(
-            f"SELECT COUNT(*) FROM {src_schema}.{table}"
-        ).fetchone()[0]
-        if src_count == 0:
-            print(f"  跳过 {label}.{table}(源库为空)")
-            continue
-
-        src_cols = set(_columns(conn, src_schema, table))
-        main_cols = _columns(conn, "main", table)
+        # 只搬两库共有的列(按目标库顺序)
         common = [c for c in main_cols if c in src_cols]
         missing = [c for c in main_cols if c not in src_cols]
         if missing:
@@ -214,10 +173,10 @@ def _copy_media_tables(
             continue
 
         # 构造 SELECT 表达式:时间列用 CASE WHEN 转换,其它列原样
-        time_cols = set(MEDIA_TIME_COLS.get(table, ()))
+        table_time_cols = set(time_cols.get(table, ()))
         select_exprs: list[str] = []
         for col in common:
-            if col in time_cols:
+            if col in table_time_cols:
                 select_exprs.append(
                     f"CASE WHEN \"{col}\" IS NULL OR \"{col}\" = 0 THEN NULL "
                     f"ELSE strftime('%Y-%m-%d %H:%M:%S', \"{col}\", 'unixepoch', '+8 hours') END "
@@ -228,13 +187,15 @@ def _copy_media_tables(
 
         col_list = ", ".join(f'"{c}"' for c in common)
         select_list = ", ".join(select_exprs)
+        # INSERT OR IGNORE:主键冲突的行跳过——重复跑脚本不会炸。
         conn.execute(
             f"INSERT OR IGNORE INTO main.{table} ({col_list}) "
             f"SELECT {select_list} FROM {src_schema}.{table}"
         )
         copied += 1
         rows_total += src_count
-        print(f"  ✓ {label}.{table}({src_count} 行,{len(common)} 列,{len(time_cols)} 个时间列转换)")
+        extra = f",{len(table_time_cols)} 个时间列转换" if table_time_cols else ""
+        print(f"  ✓ {label}.{table}({src_count} 行,{len(common)} 列{extra})")
     return copied, rows_total
 
 
@@ -271,13 +232,13 @@ def migrate(
         conn.execute("ATTACH DATABASE ? AS strm", (str(strm_path),))
 
         print("搬辅种域表(原样搬,值已是北京时间字符串):")
-        seed_copied, seed_rows = _copy_seed_tables(
+        seed_copied, seed_rows = _copy_tables(
             conn, "seed", SEED_TABLES, "seed"
         )
         print()
         print("搬媒体库域表(unix 秒 → 北京时间字符串):")
-        media_copied, media_rows = _copy_media_tables(
-            conn, "strm", MEDIA_TABLES, "strm"
+        media_copied, media_rows = _copy_tables(
+            conn, "strm", MEDIA_TABLES, "strm", time_cols=MEDIA_TIME_COLS
         )
 
         conn.commit()
