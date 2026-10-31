@@ -625,6 +625,7 @@ import type {
   SmsSendResult,
   SmsVerifyResult,
 } from "../../types"
+import { formatBytes } from "../../utils/format"
 
 const drivers = ref<Driver[]>([])
 const loading = ref(false)
@@ -763,13 +764,6 @@ function usedPercent(id: number): number {
   const s = statusOf(id)
   if (!s || !s.total_bytes) return 0
   return Math.round((s.used_bytes / s.total_bytes) * 100)
-}
-
-function formatBytes(bytes: number): string {
-  if (!bytes) return "0 B"
-  const units = ["B", "KB", "MB", "GB", "TB", "PB"]
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
-  return `${(bytes / 1024 ** i).toFixed(i === 0 ? 0 : 2)} ${units[i]}`
 }
 
 function isQrCapable(value: string | null | undefined): boolean {

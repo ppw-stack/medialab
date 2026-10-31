@@ -85,6 +85,7 @@
 import { onMounted, ref } from "vue"
 import { mediaApi as api } from "../../api"
 import type { Driver, MediaStats, ReadyResponse } from "../../types"
+import { formatBytes, formatTime } from "../../utils/format"
 
 const stats = ref<MediaStats | null>(null)
 const drivers = ref<Driver[]>([])
@@ -109,18 +110,6 @@ onMounted(async () => {
     loading.value = false
   }
 })
-
-function formatBytes(bytes: number): string {
-  if (!bytes) return "0 B"
-  const units = ["B", "KB", "MB", "GB", "TB"]
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
-  return `${(bytes / 1024 ** i).toFixed(i === 0 ? 0 : 2)} ${units[i]}`
-}
-
-function formatTime(ts: string | null | undefined): string {
-  if (!ts) return "—"
-  return ts
-}
 </script>
 
 <style scoped>

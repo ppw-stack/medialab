@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { api, mediaApi } from '../api'
 import type { DashboardSnap, MediaStats, ReadyResponse, SchedulerInfo } from '../types'
+import { formatBytes } from '../utils/format'
 
 const snap = ref<DashboardSnap | null>(null)
 const scheduler = ref<SchedulerInfo | null>(null)
@@ -113,14 +114,6 @@ const staleSeconds = computed(() => {
  */
 function jobTitle(job: { title?: string; name: string }): string {
   return job.title || job.name
-}
-
-/** 字节数 → 人类可读（媒体库域的媒体总大小）。 */
-function formatBytes(bytes: number): string {
-  if (!bytes) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
-  return `${(bytes / 1024 ** i).toFixed(i === 0 ? 0 : 2)} ${units[i]}`
 }
 </script>
 

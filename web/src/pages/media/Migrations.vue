@@ -214,6 +214,7 @@ import { message } from "ant-design-vue"
 import DirBrowser from "../../components/DirBrowser.vue"
 import { errMsg, mediaApi as api } from "../../api"
 import type { DirEntry, Driver, MigrationJob, MigrationRunInput } from "../../types"
+import { formatBytes } from "../../utils/format"
 
 const drivers = ref<Driver[]>([])
 const sourceDriver = ref<Driver | null>(null)
@@ -486,13 +487,6 @@ function stateColor(state: string): string {
     default:
       return "default"
   }
-}
-
-function formatBytes(bytes: number): string {
-  if (!bytes) return "0 B"
-  const units = ["B", "KB", "MB", "GB", "TB", "PB"]
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
-  return `${(bytes / 1024 ** i).toFixed(i === 0 ? 0 : 2)} ${units[i]}`
 }
 
 /** 进度文案：-1 = 光鸭还没开始下载（排队中）。 */

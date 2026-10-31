@@ -39,3 +39,19 @@ export function formatBytes(
       : value.toFixed(decimals);
   return text + " " + units[idx];
 }
+
+/**
+ * 时间格式化（北京时间字符串原样展示）。
+ *
+ * 后端 DB 时间列已统一为北京时间字符串（``yyyy-MM-dd HH:mm:ss``），
+ * 故**不做二次时区转换**——直接展示，避免「看起来对但差 8 小时」的坑。
+ *
+ * 空值文案由调用方给（``"—"`` / ``"从未"`` 等场景不同）。
+ */
+export function formatTime(
+  ts: string | null | undefined,
+  empty = "—",
+): string {
+  if (!ts) return empty;
+  return ts;
+}

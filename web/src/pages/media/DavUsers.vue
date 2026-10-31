@@ -82,7 +82,7 @@
               </template>
 
               <template v-else-if="column.key === 'last_login_at'">
-                <span class="muted">{{ formatTime(record.last_login_at) }}</span>
+                <span class="muted">{{ formatTime(record.last_login_at, "从未") }}</span>
               </template>
 
               <template v-else-if="column.key === 'action'">
@@ -188,7 +188,7 @@
               </template>
 
               <template v-else-if="column.key === 'created_at'">
-                <span class="muted">{{ formatTime(record.created_at) }}</span>
+                <span class="muted">{{ formatTime(record.created_at, "从未") }}</span>
               </template>
             </template>
           </a-table>
@@ -296,6 +296,7 @@ import type {
   DavRootDriver,
   DavUser,
 } from "../../types"
+import { formatTime } from "../../utils/format"
 
 const activeTab = ref("users")
 
@@ -516,11 +517,6 @@ async function saveRoot() {
 }
 
 // ---- 工具 ----
-
-function formatTime(ts: string | null | undefined): string {
-  if (!ts) return "从未"
-  return ts
-}
 
 function methodColor(method: string): string {
   switch (method) {

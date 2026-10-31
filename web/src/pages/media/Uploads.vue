@@ -224,6 +224,7 @@ import type {
   UploadRuntime,
   UploadTask,
 } from "../../types"
+import { formatBytes } from "../../utils/format"
 
 const tasks = ref<UploadTask[]>([])
 const drivers = ref<Driver[]>([])
@@ -545,13 +546,6 @@ function goTarget(index: number): void {
   form.target_file_id = picked?.id ?? ""
   form.target_path = targetPathOf(targetStack.value)
   void loadTargetDirs(picked?.id ?? "")
-}
-
-function formatBytes(bytes: number): string {
-  if (!bytes) return "0 B"
-  const units = ["B", "KB", "MB", "GB", "TB"]
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
-  return `${(bytes / 1024 ** i).toFixed(i === 0 ? 0 : 2)} ${units[i]}`
 }
 
 /** 日志行的时间戳（后端格式 ``[HH:MM:SS] 内容``）。 */

@@ -82,6 +82,7 @@ import { computed, onMounted, ref } from "vue"
 import { message } from "ant-design-vue"
 import { errMsg, mediaApi as api } from "../../api"
 import type { Driver, MediaItem } from "../../types"
+import { formatBytes } from "../../utils/format"
 
 interface TreeNode {
   key: string
@@ -362,13 +363,6 @@ async function copyUrl(url: string): Promise<void> {
   } catch {
     message.error("复制失败")
   }
-}
-
-function formatBytes(bytes: number): string {
-  if (!bytes) return "0 B"
-  const units = ["B", "KB", "MB", "GB", "TB"]
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
-  return `${(bytes / 1024 ** i).toFixed(i === 0 ? 0 : 2)} ${units[i]}`
 }
 </script>
 
