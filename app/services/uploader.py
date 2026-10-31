@@ -116,8 +116,8 @@ class SyncContext:
     """一次同步运行的上下文（跨文件共享）。
 
     Attributes:
-        driver: 光鸭驱动（需 ``list_entries`` / ``create_dir``）。
-        uploader: 上传器（传字节 / 删文件）。
+        driver: 目标网盘的**驱动**（需 ``list_subdirs``——同名冲突检测用）。
+        uploader: 上传器（传字节 / 删文件 / 建目录 / 列目录）。
         index: 目标目录索引。
         root: 本地监听根（绝对路径）。
         delete_retries: 删后重列确认的重试次数。

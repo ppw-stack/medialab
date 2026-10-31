@@ -11,7 +11,7 @@
 **一个应用装下两个业务域**，共用一套面板、一个 SQLite、一个 SPA：
 
 - **辅种域**（原 ptHelper）—— PT 站点拉取 / 免费种窗口 / 辅种巡检 / 孤儿清理
-- **媒体库域**（原 strmmanger）—— 网盘 STRM 生成 / 302 中转 / WebDAV / 上传
+- **媒体库域**（原 strmmanger）—— 网盘 STRM 生成 / 302 中转 / WebDAV / 数据同步（本地 → 网盘）
 
 **两个域的 API 前缀天然不冲突**：辅种域 `/api/v1/*`，媒体库域 `/api/*`。
 
@@ -42,6 +42,13 @@
   - 前缀必须带结尾的 `|`（`add_torrent|1|` 不匹配 `add_torrent|11|...`）
   - 契约由 `tests/integration/test_services.py` + `tests/integration/test_api.py` 固化
 - 站点适配层改动后用真实站点（测试环境 cookie）拉取验证，不使用 mock 数据测试。
+- **数据同步（本地 → 网盘）按驱动声明支持哪些网盘**（2026-10-31 加入）：
+  - 上传能力走 **`UploadDriver` 协议**（`app/adapters/drivers/upload_base.py`），与读能力 `CloudDriver`（`base.py`）分开——不是所有网盘都能写
+  - **哪些网盘支持上传由 `UPLOADABLE_DRIVER_TYPES` 单一真源声明**；后端校验用 `is_uploadable()`，前端靠 `GET /api/upload-tasks/capabilities` 过滤下拉
+  - **加新网盘只需三步**：实现 `UploadDriver` → 在 `UPLOADABLE_DRIVER_TYPES` 登记 → 在 `app/services/upload_driver_factory.py` 加构造分支。**前端零改动**
+  - 业务代码**不写 `if driver.type == "guangya"`**——一律走工厂 + 协议
+  - 上传流程的幂等判据（**同名 + 同大小 = 已同步**）、覆盖流程（删旧 → 确认消失 → 传新）、清本地的三重保护（仅 `uploaded`/`overwritten` + 大小一致 + `delete_after_upload` 显式开启）**与网盘无关**，别改
+  - 契约由 `tests/unit/test_upload_base.py` + `tests/integration/test_upload_tasks_api.py` 固化
 - **Bearer 长期凭据只用 `WEB_TOKEN`**（2026-10-30 加入）：`verify_bearer` 同时接受 API Token（`WEB_TOKEN`）与 session cookie 值两种口径，但 session cookie 值 24h 过期（`SESSION_MAX_AGE`）。CLI / 脚本长期使用应存 `WEB_TOKEN`，不可把 session cookie 值当长期 token 存储——后者会突然 401。session 值口径仅为面板/CLI 同源便利，非长期凭据。
 - **自动化 / 合规边界**（2026-10-22 修订，原「不引入未文档化的反爬对抗 / 验证码绕过（R2）」）：
   - ✅ **允许**对**自有账号**做站点自动化，含 AI 读图形验证码（`app/core/ai.py`）、真实浏览器交互

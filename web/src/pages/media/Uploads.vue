@@ -2,7 +2,7 @@
   <div class="page">
     <a-row :gutter="16">
       <a-col :xs="24" :lg="14">
-        <a-card size="small" title="上传任务">
+        <a-card size="small" title="数据同步任务">
           <template #extra>
             <a-button type="primary" size="small" @click="openCreate">
               新建任务
@@ -135,14 +135,14 @@
           <a-input v-model:value="form.name" placeholder="例如：PT 下载目录" />
         </a-form-item>
 
-        <a-form-item label="光鸭存储源" required>
+        <a-form-item label="目标网盘" required>
           <a-select
             v-model:value="form.driver_id"
-            placeholder="选择光鸭存储源"
+            placeholder="选择目标网盘"
             @change="onDriverChange"
           >
             <a-select-option
-              v-for="d in guangyaDrivers"
+              v-for="d in targetDrivers"
               :key="d.id"
               :value="d.id"
             >
@@ -170,14 +170,14 @@
             show-icon
             style="margin-top: 8px"
             message="服务能看到的所有目录都能选"
-            description="包括容器内的 /app（含明文密钥的 .env）。请只监听确实需要同步到光鸭盘的目录。"
+            description="包括容器内的 /app（含明文密钥的 .env）。请只监听确实需要同步到目标网盘的目录。"
           />
         </a-form-item>
 
         <a-form-item label="云端目标目录" required>
           <div class="target-picker">
             <DirBrowser
-              title="光鸭目录"
+              title="目标网盘目录"
               :stack="targetStack"
               :dirs="targetDirs"
               :loading="loadingTarget"
@@ -203,7 +203,7 @@
               show-icon
               style="max-width: 460px"
               message="这是破坏性操作"
-              description="上传成功后本地文件会被**彻底删除**（unlink，不进回收站）。只有「云端 fileId 存在且大小与本地一致」才会删；失败 / 冲突 / 云端已有（已存在）一律保留本地文件。云端是完整副本，需要时可从光鸭盘重新下载。"
+              description="上传成功后本地文件会被**彻底删除**（unlink，不进回收站）。只有「云端 fileId 存在且大小与本地一致」才会删；失败 / 冲突 / 云端已有（已存在）一律保留本地文件。云端是完整副本，需要时可从网盘重新下载。"
             />
           </a-space>
         </a-form-item>
@@ -221,6 +221,7 @@ import type {
   DirEntry,
   Driver,
   SyncNowResult,
+  UploadCapabilities,
   UploadRuntime,
   UploadTask,
 } from "../../types"
@@ -251,7 +252,7 @@ const form = reactive({
   target_path: "",
 })
 
-/** 光鸭目标目录浏览 */
+/** 目标网盘目录浏览 */
 const targetStack = ref<DirEntry[]>([])
 
 /** 本地监听目录浏览 */
@@ -263,13 +264,24 @@ const loadingTarget = ref(false)
 
 let timer: number | undefined
 
-const guangyaDrivers = computed(() => drivers.value.filter((d) => d.type === "guangya"))
+/**
+ * **支持上传的驱动类型**（后端声明，前端据此过滤下拉）。
+ *
+ * 加新网盘时前端零改动——后端在 `UPLOADABLE_DRIVER_TYPES` 登记即可。
+ */
+const uploadableTypes = ref<string[]>([])
+
+/** 可作为同步目标的存储源 */
+const targetDrivers = computed(() =>
+  drivers.value.filter((d) => uploadableTypes.value.includes(d.type)),
+)
 
 const watch = computed(() => runtime.value?.watch)
 
 onMounted(async () => {
   await reload()
   await loadDrivers()
+  await loadCapabilities()
   timer = window.setInterval(poll, 2000)
 })
 
@@ -292,7 +304,17 @@ async function loadDrivers(): Promise<void> {
   try {
     drivers.value = await api.get<Driver[]>("/drivers")
   } catch {
-    // 没有光鸭存储源时表单里选不到，不算错
+    // 没有可用的目标存储源时表单里选不到，不算错
+  }
+}
+
+async function loadCapabilities(): Promise<void> {
+  try {
+    const caps = await api.get<UploadCapabilities>("/upload-tasks/capabilities")
+    uploadableTypes.value = caps.uploadable_types
+  } catch {
+    // 拿不到能力列表时保守处理：不显示任何存储源
+    uploadableTypes.value = []
   }
 }
 
@@ -378,7 +400,7 @@ async function syncNow(): Promise<void> {
 function openCreate(): void {
   editing.value = null
   form.name = ""
-  form.driver_id = guangyaDrivers.value[0]?.id
+  form.driver_id = targetDrivers.value[0]?.id
   form.watch_root = ""
   localStack.value = [{ id: "/", name: "/" }]
   localDirs.value = []
@@ -387,7 +409,7 @@ function openCreate(): void {
   form.delete_after_upload = false
   form.target_file_id = ""
   form.target_path = ""
-  targetStack.value = [{ id: "", name: "光鸭根目录" }]
+  targetStack.value = [{ id: "", name: "网盘根目录" }]
   targetDirs.value = []
   formOpen.value = true
   if (form.driver_id) void loadTargetDirs("")
@@ -408,8 +430,8 @@ function openEdit(task: UploadTask): void {
   form.delete_after_upload = task.delete_after_upload
   form.target_file_id = task.target_file_id
   form.target_path = task.target_path ?? ""
-  // 目录浏览器从**目标目录本身**开始（光鸭没有「路径 ↔ id」反查，
-  // 只能从 fileId 往下钻，无法回到父级）
+  // 目录浏览器从**目标目录本身**开始（部分网盘没有「路径 ↔ id」反查，
+  // 只能从 id 往下钻，无法回到父级）
   targetStack.value = [{ id: task.target_file_id, name: task.target_path || "目标目录" }]
   targetDirs.value = []
   formOpen.value = true
@@ -450,13 +472,13 @@ async function save(): Promise<void> {
   }
 }
 
-// ---- 光鸭目录浏览 ----
+// ---- 目标网盘目录浏览 ----
 
 /** 切换存储源 —— 目标目录必须重置（fileId 是**另一个账号**的）。 */
 function onDriverChange(driverId: number): void {
   form.target_file_id = ""
   form.target_path = ""
-  targetStack.value = [{ id: "", name: "光鸭根目录" }]
+  targetStack.value = [{ id: "", name: "网盘根目录" }]
   targetDirs.value = []
   void loadTargetDirs("", driverId)
 }
@@ -471,7 +493,7 @@ async function loadTargetDirs(parentId: string, driverId?: number): Promise<void
     )
     targetDirs.value = resp.dirs ?? []
   } catch (e) {
-    message.error(errMsg(e, "加载光鸭目录失败"))
+    message.error(errMsg(e, "加载目标网盘目录失败"))
   } finally {
     loadingTarget.value = false
   }
@@ -480,12 +502,12 @@ async function loadTargetDirs(parentId: string, driverId?: number): Promise<void
 /**
  * 由面包屑栈拼出目标路径（展示用）。
  *
- * 根节点（id 为空串 = 光鸭根目录）不参与拼接 —— 它的「名字」只是占位。
+ * 根节点（id 为空串 = 网盘根目录）不参与拼接 —— 它的「名字」只是占位。
  */
 function targetPathOf(stack: DirEntry[]): string {
   return stack
     .map((c) => c.name)
-    .filter((n) => n !== "光鸭根目录")
+    .filter((n) => n !== "网盘根目录")
     .join("/")
 }
 
@@ -510,7 +532,7 @@ async function loadLocalDirs(path: string): Promise<void> {
 /**
  * 进入本地子目录 —— **同时把它设为选中的监听目录**。
  *
- * 语义与光鸭目录一致：「正在看哪个目录」=「要监听哪个目录」。
+ * 语义与目标网盘目录一致：「正在看哪个目录」=「要监听哪个目录」。
  */
 function openLocal(entry: DirEntry): void {
   localStack.value = [...localStack.value, entry]

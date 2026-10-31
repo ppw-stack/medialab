@@ -220,8 +220,9 @@ async def create_task(
     """创建上传任务。
 
     Raises:
-        UploadTaskError: 存储源不是光鸭 / 路径不在白名单 / 目录不存在。
+        UploadTaskError: 存储源不支持上传 / 路径非法 / 目录不存在。
     """
+    from app.adapters.drivers.upload_base import is_uploadable
     from app.db.models import Driver
 
     driver = (
@@ -229,9 +230,9 @@ async def create_task(
     ).scalar_one_or_none()
     if driver is None:
         raise UploadTaskError(f"存储源不存在：{driver_id}", status_code=404, kind="not_found")
-    if driver.type != "guangya":
+    if not is_uploadable(driver.type):
         raise UploadTaskError(
-            f"上传目标必须是光鸭盘（当前：{driver.type}）", status_code=400, kind="config"
+            f"该存储源不支持上传（当前：{driver.type}）", status_code=400, kind="config"
         )
 
     watch_dir = _validate_watch_dir(watch_root)
@@ -254,10 +255,11 @@ async def create_task(
     await db.commit()
     await db.refresh(row)
     logger.info(
-        "创建上传任务 id=%s 监听=%s → 光鸭 %s",
+        "创建上传任务 id=%s 监听=%s → 网盘 %s（driver=%s）",
         row.id,
         watch_dir,
         target_file_id,
+        driver.type,
     )
     return row
 
@@ -348,19 +350,36 @@ async def delete_task_view(task_id: int) -> None:
         await delete_task(db, task_id)
 
 
-async def browse_guangya_dirs(driver_id: int, parent_id: str = "") -> list[tuple[str, str]]:
-    """列出光鸭目录下的子目录（按 fileId 逐层浏览）。
+async def upload_capabilities() -> dict[str, Any]:
+    """本环境**支持上传的存储源类型**。
+
+    前端用它过滤「目标网盘」下拉——只列支持上传的。
+    **加新网盘时前端零改动**：后端在
+    :mod:`app.adapters.drivers.upload_base` 的 ``UPLOADABLE_DRIVER_TYPES``
+    里登记即可。
+
+    （API 层不直接 import 适配层——分层约束见 ``test_layering.py``，
+    故此函数住在 service 层。）
+    """
+    from app.adapters.drivers.upload_base import UPLOADABLE_DRIVER_TYPES
+
+    return {"uploadable_types": sorted(UPLOADABLE_DRIVER_TYPES)}
+
+
+async def browse_target_dirs(driver_id: int, parent_id: str = "") -> list[tuple[str, str]]:
+    """列出目标网盘目录下的子目录（按 id 逐层浏览）。
 
     返回 ``[(remote_id, name), ...]``——只含目录（文件不进目录浏览器）。
 
-    光鸭的目录**没有「路径 ↔ id」反查**（接口只接受 fileId），故只能
+    部分网盘的目录**没有「路径 ↔ id」反查**（接口只接受 id），故只能
     逐层往下走。
 
     Raises:
-        UploadTaskError: 存储源不存在（404）/ 不是光鸭（400）/ 驱动不支持
+        UploadTaskError: 存储源不存在（404）/ 不支持上传（400）/ 驱动不支持
             按 id 浏览（400）/ 上游调用失败（400）。
     """
     from app.adapters.drivers.base import DriverError
+    from app.adapters.drivers.upload_base import is_uploadable
     from app.db.models import Driver
     from app.services.driver_factory import build_driver
     from app.services.migration import persist_guangya_credential
@@ -371,9 +390,9 @@ async def browse_guangya_dirs(driver_id: int, parent_id: str = "") -> list[tuple
         ).scalar_one_or_none()
         if driver_row is None:
             raise UploadTaskError(f"存储源不存在：{driver_id}", status_code=404, kind="not_found")
-        if driver_row.type != "guangya":
+        if not is_uploadable(driver_row.type):
             raise UploadTaskError(
-                f"该接口需要光鸭存储源（当前：{driver_row.type}）",
+                f"该存储源不支持上传（当前：{driver_row.type}）",
                 status_code=400,
                 kind="config",
             )
@@ -384,7 +403,7 @@ async def browse_guangya_dirs(driver_id: int, parent_id: str = "") -> list[tuple
     async def _on_refresh(cred: Any) -> None:
         await persist_guangya_credential(row_id, cred)
 
-    driver = build_driver("guangya", credential, device_type, on_token_refresh=_on_refresh)
+    driver = build_driver(driver_row.type, credential, device_type, on_token_refresh=_on_refresh)
     lister = getattr(driver, "list_dir_by_cid", None)
     if lister is None:
         raise UploadTaskError("该驱动不支持按 id 浏览目录", status_code=400, kind="config")

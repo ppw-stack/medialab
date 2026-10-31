@@ -776,17 +776,17 @@ export interface ScanJob {
   error: string | null
 }
 
-// ---- 上传任务（本地目录 → 光鸭盘）----
+// ---- 数据同步任务（本地目录 → 网盘）----
 
 /** 上传任务。 */
 export interface UploadTask {
   id: number
   name: string
-  /** 目标存储源（光鸭） */
+  /** 目标存储源（网盘） */
   driver_id: number
-  /** 光鸭目标目录 fileId */
+  /** 目标目录 id（网盘侧） */
   target_file_id: string
-  /** 光鸭目标目录路径（只读展示） */
+  /** 目标目录路径（只读展示） */
   target_path: string | null
   /** 监听目录（容器内绝对路径，完整路径） */
   watch_root: string
@@ -809,6 +809,15 @@ export interface UploadTask {
   total_bytes: number
   /** 运行态的最近一次错误（监听启动失败等） */
   runtime_error: string | null
+}
+
+/**
+ * 本环境**支持上传的存储源类型**（后端声明）。
+ *
+ * 前端靠它过滤「目标网盘」下拉——加新网盘时前端零改动。
+ */
+export interface UploadCapabilities {
+  uploadable_types: string[]
 }
 
 /** 上传任务的运行态（轮询用）。 */

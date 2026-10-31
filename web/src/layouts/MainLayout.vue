@@ -61,7 +61,7 @@ const menuGroups = [
       { key: '/drivers', icon: DatabaseFilled, label: '存储源', sub: '网盘账号', iconColor: 'violet' },
       { key: '/library', icon: FolderOpenOutlined, label: '媒体库', sub: 'STRM 条目', iconColor: 'blue' },
       { key: '/migrations', icon: SwapOutlined, label: '迁移', sub: '115 → 光鸭', iconColor: 'amber' },
-      { key: '/uploads', icon: UploadOutlined, label: '上传', sub: '本地 → 光鸭', iconColor: 'green' },
+      { key: '/uploads', icon: UploadOutlined, label: '数据同步', sub: '本地 → 网盘', iconColor: 'green' },
       { key: '/health', icon: HeartOutlined, label: '健康监控', sub: '断链检查', iconColor: 'red' },
       { key: '/dav', icon: CloudUploadOutlined, label: 'WebDAV', sub: '账号与审计', iconColor: 'cyan' },
       { key: '/media-settings', icon: SettingOutlined, label: '签名密钥', sub: '中转签名轮换', iconColor: 'pink' },

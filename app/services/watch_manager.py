@@ -266,14 +266,13 @@ def _make_dispatcher(task_id: int, queue: asyncio.Queue[Path]) -> Any:
 
 
 async def _build_clients(driver_id: int) -> tuple[Any, Any]:
-    """构造光鸭驱动与上传器。
+    """构造目标网盘的驱动与上传器。
 
-    **Token 刷新回调**：光鸭 access_token 只有 1~2 小时有效，上传是长跑
-    ——必须把刷新后的 token **写回 DB**，否则重启后又用旧 token → 401。
+    **按驱动类型分派**（见 :mod:`app.services.upload_driver_factory`）——
+    上层只认 :class:`app.adapters.drivers.upload_base.UploadDriver` 协议，
+    不认具体网盘。新增支持上传的网盘只改工厂，前端零改动。
     """
-    from app.adapters.drivers.guangya import build_guangya_driver
-    from app.adapters.drivers.guangya_upload import build_guangya_uploader
-    from app.services.migration import persist_guangya_credential
+    from app.services.upload_driver_factory import build_upload_clients
 
     async with session_scope() as db:
         row = (
@@ -281,21 +280,22 @@ async def _build_clients(driver_id: int) -> tuple[Any, Any]:
         ).scalar_one_or_none()
         if row is None:
             raise DriverError(f"存储源不存在：{driver_id}", kind="not_found")
-        if row.type != "guangya":
-            raise DriverError(
-                f"上传目标必须是光鸭盘（当前：{row.type}）", kind="config"
-            )
         credential = row.credential
         device_type = row.device_type
+        driver_type = row.type
 
     async def _on_refresh(cred: Any) -> None:
+        # Token 刷新后写回 DB（光鸭的 token 只有 1~2 小时有效）。
+        from app.services.migration import persist_guangya_credential
+
         await persist_guangya_credential(driver_id, cred)
 
-    driver = build_guangya_driver(
-        credential, device_type, on_token_refresh=_on_refresh
+    return await build_upload_clients(
+        driver_type,
+        credential=credential,
+        device_type=device_type,
+        on_token_refresh=_on_refresh,
     )
-    uploader = build_guangya_uploader(driver.client)
-    return driver, uploader
 
 
 async def _worker_loop(

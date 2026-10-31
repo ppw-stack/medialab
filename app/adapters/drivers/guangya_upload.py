@@ -3,6 +3,10 @@
 与 :mod:`app.adapters.drivers.guangya` 拆开：那个模块管「读」（列目录 /
 换直链 / 离线下载），本模块管「写」（上传 / 删除）。
 
+**协议**：本模块的 :class:`GuangyaUploader` 实现
+:class:`app.adapters.drivers.upload_base.UploadDriver`——「数据同步」功能
+按协议调用，不认具体网盘。新增支持上传的网盘照此实现即可。
+
 **实测结论（2026-10-30，真实账号）**——这些数字别凭记忆改：
 
 =========================================================  ==========================
@@ -59,7 +63,6 @@ import base64
 import hashlib
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +70,7 @@ import httpx
 
 from app.adapters.drivers.base import DriverError
 from app.adapters.drivers.guangya import PROVIDER
+from app.adapters.drivers.upload_base import UploadResult
 from app.core.logging import get_logger
 from app.core.rate_limit import rate_limiter
 
@@ -98,34 +102,31 @@ POLL_INTERVAL_SEC = 1.0
 POLL_TIMEOUT_SEC = 3600.0
 
 
-@dataclass(frozen=True)
-class UploadResult:
-    """一次上传的结果。
+class GuangyaUploader:
+    """光鸭上传器（包 ``guangyaclient`` 的同步能力为异步）。
 
-    Attributes:
-        file_id: 光鸭侧的文件 id（上传完成后由 ``upload_info`` 返回）。
-        name: 云端文件名（**可能与请求名不同**——同名时光鸭会自动加
-            ``(1)`` 后缀，故这个值才是真实落地的名字）。
-        size: 字节数。
-        size_uploaded: 实际传输的字节数。
+    实现 :class:`app.adapters.drivers.upload_base.UploadDriver` 协议——
+    「同步」功能按协议调用，不认具体网盘。
+
+    **持有 driver**：建目录 / 列目录是**读**能力，在
+    :class:`app.adapters.drivers.guangya.GuangyaDriver` 上。这里转发过来，
+    让上传器自身满足协议的完整方法集——调用方只认协议，不必同时拿两个对象。
     """
 
-    file_id: str
-    name: str
-    size: int
-    size_uploaded: int = 0
+    #: 驱动类型标识
+    name = "guangya"
 
-
-class GuangyaUploader:
-    """光鸭上传器（包 ``guangyaclient`` 的同步能力为异步）。"""
-
-    def __init__(self, client: Any) -> None:
+    def __init__(self, client: Any, driver: Any = None) -> None:
         """构造上传器。
 
         Args:
             client: ``guangyaclient.GuangyaClient`` 实例（**已登录**）。
+            driver: 同网盘的驱动实例（提供 ``create_dir`` / ``list_entries``）。
+                缺省时这两个方法会抛 :class:`DriverError`——但**正常路径不会
+                缺**（:func:`build_guangya_uploader` 会带上）。
         """
         self._client = client
+        self._driver = driver
         self._ensure_oss_timeout()
 
     def _ensure_oss_timeout(self) -> None:
@@ -464,6 +465,40 @@ class GuangyaUploader:
                 kind=_map_code(code),
             )
 
+    # -- 目录能力（转发给 driver）--
+
+    async def create_dir(self, name: str, parent_id: str = "") -> tuple[str, bool]:
+        """建**一层**目录（转发给驱动）。
+
+        光鸭 ``fs_create_dir`` 不接受带 ``/`` 的名字（实测报 ``code 141``），
+        逐层建目录由调用方（:class:`app.services.cloud_index.CloudDirIndex`）负责。
+        """
+        if self._driver is None:
+            raise DriverError("光鸭上传器未绑定驱动，无法建目录", kind="config")
+        result: tuple[str, bool] = await self._driver.create_dir(name, parent_id)
+        return result
+
+    async def list_entries(self, dir_id: str) -> dict[str, tuple[int, str]]:
+        """列出目录里的**文件**（含 fileId，转发给驱动）。
+
+        **必须带 fileId**——「删旧文件」这条幂等路径只认 fileId。
+        """
+        if self._driver is None:
+            raise DriverError("光鸭上传器未绑定驱动，无法列目录", kind="config")
+        entries: dict[str, tuple[int, str]] = await self._driver.list_entries(dir_id)
+        return entries
+
+    async def list_subdirs(self, dir_id: str) -> list[Any]:
+        """列出目录里的**子目录**（转发给驱动）。
+
+        **不属于上传协议**——是「同名冲突检测」用的读能力
+        （云端同名项是目录时不能覆盖）。但同步流程需要它，故一并转发。
+        """
+        if self._driver is None:
+            raise DriverError("光鸭上传器未绑定驱动，无法列子目录", kind="config")
+        subdirs: list[Any] = await self._driver.list_subdirs(dir_id)
+        return subdirs
+
 
 def _xml_value(content: bytes, tag: str) -> str:
     """从 XML 响应里取某个标签的文本（空串 = 没有）。
@@ -498,9 +533,16 @@ def _map_code(code: Any) -> str:
     return "unknown"
 
 
-def build_guangya_uploader(client: Any) -> GuangyaUploader:
-    """工厂函数。"""
-    return GuangyaUploader(client)
+def build_guangya_uploader(client: Any, driver: Any = None) -> GuangyaUploader:
+    """工厂函数。
+
+    Args:
+        client: 已登录的 ``guangyaclient.GuangyaClient``。
+        driver: 同网盘的驱动实例（提供 ``create_dir`` / ``list_entries``）。
+            **要传**——否则上传器不满足
+            :class:`app.adapters.drivers.upload_base.UploadDriver` 协议。
+    """
+    return GuangyaUploader(client, driver)
 
 
 __all__ = [

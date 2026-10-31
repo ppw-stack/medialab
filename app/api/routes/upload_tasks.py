@@ -157,9 +157,9 @@ async def browse_local_dirs(path: str = "/") -> dict[str, Any]:
 
 @router.get("/targets")
 async def browse_targets(driver_id: int, parent_id: str = "") -> dict[str, Any]:
-    """列出光鸭目录下的子目录（按 fileId 逐层浏览）。"""
+    """列出**目标网盘**目录下的子目录（按 id 逐层浏览）。"""
     try:
-        dirs = await upload_tasks.browse_guangya_dirs(driver_id, parent_id)
+        dirs = await upload_tasks.browse_target_dirs(driver_id, parent_id)
     except UploadTaskError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return {
@@ -167,6 +167,18 @@ async def browse_targets(driver_id: int, parent_id: str = "") -> dict[str, Any]:
         "parent_id": parent_id,
         "dirs": [{"id": rid, "name": name} for rid, name in dirs],
     }
+
+
+@router.get("/capabilities")
+async def upload_capabilities() -> dict[str, Any]:
+    """本环境**支持上传的存储源类型**。
+
+    前端用它过滤「目标网盘」下拉——只列支持上传的。
+    **加新网盘时前端零改动**：后端在
+    ``app/adapters/drivers/upload_base.py`` 的
+    ``UPLOADABLE_DRIVER_TYPES`` 里登记即可。
+    """
+    return await upload_tasks.upload_capabilities()
 
 
 @router.get("/{task_id}", response_model=UploadTaskOut)

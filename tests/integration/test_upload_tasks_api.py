@@ -3,9 +3,10 @@
 覆盖点：
 
 - 监听目录不存在 → 400
-- 目标存储源不是光鸭 → 400
+- 目标存储源不支持上传 → 400
 - CRUD 基本流程
 - 需要登录（401）
+- ``/capabilities`` 返回支持上传的驱动类型（前端据此过滤下拉）
 """
 
 from __future__ import annotations
@@ -90,8 +91,8 @@ class TestAuth:
 
 
 class TestWhitelist:
-    async def test_目标必须是光鸭(self, client, db_session, tmp_path) -> None:
-        """目标存储源不是光鸭 → 400。"""
+    async def test_目标存储源不支持上传(self, client, db_session, tmp_path) -> None:
+        """目标存储源不支持上传（如 115）→ 400。"""
         driver_id = await _add_driver(db_session, type="p115")
         resp = await client.post(
             "/api/upload-tasks",
@@ -103,7 +104,7 @@ class TestWhitelist:
             },
         )
         assert resp.status_code == 400
-        assert "光鸭" in resp.json()["detail"]
+        assert "不支持上传" in resp.json()["detail"]
 
     async def test_存储源不存在(self, client, tmp_path) -> None:
         """存储源 id 不存在 → 404。"""
@@ -117,6 +118,25 @@ class TestWhitelist:
             },
         )
         assert resp.status_code == 404
+
+
+class TestCapabilities:
+    async def test_返回支持上传的驱动类型(self, client) -> None:
+        """``/capabilities`` 返回支持上传的驱动类型列表。
+
+        前端靠它过滤「目标网盘」下拉——加新网盘时前端零改动。
+        """
+        from app.adapters.drivers.upload_base import UPLOADABLE_DRIVER_TYPES
+
+        resp = await client.get("/api/upload-tasks/capabilities")
+        assert resp.status_code == 200
+        types = resp.json()["uploadable_types"]
+        assert types == sorted(UPLOADABLE_DRIVER_TYPES)
+        assert "guangya" in types
+
+    async def test_需要登录(self, anon_client) -> None:
+        resp = await anon_client.get("/api/upload-tasks/capabilities")
+        assert resp.status_code == 401
 
 
 class TestCrud:
