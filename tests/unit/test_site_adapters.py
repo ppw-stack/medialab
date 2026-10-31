@@ -834,7 +834,7 @@ def _mteam_routes(router: respx.MockRouter, *, final_bs: str = "112.146") -> Non
 
 
 async def test_mteam_snapshot_includes_hourly_bonus() -> None:
-    """m-team 快照：4 业务字段 + 时魔（来自 mybonus 的 finalBs）。"""
+    """m-team 快照：3 业务字段 + 时魔（来自 mybonus 的 finalBs）。"""
     from app.adapters.sites.user_data import HourlyBonus
 
     adapter = _make("mteam")
@@ -846,7 +846,6 @@ async def test_mteam_snapshot_includes_hourly_bonus() -> None:
         assert snap.upload == 1000
         assert snap.download == 2000
         assert snap.seeding_count == 34
-        assert snap.leeching_count == 2
         assert isinstance(snap.hourly_bonus, HourlyBonus)
         assert snap.hourly_bonus.amount == pytest.approx(112.146)
         assert snap.hourly_bonus.unit == "魔力值"

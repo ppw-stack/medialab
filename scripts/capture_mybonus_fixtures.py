@@ -344,7 +344,6 @@ def _same_snapshot(a: SiteUserSnapshot | None, b: SiteUserSnapshot | None) -> bo
         a.upload == b.upload
         and a.download == b.download
         and a.seeding_count == b.seeding_count
-        and a.leeching_count == b.leeching_count
     )
 
 

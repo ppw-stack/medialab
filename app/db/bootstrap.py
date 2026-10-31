@@ -107,6 +107,8 @@ _ALTER_STATEMENTS: tuple[tuple[str, str], ...] = (
     ("drop_column", "ALTER TABLE site_user_data DROP COLUMN leeching_size"),
     ("drop_column", "ALTER TABLE site_user_data DROP COLUMN message_unread"),
     ("drop_column", "ALTER TABLE site_user_data DROP COLUMN hr_status"),
+    # 「下载中数」从契约移除（2026-10-31）——字段不再有业务价值
+    ("drop_column", "ALTER TABLE site_user_data DROP COLUMN leeching_count"),
     # 站点用户数据契约 (FR-1.6)：补兼容历史库缺索引
     (
         "create_index",

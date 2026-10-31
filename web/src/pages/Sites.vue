@@ -219,7 +219,7 @@ const columns = [
   { title: '域名', key: 'domain' },
   { title: '凭据', key: 'credentials' },
   { title: '上传/下载', key: 'traffic', width: 170 },
-  { title: '做种/下载中', key: 'torrents', width: 110 },
+  { title: '做种', key: 'torrents', width: 80 },
   { title: '时魔/小时', key: 'bonus', width: 150 },
   { title: '启用', key: 'enabled', width: 80 },
   { title: '', key: 'action', width: 280 },
@@ -295,7 +295,7 @@ async function openUserDataDrawer(s: Site) {
           </template>
           <template v-else-if="column.key === 'torrents'">
             <span v-if="record.has_data" class="mono">
-              {{ record.seeding_count }} / {{ record.leeching_count }}
+              {{ record.seeding_count }}
             </span>
             <span v-else class="muted">—</span>
           </template>
@@ -403,7 +403,6 @@ async function openUserDataDrawer(s: Site) {
             <a-descriptions-item label="上传">{{ fmtBytes(drawerData.upload || 0) }}</a-descriptions-item>
             <a-descriptions-item label="下载">{{ fmtBytes(drawerData.download || 0) }}</a-descriptions-item>
             <a-descriptions-item label="做种">{{ drawerData.seeding_count }}</a-descriptions-item>
-            <a-descriptions-item label="下载中">{{ drawerData.leeching_count }}</a-descriptions-item>
             <a-descriptions-item label="时魔/小时">
               <span v-if="drawerData.hourly_bonus !== null && drawerData.hourly_bonus !== undefined">
                 {{ drawerData.hourly_bonus.toFixed(1) }}

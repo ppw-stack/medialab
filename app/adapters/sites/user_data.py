@@ -1,11 +1,10 @@
 """站点用户数据契约（FR-1.6，精简版 + 时魔）。
 
-4 业务字段：
+3 业务字段：
 
 - **上传量** (upload, bytes)
 - **下载量** (download, bytes)
 - **做种数** (seeding_count, 当前做种)
-- **下载中数** (leeching_count, 当前下载/未完成)
 
 **时魔**（每小时获得的站点积分）：各站叫法不同（魔力值 / 爆米花 / 茉莉 /
 憨豆 / 积分），统一用 :class:`HourlyBonus` 表达，``unit`` 标注站点自称。
@@ -14,7 +13,7 @@
 后宫加成等各项加成），不是「基础时魔」。各站取法见
 :mod:`app.adapters.sites.parsers.nexus_php` 与各站适配器。
 
-其他字段（username/user_level/bonus/H&R/消息/做种积分）已移除：
+其他字段（username/user_level/bonus/H&R/消息/做种积分/**下载中数**）已移除：
 适配层 4 方法合并为单方法 :meth:`SiteAdapter.get_user_snapshot`，
 service 只 upsert 这几列。
 """
@@ -52,6 +51,5 @@ class SiteUserSnapshot:
     upload: int = 0
     download: int = 0
     seeding_count: int = 0
-    leeching_count: int = 0
     #: 时魔（各站单位不同，见 :class:`HourlyBonus`）；该站不支持则 ``None``
     hourly_bonus: HourlyBonus | None = None

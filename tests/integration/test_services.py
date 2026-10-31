@@ -396,7 +396,6 @@ async def test_site_user_data_with_row(db: None) -> None:
                 upload=1024,
                 download=2048,
                 seeding_count=10,
-                leeching_count=2,
             )
         )
         await session.flush()
@@ -405,7 +404,6 @@ async def test_site_user_data_with_row(db: None) -> None:
     assert snap.has_data is True
     assert snap.upload == 1024
     assert snap.seeding_count == 10
-    assert snap.leeching_count == 2
 
 
 async def test_site_user_data_not_found_404(db: None) -> None:

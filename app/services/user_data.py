@@ -87,7 +87,6 @@ def _snapshot_payload(snap: SiteUserSnapshot) -> dict[str, object]:
         "upload": snap.upload,
         "download": snap.download,
         "seeding_count": snap.seeding_count,
-        "leeching_count": snap.leeching_count,
         "last_seen_at": bj_now(),
     }
     bonus = snap.hourly_bonus

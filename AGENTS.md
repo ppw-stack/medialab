@@ -59,7 +59,7 @@
   - 不抽 9 站 user_data 基类；NexusPHP 7 站共用 `app/adapters/sites/parsers/nexus_php.py` module-level helper（`parse_user_snapshot` / `parse_hourly_bonus`）
   - `SiteUserData` 表是**当前快照**（UNIQUE site_id），不做历史；如需时间序列需先建 `site_user_data_history` 表再迁
   - 适配器单方法 `get_user_snapshot`：**返回 `None` 只表示"该站不支持 / 无凭据"**（service 记 skipped）；**拉取/解析失败必须抛 `SiteFetchError`**（service 记 failed 并点名，**不写 0 兜底**——写 0 等于把故障伪装成"上传 0 / 做种 0"）
-  - 抓取页用 `/mybonus.php`（navbar 带 4 业务字段 + 时魔，**一页拿全**）；navbar 解析不出 4 字段时回退 `/userdetails.php`
+  - 抓取页用 `/mybonus.php`（navbar 带 3 业务字段 + 时魔，**一页拿全**）；navbar 解析不出 3 字段时回退 `/userdetails.php`
   - `refresh_user_data` cron `*/30 * * * *`（与 `push_free_torrents` 同分钟位错峰不冲突）
   - **网络 IO 在事务外**：短事务读站点 → 并发抓取（上限 5）→ 短事务批量 upsert；写锁不能横跨网络往返
   - 暂不接告警推送；只落库 + UI 展示

@@ -1,12 +1,11 @@
 """NexusPHP 站点用户数据解析 helper（FR-1.6 精简版 + 时魔，7 站共用）。
 
 7 个 NexusPHP 派生站共用 :func:`parse_user_snapshot`——从页面顶部
-**navbar**（``stdhead()`` 渲染，每个登录页都有）同时抽 4 业务字段：
+**navbar**（``stdhead()`` 渲染，每个登录页都有）同时抽 3 业务字段：
 
 - **upload** (上传量, bytes)
 - **download** (下载量, bytes)
 - **seeding_count** (做种数)
-- **leeching_count** (下载/未完成数)
 
 解析覆盖 3 种模板：
 
@@ -156,8 +155,8 @@ def _extract_labeled_values(html: str) -> dict[str, str]:
     return out
 
 
-def _find_active_count(text: str, html: str = "") -> tuple[int, int]:
-    """从多种模板提取做种/下载中数。
+def _find_active_count(text: str, html: str = "") -> int:
+    """从多种模板提取**做种数**。
 
     支持的 pattern:
     - "当前活动：181 0"（NexusPHP navbar 主流）
@@ -165,10 +164,10 @@ def _find_active_count(text: str, html: str = "") -> tuple[int, int]:
     - "做种 237 / 下载 2"（中文）
     - "活跃 ↑ 709 / ↓ 1"（audiences 等 SPA 文本模式）
     - JSON "活跃","value":"↑ 709 / ↓ 1"（audiences React SSR）
-    """
-    seeding_count = 0
-    leeching_count = 0
 
+    注：**下载中数已从契约移除**（2026-10-31）——只取做种数。
+    页面上的第二个数字（下载中）不再解析。
+    """
     # 模式 0（audiences 专用）: JSON 风格 "label":"活跃","value":"↑ N / ↓ M"
     if html:
         m = re.search(
@@ -179,47 +178,35 @@ def _find_active_count(text: str, html: str = "") -> tuple[int, int]:
             html,
         )
         if m:
-            return _parse_int(m.group(1)), _parse_int(m.group(2))
+            return _parse_int(m.group(1))
 
     # 模式 1: 当前活动 X Y
     m = re.search(r"当前活动[:：]\s*([\d,]+)\s+([\d,]+)", text)
     if m:
-        return _parse_int(m.group(1)), _parse_int(m.group(2))
+        return _parse_int(m.group(1))
 
     # 模式 1b: 活跃 ↑ N / ↓ M（audiences 文本）
     m = re.search(r"活跃\s*↑\s*(\d+)\s*/\s*↓\s*(\d+)", text)
     if m:
-        return _parse_int(m.group(1)), _parse_int(m.group(2))
+        return _parse_int(m.group(1))
 
     # 模式 2: Seeding 152 / Leeching 23（独立标签）
     m1 = re.search(r"\bseeding\b[:：]?\s*([\d,]+)", text, re.IGNORECASE)
-    m2 = re.search(r"\bleeching\b[:：]?\s*([\d,]+)", text, re.IGNORECASE)
     if m1:
-        seeding_count = _parse_int(m1.group(1))
-    if m2:
-        leeching_count = _parse_int(m2.group(1))
+        return _parse_int(m1.group(1))
 
     # 模式 3: 做种 237 / 下载 2（中文）
-    if seeding_count == 0:
-        m = re.search(r"做种[:：]?\s*([\d,]+)", text)
-        if m:
-            ctx = text[max(0, m.start() - 5):m.end()]
-            if "积分" not in ctx and "bonus" not in ctx.lower():
-                seeding_count = _parse_int(m.group(1))
-    if leeching_count == 0:
-        # 用 \b 边界 + 排除"已"前缀，避免把"已下载: 100"（历史下载量）
-        # 当当前 leeching 数
-        m = re.search(r"(?<!已)下载(?:中)?[:：]\s*([\d,]+)", text)
-        if m:
-            ctx = text[max(0, m.start() - 5):m.end()]
-            if "量" not in ctx and "ed" not in ctx.lower():
-                leeching_count = _parse_int(m.group(1))
+    m = re.search(r"做种[:：]?\s*([\d,]+)", text)
+    if m:
+        ctx = text[max(0, m.start() - 5):m.end()]
+        if "积分" not in ctx and "bonus" not in ctx.lower():
+            return _parse_int(m.group(1))
 
-    return seeding_count, leeching_count
+    return 0
 
 
 def parse_user_snapshot(html: str | bytes) -> SiteUserSnapshot | None:
-    """从 ``/userdetails.php`` HTML 提取 4 业务字段。
+    """从 ``/userdetails.php`` HTML 提取 3 业务字段。
 
     全部字段缺失 → 返回 ``None``。
     """
@@ -255,17 +242,16 @@ def parse_user_snapshot(html: str | bytes) -> SiteUserSnapshot | None:
                 f"{m.group(1).replace(',', '')} {m.group(2)}"
             )
 
-    # 2. seeding / leeching 数量
-    seeding_count, leeching_count = _find_active_count(text, html)
+    # 2. seeding 数量
+    seeding_count = _find_active_count(text, html)
 
     # 全部空 → 解析失败
-    if not (upload or download or seeding_count or leeching_count):
+    if not (upload or download or seeding_count):
         return None
     return SiteUserSnapshot(
         upload=upload,
         download=download,
         seeding_count=seeding_count,
-        leeching_count=leeching_count,
     )
 
 

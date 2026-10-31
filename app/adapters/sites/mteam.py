@@ -639,7 +639,6 @@ class MteamAdapter(SiteAdapter):
         if not isinstance(stat, dict) or "seederCount" not in stat:
             raise SiteFetchError("mteam myPeerStatistics 的 data 字段缺失")
         seeding_count = int(stat.get("seederCount") or 0)
-        leeching_count = int(stat.get("leecherCount") or 0)
 
         # 端点 3: /api/tracker/mybonus 拿时魔
         # （m-team 积分商城页 kp.m-team.cc/mybonus 是纯 SPA，数据就来自这里）
@@ -668,7 +667,6 @@ class MteamAdapter(SiteAdapter):
             upload=upload,
             download=download,
             seeding_count=seeding_count,
-            leeching_count=leeching_count,
             hourly_bonus=hourly_bonus,
         )
 

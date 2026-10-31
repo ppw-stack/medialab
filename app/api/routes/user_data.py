@@ -24,7 +24,7 @@ async def list_user_data() -> list[dict[str, Any]]:
     """取所有 site_user_data 行（按 site 排序），前端 /user-data 页面用。
 
     Returns: ``[{site_id, site_name, adapter, upload, download,
-    seeding_count, leeching_count, last_seen_at}, ...]``
+    seeding_count, last_seen_at}, ...]``
     """
     return [asdict(row) for row in await user_data_query.list_user_data()]
 

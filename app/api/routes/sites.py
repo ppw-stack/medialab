@@ -80,7 +80,6 @@ class SiteOut(BaseModel):
     upload: int = 0
     download: int = 0
     seeding_count: int = 0
-    leeching_count: int = 0
     hourly_bonus: float | None = None
     hourly_bonus_unit: str | None = None
     hourly_bonus_capped: bool | None = None
@@ -89,7 +88,7 @@ class SiteOut(BaseModel):
 
 
 class SiteUserDataOut(BaseModel):
-    """站点用户数据（FR-1.6 精简版，4 字段 + 时魔）。"""
+    """站点用户数据（FR-1.6 精简版，3 字段 + 时魔）。"""
 
     site_id: int
     site_name: str
@@ -97,7 +96,6 @@ class SiteUserDataOut(BaseModel):
     upload: int = 0
     download: int = 0
     seeding_count: int = 0
-    leaching_count: int = 0
     #: 时魔（每小时获得的站点积分·合计口径）
     hourly_bonus: float | None = None
     #: 时魔单位（站点自称：魔力值 / 爆米花 / 茉莉 / 憨豆 / 积分）
@@ -241,11 +239,11 @@ async def get_site(site_id: int) -> SiteOut:
 # ----------------------- FR-1.6 站点用户数据 API（精简版） -----------------------
 
 
-@router.get("/{site_id}/user-data", summary="站点最近用户数据（4 字段）")
+@router.get("/{site_id}/user-data", summary="站点最近用户数据（3 字段）")
 async def get_site_user_data(site_id: int) -> SiteUserDataOut:
     """取一站最近一次 :class:`SiteUserData` 行（FR-1.6 精简版）。
 
-    字段：upload / download / seeding_count / leeching_count / last_seen_at。
+    字段：upload / download / seeding_count / last_seen_at。
     """
     return SiteUserDataOut(**asdict(await site_service.get_site_user_data(site_id)))
 

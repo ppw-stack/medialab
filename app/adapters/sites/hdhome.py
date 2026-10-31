@@ -601,7 +601,6 @@ class HdhomeAdapter(SiteAdapter):
             upload=snap.upload,
             download=snap.download,
             seeding_count=snap.seeding_count,
-            leeching_count=snap.leeching_count,
             hourly_bonus=bonus,
         )
 

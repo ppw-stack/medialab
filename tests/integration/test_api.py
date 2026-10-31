@@ -302,7 +302,6 @@ async def test_list_sites_with_user_data(client: httpx.AsyncClient) -> None:
                 upload=1024**3,
                 download=2 * 1024**3,
                 seeding_count=120,
-                leeching_count=3,
                 hourly_bonus=92.9,
                 hourly_bonus_unit="魔力值",
                 hourly_bonus_capped=False,
@@ -319,7 +318,6 @@ async def test_list_sites_with_user_data(client: httpx.AsyncClient) -> None:
     assert row["upload"] == 1024**3
     assert row["download"] == 2 * 1024**3
     assert row["seeding_count"] == 120
-    assert row["leeching_count"] == 3
     assert row["hourly_bonus"] == 92.9
     assert row["hourly_bonus_unit"] == "魔力值"
     assert row["hourly_bonus_capped"] is False
@@ -354,7 +352,6 @@ async def test_list_user_data_with_row(client: httpx.AsyncClient) -> None:
                 upload=1024,
                 download=2048,
                 seeding_count=10,
-                leeching_count=2,
             )
         )
         await session.flush()

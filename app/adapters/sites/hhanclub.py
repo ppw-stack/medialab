@@ -123,15 +123,13 @@ def _parse_hhanclub_snapshot(html: str) -> SiteUserSnapshot | None:
     upload = _grab("上传", _size)
     download = _grab("下载", _size)
     seeding_count = _grab("做种数", _num)
-    leeching_count = _grab("下载数", _num)
 
-    if not (upload or download or seeding_count or leeching_count):
+    if not (upload or download or seeding_count):
         return None
     return SiteUserSnapshot(
         upload=upload,
         download=download,
         seeding_count=seeding_count,
-        leeching_count=leeching_count,
     )
 
 
@@ -725,7 +723,6 @@ class HhanclubAdapter(SiteAdapter):
             upload=snap.upload,
             download=snap.download,
             seeding_count=snap.seeding_count,
-            leeching_count=snap.leeching_count,
             hourly_bonus=bonus,
         )
 

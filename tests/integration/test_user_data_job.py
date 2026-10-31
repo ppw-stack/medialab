@@ -86,7 +86,6 @@ class _FakeUserAdapter(SiteAdapter):
                         upload=1000,
                         download=2000,
                         seeding_count=3,
-                        leeching_count=4,
                         hourly_bonus=HourlyBonus(
                             amount=88.5, unit="魔力值", capped=False, progress=12.5
                         ),
@@ -96,14 +95,13 @@ class _FakeUserAdapter(SiteAdapter):
                         upload=1,
                         download=2,
                         seeding_count=3,
-                        leeching_count=4,
                         hourly_bonus=HourlyBonus(
                             amount=154.0, unit="爆米花", capped=True, progress=110.0
                         ),
                     )
                 case "nobonus":
                     return SiteUserSnapshot(
-                        upload=5, download=6, seeding_count=7, leeching_count=8
+                        upload=5, download=6, seeding_count=7
                     )
                 case "none":
                     return None
@@ -211,7 +209,6 @@ async def test_success_writes_snapshot_with_hourly_bonus(
     assert row.upload == 1000
     assert row.download == 2000
     assert row.seeding_count == 3
-    assert row.leeching_count == 4
     # 时魔落库
     assert row.hourly_bonus == pytest.approx(88.5)
     assert row.hourly_bonus_unit == "魔力值"

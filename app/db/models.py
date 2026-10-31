@@ -473,8 +473,8 @@ class SiteUserData(Base):
     """站点用户数据快照（FR-1.6 站点用户数据契约·精简版 + 时魔）。
 
     ``refresh_user_data`` 作业每 30 分钟调一次各适配器的
-    :meth:`SiteAdapter.get_user_snapshot`，把 4 业务字段
-    upload / download / seeding_count / leeching_count
+    :meth:`SiteAdapter.get_user_snapshot`，把 3 业务字段
+    upload / download / seeding_count
     以及时魔（hourly_bonus 系列）upsert 到本表（``site_id`` UNIQUE）。
 
     字段语义详见 :mod:`app.adapters.sites.user_data`。
@@ -496,8 +496,6 @@ class SiteUserData(Base):
     download: Mapped[int] = mapped_column(BigInteger, default=0)
     #: 当前做种数
     seeding_count: Mapped[int] = mapped_column(Integer, default=0)
-    #: 当前下载/未完成数
-    leeching_count: Mapped[int] = mapped_column(Integer, default=0)
     #: 时魔：每小时获得的站点积分（**合计口径**，含各项加成）
     hourly_bonus: Mapped[float | None] = mapped_column(Float, nullable=True)
     #: 时魔单位（站点自称：魔力值 / 爆米花 / 茉莉 / 憨豆 / 积分）

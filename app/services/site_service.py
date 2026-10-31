@@ -122,7 +122,6 @@ class SiteSnapshot:
     upload: int = 0
     download: int = 0
     seeding_count: int = 0
-    leeching_count: int = 0
     hourly_bonus: float | None = None
     hourly_bonus_unit: str | None = None
     hourly_bonus_capped: bool | None = None
@@ -133,7 +132,7 @@ class SiteSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class SiteUserDataSnapshot:
-    """站点用户数据（4 字段 + 时魔 + 站点名）。"""
+    """站点用户数据（3 字段 + 时魔 + 站点名）。"""
 
     site_id: int
     site_name: str
@@ -141,7 +140,6 @@ class SiteUserDataSnapshot:
     upload: int = 0
     download: int = 0
     seeding_count: int = 0
-    leeching_count: int = 0
     #: 时魔（每小时获得的站点积分·合计口径）
     hourly_bonus: float | None = None
     #: 时魔单位（站点自称：魔力值 / 爆米花 / 茉莉 / 憨豆 / 积分）
@@ -229,7 +227,6 @@ def _to_snapshot(
         upload=user_data.upload if user_data else 0,
         download=user_data.download if user_data else 0,
         seeding_count=user_data.seeding_count if user_data else 0,
-        leeching_count=user_data.leeching_count if user_data else 0,
         hourly_bonus=user_data.hourly_bonus if user_data else None,
         hourly_bonus_unit=user_data.hourly_bonus_unit if user_data else None,
         hourly_bonus_capped=user_data.hourly_bonus_capped if user_data else None,
@@ -562,7 +559,6 @@ async def get_site_user_data(site_id: int) -> SiteUserDataSnapshot:
             upload=ud.upload,
             download=ud.download,
             seeding_count=ud.seeding_count,
-            leeching_count=ud.leeching_count,
             hourly_bonus=ud.hourly_bonus,
             hourly_bonus_unit=ud.hourly_bonus_unit,
             hourly_bonus_capped=ud.hourly_bonus_capped,

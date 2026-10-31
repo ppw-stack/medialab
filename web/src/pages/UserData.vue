@@ -70,17 +70,15 @@ function fmtAge(lastSeen: string): string {
 
 const summary = computed(() => {
   const total_seed = data.value.reduce((s, d) => s + d.seeding_count, 0)
-  const total_leech = data.value.reduce((s, d) => s + d.leeching_count, 0)
   const total_up = data.value.reduce((s, d) => s + d.upload, 0)
   const total_dn = data.value.reduce((s, d) => s + d.download, 0)
   const total_bonus = data.value.reduce((s, d) => s + (d.hourly_bonus ?? 0), 0)
   const capped = data.value.filter((d) => d.hourly_bonus_capped === true).length
-  return { total_seed, total_leech, total_up, total_dn, total_bonus, capped }
+  return { total_seed, total_up, total_dn, total_bonus, capped }
 })
 
 const summaryTiles = computed(() => [
   { label: '做种中', value: String(summary.value.total_seed), hint: '跨站合计' },
-  { label: '下载中', value: String(summary.value.total_leech), hint: '跨站合计' },
   { label: '总上传', value: fmtBytes(summary.value.total_up), hint: '累计' },
   { label: '总下载', value: fmtBytes(summary.value.total_dn), hint: '累计' },
   {
@@ -116,7 +114,6 @@ const columns = computed(() => [
     customRender: ({ text }: { text: number }) => fmtBytes(text),
   },
   { title: '做种', dataIndex: 'seeding_count', key: 'seeding_count', width: 80 },
-  { title: '下载中', dataIndex: 'leeching_count', key: 'leeching_count', width: 90 },
   {
     title: '时魔/小时',
     dataIndex: 'hourly_bonus',

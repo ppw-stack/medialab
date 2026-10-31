@@ -72,8 +72,6 @@ export interface Site {
   download: number
   /** 当前做种数 */
   seeding_count: number
-  /** 当前下载/未完成数 */
-  leeching_count: number
   /** 时魔：每小时获得的站点积分（合计口径）；null = 该站没有 */
   hourly_bonus: number | null
   /** 时魔单位（站点自称：魔力值 / 爆米花 / 茉莉 / 憨豆 / 积分） */
@@ -132,7 +130,6 @@ export interface SiteUserDataSummary {
   upload?: number
   download?: number
   seeding_count?: number
-  leeching_count?: number
   /** 时魔：每小时获得的站点积分（合计口径）。 */
   hourly_bonus?: number | null
   /** 时魔单位（站点自称：魔力值 / 爆米花 / 茉莉 / 憨豆 / 积分）。 */
@@ -154,7 +151,6 @@ export interface UserData {
   upload: number
   download: number
   seeding_count: number
-  leeching_count: number
   /** 时魔：每小时获得的站点积分（合计口径，含各项加成）。 */
   hourly_bonus: number | null
   /** 时魔单位（站点自称：魔力值 / 爆米花 / 茉莉 / 憨豆 / 积分）。 */
@@ -176,7 +172,6 @@ export interface UserDataTrend {
   upload: number
   download: number
   seeding_count: number
-  leeching_count: number
   /** 时魔：每小时获得的站点积分（合计口径，含各项加成）。 */
   hourly_bonus: number | null
   /** 时魔单位（站点自称：魔力值 / 爆米花 / 茉莉 / 憨豆 / 积分）。 */
