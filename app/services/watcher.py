@@ -285,13 +285,18 @@ class Watcher:
         watchfiles 只报「变化」，**不报存量**。容器重启期间的漏掉的文件
         要靠全量扫描补齐。
 
+        **惰性遍历 + 不阻塞事件循环**：CIFS 上 ``os.walk`` 极慢，物化成
+        list 会让启动阻塞几小时。边扫边投——第一个文件扫到就投出去。
+
         Returns:
             投递的文件数。
         """
-        from app.services.upload_filter import iter_local_files
+        from app.services.upload_filter import aiter_local_files
 
         count = 0
-        for path in iter_local_files(self.root, include_subdirs=self.include_subdirs):
+        async for path in aiter_local_files(
+            self.root, include_subdirs=self.include_subdirs
+        ):
             try:
                 await self.dispatch(path)
                 count += 1

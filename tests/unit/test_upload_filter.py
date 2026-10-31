@@ -8,10 +8,12 @@ from pathlib import Path
 from app.services.upload_filter import (
     TRASH_DIR_NAME,
     FileStamp,
+    aiter_local_files,
     is_empty,
     is_stable,
     is_temporary,
     iter_local_files,
+    iter_local_files_lazy,
     relative_to_root,
     should_skip,
 )
@@ -195,3 +197,43 @@ def test_相对路径用posix分隔符(tmp_path: Path):
 def test_遍历不存在的目录返回空(tmp_path: Path):
     """目录不存在 → 返回空列表，不抛。"""
     assert iter_local_files(tmp_path / "nope") == []
+
+
+def test_惰性遍历是生成器(tmp_path: Path):
+    """``iter_local_files_lazy`` 是生成器——**不物化整个列表**。
+
+    CIFS 上 os.walk 极慢，物化会让启动阻塞几小时。惰性是「边扫边同步」
+    的前提。
+    """
+    (tmp_path / "a.mkv").write_bytes(b"x")
+    it = iter_local_files_lazy(tmp_path)
+    # 拿到的是生成器本身，不是 list
+    assert not isinstance(it, list)
+    assert hasattr(it, "__next__")
+    assert [p.name for p in it] == ["a.mkv"]
+
+
+def test_惰性遍历与物化版结果一致(tmp_path: Path):
+    """惰性版与 ``iter_local_files`` 结果一致（同一真源）。"""
+    (tmp_path / "a.mkv").write_bytes(b"x")
+    (tmp_path / "b.mkv.part").write_bytes(b"x")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "c.mkv").write_bytes(b"x")
+
+    lazy = list(iter_local_files_lazy(tmp_path))
+    materialized = iter_local_files(tmp_path)
+    assert lazy == materialized
+
+
+async def test_aiter不阻塞事件循环(tmp_path: Path):
+    """``aiter_local_files`` 逐个产出文件，且不阻塞 loop。
+
+    每次 next() 放线程池——CIFS 上 os.walk 同步跑会卡住整个事件循环
+    （uvicorn 无法完成 startup）。
+    """
+    (tmp_path / "a.mkv").write_bytes(b"x")
+    (tmp_path / "b.mkv").write_bytes(b"x")
+
+    names = [p.name async for p in aiter_local_files(tmp_path)]
+    assert sorted(names) == ["a.mkv", "b.mkv"]

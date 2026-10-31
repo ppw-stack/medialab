@@ -39,6 +39,7 @@ from app.db.models import Driver
 from app.db.models import UploadTask as UploadTaskRow
 from app.db.session import session_scope
 from app.services.cloud_index import CloudDirIndex
+from app.services.upload_filter import aiter_local_files
 from app.services.upload_paths import resolve_watch_dir
 from app.services.upload_tasks import get_runtime
 from app.services.uploader import (
@@ -528,16 +529,14 @@ async def sync_now(task_id: int) -> dict[str, Any]:
 
 
 async def _sync_now_inner(task_id: int, runtime: Any, watcher: Any) -> dict[str, Any]:
-    """全量同步的主体（见 :func:`sync_now`）。"""
+    """全量同步的主体（见 :func:`sync_now`）。
 
+    **边扫描边同步**：文件边扫边传，不等扫描全部结束——
+    CIFS 上扫描可能要几小时，等扫完再传等于用户几小时看不到动静。
+    """
     runtime.syncing = True
     runtime.log("开始全量同步…")
     try:
-        from app.services.upload_filter import iter_local_files
-
-        files = iter_local_files(
-            watcher.root, include_subdirs=watcher.include_subdirs
-        )
         ctx = _CONTEXTS.get(task_id)
         if ctx is None:
             raise DriverError("上传上下文不存在", kind="config")
@@ -545,18 +544,21 @@ async def _sync_now_inner(task_id: int, runtime: Any, watcher: Any) -> dict[str,
         uploaded = overwritten = unchanged = failed = conflicts = 0
         total_bytes = 0
         deleted_local = 0
-        total = len(files)
         # **与事件流 worker 互斥**：同一时刻只有一个协程调 sync_file。
         # 全量同步跑时 worker 在 _process_one 里等锁——新事件不丢，只是延后。
         # ``lock`` 可能为 None（测试环境直接调本函数，未走 start_watcher）→
         # 退化为不互斥（测试本就是单协程串行）。
         lock = _SYNC_LOCKS.get(task_id)
-        for index, path in enumerate(files, start=1):
+        index = 0
+        async for path in aiter_local_files(
+            watcher.root, include_subdirs=watcher.include_subdirs
+        ):
+            index += 1
             rel = watcher.relative(path)
             runtime.current = rel
             # **每个文件都记一行** —— 大文件上传要几分钟，没有进度
             # 用户会以为卡死了。格式与事件驱动的路径一致。
-            runtime.log(f"⏳ [{index}/{total}] 处理中：{rel}")
+            runtime.log(f"⏳ [{index}] 处理中：{rel}")
             try:
                 file_size = path.stat().st_size
             except OSError:
@@ -582,7 +584,7 @@ async def _sync_now_inner(task_id: int, runtime: Any, watcher: Any) -> dict[str,
                 uploaded += 1
                 total_bytes += outcome.size
                 runtime.log(
-                    f"✅ [{index}/{total}] 已上传：{rel}"
+                    f"✅ [{index}] 已上传：{rel}"
                     f"（{outcome.size / 1024**2:.1f} MB）"
                     + ("（本地已删除）" if outcome.local_deleted else "")
                 )
@@ -590,7 +592,7 @@ async def _sync_now_inner(task_id: int, runtime: Any, watcher: Any) -> dict[str,
                 overwritten += 1
                 total_bytes += outcome.size
                 runtime.log(
-                    f"♻️ [{index}/{total}] 已覆盖：{rel}"
+                    f"♻️ [{index}] 已覆盖：{rel}"
                     f"（{outcome.size / 1024**2:.1f} MB）"
                     + ("（本地已删除）" if outcome.local_deleted else "")
                 )
@@ -601,17 +603,17 @@ async def _sync_now_inner(task_id: int, runtime: Any, watcher: Any) -> dict[str,
                 note = "（本地已删除）" if outcome.local_deleted else (
                     f"（{outcome.reason}）" if outcome.reason else ""
                 )
-                runtime.log(f"⏭️ [{index}/{total}] 已存在：{rel}{note}")
+                runtime.log(f"⏭️ [{index}] 已存在：{rel}{note}")
             elif outcome.status == RESULT_CONFLICT:
                 conflicts += 1
-                runtime.log(f"⚠️ [{index}/{total}] 冲突：{rel}（{outcome.reason}）")
+                runtime.log(f"⚠️ [{index}] 冲突：{rel}（{outcome.reason}）")
             elif outcome.status == RESULT_FAILED:
                 failed += 1
-                runtime.log(f"❌ [{index}/{total}] 失败：{rel}（{outcome.reason}）")
+                runtime.log(f"❌ [{index}] 失败：{rel}（{outcome.reason}）")
         runtime.current = ""
 
         runtime.log(
-            f"全量同步完成：上传 {uploaded}，覆盖 {overwritten}，"
+            f"全量同步完成：共 {index} 个文件，上传 {uploaded}，覆盖 {overwritten}，"
             f"已存在 {unchanged}，失败 {failed}，冲突 {conflicts}"
             + (f"，本地已删除 {deleted_local}" if deleted_local else "")
         )

@@ -170,9 +170,9 @@ async def test_sync_now有文件级日志(tmp_path: Path):
     # 每个文件至少一行（处理中）
     assert any("a.mkv" in line for line in logs)
     assert any("b.mkv" in line for line in logs)
-    # 带进度序号
-    assert any("[1/2]" in line for line in logs)
-    assert any("[2/2]" in line for line in logs)
+    # 带进度序号（**边扫边同步**，不知道总数 → 不带 /total）
+    assert any("[1]" in line for line in logs)
+    assert any("[2]" in line for line in logs)
     # 结果行
     assert any("全量同步完成" in line for line in logs)
 

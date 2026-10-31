@@ -14,7 +14,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -183,18 +185,31 @@ def relative_to_root(path: Path, root: Path) -> str:
     return rel.as_posix()
 
 
-def iter_local_files(
+def iter_local_files_lazy(
     root: Path,
     *,
     include_subdirs: bool = True,
-) -> list[Path]:
-    """遍历监听目录下的所有文件（已过滤掉临时文件与目录）。
+) -> Iterator[Path]:
+    """**惰性**遍历监听目录下的文件（已过滤掉临时文件与目录）。
 
-    用于「立即全量同步」——事件流会漏（容器重启期间），全量比对能补齐。
+    与 :func:`iter_local_files` 的区别：**不物化成 list**，边走边产。
+
+    为什么需要惰性版：CIFS / NFS 上 ``os.walk`` 极慢（实测 30 秒才遍历
+    2 个目录——每个目录都是一次网络往返）。物化成 list 意味着「扫完全部
+    才开始处理」，在几千个目录的库上要几小时。
+
+    惰性版让全量同步「**边扫描边同步**」：第一个文件扫到就开始传，
+    不用等扫描结束。
+
+    Args:
+        root: 监听根目录。
+        include_subdirs: 是否递归子目录。
+
+    Yields:
+        符合上传条件的文件路径。
     """
-    results: list[Path] = []
     if not root.is_dir():
-        return results
+        return
 
     if include_subdirs:
         for dirpath, dirnames, filenames in os.walk(root):
@@ -204,12 +219,54 @@ def iter_local_files(
             for filename in filenames:
                 candidate = base / filename
                 if should_skip(candidate, root=root) is None:
-                    results.append(candidate)
+                    yield candidate
     else:
         for candidate in root.iterdir():
             if candidate.is_file() and should_skip(candidate, root=root) is None:
-                results.append(candidate)
-    return results
+                yield candidate
+
+
+def iter_local_files(
+    root: Path,
+    *,
+    include_subdirs: bool = True,
+) -> list[Path]:
+    """遍历监听目录下的所有文件（已过滤掉临时文件与目录）。
+
+    用于「立即全量同步」——事件流会漏（容器重启期间），全量比对能补齐。
+
+    注：**物化成 list**（全量同步走 :func:`aiter_local_files` 的惰性
+    版本，不阻塞事件循环）。本函数保留给需要完整列表的调用方与测试。
+    """
+    return list(iter_local_files_lazy(root, include_subdirs=include_subdirs))
+
+
+async def aiter_local_files(
+    root: Path,
+    *,
+    include_subdirs: bool = True,
+) -> AsyncIterator[Path]:
+    """**惰性**遍历监听目录的文件，且**不阻塞事件循环**。
+
+    两个「惰性」缺一不可：
+
+    1. **不物化成 list**：CIFS / NFS 上 ``os.walk`` 极慢（实测 30 秒才
+       遍历 2 个目录——每个目录都是一次网络往返）。物化成 list 意味着
+       「扫完全部才开始处理」，几千个目录要几小时。
+    2. **每次 next() 放线程池**：``os.walk`` 是同步阻塞调用，直接在事件
+       循环里跑会把整个 loop 卡住——uvicorn 无法完成 startup，容器
+       unhealthy、API 不可达。
+
+    合起来的效果：**边扫描边同步**——第一个文件扫到就开始传，不用等
+    扫描结束；且全程不阻塞事件循环。
+    """
+    it = iter_local_files_lazy(root, include_subdirs=include_subdirs)
+    while True:
+        # 每次只等一次目录 IO（放线程池，不阻塞 loop）
+        item = await asyncio.to_thread(next, it, None)
+        if item is None:
+            return
+        yield item
 
 
 __all__ = [
@@ -218,9 +275,11 @@ __all__ = [
     "TEMP_PREFIXES",
     "TEMP_SUFFIXES",
     "FileStamp",
+    "aiter_local_files",
     "is_stable",
     "is_temporary",
     "iter_local_files",
+    "iter_local_files_lazy",
     "relative_to_root",
     "should_skip",
 ]
