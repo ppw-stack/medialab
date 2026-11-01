@@ -204,6 +204,21 @@ export interface Downloader {
   torrent_count: number | null
 }
 
+/**
+ * 任务状态元信息（`GET /downloaders/state-meta`）。
+ *
+ * **后端下发**——状态值与后端 `TorrentState` 枚举逐字一致，前端不再
+ * 硬编码映射表（漏改会显示原始英文值）。
+ */
+export interface TorrentStateMeta {
+  /** 状态值（camelCase，与后端枚举一致） */
+  value: string
+  /** 中文名 */
+  label: string
+  /** 标签颜色（Ant Design Vue tag color） */
+  color: string
+}
+
 /** 测连结果（`POST /downloaders/{id}/test` 与 `/test-config`）。 */
 export interface DownloaderTestResult {
   reachable: boolean

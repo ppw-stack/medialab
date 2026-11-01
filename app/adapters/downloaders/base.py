@@ -59,6 +59,25 @@ class TorrentState(StrEnum):
     UNKNOWN = "unknown"
 
     @classmethod
+    def display_meta(cls) -> list[dict[str, str]]:
+        """全部状态的**展示元信息**（中文名 + 颜色）——供前端直接渲染。
+
+        **为什么在后端定义**：枚举的**值**与前端必须**逐字一致**
+        （``pausedDL`` / ``missingFiles`` 是 camelCase，转小写后端不认）。
+        以前前端硬编码一份 → 后端加状态就得改前端，漏改显示原始英文值。
+
+        与 :data:`app.services.job_registry.JOB_META` 同一思路：**展示元信息
+        随数据一起下发**，前端不再维护映射表。
+
+        Returns:
+            ``[{"value": "downloading", "label": "下载中", "color": "blue"}, ...]``
+        """
+        return [
+            {"value": s.value, "label": label, "color": color}
+            for s, (label, color) in _STATE_DISPLAY.items()
+        ]
+
+    @classmethod
     def parse(cls, value: str) -> TorrentState:
         """宽松解析：接受枚举值、枚举名（大小写不敏感）与 snake_case 别名。
 
@@ -132,6 +151,25 @@ class TorrentState(StrEnum):
         ``inflight_count`` 都用它，避免两处各写一份判定而漂移。
         """
         return not (self.is_paused or self.is_fatal)
+
+
+#: 状态 → (中文名, 颜色)。**与枚举同源**——前端不再硬编码这份映射。
+#:
+#: 颜色取 Ant Design Vue 的 tag 颜色名（blue / orange / cyan / green / red /
+#: default）。定义在类**之后**：类内的 :meth:`TorrentState.display_meta`
+#: 运行时才读它。
+_STATE_DISPLAY: dict[TorrentState, tuple[str, str]] = {
+    TorrentState.DOWNLOADING: ("下载中", "blue"),
+    TorrentState.STALLED_DL: ("下载停滞", "orange"),
+    TorrentState.PAUSED_DL: ("暂停下载", "orange"),
+    TorrentState.CHECKING: ("校验中", "cyan"),
+    TorrentState.SEEDING: ("做种中", "green"),
+    TorrentState.UPLOADING: ("上传中", "green"),
+    TorrentState.PAUSED_UP: ("暂停上传", "orange"),
+    TorrentState.ERROR: ("错误", "red"),
+    TorrentState.MISSING_FILES: ("文件丢失", "red"),
+    TorrentState.UNKNOWN: ("未知", "default"),
+}
 
 
 @dataclass(frozen=True, slots=True)

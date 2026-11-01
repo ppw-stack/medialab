@@ -528,12 +528,24 @@ async def _resolve_downloader(downloader_id: int) -> DownloaderAdapter:
     return get_factory().downloader(row)
 
 
+def list_torrent_states() -> list[dict[str, str]]:
+    """全部任务状态的展示元信息（中文名 + 颜色）。
+
+    **单一真源在适配层**（:meth:`TorrentState.display_meta`）——前端不再
+    硬编码一份状态映射表（后端加状态时漏改前端会显示原始英文值）。
+
+    API 层**不直接 import 适配层**（分层约束，见
+    ``tests/unit/test_layering.py``）——故经由 service 层转发。
+    """
+    return TorrentState.display_meta()
+
+
 def _to_torrent_view(t: TorrentInfo) -> DownloaderTorrentView:
     """适配器任务 → 对外视图。
 
     ``state`` 用枚举**值**（camelCase，如 pausedDL / missingFiles）而非
-    name（PAUSED_DL）——前端 STATE_META 与过滤参数都用值，
-    且过滤参数要能被 TorrentState.parse 原样解析回去。
+    name（PAUSED_DL）——前端的展示元信息（``GET /downloaders/state-meta``
+    下发）与过滤参数都用值，且过滤参数要能被 TorrentState.parse 原样解析回去。
     """
     state = t.state
     return DownloaderTorrentView(

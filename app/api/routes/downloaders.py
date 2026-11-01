@@ -131,6 +131,18 @@ async def list_downloaders() -> list[DownloaderOut]:
     return [DownloaderOut(**asdict(d)) for d in await downloader_service.list_downloaders()]
 
 
+@router.get("/state-meta", summary="任务状态元信息（中文名 + 颜色）")
+async def list_torrent_states() -> list[dict[str, str]]:
+    """全部任务状态的展示元信息。
+
+    **单一真源在适配层**（:meth:`TorrentState.display_meta`）——前端不再
+    硬编码一份状态映射（后端加状态时漏改前端会显示原始英文值）。
+
+    经 service 层转发：API 层不直接依赖适配层（分层约束）。
+    """
+    return downloader_service.list_torrent_states()
+
+
 @router.get("/{downloader_id}", summary="下载器详情")
 async def get_downloader(downloader_id: int) -> DownloaderOut:
     return DownloaderOut(**asdict(await downloader_service.get_downloader(downloader_id)))

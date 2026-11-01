@@ -622,3 +622,42 @@ def test_qb_top_names_handles_edge_cases() -> None:
     # content_path 不在 save_path 下 → 首段为空（绝对路径以 / 开头）
     # → 返回空列表（**不猜**）
     assert _qb_top_names("/other/a.mkv", "/downloads") == []
+
+
+# ================================================================ 状态元信息
+
+
+def test_display_meta_覆盖全部状态() -> None:
+    """``display_meta`` 必须覆盖**每一个**枚举成员。
+
+    漏一个 = 前端那个状态显示原始英文值（camelCase 的 pausedDL /
+    missingFiles 尤其难认）。
+    """
+    from app.adapters.downloaders.base import TorrentState
+
+    meta = TorrentState.display_meta()
+    assert len(meta) == len(list(TorrentState))
+    assert {m["value"] for m in meta} == {s.value for s in TorrentState}
+
+
+def test_display_meta_每项都有中文名与颜色() -> None:
+    """每项都要有非空的中文名与颜色（前端直接渲染，不做兜底）。"""
+    from app.adapters.downloaders.base import TorrentState
+
+    for m in TorrentState.display_meta():
+        assert m["label"].strip(), f"{m['value']} 缺中文名"
+        assert m["color"].strip(), f"{m['value']} 缺颜色"
+
+
+def test_display_meta_值与枚举逐字一致() -> None:
+    """下发的 value 必须与枚举**逐字一致**（大小写敏感）。
+
+    这是前后端的契约——前端把它当过滤参数传给后端，转小写后端不认。
+    """
+    from app.adapters.downloaders.base import TorrentState
+
+    by_value = {m["value"]: m for m in TorrentState.display_meta()}
+    for s in TorrentState:
+        assert s.value in by_value
+        # 用枚举值反查必须能命中（前端拿它做过滤参数）
+        assert TorrentState.parse(s.value) is s

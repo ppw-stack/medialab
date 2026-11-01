@@ -8,6 +8,7 @@ import type {
   DownloaderTestResult,
   DownloaderTorrent,
   DownloaderTorrentList,
+  TorrentStateMeta,
 } from '../types'
 import { formatBytes } from '../utils/format'
 
@@ -61,7 +62,27 @@ async function load() {
   }
 }
 
-onMounted(load)
+/**
+ * 任务状态元信息（中文名 + 颜色）——**后端下发**。
+ *
+ * 以前前端硬编码一份 `STATE_META`（10 个状态的值 + 中文名 + 颜色），
+ * 与后端 `TorrentState` 枚举**必须逐字一致**——后端加状态时漏改前端
+ * 就会显示原始英文值（camelCase 的 pausedDL / missingFiles 尤其难认）。
+ */
+async function loadStateMeta(): Promise<void> {
+  try {
+    const meta = await api.get<TorrentStateMeta[]>('/downloaders/state-meta')
+    stateMeta.value = Object.fromEntries(meta.map((m) => [m.value, m]))
+  } catch {
+    // 拿不到元信息 → 用空表（页面仍可用，只是标签显示原始值）
+    stateMeta.value = {}
+  }
+}
+
+onMounted(() => {
+  void load()
+  void loadStateMeta()
+})
 
 function onCreate() {
   editing.value = null
@@ -217,42 +238,23 @@ const selectedRowKeys = ref<string[]>([])
 const batchLoading = ref(false)
 const deleteModalOpen = ref(false)
 
-// STATE_META：后端统一状态枚举（app/adapters/downloaders/base.py 的
-// TorrentState）的值 → 展示文案/颜色。
-//
-// 必须与后端枚举**逐字一致**（值大小写敏感）：
-//   downloading / stalledDL / pausedDL / checking / seeding / uploading
-//   / pausedUP / error / missingFiles / unknown
-//
-// 各下载器原生状态由后端适配层归一（qB 的 queuedUP→seeding、
-// metaDL→checking、forcedDL→downloading 等），前端只面对统一枚举。
-const STATE_META: Record<string, { label: string; color: string }> = {
-  downloading: { label: '下载中', color: 'blue' },
-  stalledDL: { label: '下载停滞', color: 'orange' },
-  pausedDL: { label: '暂停下载', color: 'orange' },
-  checking: { label: '校验中', color: 'cyan' },
-  seeding: { label: '做种中', color: 'green' },
-  uploading: { label: '上传中', color: 'green' },
-  pausedUP: { label: '暂停上传', color: 'orange' },
-  error: { label: '错误', color: 'red' },
-  missingFiles: { label: '文件丢失', color: 'red' },
-  unknown: { label: '未知', color: 'default' },
-}
+// 任务状态元信息（后端下发，见 loadStateMeta）。
+const stateMeta = ref<Record<string, { label: string; color: string }>>({})
 
 // STATE_OPTIONS：过滤下拉。value 直接用后端枚举值，不再做
 // toLowerCase() 转换——后端枚举值是 camelCase（pausedDL / missingFiles），
 // 转小写会得到后端不认的值。
-const STATE_OPTIONS = [
+const STATE_OPTIONS = computed(() => [
   { value: '', label: '全部状态' },
-  ...Object.entries(STATE_META).map(([value, m]) => ({ value, label: m.label })),
-]
+  ...Object.entries(stateMeta.value).map(([value, m]) => ({ value, label: m.label })),
+])
 
 function stateLabel(s: string): string {
-  return STATE_META[s]?.label ?? s
+  return stateMeta.value[s]?.label ?? s
 }
 
 function stateColor(s: string): string {
-  return STATE_META[s]?.color ?? 'default'
+  return stateMeta.value[s]?.color ?? 'default'
 }
 
 /** 选中一个下载器（上方表格点行）→ 下方任务列表切到它。 */
