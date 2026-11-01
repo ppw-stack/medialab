@@ -50,12 +50,30 @@ const FIELDS: {
 
 const state = ref<CronFieldsState>(cronToState(props.modelValue))
 
+/**
+ * **内部更新中**标志——区分两个 watch 的方向，避免互相触发。
+ *
+ * 两个 watch 会互相触发（props 变 → 重建 state → state 变 → emit）：
+ * - 外部改（父组件改了 modelValue）→ 重建 state，**不该**再 emit
+ * - 内部改（用户选了预设）→ emit，**不该**再重建 state
+ *
+ * 没有标志位时靠「字符串相等」隐式打破循环——一旦出现「语义相同但
+ * 字符串不同」的表达式（如 `0 8 * * *` vs `00 8 * * *`），就会来回弹跳。
+ */
+let applyingExternal = false
+
 // 外部值变化 → 同步回编辑状态（用户可能从别处改了 cron）
 watch(
   () => props.modelValue,
   (v) => {
     const next = stateToCron(state.value)
-    if (next !== v) state.value = cronToState(v)
+    if (next === v) return
+    applyingExternal = true
+    state.value = cronToState(v)
+    // 下一个 tick 复位（watch 回调是同步的，赋值会立即触发下方 watch）
+    void Promise.resolve().then(() => {
+      applyingExternal = false
+    })
   },
 )
 
@@ -63,6 +81,7 @@ watch(
 watch(
   state,
   (s) => {
+    if (applyingExternal) return
     const expr = stateToCron(s)
     if (expr !== props.modelValue) emit('update:modelValue', expr)
   },
@@ -92,6 +111,11 @@ function onPresetChange(key: keyof CronFieldsState, value: string) {
   field.preset = value
   if (value !== '') field.custom = value
 }
+
+/** 编辑某字段的自定义表达式。 */
+function onCustomChange(key: keyof CronFieldsState, value: string) {
+  state.value[key].custom = value
+}
 </script>
 
 <template>
@@ -119,7 +143,7 @@ function onPresetChange(key: keyof CronFieldsState, value: string) {
           size="small"
           class="cron-field__custom"
           :placeholder="f.placeholder"
-          @change="(e: any) => (state[f.key].custom = e.target.value)"
+          @update:value="(v: string) => onCustomChange(f.key, v)"
         />
       </div>
     </div>

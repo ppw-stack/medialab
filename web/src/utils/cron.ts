@@ -65,8 +65,8 @@ export const WEEKDAY_PRESETS: { value: string; label: string }[] = [
 
 // ==================================================================== 类型
 
-/** cron 的 5 个字段。 */
-export interface CronFields {
+/** cron 的 5 个字段（模块私有——外部只见 :type:`CronFieldsState`）。 */
+interface CronFields {
   minute: string
   hour: string
   day: string
@@ -87,8 +87,13 @@ export type CronFieldsState = Record<keyof CronFields, CronFieldState>
 
 // ==================================================================== 表达式 ↔ 字段
 
-/** 把 cron 表达式拆成 5 个字段（不合法时返回 null）。 */
-export function parseCron(expr: string): CronFields | null {
+/**
+ * 把 cron 表达式拆成 5 个字段（不合法时返回 null）。
+ *
+ * **模块私有**——外部只用 :func:`cronToState` / :func:`stateToCron`，
+ * 字段级的中间表示不作为公开契约。
+ */
+function parseCron(expr: string): CronFields | null {
   const parts = expr.trim().split(/\s+/)
   if (parts.length !== 5) return null
   return {
@@ -100,8 +105,8 @@ export function parseCron(expr: string): CronFields | null {
   }
 }
 
-/** 把 5 个字段拼成 cron 表达式。 */
-export function formatCron(fields: CronFields): string {
+/** 把 5 个字段拼成 cron 表达式（模块私有）。 */
+function formatCron(fields: CronFields): string {
   return [
     fields.minute,
     fields.hour,
@@ -170,6 +175,13 @@ export function describeCron(expr: string): string {
   }
 }
 
+/** 数字类字段（分/时/月）允许的字符。 */
+const _NUMERIC_FIELD_RE = /^[\d,\-*/]+$/
+/** 日字段额外允许 `?` `L` `W`。 */
+const _DAY_FIELD_RE = /^[\d,\-*/?LW]+$/i
+/** 星期字段额外允许 `?` `L` `#`。 */
+const _WEEKDAY_FIELD_RE = /^[\d,\-*/?L#]+$/i
+
 /**
  * cron 表达式是否**可能**合法。
  *
@@ -178,16 +190,15 @@ export function describeCron(expr: string): string {
  * 不做权威判断，避免两套解析器行为不一致。
  */
 export function isCronShapeValid(expr: string): boolean {
-  const parts = expr.trim().split(/\s+/)
-  if (parts.length !== 5) return false
-  const patterns = [
-    /^[\d,\-*/]+$/, // 分
-    /^[\d,\-*/]+$/, // 时
-    /^[\d,\-*/?LW]+$/i, // 日
-    /^[\d,\-*/]+$/, // 月
-    /^[\d,\-*/?L#]+$/i, // 星期
-  ]
-  return parts.every((p, i) => patterns[i].test(p))
+  const fields = parseCron(expr)
+  if (!fields) return false
+  return (
+    _NUMERIC_FIELD_RE.test(fields.minute) &&
+    _NUMERIC_FIELD_RE.test(fields.hour) &&
+    _DAY_FIELD_RE.test(fields.day) &&
+    _NUMERIC_FIELD_RE.test(fields.month) &&
+    _WEEKDAY_FIELD_RE.test(fields.weekday)
+  )
 }
 
 // ---- 下次运行时间计算 ----
@@ -222,7 +233,7 @@ function fieldMatches(spec: string, value: number): boolean {
 }
 
 /**
- * 计算 cron 表达式的**未来 N 次**运行时间。
+ * 计算 cron 表达式的**未来 N 次**运行时间（模块私有）。
  *
  * **纯前端计算**（零请求）。逐分钟向前搜索——最多看 366 天（分钟级
  * 表达式下足够；cron 最短周期是 1 分钟）。
@@ -230,7 +241,7 @@ function fieldMatches(spec: string, value: number): boolean {
  * 星期字段的语义：cron 里 0 和 7 都是周日，**与日期字段是 OR 关系**
  * （任一匹配即触发）——本函数按此实现。
  */
-export function nextRunTimes(expr: string, count = 3): Date[] {
+function nextRunTimes(expr: string, count = 3): Date[] {
   const fields = parseCron(expr)
   if (!fields) return []
   const result: Date[] = []

@@ -77,21 +77,21 @@ def test_enable_toggles_enabled_flag(center: SchedulerCenter) -> None:
 
 def test_enabled_overrides_take_precedence_over_spec(center: SchedulerCenter) -> None:
     """DB 里的停用状态优先于 spec 默认值——用户停用的作业重启后不该复活。"""
-    center.apply_enabled_overrides({"j1": False})
+    center.apply_overrides({"j1": False})
     center.register(JobSpec(name="j1", func=_ok_job, cron="*/10 * * * *"))
     assert center.list_jobs()[0]["enabled"] is False
 
 
 def test_enabled_overrides_absent_falls_back_to_spec(center: SchedulerCenter) -> None:
     """DB 里没有的作业用 spec 默认值——新增作业不被历史行影响。"""
-    center.apply_enabled_overrides({"other": False})
+    center.apply_overrides({"other": False})
     center.register(JobSpec(name="j1", func=_ok_job, cron="*/10 * * * *"))
     assert center.list_jobs()[0]["enabled"] is True
 
 
 def test_enabled_overrides_unknown_job_ignored(center: SchedulerCenter) -> None:
     """DB 里已下线的作业名不影响当前作业。"""
-    center.apply_enabled_overrides({"gone": False})
+    center.apply_overrides({"gone": False})
     center.register(JobSpec(name="j1", func=_ok_job, cron="*/10 * * * *"))
     assert center.list_jobs()[0]["enabled"] is True
 

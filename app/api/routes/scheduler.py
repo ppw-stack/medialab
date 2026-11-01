@@ -22,7 +22,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from apscheduler.triggers.cron import CronTrigger
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -113,13 +112,14 @@ class UpdateCronIn(BaseModel):
 async def update_job_cron(job_name: str, payload: UpdateCronIn) -> dict[str, Any]:
     """运行时切换 cron 表达式，**落库**（跨重启保持）。
 
-    不合法 cron 返 400（由 :func:`CronTrigger.from_crontab` 抛 ValueError）。
+    不合法 cron 返 400（由 :meth:`SchedulerCenter.validate_cron` 抛 ValueError
+    ——**校验逻辑的单一真源在 service 层**，路由不重复实现）。
 
     DB 写失败时返 500：cron 在调度中心**已经生效**，但没存住，
     容器重启后会回落到代码默认值。必须让用户知道，否则会以为修改是永久的。
     """
     try:
-        CronTrigger.from_crontab(payload.cron, timezone=get_settings().timezone)
+        scheduler_center.validate_cron(payload.cron)
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=f"cron 表达式不合法：{exc}") from exc
     if not scheduler_center.update_cron(job_name, payload.cron):

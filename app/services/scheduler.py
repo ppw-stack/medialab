@@ -187,7 +187,7 @@ class SchedulerCenter:
 
     # ------------------------------------------------------------ 注册
     def apply_overrides(
-        self, states: dict[str, bool], crons: dict[str, str]
+        self, states: dict[str, bool], crons: dict[str, str] | None = None
     ) -> None:
         """应用 DB 读回的调度配置（启动期，在 register_jobs 之前调用）。
 
@@ -198,9 +198,10 @@ class SchedulerCenter:
         :param states: ``{作业名: enabled}``——DB 里的启停覆盖。
         :param crons: ``{作业名: cron}``——DB 里的 cron 覆盖（**只含
             非 NULL 的行**；NULL 表示用代码里的默认值，不该覆盖）。
+            省略 = 全部用代码默认值。
         """
         self._enabled_overrides = dict(states)
-        self._cron_overrides = dict(crons)
+        self._cron_overrides = dict(crons or {})
         if self._enabled_overrides or self._cron_overrides:
             disabled = sorted(
                 name for name, on in self._enabled_overrides.items() if not on
@@ -211,13 +212,6 @@ class SchedulerCenter:
                 ", ".join(disabled) if disabled else "无",
                 len(self._cron_overrides),
             )
-
-    def apply_enabled_overrides(self, states: dict[str, bool]) -> None:
-        """兼容入口：只应用启停覆盖（cron 用代码默认值）。
-
-        新代码请用 :meth:`apply_overrides`——那个能同时应用 cron 覆盖。
-        """
-        self.apply_overrides(states, {})
 
     def register(self, spec: JobSpec) -> None:
         # DB 状态优先于 spec 自带的默认值——用户手动停用的作业重启后
@@ -254,13 +248,26 @@ class SchedulerCenter:
             self._scheduler.remove_job(name)
         return True
 
+    def validate_cron(self, cron: str) -> None:
+        """校验 cron 表达式（**单一真源**——API 层与调度中心共用）。
+
+        用 APScheduler 的 :class:`CronTrigger` 校验——**权威**判据
+        （前端只做结构检查，最终以这里为准）。
+
+        :raises ValueError: 表达式不合法。
+        """
+        CronTrigger.from_crontab(cron, timezone=self._tz)
+
     def update_cron(self, name: str, cron: str) -> bool:
-        """更新作业的 cron 表达式（运行时切换，立即生效）。"""
+        """更新作业的 cron 表达式（运行时切换，立即生效）。
+
+        :raises ValueError: cron 表达式不合法（:meth:`validate_cron`）。
+        """
         spec = self._specs.get(name)
         if spec is None:
             return False
-        # 先校验 cron 格式（不合法时直接抛，让上层返 400）
-        CronTrigger.from_crontab(cron, timezone=self._tz)
+        # 校验 cron 格式（不合法时直接抛，让上层返 400）
+        self.validate_cron(cron)
         spec.cron = cron
         if self._scheduler is not None and spec.enabled:
             # replace_existing=True 复用现有 job 槽
