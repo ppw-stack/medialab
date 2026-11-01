@@ -24,6 +24,9 @@ const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
 /** 允许定义「视图内部类型」的文件白名单（这些类型不是 API 契约）。 */
 const VIEW_LOCAL_ALLOWLIST = new Set([
   'utils/format.ts',
+  // cron 构建器的字段状态（CronFields / CronFieldState）——**纯前端内部
+  // 结构**（用户选预设或写自定义串），不是后端 DTO。
+  'utils/cron.ts',
   'pages/TorrentIndex.vue',
   // 媒体库域：目录树节点（TreeNode）与 tab 描述（Tab）是**视图内部**
   // 结构——由 MediaItem 在前端组装而成，不是后端 DTO。

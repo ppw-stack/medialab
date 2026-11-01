@@ -3,6 +3,7 @@ import { ref, watch } from 'vue'
 import { api, errMsg } from '../api'
 import type { JobConfig } from '../types'
 import { message } from 'ant-design-vue'
+import CronBuilder from './CronBuilder.vue'
 
 const props = defineProps<{
   open: boolean
@@ -126,15 +127,7 @@ function onCancel() {
       <!-- 调度 -->
       <section class="config-section">
         <div class="config-section__title">调度</div>
-        <div class="config-row">
-          <label class="config-label">cron 表达式</label>
-          <a-input
-            v-model:value="cronDraft"
-            placeholder="*/10 * * * *"
-            style="width: 180px"
-          />
-          <span class="config-hint">5 字段: 分 时 日 月 星期</span>
-        </div>
+        <CronBuilder v-model="cronDraft" />
         <div class="config-hint-note">
           <span class="config-hint-note__icon">ⓘ</span>
           保存后立即生效，并写入数据库——重启容器后保持不变。

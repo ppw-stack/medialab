@@ -48,12 +48,21 @@ test('调度作业 - 配置 modal (push_free_torrents params)', async ({ page })
   }
   console.log(`  ✓ 枚举 param 渲染 ${enumSpecs.length} 个单选组`)
 
-  // cron 输入
-  const cronInput = modal.locator('input[placeholder="*/10 * * * *"]')
-  await expect(cronInput).toBeVisible()
-  const cronVal = await cronInput.inputValue()
-  expect(cronVal).toMatch(/^\*\/30 \* \* \* \*$/)
-  console.log(`  ✓ cron 默认值: ${cronVal}`)
+  // cron 可视化构建器（不再是裸输入框）
+  const builder = modal.locator('.cron-builder')
+  await expect(builder).toBeVisible()
+  // 当前表达式（展示在预览区）
+  const exprText = await builder.locator('.cron-preview__expr code').innerText()
+  expect(exprText.trim()).toMatch(/^\*\/30 \* \* \* \*$/)
+  // 人类可读描述（cronstrue 中文）
+  const descText = await builder.locator('.cron-preview__desc').innerText()
+  expect(descText).toContain('30')
+  console.log(`  ✓ cron 构建器：${exprText.trim()} → ${descText.trim()}`)
+
+  // 5 个字段各有一个预设下拉
+  const fieldSelects = builder.locator('.cron-field__select')
+  await expect(fieldSelects).toHaveCount(5)
+  console.log('  ✓ cron 构建器渲染 5 个字段下拉')
 
   // 关闭
   await modal.getByRole('button', { name: /取\s*消/ }).click()
