@@ -172,7 +172,11 @@ class GuangyaDriver:
 
         await rate_limiter.acquire(PROVIDER)
         try:
-            result = self.client.refresh_token()
+            # **必须放线程池**——``refresh_token()`` 是同步 HTTP 调用
+            # （含 MD5 计算 + 网络往返），直接跑会阻塞事件循环：
+            # 实测 prod 启动时 healthcheck 连续 3 次超时（5s），
+            # 容器被判 unhealthy、API 不可达。
+            result = await asyncio_to_thread(self.client.refresh_token)
         except Exception as exc:
             raise DriverError(f"光鸭 Token 刷新失败：{exc}", kind="auth") from exc
 
