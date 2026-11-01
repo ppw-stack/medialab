@@ -52,9 +52,9 @@ const formState = reactive<Record<string, unknown>>({
 async function load() {
   try {
     data.value = await api.get<Downloader[]>('/downloaders')
-    // 默认选中第一个下载器 Tab（watch 会触发 loadItems 拉它的任务）
-    if (activeTab.value === null && data.value.length > 0) {
-      activeTab.value = String(data.value[0].id)
+    // 默认选中第一个下载器（下方任务列表显示它的任务）
+    if (activeDownloaderId.value === null && data.value.length > 0) {
+      selectDownloader(data.value[0].id)
     }
   } catch {
     /* ignore */
@@ -198,11 +198,11 @@ function isImplemented(type: string): boolean {
 
 // ==================================================================== 任务列表
 //
-// 「下载器实例」与「它的实时任务」合并到一个页面：
-// 第一层 Tab = 各下载器实例（带任务数），Tab 内是该下载器的任务表格。
+// 「下载器实例」与「它的实时任务」合并到一个页面，**上下两段**：
+// 上方 = 下载器管理表格（点行选中），下方 = 该下载器的实时任务列表。
 
-/** 第一层 Tab：当前选中的下载器 id；``manage`` = 「下载器管理」Tab。 */
-const activeTab = ref<string | null>(null)
+/** 当前选中的下载器 id（上方表格点行切换；null = 未选）。 */
+const activeDownloaderId = ref<number | null>(null)
 
 const items = ref<DownloaderTorrent[]>([])
 const total = ref(0)
@@ -255,12 +255,11 @@ function stateColor(s: string): string {
   return STATE_META[s]?.color ?? 'default'
 }
 
-/** 当前 Tab 对应的下载器 id（``manage`` Tab → null）。 */
-const activeDownloaderId = computed<number | null>(() => {
-  if (activeTab.value === null || activeTab.value === 'manage') return null
-  const id = Number(activeTab.value)
-  return Number.isFinite(id) ? id : null
-})
+/** 选中一个下载器（上方表格点行）→ 下方任务列表切到它。 */
+function selectDownloader(id: number) {
+  if (activeDownloaderId.value === id) return
+  activeDownloaderId.value = id
+}
 
 async function loadItems() {
   const dlId = activeDownloaderId.value
@@ -291,7 +290,7 @@ async function loadItems() {
   finally { loading.value = false }
 }
 
-watch(activeTab, () => {
+watch(activeDownloaderId, () => {
   page.value = 1
   selectedRowKeys.value = []
   loadItems()
@@ -336,6 +335,11 @@ function activeTabName(): string {
   const dlId = activeDownloaderId.value
   if (dlId === null) return ''
   return data.value.find((d) => d.id === dlId)?.name ?? ''
+}
+
+/** 选中行的 class（高亮显示当前查看任务的下载器）。 */
+function manageRowClass(record: Downloader): string {
+  return record.id === activeDownloaderId.value ? 'manage-row--active' : ''
 }
 
 const hasSelection = computed(() => selectedRowKeys.value.length > 0)
@@ -474,177 +478,179 @@ const manageColumns = [
       />
 
       <div v-if="data.length > 0" class="panel">
-        <a-tabs
-          v-model:active-key="activeTab"
-          :tab-bar-style="{ marginBottom: 'var(--sp-3)' }"
+        <!-- 上：下载器管理表格（点行选中 → 下方任务列表切到它） -->
+        <div class="label-caps" style="margin-bottom: var(--sp-2)">
+          下载器实例 · DOWNLOADERS
+        </div>
+        <a-table
+          :data-source="data"
+          :columns="manageColumns"
+          row-key="id"
+          :pagination="{ pageSize: 20 }"
+          :row-class-name="manageRowClass"
+          @rowClick="(record: Downloader) => selectDownloader(record.id)"
         >
-          <!-- 第一层：各下载器实例（带任务数） -->
-          <a-tab-pane
-            v-for="dl in data"
-            :key="String(dl.id)"
-            :tab="dl.name"
-          >
-            <div class="filter-row">
-              <a-select
-                v-model:value="filterState"
-                placeholder="状态"
-                style="width: 140px"
-                :allow-clear="true"
-                size="middle"
-                :options="STATE_OPTIONS"
-              />
-              <a-input
-                v-model:value="filterCategory"
-                placeholder="分类"
-                style="width: 140px"
-                :allow-clear="true"
-                size="middle"
-              />
-              <a-input-search
-                v-model:value="filterQ"
-                placeholder="按名称搜索"
-                style="width: 240px"
-                :allow-clear="true"
-                size="middle"
-              />
-              <span class="mono filter-row__meta">
-                <span v-if="filterQ.trim()" style="color: var(--text-secondary)">
-                  匹配 <b style="color: var(--accent-red)">{{ filtered.length }}</b> /
-                </span>
-                <span style="color: var(--text-secondary)">总计 <b style="color: var(--text-primary)">{{ total }}</b></span>
-              </span>
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'name'">
+              <span class="row-name">{{ record.name }}</span>
+            </template>
+            <template v-else-if="column.key === 'type'">
               <a-space :size="4">
-                <a-button
-                  size="small"
-                  :disabled="!hasSelection"
-                  :loading="batchLoading"
-                  @click="onBatchPause(true)"
-                >暂停选中</a-button>
-                <a-button
-                  size="small"
-                  :disabled="!hasSelection"
-                  :loading="batchLoading"
-                  @click="onBatchPause(false)"
-                >恢复选中</a-button>
-                <a-button
-                  danger
-                  size="small"
-                  :disabled="!hasSelection"
-                  :loading="batchLoading"
-                  @click="openDeleteModal"
-                >删除选中 ({{ selectedRowKeys.length }})</a-button>
+                <a-tag :color="isImplemented(record.type) ? 'blue' : 'default'">
+                  {{ typeLabel(record.type) }}
+                </a-tag>
+                <a-tag v-if="!isImplemented(record.type)" color="orange">未实现</a-tag>
               </a-space>
-            </div>
+            </template>
+            <template v-else-if="column.key === 'url'">
+              <span class="mono code">{{ record.url }}</span>
+            </template>
+            <template v-else-if="column.key === 'save_path'">
+              <span v-if="record.save_path" class="mono code">{{ record.save_path }}</span>
+              <span v-else class="dim">—</span>
+            </template>
+            <template v-else-if="column.key === 'password'">
+              <a-tag v-if="record.has_password" color="green">已配置</a-tag>
+              <a-tag v-else>—</a-tag>
+            </template>
+            <template v-else-if="column.key === 'default'">
+              <a-tag v-if="record.is_default" color="purple">★ 默认</a-tag>
+              <span v-else class="dim">—</span>
+            </template>
+            <template v-else-if="column.key === 'cross_seed'">
+              <a-tooltip v-if="record.is_cross_seed" title="标记为辅种下载器（由辅种巡查作业自动扫描并暂停异常种子）">
+                <a-tag color="cyan">辅种</a-tag>
+              </a-tooltip>
+              <span v-else class="dim">—</span>
+            </template>
+            <template v-else-if="column.key === 'torrent_count'">
+              <span v-if="record.torrent_count !== null" class="mono">
+                {{ record.torrent_count }}
+              </span>
+              <span v-else class="dim" title="下载器不可达或未启用">—</span>
+            </template>
+            <template v-else-if="column.key === 'enabled'">
+              <span v-if="record.enabled" class="status-dot status-dot--ok" />
+              <span v-else class="status-dot status-dot--off" />
+            </template>
+            <template v-else-if="column.key === 'action'">
+              <a-space :size="4">
+                <a-button size="small" type="link" @click.stop="onEdit(record)">编辑</a-button>
+                <a-button size="small" type="link" :loading="testing" :disabled="!isImplemented(record.type)" @click.stop="onTest(record)">测连</a-button>
+                <a-popconfirm title="确认删除？" @confirm="onDelete(record.id)">
+                  <a-button size="small" type="link" danger @click.stop>删除</a-button>
+                </a-popconfirm>
+              </a-space>
+            </template>
+          </template>
+        </a-table>
 
-            <a-table
-              :data-source="filtered"
-              :columns="taskColumns"
-              :loading="loading"
-              row-key="hash"
-              :row-selection="{
-                selectedRowKeys: selectedRowKeys,
-                onChange: onSelectChange,
-              }"
-              :pagination="{
-                current: page,
-                pageSize: pageSize,
-                total: total,
-                showSizeChanger: true,
-                onChange: (p: number) => { page = p; loadItems() },
-                onShowSizeChange: (p: number, ps: number) => { page = p; pageSize = ps; loadItems() },
-              }"
-              :scroll="{ x: 1600 }"
+        <!-- 下：选中下载器的实时任务 -->
+        <div class="label-caps" style="margin: var(--sp-4) 0 var(--sp-2)">
+          实时任务 · TORRENTS
+          <span v-if="activeTabName()" class="mono">（{{ activeTabName() }}）</span>
+        </div>
+
+        <div class="filter-row">
+          <a-select
+            v-model:value="filterState"
+            placeholder="状态"
+            style="width: 140px"
+            :allow-clear="true"
+            size="middle"
+            :options="STATE_OPTIONS"
+          />
+          <a-input
+            v-model:value="filterCategory"
+            placeholder="分类"
+            style="width: 140px"
+            :allow-clear="true"
+            size="middle"
+          />
+          <a-input-search
+            v-model:value="filterQ"
+            placeholder="按名称搜索"
+            style="width: 240px"
+            :allow-clear="true"
+            size="middle"
+          />
+          <span class="mono filter-row__meta">
+            <span v-if="filterQ.trim()" style="color: var(--text-secondary)">
+              匹配 <b style="color: var(--accent-red)">{{ filtered.length }}</b> /
+            </span>
+            <span style="color: var(--text-secondary)">总计 <b style="color: var(--text-primary)">{{ total }}</b></span>
+          </span>
+          <a-space :size="4">
+            <a-button
               size="small"
-            >
-              <template #bodyCell="{ column, record }">
-                <template v-if="column.key === 'progress'">
-                  <div class="progress-cell">
-                    <a-progress
-                      :percent="Math.round(record.progress * 1000) / 10"
-                      :status="record.progress >= 1 ? 'success' : (record.state === 'error' || record.state === 'missingFiles' ? 'exception' : 'active')"
-                      size="small"
-                      :show-info="false"
-                      :stroke-width="3"
-                    />
-                    <span class="mono progress-cell__num">{{ (record.progress * 100).toFixed(1) }}%</span>
-                  </div>
-                </template>
-                <template v-else-if="column.key === 'state'">
-                  <a-tag :color="stateColor(record.state)">{{ stateLabel(record.state) }}</a-tag>
-                </template>
-                <template v-else-if="column.key === 'name'">
-                  <a-typography-text
-                    :ellipsis="true"
-                    :content="record.name"
-                    style="max-width: 360px"
-                  />
-                </template>
-                <template v-else-if="['size','downloaded','uploaded','dlspeed','upspeed','ratio'].includes(column.key as string)">
-                  <span class="mono">{{ column.customRender?.({ record }) }}</span>
-                </template>
-              </template>
-            </a-table>
-          </a-tab-pane>
+              :disabled="!hasSelection"
+              :loading="batchLoading"
+              @click="onBatchPause(true)"
+            >暂停选中</a-button>
+            <a-button
+              size="small"
+              :disabled="!hasSelection"
+              :loading="batchLoading"
+              @click="onBatchPause(false)"
+            >恢复选中</a-button>
+            <a-button
+              danger
+              size="small"
+              :disabled="!hasSelection"
+              :loading="batchLoading"
+              @click="openDeleteModal"
+            >删除选中 ({{ selectedRowKeys.length }})</a-button>
+          </a-space>
+        </div>
 
-          <!-- 第一层最后一个：下载器管理（实例 CRUD） -->
-          <a-tab-pane key="manage" tab="下载器管理">
-            <a-table :data-source="data" :columns="manageColumns" row-key="id" :pagination="{ pageSize: 20 }">
-              <template #bodyCell="{ column, record }">
-                <template v-if="column.key === 'name'">
-                  <span class="row-name">{{ record.name }}</span>
-                </template>
-                <template v-else-if="column.key === 'type'">
-                  <a-space :size="4">
-                    <a-tag :color="isImplemented(record.type) ? 'blue' : 'default'">
-                      {{ typeLabel(record.type) }}
-                    </a-tag>
-                    <a-tag v-if="!isImplemented(record.type)" color="orange">未实现</a-tag>
-                  </a-space>
-                </template>
-                <template v-else-if="column.key === 'url'">
-                  <span class="mono code">{{ record.url }}</span>
-                </template>
-                <template v-else-if="column.key === 'save_path'">
-                  <span v-if="record.save_path" class="mono code">{{ record.save_path }}</span>
-                  <span v-else class="dim">—</span>
-                </template>
-                <template v-else-if="column.key === 'password'">
-                  <a-tag v-if="record.has_password" color="green">已配置</a-tag>
-                  <a-tag v-else>—</a-tag>
-                </template>
-                <template v-else-if="column.key === 'default'">
-                  <a-tag v-if="record.is_default" color="purple">★ 默认</a-tag>
-                  <span v-else class="dim">—</span>
-                </template>
-                <template v-else-if="column.key === 'cross_seed'">
-                  <a-tooltip v-if="record.is_cross_seed" title="标记为辅种下载器（由辅种巡查作业自动扫描并暂停异常种子）">
-                    <a-tag color="cyan">辅种</a-tag>
-                  </a-tooltip>
-                  <span v-else class="dim">—</span>
-                </template>
-                <template v-else-if="column.key === 'torrent_count'">
-                  <span v-if="record.torrent_count !== null" class="mono">
-                    {{ record.torrent_count }}
-                  </span>
-                  <span v-else class="dim" title="下载器不可达或未启用">—</span>
-                </template>
-                <template v-else-if="column.key === 'enabled'">
-                  <span v-if="record.enabled" class="status-dot status-dot--ok" />
-                  <span v-else class="status-dot status-dot--off" />
-                </template>
-                <template v-else-if="column.key === 'action'">
-                  <a-space :size="4">
-                    <a-button size="small" type="link" @click="onEdit(record)">编辑</a-button>
-                    <a-button size="small" type="link" :loading="testing" :disabled="!isImplemented(record.type)" @click="onTest(record)">测连</a-button>
-                    <a-popconfirm title="确认删除？" @confirm="onDelete(record.id)">
-                      <a-button size="small" type="link" danger>删除</a-button>
-                    </a-popconfirm>
-                  </a-space>
-                </template>
-              </template>
-            </a-table>
-          </a-tab-pane>
-        </a-tabs>
+        <a-table
+          :data-source="filtered"
+          :columns="taskColumns"
+          :loading="loading"
+          row-key="hash"
+          :row-selection="{
+            selectedRowKeys: selectedRowKeys,
+            onChange: onSelectChange,
+          }"
+          :pagination="{
+            current: page,
+            pageSize: pageSize,
+            total: total,
+            showSizeChanger: true,
+            onChange: (p: number) => { page = p; loadItems() },
+            onShowSizeChange: (p: number, ps: number) => { page = p; pageSize = ps; loadItems() },
+          }"
+          :scroll="{ x: 1600 }"
+          size="small"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'progress'">
+              <div class="progress-cell">
+                <a-progress
+                  :percent="Math.round(record.progress * 1000) / 10"
+                  :status="record.progress >= 1 ? 'success' : (record.state === 'error' || record.state === 'missingFiles' ? 'exception' : 'active')"
+                  size="small"
+                  :show-info="false"
+                  :stroke-width="3"
+                />
+                <span class="mono progress-cell__num">{{ (record.progress * 100).toFixed(1) }}%</span>
+              </div>
+            </template>
+            <template v-else-if="column.key === 'state'">
+              <a-tag :color="stateColor(record.state)">{{ stateLabel(record.state) }}</a-tag>
+            </template>
+            <template v-else-if="column.key === 'name'">
+              <a-typography-text
+                :ellipsis="true"
+                :content="record.name"
+                style="max-width: 360px"
+              />
+            </template>
+            <template v-else-if="['size','downloaded','uploaded','dlspeed','upspeed','ratio'].includes(column.key as string)">
+              <span class="mono">{{ column.customRender?.({ record }) }}</span>
+            </template>
+          </template>
+        </a-table>
       </div>
     </section>
 
@@ -797,5 +803,18 @@ const manageColumns = [
   background: var(--bg-surface);
   border: 1px solid var(--border-hairline);
   border-radius: var(--r-md);
+}
+
+/* 下载器表格：整行可点（切换下方任务列表）+ 选中行高亮 */
+:deep(.ant-table-tbody > tr) {
+  cursor: pointer;
+}
+
+:deep(.manage-row--active > td) {
+  background: var(--accent-red-soft) !important;
+}
+
+:deep(.manage-row--active > td:first-child) {
+  box-shadow: inset 3px 0 0 var(--accent-red);
 }
 </style>
