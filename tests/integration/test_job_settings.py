@@ -164,7 +164,11 @@ async def test_runtime_params_seeded_from_spec_defaults(db: None) -> None:
 
 
 async def test_migrate_renamed_job_moves_config(db: None) -> None:
-    """旧作业名的配置整行迁到新作业名（enabled + cron 都保留）。"""
+    """旧作业名的**启停状态**迁到新作业名。
+
+    **cron 不搬**——cron 是作业级频率，合并后语义变了（三个旧作业合成
+    一个），搬过去会让新作业跑在错误频率上；用代码里的新默认值。
+    """
     async with session_scope() as session:
         session.add(
             SchedulerJobSetting(
@@ -181,8 +185,10 @@ async def test_migrate_renamed_job_moves_config(db: None) -> None:
     rows = {r.job_name: r for r in await _rows()}
     assert "scan_cross_seed" not in rows
     new_row = rows["cross_seed_maintenance"]
+    # 启停状态迁过来了
     assert new_row.enabled is False
-    assert new_row.cron == "5,35 * * * *"
+    # cron 不用旧值 → 用代码默认值（None = 不覆盖）
+    assert new_row.cron is None
 
 
 async def test_migrate_renamed_job_does_not_overwrite_existing(db: None) -> None:

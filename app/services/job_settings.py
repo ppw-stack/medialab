@@ -173,10 +173,15 @@ async def migrate_renamed_job(
     new_name: str,
     known_jobs: set[str],
 ) -> bool:
-    """把旧作业名的配置**迁移**到新作业名（作业合并/改名时用）。
+    """把旧作业名的**启停状态**迁移到新作业名（作业合并/改名时用）。
 
     例：``scan_cross_seed`` → ``cross_seed_maintenance``（2026-11-01 合并）。
-    用户手动改过的启停状态与 cron 跟着迁过去，不丢。
+    用户手动**停用过**旧作业 → 这个意图要跟着迁过去。
+
+    **只搬 ``enabled``，不搬 ``cron``**：cron 是**作业级频率**，合并后
+    频率语义变了（三个旧作业合成一个，旧 cron 对应的是其中某一个）。
+    搬过去会让新作业跑在错误的频率上——用代码里的新默认值（3 小时）。
+    用户之后想改 cron，在新作业上改即可。
 
     目标已存在行 → **不覆盖**（用户可能已经在新作业上改过）。
 
@@ -193,11 +198,11 @@ async def migrate_renamed_job(
             if new_name in known_jobs:
                 new_row = await session.get(SchedulerJobSetting, new_name)
                 if new_row is None:
-                    # 目标没有行 → 整行迁过去（保留 enabled + cron）
+                    # 目标没有行 → 只搬启停状态，cron 用代码默认值
                     new_row = SchedulerJobSetting(
                         job_name=new_name,
                         enabled=bool(old_row.enabled),
-                        cron=old_row.cron,
+                        cron=None,
                     )
                     session.add(new_row)
                 await session.execute(
@@ -206,11 +211,10 @@ async def migrate_renamed_job(
                     )
                 )
                 logger.info(
-                    "作业配置已迁移：%s → %s（enabled=%s cron=%s）",
+                    "作业配置已迁移：%s → %s（enabled=%s，cron 用新默认值）",
                     old_name,
                     new_name,
                     old_row.enabled,
-                    old_row.cron,
                 )
                 return True
             # 新作业不在注册表里 → 不迁移（等它真被注册时再说）
