@@ -8,6 +8,7 @@ import type {
   DownloaderTestResult,
   DownloaderTorrent,
   DownloaderTorrentList,
+  DownloaderTorrentCount,
   TorrentStateMeta,
 } from '../types'
 import { formatBytes } from '../utils/format'
@@ -57,6 +58,8 @@ async function load() {
     if (activeDownloaderId.value === null && data.value.length > 0) {
       selectDownloader(data.value[0].id)
     }
+    // 任务数**异步补**（实时统计慢，不阻塞列表渲染）
+    void loadTorrentCounts()
   } catch {
     /* ignore */
   }
@@ -77,6 +80,27 @@ async function loadStateMeta(): Promise<void> {
     // 拿不到元信息 → 用空表（页面仍可用，只是标签显示原始值）
     stateMeta.value = {}
   }
+}
+
+/**
+ * 补各下载器的**任务数**（实时统计，**单独请求**）。
+ *
+ * **为什么不放在列表接口里**：任务数要实时打下载器接口（辅种站 3000+
+ * 种子，实测拉一次 7.6s）。放在列表接口里 → 前端列表超时 → 页面误显示
+ * 「暂未配置下载器」。故列表先渲染，任务数异步补。
+ */
+async function loadTorrentCounts(): Promise<void> {
+  const ids = data.value.map((d) => d.id)
+  await Promise.all(
+    ids.map(async (id) => {
+      try {
+        const r = await api.get<DownloaderTorrentCount>(`/downloaders/${id}/torrent-count`)
+        torrentCounts.value[id] = r.count
+      } catch {
+        torrentCounts.value[id] = null
+      }
+    }),
+  )
 }
 
 onMounted(() => {
@@ -240,6 +264,9 @@ const deleteModalOpen = ref(false)
 
 // 任务状态元信息（后端下发，见 loadStateMeta）。
 const stateMeta = ref<Record<string, { label: string; color: string }>>({})
+
+/** 各下载器的任务数（异步补，见 loadTorrentCounts）。null = 取不到。 */
+const torrentCounts = ref<Record<number, number | null>>({})
 
 // STATE_OPTIONS：过滤下拉。value 直接用后端枚举值，不再做
 // toLowerCase() 转换——后端枚举值是 camelCase（pausedDL / missingFiles），
@@ -526,8 +553,8 @@ const manageColumns = [
               <span v-else class="dim">—</span>
             </template>
             <template v-else-if="column.key === 'torrent_count'">
-              <span v-if="record.torrent_count !== null" class="mono">
-                {{ record.torrent_count }}
+              <span v-if="torrentCounts[record.id] !== null && torrentCounts[record.id] !== undefined" class="mono">
+                {{ torrentCounts[record.id] }}
               </span>
               <span v-else class="dim" title="下载器不可达或未启用">—</span>
             </template>

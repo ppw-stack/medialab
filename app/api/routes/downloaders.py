@@ -91,8 +91,6 @@ class DownloaderOut(BaseModel):
     is_cross_seed: bool
     created_at: str
     updated_at: str
-    #: 该下载器的任务数；None = 取不到（下载器不可达 / 未启用）
-    torrent_count: int | None = None
 
 
 class DownloaderTorrentOut(BaseModel):
@@ -141,6 +139,21 @@ async def list_torrent_states() -> list[dict[str, str]]:
     经 service 层转发：API 层不直接依赖适配层（分层约束）。
     """
     return downloader_service.list_torrent_states()
+
+
+@router.get("/{downloader_id}/torrent-count", summary="单个下载器的任务数")
+async def count_downloader_torrents(downloader_id: int) -> dict[str, Any]:
+    """单个下载器的任务数（**实时统计**）。
+
+    **为什么单独开端点**：任务数要实时打下载器接口（辅种站 3000+ 种子，
+    实测拉一次 7.6s）。放在列表接口里会把「加载下载器配置」变成慢操作
+    ——前端列表超时 → 页面误显示「暂未配置下载器」。
+
+    取不到（下载器不可达 / 未启用）→ ``count=null``（**不写 0 兜底**，
+    写 0 会把故障伪装成「没有任务」）。
+    """
+    count = await downloader_service.count_downloader_torrents(downloader_id)
+    return {"downloader_id": downloader_id, "count": count}
 
 
 @router.get("/{downloader_id}", summary="下载器详情")

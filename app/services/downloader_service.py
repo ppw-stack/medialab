@@ -12,10 +12,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import re
 from contextlib import suppress
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Final
 
 from sqlalchemy import delete, select
@@ -89,8 +88,6 @@ class DownloaderSnapshot:
     is_cross_seed: bool
     created_at: str
     updated_at: str
-    #: 该下载器的任务数（实时统计；取不到时为 None）
-    torrent_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,39 +185,35 @@ async def _apply_default(session: object, target_id: int) -> None:
 
 
 async def list_downloaders() -> list[DownloaderSnapshot]:
-    """所有下载器（按 id 升序）+ 各自的任务数。
+    """所有下载器（按 id 升序）。
 
-    **任务数是实时统计**：并发调各下载器的 ``list_torrents`` 拿总数。
-    辅种站有 3000+ 种子，故**并发**查（上限 5），不串行等。
+    **不含任务数**——任务数要实时打下载器接口（辅种站 3000+ 种子，实测
+    拉一次 7.6s），放在列表接口里会把「加载配置」变成慢操作（前端列表
+    直接超时 → 页面显示「暂未配置下载器」）。
 
-    取不到（下载器不可达 / 未启用）→ ``torrent_count=None``——
-    **不写 0 兜底**（写 0 会把故障伪装成「没有任务」）。
+    任务数走单独的 :func:`count_downloader_torrents`（前端按需异步补）。
     """
     async with session_scope() as session:
         rows = (
             await session.execute(select(DownloaderInstance).order_by(DownloaderInstance.id.asc()))
         ).scalars().all()
-    snapshots = [_to_snapshot(r) for r in rows]
+    return [_to_snapshot(r) for r in rows]
 
-    # 并发统计任务数（上限 5）
-    sem = asyncio.Semaphore(5)
 
-    async def _count(dl_id: int) -> int | None:
-        async with sem:
-            try:
-                items = await list_downloader_torrents(dl_id)
-                return len(items)
-            except ServiceError:
-                return None
-            except Exception:
-                logger.exception("统计下载器 %s 任务数失败", dl_id)
-                return None
+async def count_downloader_torrents(downloader_id: int) -> int | None:
+    """单个下载器的任务数（实时统计）。
 
-    counts = await asyncio.gather(*[_count(dl.id) for dl in snapshots])
-    return [
-        replace(dl, torrent_count=count)
-        for dl, count in zip(snapshots, counts, strict=True)
-    ]
+    取不到（下载器不可达 / 未启用）→ ``None``——**不写 0 兜底**
+    （写 0 会把故障伪装成「没有任务」）。
+    """
+    try:
+        items = await list_downloader_torrents(downloader_id)
+        return len(items)
+    except ServiceError:
+        return None
+    except Exception:
+        logger.exception("统计下载器 %s 任务数失败", downloader_id)
+        return None
 
 
 async def get_downloader(downloader_id: int) -> DownloaderSnapshot:

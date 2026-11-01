@@ -200,8 +200,18 @@ export interface Downloader {
   is_cross_seed: boolean
   created_at: string
   updated_at: string
-  /** 该下载器的任务数；null = 取不到（下载器不可达 / 未启用） */
-  torrent_count: number | null
+}
+
+/**
+ * 单个下载器的任务数（`GET /downloaders/{id}/torrent-count`）。
+ *
+ * **不在列表接口里**——任务数要实时打下载器接口（辅种站 3000+ 种子，
+ * 实测拉一次 7.6s），放列表里会把「加载配置」变成慢操作。
+ */
+export interface DownloaderTorrentCount {
+  downloader_id: number
+  /** 任务数；null = 取不到（下载器不可达 / 未启用） */
+  count: number | null
 }
 
 /**

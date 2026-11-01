@@ -105,3 +105,29 @@ async def test_state_meta_需要登录(anon_client: httpx.AsyncClient) -> None:
     """未登录 → 401（跟其它下载器端点同级别）。"""
     resp = await anon_client.get("/api/v1/downloaders/state-meta")
     assert resp.status_code == 401
+
+
+async def test_列表不返回任务数(client: httpx.AsyncClient) -> None:
+    """列表接口**不含**任务数——它要实时打下载器接口（实测 7.6s）。
+
+    放在列表里 → 前端列表超时 → 页面误显示「暂未配置下载器」。
+    """
+    resp = await client.get("/api/v1/downloaders")
+    assert resp.status_code == 200
+    for row in resp.json():
+        assert "torrent_count" not in row
+
+
+async def test_torrent_count_端点存在(client: httpx.AsyncClient) -> None:
+    """任务数走**单独端点**（前端异步补，不阻塞列表）。"""
+    resp = await client.get("/api/v1/downloaders/1/torrent-count")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["downloader_id"] == 1
+    # 下载器不存在 → count=null（**不写 0 兜底**：0 会把故障伪装成「没有任务」）
+    assert body["count"] is None
+
+
+async def test_torrent_count_需要登录(anon_client: httpx.AsyncClient) -> None:
+    resp = await anon_client.get("/api/v1/downloaders/1/torrent-count")
+    assert resp.status_code == 401
