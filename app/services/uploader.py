@@ -22,6 +22,12 @@
 **目录结构**：本地相对路径原样映射到云端（``a/b/c.mkv`` → 目标下
 ``a/b/c.mkv``）。中间目录用
 :class:`~app.services.cloud_index.CloudDirIndex` 逐层创建。
+
+**本地删除是异步的**（2026-10-31）：上传成功后把「删本地」丢后台任务，
+worker 立刻处理下一个文件。CIFS 上删一个 6.9 GB 文件要几十秒到几分钟
+（等 SMB 服务器释放句柄），同步做会让 worker 长时间空转。
+安全校验（fileId / 大小一致 / 路径合法）仍然**同步做**——那是不可绕过的
+闸门，不能把「不该删的文件」丢进后台队列。
 """
 
 from __future__ import annotations
@@ -36,6 +42,29 @@ from app.core.logging import get_logger
 from app.services.cloud_index import CloudDirIndex
 
 logger = get_logger(__name__)
+
+#: 后台删除任务的集合（持有引用防 GC）。
+#:
+#: **必须持有**——``asyncio.create_task`` 的任务没人引用会被 GC 掉，
+#: 删除就永远不会执行。
+_CLEANUP_TASKS: set[asyncio.Task[None]] = set()
+
+#: 后台删除的并发上限。
+#:
+#: CIFS 上同时删太多文件会拖垮 NAS（每个删除都是一次网络往返 + 服务器端
+#: 句柄释放），故限并发。
+_CLEANUP_CONCURRENCY = 3
+
+#: 后台删除的信号量（首次使用时创建——模块级不能建 asyncio 原语）。
+_CLEANUP_SEM: asyncio.Semaphore | None = None
+
+
+def _cleanup_sem() -> asyncio.Semaphore:
+    """取后台删除的信号量（懒创建：asyncio 原语要绑事件循环）。"""
+    global _CLEANUP_SEM
+    if _CLEANUP_SEM is None:
+        _CLEANUP_SEM = asyncio.Semaphore(_CLEANUP_CONCURRENCY)
+    return _CLEANUP_SEM
 
 #: 单个文件的同步结果
 RESULT_UPLOADED = "uploaded"
@@ -178,8 +207,7 @@ async def sync_file(
     # **开 ``delete_local`` 时也要删本地**（2026-10-31 修正）：
     # 云端已有同名同大小文件 = 之前传过 = 本地是冗余。开关开着代表用户
     # 已确认「云端是完整副本，本地可删」，故 UNCHANGED 也走清理。
-    # 复用 :func:`_maybe_cleanup_local` 的三重校验（fileId / 大小一致 /
-    # 路径合法）——不绕过。
+    # 校验同步做、删除异步（见下方第 ⑤ 步的说明）——不绕过校验。
     if remote is not None and remote.size == size:
         outcome = SyncOutcome(
             RESULT_UNCHANGED,
@@ -189,10 +217,11 @@ async def sync_file(
             cloud_size=remote.size,
         )
         if ctx.delete_local:
-            note = await _maybe_cleanup_local(ctx, local_path, outcome)
+            note = _check_cleanup_allowed(outcome)
             if note:
                 outcome.reason = note
             else:
+                _spawn_cleanup(local_path, ctx.root, outcome)
                 outcome.local_deleted = True
         return outcome
 
@@ -253,55 +282,102 @@ async def sync_file(
     #
     # 只有 ``ctx.delete_local`` 开启时才做，且必须过三道校验。
     # **失败只记提示，不翻转结果**——上传已经成功了。
+    #
+    # **删除是异步的**（2026-10-31）：校验同步做完（安全闸门），
+    # 真正的 unlink 丢后台任务——CIFS 上删大文件要几十秒到几分钟，
+    # 同步做会让 worker 空转。
     if ctx.delete_local:
-        note = await _maybe_cleanup_local(ctx, local_path, outcome)
+        note = _check_cleanup_allowed(outcome)
         if note:
             outcome.reason = note
         else:
+            _spawn_cleanup(local_path, ctx.root, outcome)
+            # 语义：已**安排**删除（不是「已删除」）——实际删除在后台完成。
             outcome.local_deleted = True
 
     return outcome
 
 
-async def _maybe_cleanup_local(
-    ctx: SyncContext,
-    local_path: Path,
-    outcome: SyncOutcome,
-) -> str:
-    """上传成功后**彻底删除**本地文件。返回提示信息（空串 = 正常）。
-
-    **三重校验**（任一不过就不删）：
+def _check_cleanup_allowed(outcome: SyncOutcome) -> str:
+    """删本地前的**云端侧**校验。返回原因（空串 = 可以删）。
 
     1. 云端 fileId 非空
     2. 云端大小 == 本地大小（不只是「API 返回成功」）
-    3. 路径在监听根内、是普通文件、非隐藏
 
-    **不抛异常**——上传已经成功了，删除失败不该翻转结果。
+    第 3 道（路径合法 / 普通文件 / 非隐藏）在
+    :func:`app.services.upload_cleanup.is_safe_to_delete` 里——它要读文件
+    系统属性，与实际删除放在一起做（后台任务里做）。
     """
-    from app.services import upload_cleanup
-
-    # ① + ② 云端确认：fileId 有值且大小一致
     if not outcome.cloud_file_id:
         return "本地未删除：云端未返回 fileId"
     if outcome.cloud_size != outcome.size:
         return (
             f"本地未删除：云端 {outcome.cloud_size} 字节 / 本地 {outcome.size} 字节不一致"
         )
+    return ""
 
-    # ③ 彻底删除（unlink —— 不可逆，故前面两道校验很关键）
-    #
-    # **必须 ``asyncio.to_thread``**：``unlink`` 在 CIFS / NFS 上是同步 IO，
-    # 删除大文件会阻塞事件循环（实测：CIFS 删除一个 mkv 卡住整个事件循环，
-    # healthcheck 超时、API 不可达）。放线程池里跑不阻塞 loop。
-    result = await asyncio.to_thread(
-        upload_cleanup.delete_local_file, local_path, ctx.root
-    )
-    if result.status in (upload_cleanup.DELETE_OK, upload_cleanup.DELETE_MISSING):
-        # MISSING = 文件已被别处删了，不算错
-        return ""
-    if result.status == upload_cleanup.DELETE_REJECTED:
-        return f"本地未删除：{result.reason}"
-    return f"本地删除失败：{result.reason}"
+
+def _spawn_cleanup(local_path: Path, root: Path, outcome: SyncOutcome) -> None:
+    """把「删本地」丢后台任务（fire-and-forget）。
+
+    worker 立刻返回处理下一个文件——不等删除完成。
+    """
+    task = asyncio.create_task(_cleanup_worker(local_path, root, outcome))
+    # 持有引用：没人引用的 task 会被 GC 掉，删除就永远不执行。
+    _CLEANUP_TASKS.add(task)
+    task.add_done_callback(_CLEANUP_TASKS.discard)
+
+
+async def _cleanup_worker(local_path: Path, root: Path, outcome: SyncOutcome) -> None:
+    """后台删本地文件。
+
+    **不抛异常**——上传已经成功了，删除失败不该翻转结果。
+    失败时本地文件残留 → **下次全量同步会自动重试**（云端已有 →
+    UNCHANGED → 再删）。
+    """
+    from app.services import upload_cleanup
+
+    try:
+        async with _cleanup_sem():
+            result = await asyncio.to_thread(
+                upload_cleanup.delete_local_file, local_path, root
+            )
+        if result.status in (upload_cleanup.DELETE_OK, upload_cleanup.DELETE_MISSING):
+            # MISSING = 文件已被别处删了，不算错
+            logger.info("已删除本地文件 %s", local_path)
+            return
+        logger.warning(
+            "后台删除本地文件未成功 %s：%s", local_path, result.reason or result.status
+        )
+    except Exception:
+        logger.exception("后台删除本地文件失败：%s", local_path)
+
+
+async def drain_cleanup_tasks(wait_sec: float = 30.0) -> int:
+    """等待后台删除任务完成（停机时调用）。
+
+    停机时等一下，保证「停机后本地文件状态确定」——不留「以为删了其实
+    还在」的中间态。
+
+    Args:
+        wait_sec: 最长等待秒数。
+
+    Returns:
+        实际完成的任务数。
+    """
+    pending = [t for t in _CLEANUP_TASKS if not t.done()]
+    if not pending:
+        return 0
+    done, still_pending = await asyncio.wait(pending, timeout=wait_sec)
+    for t in still_pending:
+        t.cancel()
+    if still_pending:
+        logger.warning(
+            "后台删除任务未在 %.0fs 内完成，已取消 %d 个（本地文件将残留）",
+            wait_sec,
+            len(still_pending),
+        )
+    return len(done)
 
 
 async def _wait_absent(ctx: SyncContext, rel_dir: str, name: str) -> bool:
@@ -354,6 +430,7 @@ __all__ = [
     "SyncOutcome",
     "UploadStats",
     "base_name",
+    "drain_cleanup_tasks",
     "parent_dir",
     "sync_file",
 ]

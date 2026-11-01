@@ -25,6 +25,7 @@ from app.services.uploader import (
     RESULT_UNCHANGED,
     RESULT_UPLOADED,
     SyncContext,
+    drain_cleanup_tasks,
     sync_file,
 )
 
@@ -177,7 +178,12 @@ async def test_开关关闭时不删本地(tmp_path: Path):
 
 
 async def test_开关开启时彻底删除(tmp_path: Path):
-    """``delete_local=True`` → 上传成功后本地文件被删掉。"""
+    """``delete_local=True`` → 上传成功后本地文件被删掉。
+
+    删除是**异步**的（2026-10-31）——CIFS 上删大文件要几十秒到几分钟，
+    同步做会让 worker 空转。故 ``sync_file`` 返回时文件可能还在，
+    要等后台任务完成。
+    """
     driver, uploader = FakeDriver(), FakeUploader()
     path = tmp_path / "a.mkv"
     path.write_bytes(b"x" * 100)
@@ -187,10 +193,33 @@ async def test_开关开启时彻底删除(tmp_path: Path):
     )
 
     assert outcome.status == RESULT_UPLOADED
-    assert not path.exists()
     assert outcome.local_deleted is True
+    # 删除是后台任务——等它完成
+    await drain_cleanup_tasks(wait_sec=5)
+    assert not path.exists()
     # 没有留下任何回收目录
     assert not (tmp_path / ".strmmanger-trash").exists()
+
+
+async def test_删除是异步的_不阻塞sync_file返回(tmp_path: Path):
+    """删除在后台跑——``sync_file`` **不等**它完成就返回。
+
+    动机：CIFS 上删一个 6.9 GB 文件要几十秒到几分钟（等 SMB 服务器释放
+    句柄）。同步做会让 worker 长时间空转，吞吐白白损失。
+    """
+    driver, uploader = FakeDriver(), FakeUploader()
+    path = tmp_path / "a.mkv"
+    path.write_bytes(b"x" * 100)
+
+    outcome = await sync_file(
+        _ctx(driver, uploader, tmp_path, delete_local=True), path, "a.mkv"
+    )
+
+    # 返回时「已安排删除」，但文件可能还在（后台任务还没跑完）
+    assert outcome.local_deleted is True
+    # 最终会被删掉
+    await drain_cleanup_tasks(wait_sec=5)
+    assert not path.exists()
 
 
 async def test_开关关闭时local_deleted为假(tmp_path: Path):
@@ -303,6 +332,8 @@ async def test_已存在unchanged开删本地则删(tmp_path: Path):
 
     assert outcome.status == RESULT_UNCHANGED
     assert outcome.local_deleted is True
+    # 删除是后台任务——等它完成
+    await drain_cleanup_tasks(wait_sec=5)
     assert not path.exists()
 
 

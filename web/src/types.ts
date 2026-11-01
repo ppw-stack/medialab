@@ -881,7 +881,7 @@ export interface SyncNowResult {
   unchanged: number
   failed: number
   conflicts: number
-  /** 本地已删除的文件数（delete_after_upload 开启时） */
+  /** 本地删除的文件数（delete_after_upload 开启时；删除在后台异步执行） */
   deleted_local: number
   uploaded_bytes: number
 }

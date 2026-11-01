@@ -49,6 +49,7 @@ from app.services.uploader import (
     RESULT_UNCHANGED,
     RESULT_UPLOADED,
     SyncContext,
+    drain_cleanup_tasks,
     sync_file,
 )
 from app.services.watcher import Watcher
@@ -160,6 +161,9 @@ async def stop_all() -> None:
     """停止所有监听器（应用停机时调用）。"""
     for task_id in list(_WATCHERS.keys()):
         await stop_watcher(task_id)
+    # 等后台删除全部完成（stop_watcher 里已等过，这里兜底——
+    # 可能是在 stop_watcher 之外派生的后台任务）
+    await drain_cleanup_tasks(wait_sec=30.0)
     logger.info("已停止全部上传监听器")
 
 
@@ -291,6 +295,9 @@ async def stop_watcher(task_id: int) -> None:
     if sync_task is not None:
         sync_task.cancel()
         await asyncio.gather(sync_task, return_exceptions=True)
+    # 等后台删除完成（停机时保证「本地文件状态确定」——不留「以为删了
+    # 其实还在」的中间态）。删除是异步的，可能还在跑。
+    await drain_cleanup_tasks(wait_sec=20.0)
     _QUEUES.pop(task_id, None)
     _CONTEXTS.pop(task_id, None)
     _SYNC_LOCKS.pop(task_id, None)
@@ -433,7 +440,7 @@ async def _process_one(task_id: int, ctx: SyncContext, path: Path) -> None:
     if outcome.status == RESULT_UPLOADED:
         runtime.total_uploaded += 1
         runtime.total_bytes += outcome.size
-        note = "（本地已删除）" if outcome.local_deleted else ""
+        note = "（本地删除中）" if outcome.local_deleted else ""
         if outcome.reason:
             note = f"（{outcome.reason}）"
         runtime.log(
@@ -443,7 +450,7 @@ async def _process_one(task_id: int, ctx: SyncContext, path: Path) -> None:
     elif outcome.status == RESULT_OVERWRITTEN:
         runtime.total_uploaded += 1
         runtime.total_bytes += outcome.size
-        note = "（本地已删除）" if outcome.local_deleted else ""
+        note = "（本地删除中）" if outcome.local_deleted else ""
         if outcome.reason:
             note = f"（{outcome.reason}）"
         runtime.log(
@@ -451,7 +458,7 @@ async def _process_one(task_id: int, ctx: SyncContext, path: Path) -> None:
         )
         await _mark_synced(task_id, runtime.total_uploaded)
     elif outcome.status == RESULT_UNCHANGED:
-        note = "（本地已删除）" if outcome.local_deleted else (
+        note = "（本地删除中）" if outcome.local_deleted else (
             f"（{outcome.reason}）" if outcome.reason else ""
         )
         runtime.log(f"⏭️ 已存在：{rel_path}{note}")
@@ -586,7 +593,7 @@ async def _sync_now_inner(task_id: int, runtime: Any, watcher: Any) -> dict[str,
                 runtime.log(
                     f"✅ [{index}] 已上传：{rel}"
                     f"（{outcome.size / 1024**2:.1f} MB）"
-                    + ("（本地已删除）" if outcome.local_deleted else "")
+                    + ("（本地删除中）" if outcome.local_deleted else "")
                 )
             elif outcome.status == RESULT_OVERWRITTEN:
                 overwritten += 1
@@ -594,13 +601,13 @@ async def _sync_now_inner(task_id: int, runtime: Any, watcher: Any) -> dict[str,
                 runtime.log(
                     f"♻️ [{index}] 已覆盖：{rel}"
                     f"（{outcome.size / 1024**2:.1f} MB）"
-                    + ("（本地已删除）" if outcome.local_deleted else "")
+                    + ("（本地删除中）" if outcome.local_deleted else "")
                 )
             elif outcome.status == RESULT_UNCHANGED:
                 unchanged += 1
                 if outcome.local_deleted:
                     deleted_local += 1
-                note = "（本地已删除）" if outcome.local_deleted else (
+                note = "（本地删除中）" if outcome.local_deleted else (
                     f"（{outcome.reason}）" if outcome.reason else ""
                 )
                 runtime.log(f"⏭️ [{index}] 已存在：{rel}{note}")
@@ -615,7 +622,7 @@ async def _sync_now_inner(task_id: int, runtime: Any, watcher: Any) -> dict[str,
         runtime.log(
             f"全量同步完成：共 {index} 个文件，上传 {uploaded}，覆盖 {overwritten}，"
             f"已存在 {unchanged}，失败 {failed}，冲突 {conflicts}"
-            + (f"，本地已删除 {deleted_local}" if deleted_local else "")
+            + (f"，本地已安排删除 {deleted_local}" if deleted_local else "")
         )
         await _mark_synced(task_id, uploaded + overwritten, force=True)
         return {
