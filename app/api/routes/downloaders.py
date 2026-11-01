@@ -91,6 +91,8 @@ class DownloaderOut(BaseModel):
     is_cross_seed: bool
     created_at: str
     updated_at: str
+    #: 该下载器的任务数；None = 取不到（下载器不可达 / 未启用）
+    torrent_count: int | None = None
 
 
 class DownloaderTorrentOut(BaseModel):

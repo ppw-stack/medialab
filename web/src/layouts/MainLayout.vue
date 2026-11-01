@@ -5,7 +5,6 @@ import {
   DashboardOutlined,
   CloudServerOutlined,
   ApiOutlined,
-  DownloadOutlined,
   SettingOutlined,
   LogoutOutlined,
   UserOutlined,
@@ -45,8 +44,7 @@ const menuGroups = [
     items: [
       { key: '/', icon: DashboardOutlined, label: '总览', sub: '仪表盘概览', iconColor: 'red' },
       { key: '/sites', icon: CloudServerOutlined, label: '站点', sub: 'NexusPHP 适配', iconColor: 'violet' },
-      { key: '/downloaders', icon: ApiOutlined, label: '下载器', sub: 'qB · Transmission', iconColor: 'green' },
-      { key: '/torrents', icon: DownloadOutlined, label: '任务', sub: '辅种运行中', iconColor: 'blue' },
+      { key: '/downloaders', icon: ApiOutlined, label: '下载器与任务', sub: '实例 / 实时任务', iconColor: 'green' },
       { key: '/torrent-index', icon: DatabaseOutlined, label: '拉取索引', sub: '免费种源', iconColor: 'amber' },
       { key: '/cross-seed', icon: SafetyOutlined, label: '辅种统计', sub: '按下载器分组展示', iconColor: 'gold' },
       { key: '/settings', icon: SettingOutlined, label: '设置', sub: '调度作业 / 环境变量', iconColor: 'pink' },

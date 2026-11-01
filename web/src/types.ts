@@ -200,6 +200,8 @@ export interface Downloader {
   is_cross_seed: boolean
   created_at: string
   updated_at: string
+  /** 该下载器的任务数；null = 取不到（下载器不可达 / 未启用） */
+  torrent_count: number | null
 }
 
 /** 测连结果（`POST /downloaders/{id}/test` 与 `/test-config`）。 */

@@ -6,7 +6,7 @@ import { useAuthStore } from './stores/auth'
  *
  * **两个业务域的页面在同一�� SPA 里**：
  *
- * - 辅种域 —— `/sites` `/downloaders` `/torrents` `/torrent-index`
+ * - 辅种域 —— `/sites` `/downloaders` `/torrent-index`
  *   `/cross-seed` `/settings`
  * - 媒体库域 —— `/drivers` `/library` `/migrations` `/uploads` `/health`
  *   `/dav` `/media-settings`
@@ -28,7 +28,6 @@ const routes: RouteRecordRaw[] = [
       { path: '', name: 'dashboard', component: () => import('./pages/Dashboard.vue') },
       { path: 'sites', name: 'sites', component: () => import('./pages/Sites.vue') },
       { path: 'downloaders', name: 'downloaders', component: () => import('./pages/Downloaders.vue') },
-      { path: 'torrents', name: 'torrents', component: () => import('./pages/Torrents.vue') },
       { path: 'torrent-index', name: 'torrent-index', component: () => import('./pages/TorrentIndex.vue') },
       { path: 'cross-seed', name: 'cross-seed', component: () => import('./pages/CrossSeed.vue') },
       { path: 'settings', name: 'settings', component: () => import('./pages/Settings.vue') },
