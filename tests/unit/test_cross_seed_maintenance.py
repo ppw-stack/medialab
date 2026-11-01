@@ -1,0 +1,143 @@
+"""辅种维护作业（合并 scan_cross_seed + disk_rotation + scan_orphans）。
+
+**为什么合并**（2026-11-01）：
+
+1. **依赖顺序**——``disk_rotation`` 读 ``cross_seed_snapshot`` 判磁盘
+   使用率，而快照由巡查产出。分开跑可能读到**旧快照**。合并后 ② 必定
+   基于 ① 的**最新**快照。
+2. **省一次全量抓取**——辅种站抓一次要 20s+（3000+ 种子）。
+
+**三段各自容错**：某段失败不影响其余，失败进 ``steps``。
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+from app.services import cross_seed_maintenance
+from app.services.scheduler import JobStep
+
+
+class _Ok:
+    """一个成功返回的子阶段替身。"""
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.payload = payload
+
+    async def __call__(self) -> dict[str, Any]:
+        return self.payload
+
+
+class _Boom:
+    """一个抛异常的子阶段替身。"""
+
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+
+    async def __call__(self) -> dict[str, Any]:
+        raise self.exc
+
+
+async def test_三段顺序执行(monkeypatch: pytest.MonkeyPatch) -> None:
+    """巡查 → 磁盘流转 → 孤儿扫描，**顺序执行**（依赖顺序正确）。"""
+    order: list[str] = []
+
+    def _mk(tag: str, payload: dict[str, Any]) -> _Ok:
+        class _Stage(_Ok):
+            async def __call__(self) -> dict[str, Any]:
+                order.append(tag)
+                return self.payload
+
+        return _Stage(payload)
+
+    # 巡查：patch 编排模块内的薄封装（service 构造要已初始化的工厂）
+    async def _fake_scan() -> dict[str, Any]:
+        order.append("scan")
+        return {"summary": "巡查 2 个下载器，3 异常", "scanned_downloaders": 2}
+
+    monkeypatch.setattr(
+        cross_seed_maintenance, "_run_scan_cross_seed", _fake_scan
+    )
+    monkeypatch.setattr(
+        "app.services.disk_rotation.run_disk_rotation",
+        _mk("rotation", {"summary": "使用率 87% < 90%", "deleted": 0}),
+    )
+    monkeypatch.setattr(
+        "app.services.cross_seed_orphan.run_scan_orphans",
+        _mk("orphan", {"summary": "孤儿 12 个", "orphan_count": 12}),
+    )
+
+    result = await cross_seed_maintenance.run_cross_seed_maintenance()
+
+    # 顺序：巡查 → 磁盘 → 孤儿
+    assert order == ["scan", "rotation", "orphan"]
+    # 三段结果都在
+    assert "cross_seed" in result
+    assert "disk_rotation" in result
+    assert "scan_orphans" in result
+    # steps 三段
+    assert len(result["steps"]) == 3
+    assert [s.name for s in result["steps"]] == [
+        "辅种巡查",
+        "磁盘空间流转",
+        "孤儿文件扫描",
+    ]
+    # summary 合成三段
+    assert "巡查" in result["summary"]
+    assert "孤儿" in result["summary"]
+
+
+async def test_某段失败不影响其它段(monkeypatch: pytest.MonkeyPatch) -> None:
+    """磁盘流转失败 → 巡查与孤儿扫描照常执行，失败进 steps。"""
+
+    async def _fake_scan() -> dict[str, Any]:
+        return {"summary": "巡查完成", "scanned_downloaders": 1}
+
+    monkeypatch.setattr(
+        cross_seed_maintenance, "_run_scan_cross_seed", _fake_scan
+    )
+    monkeypatch.setattr(
+        "app.services.disk_rotation.run_disk_rotation",
+        _Boom(RuntimeError("磁盘流转炸了")),
+    )
+    monkeypatch.setattr(
+        "app.services.cross_seed_orphan.run_scan_orphans",
+        _Ok({"summary": "孤儿 3 个", "orphan_count": 3}),
+    )
+
+    result = await cross_seed_maintenance.run_cross_seed_maintenance()
+
+    steps: list[JobStep] = result["steps"]
+    assert len(steps) == 3
+    assert steps[0].status == "ok"
+    assert steps[1].status == "fail"
+    assert "磁盘流转炸了" in (steps[1].detail or "")
+    # 失败段之后的仍执行
+    assert steps[2].status == "ok"
+    # 失败段的原始返回为空，不污染其它段
+    assert result["disk_rotation"] == {}
+    assert result["cross_seed"].get("summary") == "巡查完成"
+
+
+async def test_无辅种下载器时不报错(monkeypatch: pytest.MonkeyPatch) -> None:
+    """三段都返回「无辅种下载器」→ 正常返回，不抛。"""
+
+    async def _fake_scan() -> dict[str, Any]:
+        return {"summary": "无辅种下载器", "scanned_downloaders": 0}
+
+    monkeypatch.setattr(
+        cross_seed_maintenance, "_run_scan_cross_seed", _fake_scan
+    )
+    monkeypatch.setattr(
+        "app.services.disk_rotation.run_disk_rotation",
+        _Ok({"summary": "无辅种下载器快照", "deleted": 0}),
+    )
+    monkeypatch.setattr(
+        "app.services.cross_seed_orphan.run_scan_orphans",
+        _Ok({"summary": "无辅种下载器", "orphan_count": 0}),
+    )
+
+    result = await cross_seed_maintenance.run_cross_seed_maintenance()
+    assert result["summary"]
+    assert len(result["steps"]) == 3

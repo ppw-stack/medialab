@@ -140,7 +140,9 @@
     **但该 key 与 OpenCode 自身共用配额**，若在同一个 key 上跑批量实验会影响编码会话
 - **辅种快照契约**（2026-10-24 加入，`app/services/cross_seed_monitor.py`）：
   - 辅种下载器种子量大（实测 3000+ 个），**实时拉一次要 20s+** → 改为**定时抓取 + 落库快照**
-  - `scan_cross_seed` 作业（cron `2,32 * * * *`）：短事务读下载器 → 并发抓取（网络 IO 在事务外，上限 3）→ 短事务 upsert `cross_seed_snapshot` → 批量暂停异常
+  - `cross_seed_maintenance` 作业（cron `17 */3 * * *`，**2026-11-01 合并** `scan_cross_seed` + `disk_rotation` + `scan_orphans`）：短事务读下载器 → 并发抓取（网络 IO 在事务外，上限 3）→ 短事务 upsert `cross_seed_snapshot` → 批量暂停异常 → 磁盘超阈删种子 → 孤儿扫描
+    - **为什么合并**：`disk_rotation` 读 `cross_seed_snapshot` 判磁盘使用率，而快照由巡查产出——分开跑可能读到**旧快照**。合并后依赖顺序天然正确，且省一次辅种站全量抓取（20s+）
+    - 三段**各自容错**：某段失败不影响其余，失败进 `steps`（前端步骤卡片逐段展示）
   - `cross_seed_snapshot` 表是**当前快照**（`downloader_id` UNIQUE），不做历史；FK **不带** `ON DELETE CASCADE`（当守卫：漏删会 IntegrityError，宁可失败也不留孤儿行）——删下载器 / 取消辅种标记时必须显式删快照
   - **前端读快照，不打下载器接口**：辅种页与仪表盘「在途任务」都读快照；实时端点 `GET /cross-seed-monitor/downloaders/{id}/scan` 保留作调试用
   - **辅种页是两层 Tab**（2026-10-26）：外层 = **下载器**（数据维度），内层 = **内容分区**（概览 / 分组 / 异常 / 孤儿，功能维度）
@@ -200,8 +202,8 @@
   - **跨下载器汇总「有主」**（2026-10-26 修正）：辅种目录**被多个下载器共用**——实测 qB 有 6 个任务的 `save_path` 也在辅种目录里。只看辅种下载器（TR）的任务会把那 6 个 qB 任务的数据误判成孤儿（实测误判 480 GB，占「孤儿」总量 78%）。故「有主」集合必须汇总**所有已启用下载器**的任务
     - 拉取失败的下载器不贡献「有主」→ 其数据可能被误判 → **必须点名**（作业 summary + 步骤里写明哪个下载器失败）
     - 每个下载器**只拉一次**（汇总时拉的结果复用给扫描，别拉两遍）
-  - 新表 `cross_seed_orphan`（每下载器一行）+ 新作业 `scan_orphans`（cron `7 4 * * *`，每天一次——孤儿不会快变）+ 端点 `GET /cross-seed-monitor/orphans`
-  - **顶层名单独拉**（2026-10-26）：`list_torrent_file_names()` 是**独立**的 adapter 方法——顶层名需要 TR 的 `files` 字段，而它在辅种站是 **27.5 MB**（15.8 万个文件条目，占响应体 98%）。混进 `list_torrents_with_errors()` 会让每次辅种巡查（30 分钟一次）都白拉 27 MB。**只有孤儿作业（每天一次）付这个代价**
+  - 新表 `cross_seed_orphan`（每下载器一行）+ 由 `cross_seed_maintenance` 作业的第三段扫描（cron `17 */3 * * *`）+ 端点 `GET /cross-seed-monitor/orphans`
+  - **顶层名单独拉**（2026-10-26）：`list_torrent_file_names()` 是**独立**的 adapter 方法——顶层名需要 TR 的 `files` 字段，而它在辅种站是 **27.5 MB**（15.8 万个文件条目，占响应体 98%）。混进 `list_torrents_with_errors()` 会让每次辅种巡查都白拉 27 MB。**只有孤儿扫描段付这个代价**（辅种维护作业的第三段）
     - 该方法**自带 `save_path`**（= downloadDir）→ 孤儿扫描**只打一次**下载器接口
     - qB 的 `/torrents/info` 本来就返回 `content_path` + `save_path` → **零额外请求**
     - `list_torrents_with_errors()` 与 `list_torrents()` **都不再拉 `files`/`fileStats`**（TR 的 `TorrentInfo` 没有这两个字段，拉了完全用不上）

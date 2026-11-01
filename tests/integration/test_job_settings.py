@@ -20,6 +20,8 @@ from app.services.job_settings import (
     load_crons,
     load_enabled_states,
     load_job_settings,
+    migrate_renamed_job,
+    prune_orphaned_settings,
     save_cron,
     save_enabled_state,
 )
@@ -153,3 +155,92 @@ async def test_runtime_params_seeded_from_spec_defaults(db: None) -> None:
         stored = {r.key: r.value_int for r in rows}
     for spec in PARAM_SPECS:
         assert stored[spec.key] == spec.default
+
+
+# ------------------------------------------------------------------ 改名迁移
+#
+# 作业合并/改名（2026-11-01：scan_cross_seed → cross_seed_maintenance）后，
+# 用户手动改过的启停 + cron 不能丢——旧行的配置要迁到新作业名。
+
+
+async def test_migrate_renamed_job_moves_config(db: None) -> None:
+    """旧作业名的配置整行迁到新作业名（enabled + cron 都保留）。"""
+    async with session_scope() as session:
+        session.add(
+            SchedulerJobSetting(
+                job_name="scan_cross_seed", enabled=False, cron="5,35 * * * *"
+            )
+        )
+        await session.commit()
+
+    migrated = await migrate_renamed_job(
+        "scan_cross_seed", "cross_seed_maintenance", {"cross_seed_maintenance"}
+    )
+    assert migrated is True
+
+    rows = {r.job_name: r for r in await _rows()}
+    assert "scan_cross_seed" not in rows
+    new_row = rows["cross_seed_maintenance"]
+    assert new_row.enabled is False
+    assert new_row.cron == "5,35 * * * *"
+
+
+async def test_migrate_renamed_job_does_not_overwrite_existing(db: None) -> None:
+    """目标作业已有行 → **不覆盖**（用户可能已在新作业上改过）。"""
+    async with session_scope() as session:
+        session.add(
+            SchedulerJobSetting(job_name="scan_cross_seed", enabled=False, cron="x")
+        )
+        session.add(
+            SchedulerJobSetting(
+                job_name="cross_seed_maintenance", enabled=True, cron="y"
+            )
+        )
+        await session.commit()
+
+    await migrate_renamed_job(
+        "scan_cross_seed", "cross_seed_maintenance", {"cross_seed_maintenance"}
+    )
+
+    rows = {r.job_name: r for r in await _rows()}
+    assert "scan_cross_seed" not in rows
+    # 新行保持用户改过的值
+    assert rows["cross_seed_maintenance"].enabled is True
+    assert rows["cross_seed_maintenance"].cron == "y"
+
+
+async def test_migrate_renamed_job_noop_when_source_missing(db: None) -> None:
+    """旧行不存在 → 不做事（不报错）。"""
+    migrated = await migrate_renamed_job(
+        "scan_cross_seed", "cross_seed_maintenance", {"cross_seed_maintenance"}
+    )
+    assert migrated is False
+
+
+# ------------------------------------------------------------------ 孤儿清理
+
+
+async def test_prune_orphaned_settings_removes_unknown_jobs(db: None) -> None:
+    """已下线作业的残留行被清掉（读出来没人用）。"""
+    async with session_scope() as session:
+        session.add(SchedulerJobSetting(job_name="scan_orphans", enabled=True))
+        session.add(SchedulerJobSetting(job_name="disk_rotation", enabled=True))
+        session.add(SchedulerJobSetting(job_name="daily_checkin", enabled=True))
+        await session.commit()
+
+    removed = await prune_orphaned_settings({"daily_checkin"})
+    assert removed == 2
+
+    rows = {r.job_name for r in await _rows()}
+    assert rows == {"daily_checkin"}
+
+
+async def test_prune_orphaned_settings_keeps_known_jobs(db: None) -> None:
+    """已知作业的行不动。"""
+    async with session_scope() as session:
+        session.add(SchedulerJobSetting(job_name="daily_checkin", enabled=False))
+        await session.commit()
+
+    removed = await prune_orphaned_settings({"daily_checkin"})
+    assert removed == 0
+    assert {r.job_name for r in await _rows()} == {"daily_checkin"}

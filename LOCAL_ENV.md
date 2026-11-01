@@ -199,7 +199,7 @@ python -c "import secrets; print('WEB_TOKEN=' + secrets.token_urlsafe(32))"
 curl -H "Authorization: Bearer $WEB_TOKEN" http://localhost:8092/api/v1/scheduler
 ```
 
-## 6. 调度作业（8 个）
+## 6. 调度作业（7 个）
 
 | 作业 | 默认 cron | 说明 |
 |---|---|---|
@@ -207,10 +207,9 @@ curl -H "Authorization: Bearer $WEB_TOKEN" http://localhost:8092/api/v1/schedule
 | `push_free_torrents` | `*/30 * * * *` | 免费种推送（走 TaskQueue） |
 | `monitor_free_window` | `5,15,25,35,45,55 * * * *` | 免费窗口看护 |
 | `refresh_user_data` | `*/30 * * * *` | FR-1.6 用户数据刷新 |
-| `scan_cross_seed` | `2,32 * * * *` | 辅种巡查（定时抓取 → 落库快照 + 暂停异常） |
 | `drain_task_queue` | `*/5 * * * *` | 任务队列排空 |
 | `daily_checkin` | `37 8 * * *` | 站点每日签到（FR-3.6，仅 3 站） |
-| `scan_orphans` | `7 4 * * *` | 辅种孤儿文件扫描（磁盘有、任务没了） |
+| `cross_seed_maintenance` | `17 */3 * * *` | 辅种维护（巡查 → 落库快照 + 暂停异常 → 磁盘超阈删种子 → 孤儿扫描） |
 
 专属参数：
 

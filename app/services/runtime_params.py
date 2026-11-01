@@ -110,7 +110,7 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         default=90,
         min=50,
         max=99,
-        job="disk_rotation",
+        job="cross_seed_maintenance",
         note="辅种下载器磁盘使用率超过此值时触发流转（按价值低→高删种子）",
     ),
     ParamSpec(
@@ -119,7 +119,7 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         default=1,
         min=0,
         max=1,
-        job="disk_rotation",
+        job="cross_seed_maintenance",
         options=((0, "仅删任务"), (1, "删任务+删数据")),
         note="删磁盘数据不可恢复，删除前会记审计日志",
     ),

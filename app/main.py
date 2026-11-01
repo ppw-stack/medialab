@@ -98,7 +98,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # 作业调度配置（DB 持久化的启停 + cron）同样必须在 register_jobs
         # 之前载入：register() 会按 enabled 决定是否把作业安排到
         # APScheduler、按 cron 决定触发时刻，届时才知道该用什么。
-        from app.services.job_settings import load_crons, load_enabled_states
+        from app.services.job_registry import JOB_META
+        from app.services.job_settings import (
+            load_crons,
+            load_enabled_states,
+            migrate_renamed_job,
+            prune_orphaned_settings,
+        )
+
+        # 作业合并/改名后迁移旧的配置行（用户改过的启停 + cron 不丢），
+        # 再清理已下线作业的残留行。**必须在 apply_overrides 之前**——
+        # 否则旧行读出来没人用，新作业又拿不到用户改过的值。
+        known_jobs = {meta.name for meta in JOB_META}
+        await migrate_renamed_job(
+            "scan_cross_seed", "cross_seed_maintenance", known_jobs
+        )
+        await prune_orphaned_settings(known_jobs)
 
         scheduler_center.apply_overrides(
             await load_enabled_states(),

@@ -10,12 +10,11 @@
 - ``push_free_torrents`` — 选免费种自动推到默认下载器（经 task_queue 幂等入队）
 - ``monitor_free_window`` — 巡检已推免费种，临近窗口截止自动暂停
 - ``refresh_user_data`` — 拉取 9 站用户数据（上传/下载/做种数）
-- ``scan_cross_seed`` — 定时抓取辅种下载器，落库快照 + 暂停 tracker 未注册 / 数据丢失的种子
+- ``cross_seed_maintenance`` — **辅种维护**（2026-11-01 合并）：
+  辅种站巡查（落快照 + 暂停异常种子）→ 磁盘空间流转 → 孤儿文件扫描，
+  三段顺序执行、每 3 小时一次
 - ``drain_task_queue`` — 排空任务队列：崩溃恢复（僵死 running 回收）+ 退避重试
 - ``daily_checkin`` — 对支持签到的站点执行每日签到（hhanclub / soulvoice / hdhome）
-- ``scan_orphans`` — 扫描辅种下载器的孤儿文件（磁盘有、任务没了）
-- ``disk_rotation`` — 磁盘使用率超阈时按价值低→高删辅种种子
-  （独苗优先删，多副本保留；同档内先删加入更早的）
 """
 from __future__ import annotations
 
@@ -40,23 +39,20 @@ logger = get_logger(__name__)
 #: - ``*/30``  : push_free_torrents / refresh_user_data
 #: - ``5,15,…``: monitor_free_window（错开 fetch 与 push）
 #: - ``*/5``   : drain_task_queue
-#: - ``2,32``  : scan_cross_seed（辅种站单次抓取 20s+，别太密）
 #: - ``37 8``  : daily_checkin（每天 08:37，避开所有多 5 分钟的作业）
+#: - ``17 */3``: cross_seed_maintenance（辅种维护，合并巡查/磁盘/孤儿）
 DEFAULT_CRON: dict[str, str] = {
     "fetch_all_sites": "*/10 * * * *",
     "push_free_torrents": "*/30 * * * *",
     "monitor_free_window": "5,15,25,35,45,55 * * * *",
     "refresh_user_data": "*/30 * * * *",
-    "scan_cross_seed": "2,32 * * * *",
     "drain_task_queue": "*/5 * * * *",
     "daily_checkin": "37 8 * * *",
-    # 孤儿文件扫描：辅种站全量扫盘实测 39 秒（1669 目录 / 3.6 万文件），
-    # 每天一次足够——孤儿不会快速变化。分钟位 7 避开所有多 5 分钟的作业。
-    "scan_orphans": "7 4 * * *",
-    # 磁盘空间流转：每 2 小时一次——磁盘不会瞬间涨满，2 小时检查一次足够。
+    # 辅种维护（2026-11-01 合并 scan_cross_seed + disk_rotation + scan_orphans）：
+    # 巡查 → 磁盘流转 → 孤儿扫描，三段顺序执行。
     # 分钟位 17 避开所有多 5 分钟的作业（fetch_all_sites */10、push/refresh */30、
-    # monitor 5,15,…、drain */5）与 scan_cross_seed（2,32）。
-    "disk_rotation": "17 */2 * * *",
+    # monitor 5,15,…、drain */5）。
+    "cross_seed_maintenance": "17 */3 * * *",
 }
 
 
@@ -139,16 +135,6 @@ JOB_META: tuple[JobMeta, ...] = (
         make_func=lambda f: _job_fn(lambda: _run_refresh_user_data(f)),
     ),
     JobMeta(
-        name="scan_cross_seed",
-        title="辅种巡查",
-        description=(
-            "定时抓取 is_cross_seed 下载器 → 落库快照，"
-            "检测 tracker 未注册/数据丢失 → 自动暂停（每 30 分钟）"
-        ),
-        make_func=lambda f: _job_fn(_run_scan_cross_seed),
-        log_extra="（定时抓取 + 落库快照）",
-    ),
-    JobMeta(
         name="drain_task_queue",
         title="任务队列排空",
         description="回收崩溃残留的僵死任务 + 重试退避到期的推送任务（每 5 分钟）",
@@ -164,23 +150,14 @@ JOB_META: tuple[JobMeta, ...] = (
         make_func=lambda f: _job_fn(lambda: _run_daily_checkin(f)),
     ),
     JobMeta(
-        name="scan_orphans",
-        title="辅种孤儿文件扫描",
+        name="cross_seed_maintenance",
+        title="辅种维护",
         description=(
-            "扫描辅种下载目录，找出「磁盘有文件但任务已删」的孤儿数据（每天一次）"
+            "辅种站巡检（落快照 + 暂停异常种子）→ 磁盘超阈删种子 → 孤儿文件扫描"
+            "（每 3 小时）"
         ),
-        make_func=lambda f: _job_fn(_run_scan_orphans),
-    ),
-    JobMeta(
-        name="disk_rotation",
-        title="磁盘空间流转",
-        description=(
-            "辅种磁盘使用率超阈时，按价值低→高删种子"
-            "（独苗优先删，多副本保留），同档内先删加入更早的，"
-            "把使用率压回阈值以下"
-        ),
-        make_func=lambda f: _job_fn(_run_disk_rotation),
-        log_extra="（按价值低→高删种子，同档先删旧的，把使用率压回阈值以下）",
+        make_func=lambda f: _job_fn(_run_cross_seed_maintenance),
+        log_extra="（巡查 → 磁盘流转 → 孤儿扫描，三段顺序执行）",
     ),
 )
 
@@ -260,13 +237,6 @@ async def _run_refresh_user_data(factory: AdapterFactory) -> dict[str, object]:
     return await refresh_all_sites(factory)
 
 
-async def _run_scan_cross_seed() -> dict[str, object]:
-    """执行辅种巡查（定时抓取 + 落库快照 + 暂停异常种子）。"""
-    from app.services.cross_seed_monitor import CrossSeedMonitorService
-
-    svc = CrossSeedMonitorService()
-    return await svc.run_scan_job()
-
 async def _run_drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
     """排空任务队列（崩溃恢复 + 退避重试）。"""
     from app.services.task_drain import drain_task_queue
@@ -281,18 +251,11 @@ async def _run_daily_checkin(factory: AdapterFactory) -> dict[str, object]:
     return await refresh_all_sites(factory)
 
 
-async def _run_scan_orphans() -> dict[str, object]:
-    """执行辅种孤儿文件扫描（磁盘有、任务没了）。"""
-    from app.services.cross_seed_orphan import run_scan_orphans
+async def _run_cross_seed_maintenance() -> dict[str, object]:
+    """执行辅种维护（巡查 → 磁盘流转 → 孤儿扫描，顺序执行）。"""
+    from app.services.cross_seed_maintenance import run_cross_seed_maintenance
 
-    return await run_scan_orphans()
-
-
-async def _run_disk_rotation() -> dict[str, object]:
-    """执行磁盘空间流转（按价值低→高删种子，压回使用率阈值以下）。"""
-    from app.services.disk_rotation import run_disk_rotation
-
-    return await run_disk_rotation()
+    return await run_cross_seed_maintenance()
 
 
 def _job_fn(

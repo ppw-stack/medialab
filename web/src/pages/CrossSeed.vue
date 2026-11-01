@@ -455,10 +455,19 @@ function snapshotAgeSeconds(scannedAt: string): number | null {
   return Math.max(0, (Date.now() - ts) / 1000)
 }
 
-/** 快照是否陈旧（超过一个抓取周期 = 30 分钟）。 */
+/**
+ * 快照是否陈旧（超过一个抓取周期 = 3 小时）。
+ *
+ * 辅种维护作业 `cross_seed_maintenance` 的 cron 是每 3 小时一次
+ * （2026-11-01 合并 scan_cross_seed / disk_rotation / scan_orphans 后，
+ * 从原来的 30 分钟改成 3 小时）——阈值要跟着 cron 走，否则每次都会误报
+ * 「陈旧」。
+ */
+const SNAPSHOT_STALE_SEC = 3 * 60 * 60
+
 const isSnapshotStale = computed<boolean>(() => {
   const age = snapshotAgeSeconds(snapshot.value?.scanned_at ?? '')
-  return age !== null && age > 30 * 60
+  return age !== null && age > SNAPSHOT_STALE_SEC
 })
 
 onMounted(async () => {

@@ -151,8 +151,8 @@ test('调度作业 - 历史 modal 打开并展示结果', async ({ page }) => {
   await page.keyboard.press('Escape')
   await page.waitForTimeout(200)
 
-  // 找最后一个 .job-item (scan_cross_seed 是最末 5 个之一)
-  const row = page.locator('.job-item').filter({ hasText: 'scan_cross_seed' })
+  // 找辅种维护作业（合并后的新作业名）
+  const row = page.locator('.job-item').filter({ hasText: 'cross_seed_maintenance' })
   await expect(row).toBeVisible()
 
   // 用 getByRole 准确找「历史」按钮 (antd 渲染可能含空格, 用 name 选项)
@@ -186,7 +186,7 @@ test('调度作业 - 历史 modal 展示任务步骤', async ({ page }) => {
   await page.keyboard.press('Escape')
   await page.waitForTimeout(200)
 
-  const row = page.locator('.job-item').filter({ hasText: 'scan_cross_seed' })
+  const row = page.locator('.job-item').filter({ hasText: 'cross_seed_maintenance' })
   await row.getByRole('button', { name: /历\s*史/ }).click({ force: true })
 
   const modal = page.locator('.ant-modal-content').filter({ hasText: '运行历史' })

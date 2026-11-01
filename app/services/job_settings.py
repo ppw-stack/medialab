@@ -36,6 +36,8 @@ __all__ = [
     "load_crons",
     "load_enabled_states",
     "load_job_settings",
+    "migrate_renamed_job",
+    "prune_orphaned_settings",
     "save_cron",
     "save_enabled_state",
 ]
@@ -132,3 +134,87 @@ async def save_cron(job_name: str, cron: str) -> None:
             )
         else:
             row.cron = cron
+
+
+async def prune_orphaned_settings(known_jobs: set[str]) -> int:
+    """删掉**已下线作业**的残留行，返回删除条数。
+
+    **为什么需要**：作业合并/下线后，DB 里旧作业名的行会变成孤儿——
+    读出来没人用（``apply_overrides`` 只认已注册的作业），还占着
+    ``job_name`` 主键。用户手动改过的启停状态也会跟着丢（新作业用
+    默认值），所以**要迁移而不是直接删**——见 :func:`migrate_renamed_job`。
+
+    删除失败只记日志——启动期不该因清理失败而中断。
+    """
+    from sqlalchemy import delete
+
+    try:
+        async with session_scope() as session:
+            rows = (
+                await session.execute(select(SchedulerJobSetting))
+            ).scalars().all()
+            orphans = [r.job_name for r in rows if r.job_name not in known_jobs]
+            if not orphans:
+                return 0
+            await session.execute(
+                delete(SchedulerJobSetting).where(
+                    SchedulerJobSetting.job_name.in_(orphans)
+                )
+            )
+            logger.info("清理已下线作业的调度配置：%s", "、".join(orphans))
+            return len(orphans)
+    except Exception as exc:
+        logger.warning("清理已下线作业的调度配置失败（可忽略）：%s", exc)
+        return 0
+
+
+async def migrate_renamed_job(
+    old_name: str,
+    new_name: str,
+    known_jobs: set[str],
+) -> bool:
+    """把旧作业名的配置**迁移**到新作业名（作业合并/改名时用）。
+
+    例：``scan_cross_seed`` → ``cross_seed_maintenance``（2026-11-01 合并）。
+    用户手动改过的启停状态与 cron 跟着迁过去，不丢。
+
+    目标已存在行 → **不覆盖**（用户可能已经在新作业上改过）。
+
+    Returns:
+        是否发生了迁移。
+    """
+    from sqlalchemy import delete
+
+    try:
+        async with session_scope() as session:
+            old_row = await session.get(SchedulerJobSetting, old_name)
+            if old_row is None:
+                return False
+            if new_name in known_jobs:
+                new_row = await session.get(SchedulerJobSetting, new_name)
+                if new_row is None:
+                    # 目标没有行 → 整行迁过去（保留 enabled + cron）
+                    new_row = SchedulerJobSetting(
+                        job_name=new_name,
+                        enabled=bool(old_row.enabled),
+                        cron=old_row.cron,
+                    )
+                    session.add(new_row)
+                await session.execute(
+                    delete(SchedulerJobSetting).where(
+                        SchedulerJobSetting.job_name == old_name
+                    )
+                )
+                logger.info(
+                    "作业配置已迁移：%s → %s（enabled=%s cron=%s）",
+                    old_name,
+                    new_name,
+                    old_row.enabled,
+                    old_row.cron,
+                )
+                return True
+            # 新作业不在注册表里 → 不迁移（等它真被注册时再说）
+            return False
+    except Exception as exc:
+        logger.warning("迁移作业配置失败（可忽略）：%s", exc)
+        return False

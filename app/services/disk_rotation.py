@@ -22,16 +22,16 @@
 设计要点：
 
 - **读快照不打下载器接口**：直接读 ``cross_seed_snapshot.stats`` 字段
-  （每 30 分钟由 ``scan_cross_seed`` 作业刷新）——与「前端读快照」契约一致。
+  （每 3 小时由 ``cross_seed_maintenance`` 作业刷新）——与「前端读快照」契约一致。
   快照里已有完整 40 位 ``hashes`` 列表（删除用），无需再拉一次。
 - **删前实时校验**：删种子是 hash 精确匹配（40 位 hex 校验），
-  快照最多 30 分钟滞后，下载器找不到的 hash 计入 failed，不会误删别的种子。
+  快照最多 3 小时滞后，下载器找不到的 hash 计入 failed，不会误删别的种子。
 - **安全闸**（与 AGENTS.md 删磁盘数据契约一致）：
     1. hash 校验：40 位 hex，拒绝 all/通配
     2. CHECKING（校验中）跳过：删磁盘数据不可逆，校验期完成度判定不可靠
     3. 审计日志：逐批记 warning，含 hash 列表 + 大小
 - **失败不阻塞**：单个下载器拉取/删除失败 → 计 failed + 点名
-  （与 ``scan_cross_seed`` 同一处理）
+  （与辅种巡查同一处理）
 
 阈值与动作由运行参数控制（见 :data:`app.services.runtime_params.PARAM_SPECS`）：
 

@@ -987,7 +987,7 @@ async def test_scheduler_jobs_carry_title_and_description(
 
         # 新增的作业也不能漏（回归点）
         titles = {j["name"]: j["title"] for j in jobs}
-        for name in ("scan_orphans", "disk_rotation"):
+        for name in ("cross_seed_maintenance",):
             assert name in titles, f"{name} 未注册"
             assert titles[name].strip(), f"{name} 缺中文名"
     finally:
@@ -1178,16 +1178,19 @@ async def test_job_runs_empty(client: httpx.AsyncClient) -> None:
 
 
 async def test_disk_rotation_params_roundtrip(client: httpx.AsyncClient) -> None:
-    """disk_rotation 作业的运行参数：归属 + 默认值 + 可改 + 越界被拒.
+    """辅种维护作业的运行参数：归属 + 默认值 + 可改 + 越界被拒.
 
     钉住契约（AGENTS.md「枚举型运行参数用单选按钮组」）：
     - ``disk_rotation_threshold_pct`` 连续数值参数（50-99，默认 90）
     - ``disk_rotation_action`` 枚举参数（0=仅删任务 / 1=删任务+删数据，默认 1）
+
+    注：参数 key 仍叫 ``disk_rotation_*``（历史命名），但归属作业是
+    合并后的 ``cross_seed_maintenance``（2026-11-01）。
     """
     from app.services.runtime_params import specs_for_job
 
-    # 1) 归属 disk_rotation 作业
-    keys = [s.key for s in specs_for_job("disk_rotation")]
+    # 1) 归属 cross_seed_maintenance 作业
+    keys = [s.key for s in specs_for_job("cross_seed_maintenance")]
     assert "disk_rotation_threshold_pct" in keys
     assert "disk_rotation_action" in keys
 

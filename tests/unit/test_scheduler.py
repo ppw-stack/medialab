@@ -140,11 +140,9 @@ def test_default_cron_covers_all_registered_jobs() -> None:
         "push_free_torrents",
         "monitor_free_window",
         "refresh_user_data",
-        "scan_cross_seed",
         "drain_task_queue",
         "daily_checkin",
-        "scan_orphans",
-        "disk_rotation",
+        "cross_seed_maintenance",
     }
 
 

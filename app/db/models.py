@@ -103,7 +103,7 @@ class DownloaderInstance(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     verify_tls: Mapped[bool] = mapped_column(Boolean, default=True)
     #: 标记此下载器用于辅种监测。
-    #: 调度作业 ``scan_cross_seed``（cron ``0 */6 * * *``）扫描所有
+    #: 调度作业 ``cross_seed_maintenance``（cron ``17 */3 * * *``）扫描所有
     #: is_cross_seed=True 的实例, 检测 tracker 未注册 / 数据丢失两类异常
     #: 并自动暂停（保留数据文件, 不删除）。
     is_cross_seed: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -339,7 +339,7 @@ class SchedulerJobSetting(Base):
 class CrossSeedSnapshot(Base):
     """辅种下载器扫描快照（定时抓取结果）。
 
-    ``scan_cross_seed`` 作业（cron ``2,32 * * * *``）定时拉取
+    ``cross_seed_maintenance`` 作业（cron ``17 */3 * * *``）定时拉取
     ``is_cross_seed=True`` 的下载器全量种子，把统计结果 upsert 到本表
     ——**每个辅种下载器一行**（``downloader_id`` UNIQUE）。
 

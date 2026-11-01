@@ -56,7 +56,7 @@
 - **F1 站点拉取**：9 站适配器（mteam / hdsky / hhanclub / audiences / hdhome / hddolby / ourbits / soulvoice / springsunday）拉取免费种 + RSS 清理
 - **F2 免费种窗口**：推送 + 监测 + 中止（push_free_torrents / monitor_free_window）
 - **FR-1.6 站点用户数据契约**：单方法 `get_user_snapshot` 拉 3 业务字段 + **时魔**，刷新作业 `*/30 * * * *`。数据在**站点列表页**展示（上传/下载、做种、时魔 + 跨站汇总）
-- **辅种快照**：`scan_cross_seed` 作业（cron `2,32 * * * *`）**定时抓取 → 落库 `cross_seed_snapshot`**，前端读快照而不打下载器接口
+- **辅种快照**：`cross_seed_maintenance` 作业（cron `17 */3 * * *`）**定时抓取 → 落库 `cross_seed_snapshot`**，前端读快照而不打下载器接口（该作业还合并了磁盘空间流转与孤儿文件扫描）
 - **辅种孤儿文件统计与清理**：把辅种站的下载目录**挂载**进容器，扫出「磁盘有、下载器里已无对应任务」的孤儿文件
 - **FR-3.6 站点每日签到**：`daily_checkin` 作业（cron `37 8 * * *`）对 **4 站**自动签到（图形验证码走 AI 读码）
 
