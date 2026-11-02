@@ -223,52 +223,47 @@ async def test_分片上传有进度回调(uploader: GuangyaUploader, client: Fa
     assert progress == sorted(progress)
 
 
-async def test_分片是并发的(uploader: GuangyaUploader, client: FakeClient, tmp_path: Path):
-    """**回归测试**：分片上传必须**并发**，不能一片传完才下一片。
+async def test_分片是串行的(uploader: GuangyaUploader, client: FakeClient, tmp_path: Path):
+    """**回归测试**：分片上传必须**串行**，不能并发。
 
-    原本完全串行——每片往返 ~1.5-2 秒，1.3GB 的文件要传 265 片，
-    光鸭侧看到的是「一个请求接一个请求」，带宽跑不满
-    （实测 prod：3.31 MB/s）。并发 4 后实测快 2 倍。
+    实测 prod：光鸭 OSS **不支持同一 uploadId 的并发分片**——
+    并发 2 起就直接卡死（200s 无响应，报
+    ``The write operation timed out``）。
+
+    实测记录（100MB / 20 片）：
+      纯串行 4 轮：24.28s / 26.89s / 25.70s / 17.08s  ← 稳定
+      并发 2 一次：❌ 卡死
+      并发 4：第 1 轮 44.72s（比串行慢一倍），第 2 轮 ❌ 卡死
     """
     from app.adapters.drivers.guangya_upload import CHUNK_CONCURRENCY, CHUNK_SIZE
 
-    # 造够多的片（窗口 = CHUNK_CONCURRENCY）
-    size = CHUNK_SIZE * (CHUNK_CONCURRENCY + 2)
+    assert CHUNK_CONCURRENCY == 1, "分片并发必须关着（光鸭 OSS 不支持）"
+
+    size = CHUNK_SIZE * 5
     path = tmp_path / "big.bin"
     path.write_bytes(b"x" * size)
 
-    # 每片都带点延迟——否则线程瞬间结束，测不到「同时在飞」
-    client.part_delay = dict.fromkeys(range(1, 99), 0.05)
+    client.part_delay = dict.fromkeys(range(1, 99), 0.01)
 
     await uploader.upload_file(path, "dir-1")
 
-    assert client.max_inflight > 1, "分片没有并发（max_inflight=1）"
-    assert client.max_inflight <= CHUNK_CONCURRENCY
+    assert client.max_inflight == 1, f"分片不应并发（max_inflight={client.max_inflight}）"
 
 
-async def test_并发下合并按分片号排序(
-    uploader: GuangyaUploader, client: FakeClient, tmp_path: Path
-):
-    """**回归测试**：并发下分片**完成顺序不定**，合并时必须按分片号排。
+async def test_合并按分片号排序(uploader: GuangyaUploader, client: FakeClient, tmp_path: Path):
+    """**回归测试**：合并 XML 必须按分片号升序。
 
     OSS 的 ``CompleteMultipartUpload`` 要求 Part 按 PartNumber 升序——
     顺序错了服务端会拒绝合并（或合并出损坏文件）。
     """
-    from app.adapters.drivers.guangya_upload import CHUNK_CONCURRENCY, CHUNK_SIZE
+    from app.adapters.drivers.guangya_upload import CHUNK_SIZE
 
-    size = CHUNK_SIZE * (CHUNK_CONCURRENCY + 1)
+    size = CHUNK_SIZE * 4
     path = tmp_path / "big.bin"
     path.write_bytes(b"x" * size)
 
-    # 制造**乱序完成**：最后一片最快，第 2 片最慢
-    client.part_delay = {1: 0.05, 2: 0.04, 3: 0.03, 4: 0.02, 5: 0.01}
-
     await uploader.upload_file(path, "dir-1")
 
-    # 完成顺序确实乱了（否则这个测试没意义）
-    assert client.part_order != sorted(client.part_order), "完成顺序没乱，测试无效"
-
-    # 但合并 XML 里必须按分片号升序
     body = client.complete_body.decode("utf-8")
     numbers = [
         int(x.split("</PartNumber>")[0])
@@ -279,10 +274,10 @@ async def test_并发下合并按分片号排序(
 
 
 async def test_分片全部上传(uploader: GuangyaUploader, client: FakeClient, tmp_path: Path):
-    """并发不能丢片——每个分片都要发出去。"""
-    from app.adapters.drivers.guangya_upload import CHUNK_CONCURRENCY, CHUNK_SIZE
+    """不能丢片——每个分片都要发出去。"""
+    from app.adapters.drivers.guangya_upload import CHUNK_SIZE
 
-    size = CHUNK_SIZE * (CHUNK_CONCURRENCY * 2 + 1)
+    size = CHUNK_SIZE * 5
     path = tmp_path / "big.bin"
     path.write_bytes(b"x" * size)
 
