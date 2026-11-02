@@ -82,9 +82,6 @@ class UploadTaskOut(BaseModel):
     concurrency: int
     created_at: str
     updated_at: str
-    last_sync_at: str | None
-    last_uploaded_count: int
-    last_error: str | None
     #: 运行态（监听中？正在传什么？）
     listening: bool = False
     current: str = ""
@@ -110,9 +107,6 @@ def _to_out(row: UploadTaskView) -> UploadTaskOut:
         concurrency=row.concurrency,
         created_at=row.created_at,
         updated_at=row.updated_at,
-        last_sync_at=row.last_sync_at,
-        last_uploaded_count=row.last_uploaded_count,
-        last_error=row.last_error,
         listening=row.listening,
         current=row.current,
         total_uploaded=row.total_uploaded,

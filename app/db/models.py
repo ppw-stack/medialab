@@ -774,12 +774,12 @@ class UploadTask(Base):
     updated_at: Mapped[str] = mapped_column(
         String(32), default=_bj_now, onupdate=_bj_now
     )
-    #: 上次同步时间（北京时间字符串，NULL = 从未同步）
-    last_sync_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    #: 上次同步上传成功的文件数
-    last_uploaded_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    #: 上次错误（展示用）
-    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # 注：**没有**「上次同步时间 / 上次上传数 / 上次错误」列——
+    # 统计一律是**内存运行态**（``UploadRuntime``），重启后重跑即可，
+    # 幂等靠云端目录（同名 + 同大小 = 已同步），不依赖本地状态。
+    # 这三列曾长期「只写不读」（前端只渲染运行态），写进 DB 只是给
+    # SQLite 单写者添堵——已随 2026-11-02 的清理删除（见 bootstrap）。
 
     __table_args__ = (Index("idx_upload_tasks_driver", "driver_id"),)
 

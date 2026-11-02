@@ -21,17 +21,23 @@ from tests.unit.upload_fakes import FakeDriver, FakeUploader
 @pytest.fixture(autouse=True)
 def _clean_manager():
     """每个用例前后清空管理器状态。"""
+    from app.services.upload_tasks import clear_all
+
     watch_manager._WATCHERS.clear()
     watch_manager._WORKERS.clear()
     watch_manager._QUEUES.clear()
     watch_manager._CONTEXTS.clear()
     watch_manager._SYNC_LOCKS.clear()
+    # 运行态是**全局**的（``_RUNTIMES``）——不清会跨用例串
+    # （统计是累计值，上个用例传了几个，这个用例就带着）
+    clear_all()
     yield
     watch_manager._WATCHERS.clear()
     watch_manager._WORKERS.clear()
     watch_manager._QUEUES.clear()
     watch_manager._CONTEXTS.clear()
     watch_manager._SYNC_LOCKS.clear()
+    clear_all()
 
 
 def _ctx(driver: FakeDriver, uploader: FakeUploader, root: Path) -> SyncContext:
@@ -181,6 +187,72 @@ async def test_sync_now任务未运行报错():
     """任务没在跑 → 报错。"""
     with pytest.raises(DriverError, match="未在运行"):
         await watch_manager.sync_now(999)
+
+
+async def test_sync_now把统计写回运行态(tmp_path: Path):
+    """**回归测试**：全量同步必须把统计**同步到运行态**。
+
+    曾经只累加局部变量（``uploaded`` / ``total_bytes``），
+    ``runtime.total_uploaded`` 全程不动 → 面板上「上传 N」在跑
+    全量同步时**恒为 0**（生产实测：传了 286 个文件，面板显示 0）。
+
+    运行态是面板唯一的统计来源（DB 里的统计列已删），故必须同步。
+    """
+    from app.services.upload_tasks import get_runtime
+    from app.services.watcher import Watcher
+
+    driver = FakeDriver()
+    uploader = FakeUploader()
+    ctx = _ctx(driver, uploader, tmp_path)
+
+    (tmp_path / "a.mkv").write_bytes(b"x" * 100)
+    (tmp_path / "b.mkv").write_bytes(b"y" * 200)
+    # 云端已有同名同大小 → unchanged（不计入上传数）
+    driver.add_file("root", "c.mkv", 300)
+    (tmp_path / "c.mkv").write_bytes(b"z" * 300)
+
+    watcher = Watcher(root=tmp_path)
+    watch_manager._WATCHERS[1] = watcher
+    watch_manager._CONTEXTS[1] = ctx
+
+    runtime = get_runtime(1)
+    runtime.total_uploaded = 0
+    runtime.total_bytes = 0
+    runtime.total_failed = 0
+
+    result = await watch_manager.sync_now(1)
+
+    assert result["uploaded"] == 2
+    assert result["unchanged"] == 1
+    # 运行态必须跟着涨（面板显示的就是它）
+    assert runtime.total_uploaded == 2
+    assert runtime.total_bytes == 100 + 200
+    assert runtime.total_failed == 0
+
+
+async def test_sync_now失败计入运行态(tmp_path: Path):
+    """失败也要计入运行态的 ``total_failed``（面板据此显示失败数）。"""
+    from app.services.upload_tasks import get_runtime
+    from app.services.watcher import Watcher
+
+    driver = FakeDriver()
+    uploader = FakeUploader(fail=True)
+    ctx = _ctx(driver, uploader, tmp_path)
+
+    (tmp_path / "a.mkv").write_bytes(b"x" * 100)
+
+    watcher = Watcher(root=tmp_path)
+    watch_manager._WATCHERS[1] = watcher
+    watch_manager._CONTEXTS[1] = ctx
+
+    runtime = get_runtime(1)
+    runtime.total_failed = 0
+
+    result = await watch_manager.sync_now(1)
+
+    assert result["failed"] == 1
+    assert runtime.total_failed == 1
+    assert runtime.total_uploaded == 0
 
 
 async def test_停用会取消全量同步(tmp_path: Path):

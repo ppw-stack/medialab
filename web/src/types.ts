@@ -854,9 +854,6 @@ export interface UploadTask {
   concurrency: number
   created_at: string
   updated_at: string
-  last_sync_at: string | null
-  last_uploaded_count: number
-  last_error: string | null
   /** 运行态：监听器是否在跑 */
   listening: boolean
   /** 当前正在上传的文件 */
@@ -882,7 +879,6 @@ export interface UploadRuntime {
   task_id: number
   listening: boolean
   current: string
-  last_event_at: number
   total_uploaded: number
   total_failed: number
   total_bytes: number

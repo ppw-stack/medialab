@@ -63,9 +63,6 @@ class UploadTaskView:
     concurrency: int
     created_at: str
     updated_at: str
-    last_sync_at: str | None
-    last_uploaded_count: int
-    last_error: str | None
     #: 运行态（监听中？正在传什么？）
     listening: bool = False
     current: str = ""
@@ -92,9 +89,6 @@ def to_task_view(row: UploadTaskRow) -> UploadTaskView:
         concurrency=row.concurrency,
         created_at=row.created_at,
         updated_at=row.updated_at,
-        last_sync_at=row.last_sync_at,
-        last_uploaded_count=row.last_uploaded_count,
-        last_error=row.last_error,
         listening=runtime.listening,
         current=runtime.current,
         total_uploaded=runtime.total_uploaded,
@@ -119,8 +113,6 @@ class UploadRuntime:
     workers: list[asyncio.Task[None]] = field(default_factory=list)
     #: 正在上传的文件
     current: str = ""
-    #: 最近事件时间
-    last_event_at: int = 0
     #: 累计统计
     total_uploaded: int = 0
     total_failed: int = 0
@@ -145,7 +137,6 @@ class UploadRuntime:
             "task_id": self.task_id,
             "listening": self.listening,
             "current": self.current,
-            "last_event_at": self.last_event_at,
             "total_uploaded": self.total_uploaded,
             "total_failed": self.total_failed,
             "total_bytes": self.total_bytes,

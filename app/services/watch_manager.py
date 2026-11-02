@@ -24,7 +24,6 @@ watchfiles.awatch(目录)
 from __future__ import annotations
 
 import asyncio
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -34,7 +33,6 @@ from sqlalchemy import select
 from app.adapters.drivers.base import DriverError
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.core.timeutils import bj_now
 from app.db.models import Driver
 from app.db.models import UploadTask as UploadTaskRow
 from app.db.session import session_scope
@@ -81,13 +79,6 @@ _SYNC_LOCKS: dict[int, asyncio.Lock] = {}
 #: **必须单独记**：``sync_now`` 是独立协程（不由 worker 执行），
 #: 停监听器不会停它。停用任务时必须显式取消——否则「停用」后还在传。
 _SYNC_TASKS: dict[int, asyncio.Task[None]] = {}
-
-#: DB 状态写回节流：``task_id → (上次写的时间, 上次写的上传数)``
-_LAST_MARK: dict[int, tuple[float, int]] = {}
-
-#: 状态写回的节流参数
-_MARK_THROTTLE = 10
-_MARK_INTERVAL_SEC = 10.0
 
 
 @dataclass
@@ -446,7 +437,6 @@ async def _process_one(task_id: int, ctx: SyncContext, path: Path) -> None:
         runtime.log(
             f"✅ 已上传：{rel_path}（{outcome.size / 1024**2:.1f} MB）{note}"
         )
-        await _mark_synced(task_id, runtime.total_uploaded)
     elif outcome.status == RESULT_OVERWRITTEN:
         runtime.total_uploaded += 1
         runtime.total_bytes += outcome.size
@@ -456,7 +446,6 @@ async def _process_one(task_id: int, ctx: SyncContext, path: Path) -> None:
         runtime.log(
             f"♻️ 已覆盖：{rel_path}（{outcome.size / 1024**2:.1f} MB）{note}"
         )
-        await _mark_synced(task_id, runtime.total_uploaded)
     elif outcome.status == RESULT_UNCHANGED:
         note = "（本地删除中）" if outcome.local_deleted else (
             f"（{outcome.reason}）" if outcome.reason else ""
@@ -469,36 +458,6 @@ async def _process_one(task_id: int, ctx: SyncContext, path: Path) -> None:
         runtime.total_failed += 1
         runtime.log(f"❌ 失败：{rel_path}（{outcome.reason}）")
     runtime.current = ""
-
-
-async def _mark_synced(task_id: int, uploaded: int, *, force: bool = False) -> None:
-    """把「上次同步时间 + 上传数」写回 DB（展示用）。
-
-    **节流**：默认每 ``_MARK_THROTTLE`` 次或 ``_MARK_INTERVAL_SEC`` 秒才写一次
-    ——每个文件都写库会拖慢上传（SQLite 单写者）。
-
-    **写失败只记日志**——这是统计信息，不该让上传流程因它失败。
-    """
-    now = time.monotonic()
-    last = _LAST_MARK.get(task_id, (0.0, 0.0))
-    if not force and now - last[0] < _MARK_INTERVAL_SEC and uploaded - last[1] < _MARK_THROTTLE:
-        return
-
-    _LAST_MARK[task_id] = (now, uploaded)
-    try:
-        async with session_scope() as db:
-            row = (
-                await db.execute(
-                    select(UploadTaskRow).where(UploadTaskRow.id == task_id)
-                )
-            ).scalar_one_or_none()
-            if row is None:
-                return
-            row.last_sync_at = bj_now()
-            row.last_uploaded_count = uploaded
-            row.last_error = None
-    except Exception:
-        logger.exception("更新上传任务状态失败（不影响上传）")
 
 
 async def sync_now(task_id: int) -> dict[str, Any]:
@@ -590,6 +549,11 @@ async def _sync_now_inner(task_id: int, runtime: Any, watcher: Any) -> dict[str,
             if outcome.status == RESULT_UPLOADED:
                 uploaded += 1
                 total_bytes += outcome.size
+                # **同步累加到运行态**——否则面板的「上传 N」在跑全量
+                # 同步时恒为 0（只累加局部变量，运行态不动）。
+                # 用 ``+=``：``runtime`` 是跨多次同步的累计值。
+                runtime.total_uploaded += 1
+                runtime.total_bytes += outcome.size
                 runtime.log(
                     f"✅ [{index}] 已上传：{rel}"
                     f"（{outcome.size / 1024**2:.1f} MB）"
@@ -598,6 +562,8 @@ async def _sync_now_inner(task_id: int, runtime: Any, watcher: Any) -> dict[str,
             elif outcome.status == RESULT_OVERWRITTEN:
                 overwritten += 1
                 total_bytes += outcome.size
+                runtime.total_uploaded += 1
+                runtime.total_bytes += outcome.size
                 runtime.log(
                     f"♻️ [{index}] 已覆盖：{rel}"
                     f"（{outcome.size / 1024**2:.1f} MB）"
@@ -613,9 +579,11 @@ async def _sync_now_inner(task_id: int, runtime: Any, watcher: Any) -> dict[str,
                 runtime.log(f"⏭️ [{index}] 已存在：{rel}{note}")
             elif outcome.status == RESULT_CONFLICT:
                 conflicts += 1
+                runtime.total_failed += 1
                 runtime.log(f"⚠️ [{index}] 冲突：{rel}（{outcome.reason}）")
             elif outcome.status == RESULT_FAILED:
                 failed += 1
+                runtime.total_failed += 1
                 runtime.log(f"❌ [{index}] 失败：{rel}（{outcome.reason}）")
         runtime.current = ""
 
@@ -624,7 +592,6 @@ async def _sync_now_inner(task_id: int, runtime: Any, watcher: Any) -> dict[str,
             f"已存在 {unchanged}，失败 {failed}，冲突 {conflicts}"
             + (f"，本地已安排删除 {deleted_local}" if deleted_local else "")
         )
-        await _mark_synced(task_id, uploaded + overwritten, force=True)
         return {
             "uploaded": uploaded,
             "overwritten": overwritten,

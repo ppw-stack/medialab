@@ -89,7 +89,7 @@ ptHelper 的 `tests/unit/test_layering.py` 是**硬约束测试**，会直接判
 
 | Phase | 内容 | 结果 |
 |---|---|---|
-| 0 | 以 ptHelper 为基线建仓，引入 strm 代码 | 保留双方 git 历史（`strm-upstream` remote） |
+| 0 | 以 ptHelper 为基线建仓，引入 strm 代码 | 保留双方 git 历史（`strm-upstream` remote，2026-11-02 随旧仓库一并清理，历史已并入本仓） |
 | 1 | 后端合并：DB 模型 20 表、配置、日志、认证、main lifespan | 1521 测试通过 |
 | 2 | 补齐分层：API 层下沉到 service 层 | `test_layering.py` 全绿 |
 | 3 | 前端合并：单一 SPA，两组菜单 | `vue-tsc` + `vite build` 通过 |
@@ -128,7 +128,7 @@ ptHelper 的 `tests/unit/test_layering.py` 是**硬约束测试**，会直接判
 | `settings` | `updated_at` |
 | `dav_users` | `last_login_at` / `created_at` / `updated_at` |
 | `dav_audit_log` | `created_at` |
-| `upload_tasks` | `created_at` / `updated_at` / `last_sync_at` |
+| `upload_tasks` | `created_at` / `updated_at` |
 | `probe_results` | `probed_at` |
 
 **保留 unix 秒的列**（协议侧时刻，与 `time.time()` 直接比较）：
@@ -154,6 +154,11 @@ ptHelper 的 `tests/unit/test_layering.py` 是**硬约束测试**，会直接判
 **契约由 `tests/integration/test_db_models.py` + `tests/unit/test_timeutils.py` 固化**。
 
 ## 生产切换（可回滚）
+
+> **状态（2026-11-02）**：切换已完成并稳定运行。旧环境**已全部清理**——
+> 旧容器（`strmmanger` / `seedhelper-prod`）、旧镜像、旧 appdata 目录
+> （`/mnt/user/appdata/seedhelper` / `strmmanger`）均已删除，
+> **下面的回滚路径已不再可用**。此处保留为历史实施记录。
 
 ```bash
 # 1. 停旧容器（**不删**）

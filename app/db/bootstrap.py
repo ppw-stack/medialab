@@ -274,12 +274,18 @@ class DbBootstrap:
         - 新增 ``delete_after_upload``（同步成功后清理本地文件）
         - 删除 ``watch_subdir`` —— 去掉白名单后，监听目录改成**完整路径**
           （``watch_root``），拆成「根 + 子路径」没有意义。
+        - 删除 ``last_sync_at`` / ``last_uploaded_count`` / ``last_error``
+          —— 统计一律是**内存运行态**，这三列曾长期「只写不读」
+          （前端只渲染运行态），写进 DB 只是给 SQLite 单写者添堵。
         """
         await self._add_columns(
             "upload_tasks",
             (("delete_after_upload", "INTEGER", "0"),),
         )
         await self._drop_column("upload_tasks", "watch_subdir")
+        await self._drop_column("upload_tasks", "last_sync_at")
+        await self._drop_column("upload_tasks", "last_uploaded_count")
+        await self._drop_column("upload_tasks", "last_error")
 
     async def _drop_obsolete_columns(self) -> None:
         """删除已废弃的列（幂等）。

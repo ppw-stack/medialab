@@ -16,9 +16,9 @@
 | 架构 | `arm64` (Apple Silicon) |
 | 主机名 | 本机开发机 |
 | LAN IP | `192.168.0.92` (en0) |
-| 仓库路径 | `/Users/pw/工作/ptHelper` |
+| 仓库路径 | `/Users/pw/工作/pt/medialab` |
 | 分支 | `main` |
-| 远端 | `https://github.com/ppw-stack/ptHelper.git` |
+| 远端 | `https://github.com/ppw-stack/medialab.git` |
 
 ## 2. 工具链
 
