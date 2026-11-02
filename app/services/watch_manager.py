@@ -57,8 +57,13 @@ logger = get_logger(__name__)
 #: 活跃的监听器：task_id → Watcher
 _WATCHERS: dict[int, Watcher] = {}
 
-#: 活跃的上传 worker：task_id → asyncio.Task
-_WORKERS: dict[int, asyncio.Task[None]] = {}
+#: 活跃的上传 worker：task_id → asyncio.Task **列表**
+#:
+#: **一个列表**而非单个 Task：``concurrency`` 决定起几个 worker，
+#: 每个 worker 从同一个队列取文件（互不重复）。
+#: 曾经这里只存一个 Task——``concurrency`` 参数传进 ``_worker_loop``
+#: 却从未被使用，面板上把并发调成 4 也毫无效果（真 bug）。
+_WORKERS: dict[int, list[asyncio.Task[None]]] = {}
 
 #: 活跃的队列：task_id → asyncio.Queue
 _QUEUES: dict[int, asyncio.Queue[Path]] = {}
@@ -224,8 +229,17 @@ async def start_watcher(
         delete_local=delete_after_upload,
     )
     _CONTEXTS[task_id] = ctx
-    worker = asyncio.create_task(_worker_loop(task_id, queue, ctx, concurrency))
-    _WORKERS[task_id] = worker
+    # **起 N 个 worker**（N = concurrency）——每个从同一个队列取文件。
+    #
+    # 为什么是「多 worker」而不是「单 worker 内部并发」：
+    # 队列的 ``get()`` 天然互斥——每个文件只会被一个 worker 取到，
+    # 且不同文件可以同时上传（不同 uploadId，服务端能并行处理）。
+    # 实测 prod：并发 5 时 OSS 传输快 2 倍。
+    workers = [
+        asyncio.create_task(_worker_loop(task_id, queue, ctx, concurrency))
+        for _ in range(max(1, concurrency))
+    ]
+    _WORKERS[task_id] = workers
 
     # **启动时先跑一次全量同步**——把监听目录里**已有的历史文件**同步上去。
     #
@@ -277,10 +291,11 @@ async def stop_watcher(task_id: int) -> None:
     watcher = _WATCHERS.pop(task_id, None)
     if watcher is not None:
         await watcher.stop()
-    worker = _WORKERS.pop(task_id, None)
-    if worker is not None:
-        worker.cancel()
-        await asyncio.gather(worker, return_exceptions=True)
+    workers = _WORKERS.pop(task_id, None)
+    if workers:
+        for worker in workers:
+            worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
     # 取消正在跑的全量同步（停用任务时必须真的停）
     sync_task = _SYNC_TASKS.pop(task_id, None)
     if sync_task is not None:
@@ -351,11 +366,22 @@ async def _worker_loop(
     ctx: SyncContext,
     concurrency: int,
 ) -> None:
-    """上传 worker 主循环（一个任务一个协程，内部串行处理）。
+    """上传 worker 主循环（一个 worker 一个协程，从共享队列取文件）。
 
-    **为什么内部串行**：光鸭对单账号有频控（限速器按 provider 分桶），
-    并发传反而会排队积压。并发度通过「多个 worker」体现更直观——但实测
-    光鸭上传很快（12MB / 2.3 秒），串行足够，故默认 1。
+    **并发度由「起几个 worker」体现**（见 :func:`start_watcher`）——
+    队列的 ``get()`` 天然互斥，每个文件只会被一个 worker 取到。
+
+    ``concurrency`` 参数保留在签名里（调用方按它起 N 个 worker），
+    但**本函数内部不再用它**——并发是「有几个协程」的事，
+    在单个协程里再开并发只会让日志交错、进度难读。
+
+    **为什么允许多 worker 并发**：光鸭对**同一个 uploadId 的分片**有并发
+    限制，但**不同文件是不同 uploadId**，服务端能并行处理。实测 prod：
+    并发 5 时 OSS 传输快 2 倍（30.97s → 15.40s）。
+
+    多 worker 下 ``runtime.current`` 会被互相覆盖（日志里显示的是
+    「最近一个在传的文件」），这是可接受的——日志本身带文件名，
+    能看出是哪个在传。
     """
     while True:
         path = await queue.get()

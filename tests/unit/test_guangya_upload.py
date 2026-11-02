@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import time
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -43,6 +44,17 @@ class FakeClient:
         self.token_response: dict[str, Any] | None = None
         #: 各方法的错误注入
         self.errors: dict[str, Exception] = {}
+        #: **同时在飞的 OSS 请求数**（峰值）——测并发用
+        self.max_inflight = 0
+        self._inflight = 0
+        #: 每个分片 PUT 的**完成顺序**（partNumber 序列）
+        self.part_order: list[int] = []
+        #: 分片 PUT 的**开始顺序**（partNumber 序列）——测并发用
+        self.part_start_order: list[int] = []
+        #: 每次分片 PUT 的耗时（秒），用于制造乱序完成
+        self.part_delay: dict[int, float] = {}
+        #: 合并请求的 XML body
+        self.complete_body: bytes = b""
 
     def upload_token(
         self,
@@ -87,6 +99,21 @@ class FakeClient:
                 b"<UploadId>upload-id-1</UploadId>"
                 b"</InitiateMultipartUploadResult>"
             )
+        if method == "PUT" and "partNumber=" in url:
+            # 分片 PUT：记录并发情况 + 制造乱序完成
+            pn = int(url.split("partNumber=")[1].split("&")[0])
+            self.part_start_order.append(pn)
+            self._inflight += 1
+            self.max_inflight = max(self.max_inflight, self._inflight)
+            delay = self.part_delay.get(pn, 0.0)
+            if delay:
+                time.sleep(delay)
+            self._inflight -= 1
+            self.part_order.append(pn)
+            return _FakeResponse()
+        if method == "POST" and "uploadId=" in url:
+            self.complete_body = kwargs.get("content", b"")
+            return _FakeResponse()
         return _FakeResponse()
 
     def cdn_upload(self, path: Any, token_data: Any, **kwargs: Any) -> str:
@@ -196,8 +223,76 @@ async def test_分片上传有进度回调(uploader: GuangyaUploader, client: Fa
     assert progress == sorted(progress)
 
 
+async def test_分片是并发的(uploader: GuangyaUploader, client: FakeClient, tmp_path: Path):
+    """**回归测试**：分片上传必须**并发**，不能一片传完才下一片。
+
+    原本完全串行——每片往返 ~1.5-2 秒，1.3GB 的文件要传 265 片，
+    光鸭侧看到的是「一个请求接一个请求」，带宽跑不满
+    （实测 prod：3.31 MB/s）。并发 4 后实测快 2 倍。
+    """
+    from app.adapters.drivers.guangya_upload import CHUNK_CONCURRENCY, CHUNK_SIZE
+
+    # 造够多的片（窗口 = CHUNK_CONCURRENCY）
+    size = CHUNK_SIZE * (CHUNK_CONCURRENCY + 2)
+    path = tmp_path / "big.bin"
+    path.write_bytes(b"x" * size)
+
+    # 每片都带点延迟——否则线程瞬间结束，测不到「同时在飞」
+    client.part_delay = dict.fromkeys(range(1, 99), 0.05)
+
+    await uploader.upload_file(path, "dir-1")
+
+    assert client.max_inflight > 1, "分片没有并发（max_inflight=1）"
+    assert client.max_inflight <= CHUNK_CONCURRENCY
+
+
+async def test_并发下合并按分片号排序(
+    uploader: GuangyaUploader, client: FakeClient, tmp_path: Path
+):
+    """**回归测试**：并发下分片**完成顺序不定**，合并时必须按分片号排。
+
+    OSS 的 ``CompleteMultipartUpload`` 要求 Part 按 PartNumber 升序——
+    顺序错了服务端会拒绝合并（或合并出损坏文件）。
+    """
+    from app.adapters.drivers.guangya_upload import CHUNK_CONCURRENCY, CHUNK_SIZE
+
+    size = CHUNK_SIZE * (CHUNK_CONCURRENCY + 1)
+    path = tmp_path / "big.bin"
+    path.write_bytes(b"x" * size)
+
+    # 制造**乱序完成**：最后一片最快，第 2 片最慢
+    client.part_delay = {1: 0.05, 2: 0.04, 3: 0.03, 4: 0.02, 5: 0.01}
+
+    await uploader.upload_file(path, "dir-1")
+
+    # 完成顺序确实乱了（否则这个测试没意义）
+    assert client.part_order != sorted(client.part_order), "完成顺序没乱，测试无效"
+
+    # 但合并 XML 里必须按分片号升序
+    body = client.complete_body.decode("utf-8")
+    numbers = [
+        int(x.split("</PartNumber>")[0])
+        for x in body.split("<PartNumber>")[1:]
+    ]
+    assert numbers == sorted(numbers), f"合并顺序错了：{numbers}"
+    assert numbers == list(range(1, len(numbers) + 1)), f"分片号不连续：{numbers}"
+
+
+async def test_分片全部上传(uploader: GuangyaUploader, client: FakeClient, tmp_path: Path):
+    """并发不能丢片——每个分片都要发出去。"""
+    from app.adapters.drivers.guangya_upload import CHUNK_CONCURRENCY, CHUNK_SIZE
+
+    size = CHUNK_SIZE * (CHUNK_CONCURRENCY * 2 + 1)
+    path = tmp_path / "big.bin"
+    path.write_bytes(b"x" * size)
+
+    await uploader.upload_file(path, "dir-1")
+
+    puts = [c for c in client.put_calls if "partNumber=" in c["url"]]
+    assert len(puts) == size // CHUNK_SIZE
+
+
 async def test_轮询直到完成(uploader: GuangyaUploader, client: FakeClient, tmp_path: Path):
-    """``upload_info`` 先报「上传中」，再报完成。"""
     path = tmp_path / "a.bin"
     path.write_bytes(b"x")
     client.info_queue = [

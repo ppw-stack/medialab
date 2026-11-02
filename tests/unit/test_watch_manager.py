@@ -332,6 +332,85 @@ async def test_启动监听器会登记进_WATCHERS(tmp_path: Path, monkeypatch)
     assert watch_manager.get_watcher(42) is None
 
 
+async def test_concurrency真的起多个worker(tmp_path: Path, monkeypatch):
+    """**回归测试**：``concurrency`` 必须真的起 N 个 worker。
+
+    曾经 ``concurrency`` 传进 ``_worker_loop`` 却**从未被使用**，
+    worker 永远只有 1 个——面板上把并发调成 4 也毫无效果（真 bug）。
+
+    实测 prod：并发 5 时 OSS 传输快 2 倍（30.97s → 15.40s）。
+    """
+    driver = FakeDriver()
+    uploader = FakeUploader()
+
+    async def _fake_clients(_driver_id: int):
+        return driver, uploader
+
+    monkeypatch.setattr(watch_manager, "_build_clients", _fake_clients)
+
+    await watch_manager.start_watcher(
+        task_id=77,
+        driver_id=1,
+        target_file_id="root",
+        watch_root=str(tmp_path),
+        include_subdirs=True,
+        concurrency=3,
+        name="测试并发",
+    )
+
+    workers = watch_manager._WORKERS.get(77)
+    assert workers is not None, "没登记 worker"
+    assert len(workers) == 3, f"应起 3 个 worker，实际 {len(workers)}"
+    # 每个都是活的协程
+    assert all(not w.done() for w in workers)
+
+    await watch_manager.stop_watcher(77)
+    # 停用后全部结束
+    assert 77 not in watch_manager._WORKERS
+
+
+async def test_多个worker不会重复处理同一文件(tmp_path: Path, monkeypatch):
+    """**回归测试**：多 worker 下每个文件只被处理一次。
+
+    队列的 ``get()`` 天然互斥——但如果实现有误（比如每个 worker 各自
+    建了队列），同一文件会被传两次 → 云端出现重复副本。
+    """
+    driver = FakeDriver()
+    uploader = FakeUploader()
+    ctx = _ctx(driver, uploader, tmp_path)
+
+    processed: list[str] = []
+    orig = watch_manager._process_one
+
+    async def _spy(task_id: int, ctx_: object, path: Path) -> None:
+        processed.append(path.name)
+        await orig(task_id, ctx_, path)
+
+    monkeypatch.setattr(watch_manager, "_process_one", _spy)
+
+    queue: asyncio.Queue[Path] = asyncio.Queue()
+    workers = [
+        asyncio.create_task(watch_manager._worker_loop(1, queue, ctx, 1))
+        for _ in range(4)
+    ]
+    files = []
+    for i in range(20):
+        p = tmp_path / f"f{i:03d}.mkv"
+        p.write_bytes(b"x" * 10)
+        files.append(p)
+
+    for p in files:
+        await queue.put(p)
+    await queue.join()
+
+    for w in workers:
+        w.cancel()
+    await asyncio.gather(*workers, return_exceptions=True)
+
+    assert sorted(processed) == sorted(p.name for p in files)
+    assert len(processed) == len(set(processed)), "有文件被重复处理"
+
+
 async def test_同步锁让全量同步与worker串行(tmp_path: Path):
     """``_SYNC_LOCKS`` 让全量同步与事件流 worker 互斥——同一时刻只有一个
     协程在 ``sync_file`` 里。

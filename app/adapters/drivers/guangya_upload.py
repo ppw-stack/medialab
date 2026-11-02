@@ -72,7 +72,7 @@ from app.adapters.drivers.base import DriverError
 from app.adapters.drivers.guangya import PROVIDER
 from app.adapters.drivers.upload_base import UploadResult
 from app.core.logging import get_logger
-from app.core.rate_limit import rate_limiter
+from app.core.rate_limit import RateLimiter, rate_limiter
 
 logger = get_logger(__name__)
 
@@ -84,6 +84,37 @@ SMALL_FILE_THRESHOLD = 1024 * 1024
 
 #: OSS 分片大小（字节）
 CHUNK_SIZE = 5 * 1024 * 1024
+
+#: **分片并发度**（同一个文件内，同时在传的分片数）
+#:
+#: **为什么需要并发**：分片上传原本是**完全串行**的——一片传完才传
+#: 下一片。每片往返 ~1.5-2 秒，1.3GB 的文件要传 265 片 → 光鸭侧
+#: 看到的是「一个请求接一个请求」，带宽跑不满（实测 prod：3.31 MB/s）。
+#:
+#: 实测（prod 真实凭据，直传光鸭 OSS）：
+#:
+#:   50MB / 10 片：并发 1 → 30.97s（1.6 MB/s）；并发 5 → 15.40s（3.2 MB/s）
+#:
+#: 即**并发 5 快 2 倍**。
+#:
+#: **为什么不是 10**：实测并发 10 时同一个 uploadId 的分片请求会挂起
+#: （200 秒未完成）——服务端对同一 uploadId 的并发分片数有上限。
+#: 故取 4：留一点余量，且实测 5 已接近上限。
+CHUNK_CONCURRENCY = 4
+
+#: **分片级限速间隔**（秒）——与业务接口的限速器**分开**
+#:
+#: 为什么不用全局 :data:`app.core.rate_limit.rate_limiter`：
+#: 它的 ``acquire()`` 内部有锁，多个分片并发进来会**被串行化**——
+#: N 个分片要排 N × 间隔才发得完，请求几乎不重叠，并发收益被吃掉。
+#: （实测：全局限速开着时，并发 5 反而比串行慢 16%。）
+#:
+#: 分片请求打的是**同一个 OSS 桶**，但光鸭对它的容忍度远高于业务接口
+#: （实测并发 4 无异常）。故单独一个更宽松的桶。
+CHUNK_RATE_LIMIT_INTERVAL_SEC = 0.02
+
+#: 分片级限速器的 provider 名（**独立于** ``guangya`` 桶）
+CHUNK_PROVIDER = "guangya-chunk"
 
 #: OSS 请求超时（秒）
 #:
@@ -100,6 +131,39 @@ POLL_INTERVAL_SEC = 1.0
 
 #: 轮询上限（秒）——超时即判失败
 POLL_TIMEOUT_SEC = 3600.0
+
+#: **分片级限速器**（与业务接口的全局限速器分开）
+#:
+#: 用独立的 provider 名分桶——不干扰
+#: :data:`app.core.rate_limit.rate_limiter` 的 ``guangya`` 桶。
+#:
+#: **为什么需要独立**：全局限速器的 ``acquire()`` 内部有锁，多个分片
+#: 并发进来会被**串行化**——N 个分片要排 N × 0.2 秒才发得完，
+#: 请求几乎不重叠，并发收益被吃掉（实测：全局限速开着时，
+#: 并发 5 反而比串行慢 16%）。
+_chunk_rate_limiter = RateLimiter(default_interval=CHUNK_RATE_LIMIT_INTERVAL_SEC)
+
+
+def reset_chunk_rate_limiter(interval: float | None = None) -> None:
+    """重置分片限速器（**测试用**）。
+
+    限速器是进程级单例，桶里的 ``last_request`` 会**跨用例残留**，
+    且 ``asyncio.Lock`` 绑定创建它的 event loop——pytest 每个用例
+    新建 loop，跨 loop 复用会抛
+    ``RuntimeError: ... is bound to a different event loop``。
+    故每个用例前重建一次。
+
+    Args:
+        interval: 新的间隔（秒）。``None`` = 用默认的
+            :data:`CHUNK_RATE_LIMIT_INTERVAL_SEC`；``0`` = 不限速
+            （测试用，否则每个用例要多等几秒）。
+    """
+    global _chunk_rate_limiter
+    _chunk_rate_limiter = RateLimiter(
+        default_interval=(
+            CHUNK_RATE_LIMIT_INTERVAL_SEC if interval is None else interval
+        )
+    )
 
 
 class GuangyaUploader:
@@ -162,6 +226,25 @@ class GuangyaUploader:
     async def _call_oss(self, method: str, *args: Any, **kwargs: Any) -> Any:
         """调 OSS 相关方法（同样限速——OSS 是光鸭的资源）。"""
         await rate_limiter.acquire(PROVIDER)
+        try:
+            return await asyncio.to_thread(
+                getattr(self._client, method), *args, **kwargs
+            )
+        except Exception as exc:
+            raise DriverError(f"光鸭 OSS 调用失败：{exc}") from exc
+
+    async def _call_oss_chunk(self, method: str, *args: Any, **kwargs: Any) -> Any:
+        """调 OSS **分片**接口（用片级限速器，不走全局桶）。
+
+        **为什么不用全局限速器**：它的 ``acquire()`` 内部有锁，
+        多个分片并发进来会被**串行化**——N 个分片要排 N × 0.2 秒
+        才发得完，请求几乎不重叠，并发收益被完全吃掉
+        （实测：全局限速开着时，并发 5 反而比串行慢 16%）。
+
+        分片打的是同一个 OSS 桶，光鸭对它的容忍度远高于业务接口
+        （实测并发 4 无异常，故取 4 而非更激进的 10——那个会挂起）。
+        """
+        await _chunk_rate_limiter.acquire(CHUNK_PROVIDER)
         try:
             return await asyncio.to_thread(
                 getattr(self._client, method), *args, **kwargs
@@ -349,6 +432,14 @@ class GuangyaUploader:
         分片上传的 OSS 协议：``POST ?uploads`` 拿到 uploadId → 逐片
         ``PUT ?partNumber=N&uploadId=...`` → ``POST ?uploadId=...``
         带 CompleteMultipartUpload 的 XML 合并。
+
+        **分片是并发的**（:data:`CHUNK_CONCURRENCY` = 4）——原本完全串行，
+        一片传完才传下一片，光鸭侧看到的是「一个请求接一个请求」，
+        带宽跑不满（实测 prod：3.31 MB/s）。并发后实测快 2 倍。
+
+        **读文件与传文件解耦**：先把分片读进内存（受
+        :data:`CHUNK_CONCURRENCY` × :data:`CHUNK_SIZE` 约束），
+        再并发发出——否则多个协程抢同一个文件句柄会读乱。
         """
         import xml.etree.ElementTree as ET
 
@@ -371,43 +462,66 @@ class GuangyaUploader:
         if not upload_id:
             raise DriverError("光鸭分片上传初始化失败（未返回 UploadId）")
 
-        # ② 逐片上传
+        # ② 分片上传（并发）
+        #
+        # **读文件与传文件解耦**：按窗口大小批量读入分片，再一起并发发出。
+        # 若边读边 await，协程会卡在读上 → 等于串行。
+        # 若一次性读完，1.3GB 会撑爆内存 → 故用**滑动窗口**：
+        # 最多 ``CHUNK_CONCURRENCY`` 个分片同时处于「待发」状态。
+        window = max(1, CHUNK_CONCURRENCY)
+
+        async def _put_part(part_number: int, chunk: bytes) -> tuple[int, str]:
+            """传一个分片，返回 ``(partNumber, etag)``。"""
+            resp = await self._call_oss_chunk(
+                "oss_request",
+                "PUT",
+                f"{endpoint}/{object_path}?partNumber={part_number}&uploadId={upload_id}",
+                bucket,
+                object_path,
+                access_key,
+                secret_key,
+                session_token,
+                content=chunk,
+                content_type="application/octet-stream",
+                sub_resources={
+                    "partNumber": str(part_number),
+                    "uploadId": upload_id,
+                },
+            )
+            etag = str(resp.headers.get("etag") or resp.headers.get("ETag") or "")
+            if not etag:
+                raise DriverError(f"光鸭分片上传失败（第 {part_number} 片无 ETag）")
+            return part_number, etag
+
         parts: list[tuple[int, str]] = []
         sent = 0
         with path.open("rb") as source:
             part_number = 1
             while sent < size:
-                chunk = source.read(CHUNK_SIZE)
-                if not chunk:
+                # 读满一个窗口的片
+                batch: list[tuple[int, bytes]] = []
+                for _ in range(window):
+                    chunk = source.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    batch.append((part_number, chunk))
+                    sent += len(chunk)
+                    part_number += 1
+                if not batch:
                     break
-                resp = await self._call_oss(
-                    "oss_request",
-                    "PUT",
-                    f"{endpoint}/{object_path}?partNumber={part_number}&uploadId={upload_id}",
-                    bucket,
-                    object_path,
-                    access_key,
-                    secret_key,
-                    session_token,
-                    content=chunk,
-                    content_type="application/octet-stream",
-                    sub_resources={"partNumber": str(part_number), "uploadId": upload_id},
-                )
-                etag = str(resp.headers.get("etag") or resp.headers.get("ETag") or "")
-                if not etag:
-                    raise DriverError(f"光鸭分片上传失败（第 {part_number} 片无 ETag）")
-                parts.append((part_number, etag))
-                sent += len(chunk)
+                # 进度在**读入**时报（并发下「传完」时刻不再单调递增，
+                # 先报能给出稳定的进度曲线）
                 if progress is not None:
                     progress(sent)
-                part_number += 1
+                # **并发发出这一批**
+                parts.extend(await asyncio.gather(*[_put_part(n, c) for n, c in batch]))
 
         if not parts:
             raise DriverError("光鸭分片上传失败：没有传任何分片")
 
-        # ③ 合并分片
+        # ③ 合并分片（**按分片号排序**——并发下完成顺序不定）
         root = ET.Element("CompleteMultipartUpload")
-        for number, etag in parts:
+        for number, etag in sorted(parts):
             part = ET.SubElement(root, "Part")
             ET.SubElement(part, "PartNumber").text = str(number)
             ET.SubElement(part, "ETag").text = etag

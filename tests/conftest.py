@@ -176,6 +176,25 @@ def no_rate_limit() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def reset_chunk_rate_limiter() -> Iterator[None]:
+    """每个用例前重建**分片级限速器**（autouse）。
+
+    光鸭分片上传用了一个独立的限速器实例（见
+    :data:`app.adapters.drivers.guangya_upload`）——它**不**受
+    ``no_rate_limit`` 影响（那个只改全局实例的默认间隔）。
+
+    重建而非清空的原因：限速器里的 ``asyncio.Lock`` 绑定创建它的
+    event loop，而 pytest 每个异步用例新建 loop，跨 loop 复用会抛
+    ``RuntimeError: ... is bound to a different event loop``。
+    """
+    from app.adapters.drivers.guangya_upload import reset_chunk_rate_limiter
+
+    # 间隔设 0（不限速）——否则每个用例要多等几秒
+    reset_chunk_rate_limiter(0.0)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def reset_dav_rate_limiter() -> Iterator[None]:
     """每个用例前清空 WebDAV 限流器的桶（autouse）。
 
