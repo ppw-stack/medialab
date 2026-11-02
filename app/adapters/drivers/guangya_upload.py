@@ -72,7 +72,7 @@ from app.adapters.drivers.base import DriverError
 from app.adapters.drivers.guangya import PROVIDER
 from app.adapters.drivers.upload_base import UploadResult
 from app.core.logging import get_logger
-from app.core.rate_limit import RateLimiter, rate_limiter
+from app.core.rate_limit import rate_limiter
 
 logger = get_logger(__name__)
 
@@ -87,35 +87,28 @@ CHUNK_SIZE = 5 * 1024 * 1024
 
 #: **分片并发度**（同一个文件内，同时在传的分片数）
 #:
-#: **必须是 1**——实测光鸭 OSS **不支持同一 uploadId 的并发分片**，
-#: 并发会直接卡死（prod 实测：并发 2 起就挂，200s 超时无响应）。
+#: **必须是 1**——实测光鸭 OSS **不支持同一 uploadId 的并发分片**。
 #:
-#: 实测记录（prod 真实凭据，直传光鸭 OSS，100MB / 20 片）：
+#: 实测记录（prod 真实凭据，直传光鸭 OSS）：
 #:
-#:   纯串行 4 轮：24.28s / 26.89s / 25.70s / 17.08s   ← 稳定
-#:   并发 2 一次：❌ 直接卡死
+#:   纯串行 4 轮（100MB/20片）：24.28s / 26.89s / 25.70s / 17.08s ← 稳定
+#:   并发 2 一次：❌ 直接卡死（200s 无响应）
 #:   并发 4：第 1 轮 44.72s（**比串行慢一倍**），第 2 轮 ❌ 卡死
 #:
 #: 曾经的「并发 5 快 2 倍」是**假象**——那次只测 50MB / 10 片，
-#: 总时长太短，卡死还没显现。片数一多（≥20 片）就暴露。
+#: 总时长太短，卡死还没显现；片数一多（≥20 片）就暴露。
 #:
-#: **真正的提速靠文件级并发**（不同文件 = 不同 uploadId，服务端能并行）
-#: ——见 :mod:`app.services.watch_manager` 的 ``concurrency``。
+#: **文件级并发也不行**（不同 uploadId 并发）：60MB x4 并发 4 报
+#: ``Server disconnected without sending a response``；30MB x2 并发 2
+#: 虽能跑完，但总吞吐 2.40 MB/s **低于**串行的 3.31 MB/s。
+#: 光鸭侧存在账号级带宽/连接数限制，并发换不来吞吐。
+#:
+#: 唯一支持并发的是**小文件单 PUT**（<1MB，不分片）——但那些文件
+#: 本来就快，不是瓶颈。
+#:
+#: **结论：光鸭上传只能串行。** 要提速得换思路（见
+#: :mod:`app.services.watch_manager` 的注释）。
 CHUNK_CONCURRENCY = 1
-
-#: **分片级限速间隔**（秒）——与业务接口的限速器**分开**
-#:
-#: 为什么不用全局 :data:`app.core.rate_limit.rate_limiter`：
-#: 它的 ``acquire()`` 内部有锁，多个分片并发进来会**被串行化**——
-#: N 个分片要排 N × 间隔才发得完，请求几乎不重叠，并发收益被吃掉。
-#: （实测：全局限速开着时，并发 5 反而比串行慢 16%。）
-#:
-#: 分片请求打的是**同一个 OSS 桶**，但光鸭对它的容忍度远高于业务接口
-#: （实测并发 4 无异常）。故单独一个更宽松的桶。
-CHUNK_RATE_LIMIT_INTERVAL_SEC = 0.02
-
-#: 分片级限速器的 provider 名（**独立于** ``guangya`` 桶）
-CHUNK_PROVIDER = "guangya-chunk"
 
 #: OSS 请求超时（秒）
 #:
@@ -132,39 +125,6 @@ POLL_INTERVAL_SEC = 1.0
 
 #: 轮询上限（秒）——超时即判失败
 POLL_TIMEOUT_SEC = 3600.0
-
-#: **分片级限速器**（与业务接口的全局限速器分开）
-#:
-#: 用独立的 provider 名分桶——不干扰
-#: :data:`app.core.rate_limit.rate_limiter` 的 ``guangya`` 桶。
-#:
-#: **为什么需要独立**：全局限速器的 ``acquire()`` 内部有锁，多个分片
-#: 并发进来会被**串行化**——N 个分片要排 N × 0.2 秒才发得完，
-#: 请求几乎不重叠，并发收益被吃掉（实测：全局限速开着时，
-#: 并发 5 反而比串行慢 16%）。
-_chunk_rate_limiter = RateLimiter(default_interval=CHUNK_RATE_LIMIT_INTERVAL_SEC)
-
-
-def reset_chunk_rate_limiter(interval: float | None = None) -> None:
-    """重置分片限速器（**测试用**）。
-
-    限速器是进程级单例，桶里的 ``last_request`` 会**跨用例残留**，
-    且 ``asyncio.Lock`` 绑定创建它的 event loop——pytest 每个用例
-    新建 loop，跨 loop 复用会抛
-    ``RuntimeError: ... is bound to a different event loop``。
-    故每个用例前重建一次。
-
-    Args:
-        interval: 新的间隔（秒）。``None`` = 用默认的
-            :data:`CHUNK_RATE_LIMIT_INTERVAL_SEC`；``0`` = 不限速
-            （测试用，否则每个用例要多等几秒）。
-    """
-    global _chunk_rate_limiter
-    _chunk_rate_limiter = RateLimiter(
-        default_interval=(
-            CHUNK_RATE_LIMIT_INTERVAL_SEC if interval is None else interval
-        )
-    )
 
 
 class GuangyaUploader:
@@ -227,25 +187,6 @@ class GuangyaUploader:
     async def _call_oss(self, method: str, *args: Any, **kwargs: Any) -> Any:
         """调 OSS 相关方法（同样限速——OSS 是光鸭的资源）。"""
         await rate_limiter.acquire(PROVIDER)
-        try:
-            return await asyncio.to_thread(
-                getattr(self._client, method), *args, **kwargs
-            )
-        except Exception as exc:
-            raise DriverError(f"光鸭 OSS 调用失败：{exc}") from exc
-
-    async def _call_oss_chunk(self, method: str, *args: Any, **kwargs: Any) -> Any:
-        """调 OSS **分片**接口（用片级限速器，不走全局桶）。
-
-        **为什么不用全局限速器**：它的 ``acquire()`` 内部有锁，
-        多个分片并发进来会被**串行化**——N 个分片要排 N × 0.2 秒
-        才发得完，请求几乎不重叠，并发收益被完全吃掉
-        （实测：全局限速开着时，并发 5 反而比串行慢 16%）。
-
-        分片打的是同一个 OSS 桶，光鸭对它的容忍度远高于业务接口
-        （实测并发 4 无异常，故取 4 而非更激进的 10——那个会挂起）。
-        """
-        await _chunk_rate_limiter.acquire(CHUNK_PROVIDER)
         try:
             return await asyncio.to_thread(
                 getattr(self._client, method), *args, **kwargs
@@ -477,7 +418,7 @@ class GuangyaUploader:
 
         async def _put_part(part_number: int, chunk: bytes) -> tuple[int, str]:
             """传一个分片，返回 ``(partNumber, etag)``。"""
-            resp = await self._call_oss_chunk(
+            resp = await self._call_oss(
                 "oss_request",
                 "PUT",
                 f"{endpoint}/{object_path}?partNumber={part_number}&uploadId={upload_id}",
