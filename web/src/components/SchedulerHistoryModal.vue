@@ -167,13 +167,28 @@ function shortTime(s: string): string {
   return s.length >= 19 ? s.substring(5, 19) : s
 }
 
+/**
+ * 历史列表的列宽。
+ *
+ * **必须给够宽度**——td 的 padding 左右各 16px（可用宽 = 列宽 − 32），
+ * 放不下就会**单词中间断行**（"manual" → "ma" / "nual"），把行高从
+ * 49px 撑到 69px，看起来像半个词被撕开。
+ *
+ * 各列的最小可用宽（= 文本实测宽 + 32）：
+ *   开始时间 "11-03 19:52:52" → 67 + 32 = 99
+ *   触发     "manual"        → 33 + 32 = 65
+ *   耗时     "1m33s"         → 30 + 32 = 62
+ *   状态     "OK"            → 14 + 32 = 46
+ *   步骤     （小圆点）      → 47 + 32 = 79
+ *   错误     "错误"（表头）  → 24 + 32 = 56
+ */
 const columns = [
-  { title: '开始时间', dataIndex: 'started_at', key: 'started_at', width: 130 },
-  { title: '触发', dataIndex: 'trigger', key: 'trigger', width: 60 },
-  { title: '耗时', dataIndex: 'duration_ms', key: 'duration_ms', width: 80 },
-  { title: '状态', dataIndex: 'ok', key: 'ok', width: 70 },
-  { title: '步骤', key: 'steps', width: 80 },
-  { title: '错误', dataIndex: 'error', key: 'error', ellipsis: true },
+  { title: '开始时间', dataIndex: 'started_at', key: 'started_at', width: 150 },
+  { title: '触发', dataIndex: 'trigger', key: 'trigger', width: 72 },
+  { title: '耗时', dataIndex: 'duration_ms', key: 'duration_ms', width: 70 },
+  { title: '状态', dataIndex: 'ok', key: 'ok', width: 60 },
+  { title: '步骤', key: 'steps', width: 70 },
+  { title: '错误', dataIndex: 'error', key: 'error', width: 60, ellipsis: true },
 ]
 
 /** Antd Table custom-row: 给 <tr> 绑 click 事件（比 @rowClick 可靠）。 */
@@ -335,6 +350,29 @@ function customRow(record: RunItem) {
 .history-list {
   overflow: auto;
   min-width: 0;
+}
+
+/*
+  表格布局：**必须 fixed**。
+  Ant 默认 table-layout:auto —— 列宽只是「建议值」，浏览器按内容重新分配，
+  列宽设了也不生效（实测设 60px 的「触发」列实际拿到 60px，但内容仍
+  决定最终分配）。fixed 才能让上面的列宽严格生效。
+*/
+.history-list :deep(.ant-table table) {
+  table-layout: fixed !important;
+}
+
+/*
+  单元格内容**不换行**。
+  「触发」列的值是 "manual"（6 个字母），窄列里会被**单词中间断开**
+  （"ma" / "nual"），行高因此从 49px 撑到 69px——看起来像半个词被撕开。
+
+  注意：**不是**给 span 加 .nowrap 就够了——span 是 inline 元素，
+  父级 td 的可用宽不足时它照样溢出/断开。得约束 td 本身。
+  「错误」列例外：长错误文本靠 ellipsis 单行截断（tooltip 看全文）。
+*/
+.history-list :deep(.ant-table-tbody > tr > td) {
+  white-space: nowrap;
 }
 
 .history-list :deep(.row-selected) {

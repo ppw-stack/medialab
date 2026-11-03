@@ -115,6 +115,22 @@
   - 7 个作业全填：`fetch_all_sites`（逐站）/ `push_free_torrents`（逐种 + 逐档站名）/ `monitor_free_window`（逐 hash 动作）/ `refresh_user_data`（逐站 + 时魔值）/ `drain_task_queue`（逐 task）/ `daily_checkin`（逐站状态）/ `cross_seed_maintenance`（逐下载器）
   - 顺手干掉硬截断：`user_data.py` / `checkin.py` 的 `[:200]`（完整原因进明细，summary 只给一句人话）
   - 契约由 `tests/unit/test_scheduler.py` + 各作业的 integration 测试固化
+  - **站点进度是「百分数」，不是 0~1 的小数**（2026-11-03 修正）：
+    `hourly_bonus_progress` 存的就是 `16.45` / `110.4` 这样的**百分数**
+    （契约见 `HourlyBonus.progress`：`>=100` 表示封顶；解析侧
+    `parse_progress_percent` 直接返回 `alt="NN%"` 的数值）。**展示时不得再乘 100**
+    ——曾在 `push_free.py` 的逐站明细里多乘了一次，页面显示「进度 1645%」
+    「进度 11040%」。前端 `format.ts` 的 `站点进度 ${...toFixed(1)}%` 是对的
+- **作业历史弹框的表格布局**（2026-11-03 修正，`SchedulerHistoryModal.vue`）：
+  - **必须 `table-layout: fixed`**——Ant 默认 `auto`，列宽只是「建议值」，
+    浏览器按内容重新分配，**列宽设了也不生效**
+  - **必须给够列宽**：td 的 padding 左右各 16px（可用宽 = 列宽 − 32），
+    放不下就**单词中间断行**——「触发」列的 "manual" 曾被断成 "ma" / "nual"，
+    行高从 49px 撑到 69px，看起来像半个词被撕开
+  - **约束 td 本身而非 span**：span 是 inline 元素，父级可用宽不足时照样溢出
+  - 「错误」列靠 `ellipsis` 单行截断（tooltip 看全文）
+  - 契约由 `web/tests/scheduler-config.spec.ts` 固化（表头不截断 / 单元格不换行 /
+    行高 ≤ 55px）
 - **作业执行日志**（2026-11-03 加入，`app/core/job_log.py`）：
   - `job_runs.result_json.logs` = 作业执行期间的 Python 日志（结构化 `{ts, level, logger, message}`），**不加列**（免 DB 迁移）
   - 与逐项明细**互补**：明细回答「**是哪些**」，日志回答「**什么时候 / 多慢**」

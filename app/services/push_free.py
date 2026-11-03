@@ -527,7 +527,11 @@ class PushFreeService:
                     None,
                     f"{label}"
                     + (
-                        f"，进度 {float(progress) * 100:.0f}%"
+                        # ``progress`` **就是百分数**（契约见 HourlyBonus.progress：
+                        # ``>=100`` 表示封顶；解析侧 parse_progress_percent 直接
+                        # 返回 ``alt="NN%"`` 的数值）。曾在这里多乘 100 → 显示
+                        # 「进度 1645%」这种离谱值。**不要**再乘。
+                        f"，进度 {float(progress):.0f}%"
                         if progress is not None
                         else ""
                     ),

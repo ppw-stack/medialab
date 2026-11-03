@@ -540,3 +540,36 @@ async def test_bucket_distribution_is_reported_in_steps(db: None) -> None:
     assert "未封顶 1 站" in detail
     assert "无信号 1 站" in detail
     assert "已封顶 1 站" in detail
+
+
+async def test_bucket_items_show_progress_as_percent(db: None) -> None:
+    """逐站明细里的进度是**百分数**（不是 0~1 的小数）。
+
+    回归（2026-11-03）：明细里把 ``progress`` 又乘了 100 →
+    页面显示「进度 1645%」「进度 11040%」这种离谱值。
+
+    ``hourly_bonus_progress`` 存的就是百分数（契约见
+    :class:`HourlyBonus.progress`：``>=100`` 表示封顶；解析侧
+    ``parse_progress_percent`` 直接返回 ``alt="NN%"`` 的数值），
+    展示时**不得**再乘 100。
+    """
+    await _add_downloader()
+    await _add_site_with_bonus("s_open", capped=False, progress=16.45)
+    await _add_site_with_bonus("s_none", capped=None)
+    await _add_site_with_bonus("s_capped", capped=True, progress=110.4)
+
+    result = await _service().run()
+
+    bucket_step = next(s for s in result.steps if s.name == "按时魔封顶排序")
+    assert bucket_step.items is not None
+    by_name = {i.name: i.detail or "" for i in bucket_step.items}
+
+    # 16.45% → 「进度 16%」（不是 1645%）
+    assert "进度 16%" in by_name["s_open"], by_name["s_open"]
+    assert "1645" not in by_name["s_open"]
+    # 封顶站 110.4% → 「进度 110%」（不是 11040%）
+    assert "进度 110%" in by_name["s_capped"], by_name["s_capped"]
+    assert "11040" not in by_name["s_capped"]
+    # 无信号站没有进度字段
+    assert "进度" not in by_name["s_none"]
+

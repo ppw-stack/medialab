@@ -348,8 +348,99 @@ test('调度作业 - 步骤明细默认折叠且可展开', async ({ page }) => 
   await modal.locator('.ant-modal-close').click()
 })
 
-test('调度作业 - 每日签到 (daily_checkin) 出现在作业列表', async ({ page }) => {
+test('调度作业 - 历史列表单元格不换行、表头不截断', async ({ page }) => {
   await login(page)
+  await page.goto('/settings')
+  await page.waitForLoadState('networkidle')
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(200)
+
+  const row = page.locator('.job-item').filter({ hasText: 'push_free_torrents' })
+  await expect(row).toBeVisible()
+  await row.getByRole('button', { name: /历\s*史/ }).click({ force: true })
+
+  const modal = page.locator('.ant-modal-content').filter({ hasText: '运行历史' })
+  await expect(modal).toBeVisible()
+  await page.waitForTimeout(1500)
+
+  const tableRows = modal.locator('.ant-table-tbody > tr.ant-table-row')
+  expect(await tableRows.count()).toBeGreaterThan(0)
+
+  // ---- ① 表头文字不截断 ----
+  //
+  // 回归（2026-11-03）：「错误」列表头被截成「错..」——列宽不足时
+  // Ant 的 ellipsis 会把表头文字也截掉。
+  const clippedHeads = await page.evaluate(() => {
+    const out: string[] = []
+    document.querySelectorAll('.history-list .ant-table-thead th').forEach((th) => {
+      const inner = th.querySelector('.ant-table-column-title') ?? th
+      if (inner.scrollWidth > inner.clientWidth + 1) {
+        out.push(th.innerText.trim().replace(/\s+/g, ''))
+      }
+    })
+    return out
+  })
+  console.log(`  ✓ 被截断的表头: ${clippedHeads.length ? clippedHeads.join(', ') : '无'}`)
+  expect(clippedHeads).toEqual([])
+
+  // ---- ② 单元格内容不换行（行高不因内容变高） ----
+  //
+  // 回归（2026-11-03）：「触发」列的 "manual" 在窄列里被**单词中间断开**
+  // （"ma" / "nual"），行高从 49px 撑到 69px。
+  //
+  // 判据用**实际渲染的行数**（scrollHeight / 行高），不是绝对像素高——
+  // 「触发」列是裸文本（无 span 包裹），firstElementChild 会拿到 td 本身，
+  // 它的 height 等于整行高度，按绝对值判会误报。
+  const lineIssues = await page.evaluate(() => {
+    const out: string[] = []
+    document.querySelectorAll('.history-list .ant-table-tbody tr').forEach((tr) => {
+      const rowH = tr.getBoundingClientRect().height
+      tr.querySelectorAll('td').forEach((td) => {
+        const inner = td.firstElementChild
+        // 裸文本单元格（无子元素）——用 td 自身的高度对比行高
+        const el = inner ?? td
+        const h = el.getBoundingClientRect().height
+        // 行高明显超过「单行 + 上下 padding」→ 说明内容换行了
+        // （单行约 19px + padding 24px ≈ 43px；换行后 ≥ 62px）
+        if (h > 55) {
+          out.push(td.innerText.trim().slice(0, 16) + `(${Math.round(h)}px/行高${Math.round(rowH)}px)`)
+        }
+      })
+    })
+    return out
+  })
+  console.log(`  ✓ 换行的单元格: ${lineIssues.length ? lineIssues.join(', ') : '无'}`)
+  expect(lineIssues).toEqual([])
+
+  // 行高本身也要收敛（之前被撑到 69px）
+  const rowHeights = await page.evaluate(() =>
+    [...document.querySelectorAll('.history-list .ant-table-tbody tr')].map(
+      (tr) => Math.round(tr.getBoundingClientRect().height),
+    ),
+  )
+  const maxRowH = Math.max(...rowHeights)
+  console.log(`  ✓ 行高: ${[...new Set(rowHeights)].join(', ')}`)
+  expect(maxRowH).toBeLessThanOrEqual(55)
+
+  // ---- ③ 「触发」列的值完整显示（不被拆成两段） ----
+  const triggers = await page.evaluate(() =>
+    [...document.querySelectorAll('.history-list .ant-table-tbody tr')].map((tr) => {
+      const td = tr.querySelectorAll('td')[1]
+      return td ? td.innerText.trim() : ''
+    }),
+  )
+  for (const t of triggers) {
+    if (t) {
+      // 合法值只有 "cron" / "manual"——出现换行残留（"ma\nnual"）即失败
+      expect(['cron', 'manual']).toContain(t.replace(/\s+/g, ''))
+    }
+  }
+  console.log(`  ✓ 触发列值: ${[...new Set(triggers)].join(', ')}`)
+
+  await modal.locator('.ant-modal-close').click()
+})
+
+test('调度作业 - 每日签到 (daily_checkin) 出现在作业列表', async ({ page }) => {  await login(page)
   await page.goto('/settings')
   await page.waitForLoadState('networkidle')
 
