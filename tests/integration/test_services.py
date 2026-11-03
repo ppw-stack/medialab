@@ -1006,6 +1006,112 @@ async def test_job_run_bad_json_is_none(db: None) -> None:
     assert page.items[0].result is None
 
 
+# ------------------------------------------- 列表剥离大字段 / 详情保留全量
+
+#: 含日志 + 大字段的 result_json（模拟 cross_seed_maintenance 的返回）
+_HEAVY_RESULT = {
+    "summary": "巡查完成",
+    "steps": [{"name": "辅种巡查", "status": "ok", "count": 1, "detail": "1 站"}],
+    "logs": [
+        {"ts": "2026-01-01 00:00:01", "level": "INFO",
+         "logger": "app.services.cross_seed_monitor", "message": "扫完了"},
+    ],
+    "cross_seed": {
+        "results": [
+            {
+                "downloader_name": "qb",
+                "total_torrents": 3000,
+                # 40 位 hash 列表——辅种站快照能到 590KB
+                "stats": [{"name": "A", "size_gb": 1.0, "count": 3,
+                           "sample_hash": "aaa", "hashes": ["a" * 40] * 3}],
+                "anomalies": [{"hash": "b" * 40, "anomaly_type": "no_data_found"}],
+            }
+        ],
+    },
+    "disk_rotation": {"results": [{"downloader_name": "qb", "deleted_count": 5}]},
+}
+
+
+async def _add_heavy_job_run() -> int:
+    """写一条含日志 + 大字段的作业历史，返回 id。"""
+    import json
+
+    from app.db.models import JobRun
+
+    async with session_scope() as session:
+        run = JobRun(
+            job_name="cross_seed_maintenance",
+            trigger="cron",
+            started_at="2026-01-01 00:00:00",
+            ok=True,
+            result_json=json.dumps(_HEAVY_RESULT, ensure_ascii=False),
+        )
+        session.add(run)
+        await session.flush()
+        await session.commit()
+        return run.id
+
+
+async def test_列表剥离日志与大字段(db: None) -> None:
+    """列表端点**不返回**日志与大字段（否则 100 条就是 MB 级）。"""
+    run_id = await _add_heavy_job_run()
+
+    page = await job_run_service.list_job_runs()
+    result = page.items[0].result
+    assert isinstance(result, dict)
+    # 日志被剥离
+    assert "logs" not in result
+    # summary / steps 保留（列表的圆点预览要用）
+    assert result["summary"] == "巡查完成"
+    assert result["steps"]
+    # 大字段被剥离
+    assert "stats" not in result["cross_seed"]["results"][0]
+    assert "anomalies" not in result["cross_seed"]["results"][0]
+    assert "results" not in result["disk_rotation"]
+
+    # 详情端点返回**完整**数据
+    detail = await job_run_service.get_job_run(run_id)
+    d = detail.result
+    assert isinstance(d, dict)
+    assert len(d["logs"]) == 1
+    assert d["logs"][0]["message"] == "扫完了"
+    assert d["cross_seed"]["results"][0]["stats"]
+    assert d["cross_seed"]["results"][0]["anomalies"]
+    assert d["disk_rotation"]["results"]
+
+
+async def test_列表可显式要求日志(db: None) -> None:
+    """``include_logs=True`` → 列表也返回日志（大字段仍剥离）。"""
+    await _add_heavy_job_run()
+
+    page = await job_run_service.list_job_runs(include_logs=True)
+    result = page.items[0].result
+    assert isinstance(result, dict)
+    assert len(result["logs"]) == 1
+    # 大字段仍剥离（那个太大，不该因 include_logs 就放开）
+    assert "stats" not in result["cross_seed"]["results"][0]
+
+
+async def test_剥离不影响旧数据(db: None) -> None:
+    """旧数据（没有 logs / 大字段）不受剥离影响。"""
+    from app.db.models import JobRun
+
+    async with session_scope() as session:
+        session.add(
+            JobRun(
+                job_name="j1",
+                trigger="cron",
+                started_at="2026-01-01 00:00:00",
+                ok=True,
+                result_json='{"summary": "ok"}',
+            )
+        )
+        await session.flush()
+
+    page = await job_run_service.list_job_runs()
+    assert page.items[0].result == {"summary": "ok"}
+
+
 async def test_remove_in_batches_raises_when_downloader_missing(
     db: None, monkeypatch, factory: AdapterFactory
 ) -> None:

@@ -314,6 +314,23 @@ async def test_steps_list_failed_sites(db: None, factory_with) -> None:
     assert "s1" in str(step.detail)
 
 
+async def test_steps_含逐站明细(db: None, factory_with) -> None:
+    """签到步骤带**逐站明细**——回答「哪个站什么状态」。"""
+    await _add_sites("s1", "s2", "s3")
+    result = await refresh_all_sites(
+        factory_with({"s1": "success", "s2": "unsupported", "s3": "raise"})
+    )
+
+    step = next(s for s in result["steps"] if s.name == "执行签到")
+    assert step.items is not None
+    by_name = {i.name: i for i in step.items}
+    assert set(by_name) == {"s1", "s2", "s3"}
+    assert by_name["s1"].status == "ok"
+    assert by_name["s2"].status == "skip"
+    assert by_name["s3"].status == "fail"
+    assert by_name["s3"].detail
+
+
 # ------------------------------------------------------------------ 幂等
 
 

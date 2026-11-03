@@ -1,12 +1,48 @@
 <script setup lang="ts">
-/** 作业步骤卡片列表 + 列表小圆点预览（共用 JobStep 数据结构）。 */
+/**
+ * 作业步骤卡片列表 + 列表小圆点预览（共用 JobStep 数据结构）。
+ *
+ * 明细（`items`）**默认折叠**——monitor 这类作业可能几百条，
+ * 默认展开会把详情面板撑爆。点击「明细（N）」才展开。
+ */
+import { ref, watch } from 'vue'
 import type { JobStep } from '../types'
 
-defineProps<{
+const props = defineProps<{
   steps: JobStep[]
   /** compact = 只显示小圆点（列表内预览） */
   compact?: boolean
 }>()
+
+/**
+ * 哪些步骤的明细处于展开态。
+ *
+ * 用 `Set` 存步骤索引而不是组件级布尔——多个步骤各自独立展开，
+ * 且步骤名可能重复（不同作业的同名步骤），索引更安全。
+ */
+const expanded = ref<Set<number>>(new Set())
+
+/** 步骤内容变化时收起全部（换了运行记录，旧展开态无意义）。 */
+watch(
+  () => props.steps,
+  () => {
+    expanded.value = new Set()
+  }
+)
+
+function isExpanded(idx: number): boolean {
+  return expanded.value.has(idx)
+}
+
+function toggle(idx: number): void {
+  const next = new Set(expanded.value)
+  if (next.has(idx)) {
+    next.delete(idx)
+  } else {
+    next.add(idx)
+  }
+  expanded.value = next
+}
 
 function statusIcon(s: string): string {
   switch (s) {
@@ -19,6 +55,18 @@ function statusIcon(s: string): string {
 
 function stepClass(s: string): string {
   return `step--${s}`
+}
+
+/** 明细条数（截断时取完整条数）。 */
+function itemCount(step: JobStep): number {
+  return step.items_total ?? step.items?.length ?? 0
+}
+
+/** 是否被截断（显示条数 < 完整条数）。 */
+function truncated(step: JobStep): boolean {
+  const total = step.items_total ?? 0
+  const shown = step.items?.length ?? 0
+  return total > shown
 }
 </script>
 
@@ -45,7 +93,42 @@ function stepClass(s: string): string {
       <span class="step-icon">{{ statusIcon(s.status) }}</span>
       <span class="step-name">{{ s.name }}</span>
       <span v-if="s.count != null" class="step-count mono">{{ s.count }}</span>
+
+      <!--
+        detail **独占一行**、不截断：
+        之前是同行右对齐 + `white-space: nowrap` + `text-overflow: ellipsis`
+        + `max-width: 50%`——详情面板窄，只有 ~200px 可用，
+        「未封顶 5 站，无信号 2 站，已封顶 1 站」被砍成「...」。
+        步骤的 detail 是排查时最该看清的一行，不能被省略。
+      -->
       <span v-if="s.detail" class="step-detail">{{ s.detail }}</span>
+
+      <!-- 明细展开按钮（默认折叠） -->
+      <button
+        v-if="s.items && s.items.length"
+        type="button"
+        class="step-items-toggle"
+        @click="toggle(i)"
+      >
+        {{ isExpanded(i) ? '▾' : '▸' }} 明细（{{ itemCount(s) }}）
+        <span v-if="truncated(s)" class="step-items-note">
+          显示 {{ s.items!.length }} / 共 {{ s.items_total }}
+        </span>
+      </button>
+
+      <!-- 明细列表（展开态） -->
+      <div v-if="isExpanded(i) && s.items && s.items.length" class="step-items">
+        <div
+          v-for="(item, j) in s.items"
+          :key="j"
+          class="step-item"
+          :class="stepClass(item.status)"
+        >
+          <span class="step-item__icon">{{ statusIcon(item.status) }}</span>
+          <span class="step-item__name">{{ item.name }}</span>
+          <span v-if="item.detail" class="step-item__detail">{{ item.detail }}</span>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -64,6 +147,7 @@ function stepClass(s: string): string {
   display: flex;
   align-items: baseline;
   gap: var(--sp-2);
+  flex-wrap: wrap;
   padding: var(--sp-2);
   border-left: 3px solid var(--text-tertiary);
   border-radius: 0 var(--r-sm) var(--r-sm) 0;
@@ -95,14 +179,87 @@ function stepClass(s: string): string {
   color: var(--text-secondary);
   font-weight: 600;
 }
+
+/*
+  detail 独占一行、左对齐、**不截断**。
+  之前同行右对齐 + ellipsis，窄面板里只显示得下 ~200px，
+  关键信息（「未封顶 5 站，无信号 2 站，已封顶 1 站」）被砍成「...」。
+*/
 .step-detail {
+  flex: 0 0 100%;
+  color: var(--text-secondary);
+  white-space: normal;
+  overflow: visible;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+/* 明细展开按钮 */
+.step-items-toggle {
+  flex: 0 0 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  margin-top: var(--sp-1);
+  padding: 2px 0;
+  border: 0;
+  background: none;
   color: var(--text-tertiary);
-  margin-left: auto;
-  text-align: right;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 50%;
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  text-align: left;
+}
+.step-items-toggle:hover {
+  color: var(--accent-red);
+}
+.step-items-note {
+  color: var(--text-tertiary);
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-2xs);
+}
+
+/* 明细列表 */
+.step-items {
+  flex: 0 0 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: var(--sp-1);
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-sm);
+  background: var(--bg-inset);
+}
+.step-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+.step-item__icon {
+  font-weight: 700;
+  width: 12px;
+  flex: 0 0 12px;
+  text-align: center;
+}
+.step-item--ok .step-item__icon { color: var(--success-text, #52c41a); }
+.step-item--warn .step-item__icon { color: var(--warning-text, #d97706); }
+.step-item--skip .step-item__icon { color: var(--text-tertiary); }
+.step-item--fail .step-item__icon { color: var(--error-text, #f5222d); }
+
+.step-item__name {
+  color: var(--text-primary);
+  font-weight: 500;
+  flex: 0 1 auto;
+  min-width: 0;
+  word-break: break-word;
+}
+.step-item__detail {
+  color: var(--text-tertiary);
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-word;
 }
 
 /* 列表里的步骤小圆点 */

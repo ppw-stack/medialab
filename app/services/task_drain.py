@@ -4,6 +4,7 @@
 1. 回收僵死 running 任务（updated_at 早于 30 分钟前 → 进程崩溃残留）
 2. 认领到期 pending 任务（run_at <= now，指数退避已到点）
 3. 逐个执行（task_executor 按 kind 分发），成功 mark_done / 失败 mark_failed
+4. 清理超期的 ``job_runs`` 历史（作业执行历史，见 :data:`_JOB_RUN_PURGE_DAYS`）
 
 由调度作业 ``drain_task_queue``（cron ``*/5 * * * *``）驱动。
 """
@@ -12,12 +13,16 @@ from __future__ import annotations
 
 import copy
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
+
+from sqlalchemy import CursorResult, delete
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.core.timeutils import bj_now, bj_now_dt, format_bj
+from app.db.models import JobRun
 from app.db.session import session_scope
-from app.services.scheduler import JobStep
+from app.services.scheduler import JobStep, JobStepItem, build_items
 from app.services.task_executor import PushItemError, execute_task
 from app.services.task_queue import STALE_RUNNING_MINUTES, TaskQueueService
 
@@ -31,6 +36,15 @@ _DRAIN_LIMIT = 50
 
 #: 终态任务保留天数（审计排障窗口）
 _PURGE_DAYS = 7
+
+#: ``job_runs``（作业执行历史）保留天数。
+#:
+#: 作业历史**只增不删**会无限增长——现在每次运行还额外存了执行日志
+#: 与逐项明细，单条 ``result_json`` 已有 10–30KB。故必须定期清理。
+#:
+#: 为什么挂在 drain 作业里：它已经承担 ``task_queue`` 的定期清理语义
+#: （每 5 分钟一次），为一个 DELETE 单开第 8 个作业属过度设计。
+_JOB_RUN_PURGE_DAYS = 30
 
 
 async def drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
@@ -63,6 +77,18 @@ async def drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
     if purged:
         logger.info("drain_task_queue: 清理 %d 条超 %d 天的终态任务", purged, _PURGE_DAYS)
 
+    # 3.1) 清理超期的作业执行历史（job_runs）
+    #
+    # 作业历史只增不删会无限增长——现在每次运行还额外存了执行日志与
+    # 逐项明细，单条 result_json 已有 10–30KB。
+    async with session_scope() as session:
+        job_runs_purged = await _purge_old_job_runs(session)
+    if job_runs_purged:
+        logger.info(
+            "drain_task_queue: 清理 %d 条超 %d 天的作业历史",
+            job_runs_purged, _JOB_RUN_PURGE_DAYS,
+        )
+
     if not tasks:
         return {
             "requeued": requeued,
@@ -70,6 +96,7 @@ async def drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
             "done": 0,
             "failed": 0,
             "purged": purged,
+            "job_runs_purged": job_runs_purged,
             "summary": (
                 (f"回收僵死 {requeued}，无到期任务" if requeued else "无到期任务")
                 + (f"，清理历史 {purged}" if purged else "")
@@ -80,6 +107,10 @@ async def drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
                 JobStep("认领到期任务", "skip", 0, "无到期任务"),
                 JobStep("清理历史", "ok" if purged else "skip", purged,
                         f"{purged} 条超 7 天" if purged else "无超期历史"),
+                JobStep("清理作业历史", "ok" if job_runs_purged else "skip",
+                        job_runs_purged,
+                        f"{job_runs_purged} 条超 {_JOB_RUN_PURGE_DAYS} 天"
+                        if job_runs_purged else "无超期作业历史"),
             ],
         }
 
@@ -88,6 +119,8 @@ async def drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
     failed = 0
     retried = 0
     errors: list[str] = []
+    # 逐任务明细（前端「步骤卡片」展开后可见）
+    task_items: list[JobStepItem] = []
     for task_id, kind, payload in tasks:
         try:
             await execute_task(str(kind), payload, factory)
@@ -97,12 +130,24 @@ async def drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
                 if exc.category == "fatal":
                     await svc.mark_failed_forever(task_id, str(exc))
                     failed += 1
+                    task_items.append(
+                        JobStepItem(f"task #{task_id}", "fail", None, str(exc))
+                    )
                 else:
                     final = await svc.mark_failed(task_id, str(exc))
                     if final == "failed":
                         failed += 1
+                        task_items.append(
+                            JobStepItem(f"task #{task_id}", "fail", None, str(exc))
+                        )
                     else:
                         retried += 1
+                        task_items.append(
+                            JobStepItem(
+                                f"task #{task_id}", "warn", None,
+                                f"退避重试：{exc}",
+                            )
+                        )
             errors.append(f"task={task_id} kind={kind}: {exc}")
         except Exception as exc:
             async with session_scope() as session:
@@ -112,12 +157,20 @@ async def drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
                     failed += 1
                 else:
                     retried += 1
+            task_items.append(
+                JobStepItem(
+                    f"task #{task_id}", "fail", None, f"{type(exc).__name__}: {exc}",
+                )
+            )
             errors.append(f"task={task_id} kind={kind}: {exc}")
         else:
             async with session_scope() as session:
                 svc = TaskQueueService(session)
                 await svc.mark_done(task_id)
             done += 1
+            task_items.append(JobStepItem(f"task #{task_id}", "ok", None, str(kind)))
+
+    items, items_total = build_items(task_items)
 
     summary = (
         f"认领 {len(tasks)} 任务，成功 {done}"
@@ -136,6 +189,7 @@ async def drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
         "failed": failed,
         "retried": retried,
         "purged": purged,
+        "job_runs_purged": job_runs_purged,
         "errors": tuple(errors[:10]),
         "summary": summary,
         "steps": [
@@ -147,8 +201,31 @@ async def drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
                 "warn" if failed else "ok",
                 done,
                 f"{done} 成功，{failed} 永久失败，{retried} 退避重试",
+                items=items,
+                items_total=items_total,
             ),
             JobStep("清理历史", "ok" if purged else "skip", purged,
                     f"{purged} 条超 7 天" if purged else "无超期历史"),
+            JobStep("清理作业历史", "ok" if job_runs_purged else "skip",
+                    job_runs_purged,
+                    f"{job_runs_purged} 条超 {_JOB_RUN_PURGE_DAYS} 天"
+                    if job_runs_purged else "无超期作业历史"),
         ],
     }
+
+
+async def _purge_old_job_runs(session: AsyncSession) -> int:
+    """删除超期的作业执行历史，返回删除条数。
+
+    ``started_at`` 是**北京时间字符串**（``yyyy-MM-dd HH:mm:ss``），
+    字典序 == 时间序，故可直接字符串比较（与 ``task_queue`` 的
+    ``purge_finished`` 同款口径）。
+    """
+    cutoff = format_bj(bj_now_dt() - timedelta(days=_JOB_RUN_PURGE_DAYS))
+    result = cast(
+        CursorResult[object],
+        await session.execute(
+            delete(JobRun).where(JobRun.started_at < cutoff)
+        ),
+    )
+    return int(result.rowcount or 0)

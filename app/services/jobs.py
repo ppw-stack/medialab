@@ -25,7 +25,7 @@ from app.db.models import Site, TorrentIndex
 from app.db.session import session_scope
 from app.services.factory import AdapterFactory
 from app.services.feed_fetcher import FeedFetcher, PullStatus
-from app.services.scheduler import JobStep
+from app.services.scheduler import JobStep, JobStepItem, build_items
 from app.services.window_parser import WindowParser
 
 logger = get_logger(__name__)
@@ -60,6 +60,8 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
     pull_failures: list[tuple[str, str]] = []
     # 被熔断跳过的站（不发请求）
     breaker_skipped: list[tuple[str, str]] = []
+    # 逐站明细（前端「步骤卡片」展开后可见）——回答"是哪个站出了问题"
+    site_items: list[JobStepItem] = []
 
     async with session_scope() as session:
         stmt = select(Site).where(Site.enabled.is_(True))
@@ -70,6 +72,12 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
         # 熔断期内直接跳过——继续请求只会加速账号暴露
         if _is_breaker_open(row.breaker_until):
             breaker_skipped.append((row.name, row.breaker_until or ""))
+            site_items.append(
+                JobStepItem(
+                    row.name, "skip", None,
+                    f"熔断期（至 {row.breaker_until}）",
+                )
+            )
             logger.info(
                 "站点 %s 处于熔断期（至 %s），跳过本轮拉取",
                 row.name, row.breaker_until,
@@ -82,10 +90,23 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
         summary.append((row.id, row.name, ok + ko, ok, ko, pull_error))
         if pull_error is not None:
             pull_failures.append((row.name, pull_error))
+            site_items.append(
+                JobStepItem(row.name, "fail", ok + ko, pull_error)
+            )
         elif breaker_until is not None:
             # 本轮触发熔断的站也计入「熔断跳过」——它本轮没拉到数据，
             # 但性质是保护性熔断而非故障，不该进 failed_sites。
             breaker_skipped.append((row.name, breaker_until))
+            site_items.append(
+                JobStepItem(
+                    row.name, "warn", ok + ko,
+                    f"触发熔断（至 {breaker_until}）",
+                )
+            )
+        else:
+            site_items.append(
+                JobStepItem(row.name, "ok", ok + ko, f"写入 {ok} 条种子")
+            )
 
     # 失败站 = 拉取失败（网络/DNS/适配器异常）或写入失败（DB 错误）的站。
     # 按站名去重——同一站可能两类错误都命中。
@@ -121,6 +142,7 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
     )
     failed_names = ", ".join(sorted(failed_site_names))
     breaker_names = ", ".join(sorted(name for name, _ in breaker_skipped))
+    site_items, site_items_total = build_items(site_items)
     return {
         "total_written": total_written,
         "scanned_sites": len(rows),
@@ -151,6 +173,8 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
                 )
                 if (total_failed or total_breaker_skipped)
                 else "逐站拉取（上限 3 页）",
+                items=site_items,
+                items_total=site_items_total,
             ),
             JobStep(
                 "写入 torrent_index",

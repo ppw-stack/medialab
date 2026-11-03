@@ -24,7 +24,7 @@ from app.db.models import Site, TorrentIndex
 from app.db.session import session_scope
 from app.services.factory import AdapterFactory
 from app.services.jobs import fetch_all_sites
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 
 class _FakeAdapter(SiteAdapter):
@@ -255,6 +255,44 @@ async def test_steps_ok_when_no_failure(db: None, factory_with) -> None:
 
     pull_step = next(s for s in result["steps"] if s.name == "拉取种子列表")
     assert pull_step.status == "ok"
+
+
+async def test_steps_含逐站明细(db: None, factory_with) -> None:
+    """步骤带**逐站明细**——回答「是哪个站失败了」。"""
+    await _add_sites("s1", "s2")
+    factory = factory_with({"s1": "ok", "s2": "raise"})
+    result = await fetch_all_sites(factory)
+
+    pull_step = next(s for s in result["steps"] if s.name == "拉取种子列表")
+    assert pull_step.items is not None
+    names = {i.name for i in pull_step.items}
+    assert names == {"s1", "s2"}
+    # 失败的站是 fail 状态 + 带原因
+    bad = next(i for i in pull_step.items if i.name == "s2")
+    assert bad.status == "fail"
+    assert bad.detail
+    # 成功的站是 ok 状态
+    good = next(i for i in pull_step.items if i.name == "s1")
+    assert good.status == "ok"
+
+
+async def test_steps_明细标记熔断跳过(db: None, factory_with) -> None:
+    """熔断跳过的站在明细里是 skip 状态（不是 fail——那是保护性跳过）。"""
+    await _add_sites("s1")
+    async with session_scope() as session:
+        await session.execute(
+            update(Site).where(Site.name == "s1").values(
+                breaker_until="2099-01-01 00:00:00"
+            )
+        )
+    factory = factory_with({"s1": "ok"})
+    result = await fetch_all_sites(factory)
+
+    pull_step = next(s for s in result["steps"] if s.name == "拉取种子列表")
+    assert pull_step.items is not None
+    item = next(i for i in pull_step.items if i.name == "s1")
+    assert item.status == "skip"
+    assert "熔断" in (item.detail or "")
 
 
 # ------------------------------------------------------------------ 重试

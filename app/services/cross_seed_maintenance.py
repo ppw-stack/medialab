@@ -27,7 +27,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.core.logging import get_logger
-from app.services.scheduler import JobStep
+from app.services.scheduler import JobStep, JobStepItem, build_items
 
 logger = get_logger(__name__)
 
@@ -113,7 +113,58 @@ async def _run_stage(
     if raw.get("failures") or raw.get("failed_downloaders"):
         status = "warn"
     count = _extract_count(raw)
-    return raw, JobStep(name, status, count, detail or None)
+    items, items_total = build_items(_extract_items(raw))
+    return raw, JobStep(
+        name, status, count, detail or None,
+        items=items or None, items_total=items_total,
+    )
+
+
+def _extract_items(raw: dict[str, Any]) -> list[JobStepItem]:
+    """从子阶段返回里抽逐项明细。
+
+    三段的返回结构不同，但失败信息都在 ``failures`` 里
+    （统一的 ``{downloader_id, downloader_name, error}`` 形态）——
+    故优先读它，其余按子阶段特有的键补。
+    """
+    items: list[JobStepItem] = []
+
+    # ① 统一形态的失败列表（巡查 / 磁盘流转 / 孤儿扫描都有）
+    for f in raw.get("failures") or []:
+        if isinstance(f, dict):
+            name = str(f.get("downloader_name") or f.get("name") or "?")
+            err = str(f.get("error") or "失败")
+        else:
+            name = "?"
+            err = str(f)
+        items.append(JobStepItem(name, "fail", None, err))
+
+    # ② 各子阶段特有的成功明细
+    for r in raw.get("results") or []:
+        if not isinstance(r, dict):
+            continue
+        name = str(r.get("downloader_name") or r.get("name") or "?")
+        if r.get("error"):
+            continue  # 失败已由上面记录
+        bits: list[str] = []
+        if r.get("usage_pct") is not None:
+            bits.append(f"使用率 {float(r['usage_pct']):.0f}%")
+        if r.get("triggered"):
+            bits.append("超阈")
+        if r.get("deleted_count"):
+            bits.append(f"删除 {r['deleted_count']} 个")
+        if r.get("orphan_count"):
+            bits.append(f"孤儿 {r['orphan_count']} 个")
+        if r.get("total_torrents"):
+            bits.append(f"{r['total_torrents']} 个种子")
+        if r.get("paused_count"):
+            bits.append(f"暂停 {r['paused_count']} 个")
+        if r.get("anomaly_count"):
+            bits.append(f"异常 {r['anomaly_count']} 个")
+        if bits:
+            items.append(JobStepItem(name, "ok", None, "，".join(bits)))
+
+    return items
 
 
 def _extract_count(raw: dict[str, Any]) -> int | None:

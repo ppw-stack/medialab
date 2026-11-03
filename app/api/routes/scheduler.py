@@ -299,14 +299,19 @@ async def list_job_runs(
     job_name: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    include_logs: bool = False,
 ) -> JobRunPage:
     """查询作业执行历史（按 started_at desc）。
 
     :param job_name: 可选过滤单个作业。
     :param limit: 上限 200。
+    :param include_logs: 是否返回执行日志。**默认 False**——日志 +
+        明细让单条结果达 10–30KB，列表一次 100 条会到 MB 级。
+        完整数据走 ``GET /scheduler/runs/{run_id}``。
     """
     page = await job_run_service.list_job_runs(
-        job_name=job_name, limit=limit, offset=offset
+        job_name=job_name, limit=limit, offset=offset,
+        include_logs=include_logs,
     )
     return JobRunPage(
         total=page.total,
@@ -316,7 +321,10 @@ async def list_job_runs(
 
 @router.get("/scheduler/runs/{run_id}", summary="作业执行详情")
 async def get_job_run(run_id: int) -> JobRunItem:
-    """单条作业执行详情（含 result JSON 解析）。"""
+    """单条作业执行详情（含完整日志与大字段明细）。
+
+    列表端点为了控制响应体积剥离了这些；详情端点返回**完整**数据。
+    """
     return JobRunItem.from_row(await job_run_service.get_job_run(run_id))
 
 

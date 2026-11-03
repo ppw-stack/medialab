@@ -20,6 +20,7 @@ from apscheduler.executors.asyncio import AsyncIOExecutor
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from app.core.job_log import JobLogCollector, capture_job_logs
 from app.core.logging import get_logger
 from app.core.metrics import stage_duration
 from app.core.timeutils import bj_now, bj_now_dt, format_bj
@@ -50,6 +51,31 @@ class JobSpec:
 
 
 @dataclass(slots=True)
+class JobStepItem:
+    """步骤内的一条**明细**（逐站 / 逐种 / 逐任务）。
+
+    为什么需要：步骤的 ``detail`` 是**聚合**描述（如「20 成功，0 失败」），
+    光看它**无法回答「是哪些出了问题」**。而作业执行时这些数据本来就在
+    内存里（逐站结果、逐种推送结果…），只是没被带出来。
+
+    例：``fetch_all_sites`` 内部维护着 ``(site_id, name, pulled, ok, ko,
+    pull_error)`` 的列表，聚合后只剩一句「8 站失败」——哪个站失败、
+    什么原因，全部丢失。本字段把这份明细还给用户。
+
+    存储在 :attr:`JobStep.items`，随 ``result_json.steps`` 落库。
+    """
+
+    #: 主体标识（站名 / 种子名 / hash 前缀 / task id）
+    name: str
+    #: 状态：ok / warn / skip / fail
+    status: str
+    #: 涉及数量；None 表示不适用
+    count: int | None = None
+    #: 简要描述（如失败原因「DNS 解析失败」）
+    detail: str | None = None
+
+
+@dataclass(slots=True)
 class JobStep:
     """作业单次执行的子步骤（前端「步骤卡片」数据源）。
 
@@ -65,6 +91,16 @@ class JobStep:
     count: int | None = None
     #: 简要描述（如「5 成功 / 0 失败」）
     detail: str | None = None
+    #: 逐项明细（默认 None = 该步骤无明细）
+    #:
+    #: 前端**默认折叠**，点击「明细（N）」才展开——``monitor`` 这类作业
+    #: 可能有几百条明细，默认展开会把详情面板撑爆。
+    items: list[JobStepItem] | None = None
+    #: 明细的**完整**条数。
+    #:
+    #: ``len(items) < items_total`` 说明明细被截断了（前端据此显示
+    #: 「显示 50 / 共 200」）。None = 未截断或无明细。
+    items_total: int | None = None
 
 
 @dataclass(slots=True)
@@ -78,6 +114,45 @@ class RunResult:
     error: str = ""
     #: 作业函数返回值（dict / dataclass.toDict / str / None），供前端展示详情
     result: object = None
+
+
+#: 单个步骤最多保留的明细条数（超出丢最旧的）。
+#:
+#: 必须限流：``monitor`` 可能命中几百个种子，明细全存会让
+#: ``job_runs.result_json`` 失控（辅种快照本身就 590KB）。
+MAX_STEP_ITEMS = 50
+
+
+def build_items(
+    items: list[JobStepItem], *, limit: int = MAX_STEP_ITEMS
+) -> tuple[list[JobStepItem], int | None]:
+    """截断明细列表，返回 ``(items, items_total)``。
+
+    :param items: 完整明细列表。
+    :param limit: 最多保留多少条。
+    :return: ``(截断后的明细, 完整条数)``。未截断时第二项为 None
+        （前端据此判断要不要显示「显示 N / 共 M」）。
+
+    **丢最旧的还是最晚的**：明细是**按执行顺序**产生的，故丢**末尾**
+    的（保留最早发生的）——排查时「先发生了什么」比「最后发生了什么」
+    更能定位问题。
+    """
+    total = len(items)
+    if total <= limit:
+        return items, None
+    return items[:limit], total
+
+
+__all__ = [
+    "MAX_STEP_ITEMS",
+    "JobSpec",
+    "JobStep",
+    "JobStepItem",
+    "RunResult",
+    "SchedulerCenter",
+    "build_items",
+    "scheduler_center",
+]
 
 
 class SchedulerCenter:
@@ -315,8 +390,12 @@ class SchedulerCenter:
             _ok = True
             _err: str | None = None
             _result: object = None
+            # 采集本次作业的 Python 日志（时序视角：哪步慢、中间发生了什么）。
+            # 采集器由**外部**创建——作业抛异常时也要能拿到已收集的日志。
+            collector = JobLogCollector()
             try:
-                _result = await spec.func()
+                with capture_job_logs(collector):
+                    _result = await spec.func()
             except asyncio.CancelledError:
                 logger.info("作业 %s 被取消", spec.name)
                 raise
@@ -341,6 +420,7 @@ class SchedulerCenter:
                     ok=_ok,
                     error=_err,
                     result=_result,
+                    logs=collector.entries(),
                 )
 
         return _run
@@ -412,8 +492,11 @@ class SchedulerCenter:
         if manual_task is not None:
             self._manual_inflight.add(manual_task)
         result: object = None
+        # 采集器由外部创建——失败/取消路径也要能拿到已收集的日志
+        collector = JobLogCollector()
         try:
-            result = await spec.func()
+            with capture_job_logs(collector):
+                result = await spec.func()
         except asyncio.CancelledError:
             finished_dt = bj_now_dt()
             started_str = format_bj(started_dt)
@@ -424,6 +507,7 @@ class SchedulerCenter:
                 started_at=started_str, finished_at=finished_str,
                 duration_ms=int((finished_dt - started_dt).total_seconds() * 1000),
                 ok=False, error="cancelled", result=result,
+                logs=collector.entries(),
             )
             return RunResult(
                 ok=False,
@@ -443,6 +527,7 @@ class SchedulerCenter:
                 started_at=started_str, finished_at=finished_str,
                 duration_ms=int((finished_dt - started_dt).total_seconds() * 1000),
                 ok=False, error=str(exc), result=result,
+                logs=collector.entries(),
             )
             return RunResult(
                 ok=False,
@@ -464,6 +549,7 @@ class SchedulerCenter:
             started_at=started_str, finished_at=finished_str,
             duration_ms=int((finished_dt - started_dt).total_seconds() * 1000),
             ok=True, error=None, result=result,
+            logs=collector.entries(),
         )
         return RunResult(
             ok=True,
@@ -517,6 +603,7 @@ def _record_run(
     ok: bool,
     error: str | None,
     result: object,
+    logs: list[dict[str, object]] | None = None,
 ) -> None:
     """把单次作业执行结果写入 job_runs 表（失败不抛，仅 warn）。
 
@@ -524,6 +611,8 @@ def _record_run(
     :param started_at: 北京时间字符串。
     :param finished_at: 北京时间字符串。
     :param duration_ms: 执行时长（毫秒），由调用方计算。
+    :param logs: 作业期间的 Python 日志（结构化条目）。非空时**并入**
+        ``result_json`` 的 ``logs`` 键——不另建列（免 DB 迁移）。
     """
     import json
 
@@ -532,13 +621,22 @@ def _record_run(
 
     result_json: str | None = None
     try:
+        payload: object = None
         if result is not None:
             # dataclass（含嵌套 JobStep）→ dict，再 JSON 序列化。
             # 不能只靠 default=str：dataclass 会被转成 repr 字符串，
             # 前端拿不到 steps 的 name/status/count 字段。
-            result_json = json.dumps(
-                _jsonable(result), default=str, ensure_ascii=False
-            )
+            payload = _jsonable(result)
+        if logs:
+            # 日志与结果**合并**成一个 JSON 对象：
+            # - result 是 dict → 直接加 logs 键
+            # - result 不是 dict（None / str）→ 包一层 {"result": ..., "logs": [...]}
+            if isinstance(payload, dict):
+                payload = {**payload, "logs": logs}
+            else:
+                payload = {"result": payload, "logs": logs}
+        if payload is not None:
+            result_json = json.dumps(payload, default=str, ensure_ascii=False)
     except Exception:
         result_json = None
 

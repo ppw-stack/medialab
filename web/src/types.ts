@@ -23,12 +23,51 @@ export interface AdapterInfo {
   domain: string
 }
 
+/**
+ * 作业步骤内的一条**明细**（逐站 / 逐种 / 逐任务）。
+ *
+ * 步骤的 `detail` 是**聚合**描述（如「20 成功，0 失败」），光看它
+ * 无法回答「是哪些出了问题」。明细把这份逐项信息还给用户。
+ */
+export interface JobStepItem {
+  /** 主体标识（站名 / 种子名 / hash 前缀 / task id）。 */
+  name: string
+  status: 'ok' | 'warn' | 'skip' | 'fail'
+  count: number | null
+  /** 简要描述（如失败原因「DNS 解析失败」）。 */
+  detail: string | null
+}
+
 /** 作业步骤（调度作业结果里的分步明细）。 */
 export interface JobStep {
   name: string
   status: 'ok' | 'warn' | 'skip' | 'fail'
   count: number | null
   detail: string | null
+  /**
+   * 逐项明细。**默认折叠**——monitor 这类作业可能有几百条，
+   * 默认展开会把详情面板撑爆。
+   */
+  items?: JobStepItem[] | null
+  /**
+   * 明细的**完整**条数。
+   *
+   * `items_total > items.length` 说明明细被截断了（后端限流），
+   * 前端据此显示「显示 N / 共 M」。
+   */
+  items_total?: number | null
+}
+
+/** 一条作业执行日志（`result.logs` 的元素）。 */
+export interface JobLogEntry {
+  /** 北京时间字符串（`yyyy-MM-dd HH:mm:ss`）。 */
+  ts: string
+  /** 日志级别名（INFO / WARNING / ERROR …）。 */
+  level: string
+  /** 发出日志的 logger 名（如 `app.services.jobs`）。 */
+  logger: string
+  /** 日志正文（可能含多行异常堆栈）。 */
+  message: string
 }
 
 /** 可调运行参数的元数据。 */
@@ -593,12 +632,20 @@ export interface RunResult {
  * 作业执行结果（作业函数返回的 dict）。
  *
  * 后端 `JobRun.result` 是 `Any`（不同作业返回不同结构），但前端只用
- * 两个通用字段：`summary`（人话摘要）与 `steps`（分步明细）。
+ * 几个通用字段：`summary`（人话摘要）、`steps`（分步明细）、
+ * `logs`（执行日志，仅详情端点返回）。
  * 其余字段用索引签名兜住。
  */
 export interface JobRunResult {
   summary?: string
   steps?: JobStep[]
+  /**
+   * 作业执行期间的 Python 日志（时序视角：哪步慢、中间发生了什么）。
+   *
+   * **列表端点不返回**（`include_logs` 默认 false）——日志让单条结果
+   * 达 10–30KB，列表一次 100 条会到 MB 级。前端选中行时按需拉详情。
+   */
+  logs?: JobLogEntry[]
   [key: string]: unknown
 }
 

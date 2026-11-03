@@ -284,6 +284,88 @@ async def test_no_candidates_reports_skip_step(db: None) -> None:
     assert "无新候选" in result.summary
 
 
+async def test_steps_含逐种明细(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """推送步骤带**逐种明细**——回答「推了哪些 / 哪些失败」。"""
+    await _add_downloader()
+    site_id = await _add_site()
+    await _add_torrent(free_type=FreeType.PERMANENT, site_id=site_id,
+                       item_id="i1")
+
+    # 执行器打桩——真实推送要连站点 + 下载器，本用例只关心明细结构
+    async def _fake_execute(payload, factory, *, category="auto-push"):
+        return {"info_hash": "a" * 40, "name": "torrent-i1", "idempotent": False}
+
+    monkeypatch.setattr("app.services.task_executor.execute_add_torrent",
+                        _fake_execute)
+
+    result = await _service().run()
+
+    push_step = next(s for s in result.steps if s.name == "推送到下载器")
+    assert push_step.items is not None
+    assert len(push_step.items) == 1
+    item = push_step.items[0]
+    assert item.name == "torrent-i1"
+    assert item.status == "ok"
+    assert "推送成功" in (item.detail or "")
+
+
+async def test_steps_明细记录推送失败(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """推送失败 → 明细是 fail 状态 + 带失败原因。"""
+    from app.services.task_executor import PushItemError
+
+    await _add_downloader()
+    site_id = await _add_site()
+    await _add_torrent(free_type=FreeType.PERMANENT, site_id=site_id,
+                       item_id="i1")
+
+    async def _fail_execute(payload, factory, *, category="auto-push"):
+        raise PushItemError("download", "下载超时")
+
+    monkeypatch.setattr("app.services.task_executor.execute_add_torrent",
+                        _fail_execute)
+
+    result = await _service().run()
+
+    push_step = next(s for s in result.steps if s.name == "推送到下载器")
+    assert push_step.items is not None
+    item = push_step.items[0]
+    assert item.status == "fail"
+    assert "下载超时" in (item.detail or "")
+
+
+async def test_steps_候选步骤含明细(db: None) -> None:
+    """候选步骤也带明细（用户能看到推了哪些种、什么免费类型）。"""
+    await _add_downloader()
+    site_id = await _add_site()
+    await _add_torrent(free_type=FreeType.PERMANENT, site_id=site_id,
+                       item_id="i1")
+
+    result = await _service().run()
+
+    cand_step = next(s for s in result.steps if s.name == "查询候选免费种")
+    assert cand_step.items is not None
+    assert cand_step.items[0].name == "torrent-i1"
+
+
+async def test_steps_时魔排序步骤含逐站明细(db: None) -> None:
+    """时魔封顶排序步骤带逐站明细（哪个站在哪一档）。"""
+    await _add_downloader()
+    await _add_site()
+
+    result = await _service().run()
+
+    bucket_step = next(s for s in result.steps if s.name == "按时魔封顶排序")
+    assert bucket_step.items is not None
+    assert len(bucket_step.items) == 1
+    # 没抓过时魔 → 落「无信号」档（skip）
+    assert bucket_step.items[0].status == "skip"
+    assert "无信号" in (bucket_step.items[0].detail or "")
+
+
 # ------------------------------------------------- 时魔封顶档排序（FR-1.6 增补）
 
 
