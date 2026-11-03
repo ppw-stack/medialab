@@ -53,7 +53,7 @@ from app.db.session import session_scope
 from app.domain.enums import FreeType, PushStatus
 from app.services.downloader_query import get_default_downloader
 from app.services.factory import AdapterFactory
-from app.services.scheduler import JobStep
+from app.services.scheduler import JobStep, JobStepItem, build_items
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -137,7 +137,7 @@ class PushFreeService:
         from app.services.runtime_params import get_runtime_params
 
         order_mode = get_runtime_params().get_int("push_within_bucket_order")
-        bucket_open, bucket_unknown, bucket_capped = bucket_counts
+        bucket_open, bucket_unknown, bucket_capped, bucket_items = bucket_counts
         bucket_step = JobStep(
             "按时魔封顶排序",
             "ok",
@@ -145,6 +145,7 @@ class PushFreeService:
             f"未封顶 {bucket_open} 站，无信号 {bucket_unknown} 站，"
             f"已封顶 {bucket_capped} 站"
             f"（档内：{'随机' if order_mode == _ORDER_RANDOM else '按进度升序'}）",
+            items=bucket_items,
         )
 
         if not candidates:
@@ -167,6 +168,18 @@ class PushFreeService:
         failed = 0
         retried = 0
         errors: list[str] = []
+        # 逐种明细（前端「步骤卡片」展开后可见）——回答"推了哪些 / 哪些失败"
+        push_items: list[JobStepItem] = []
+        # 候选明细（查询候选免费种步骤）
+        candidate_items: list[JobStepItem] = [
+            JobStepItem(
+                c.name or c.item_id or f"#{c.index_id}",
+                "skip",
+                None,
+                f"站点 {c.site_id} · {c.free_type or 'unknown'}",
+            )
+            for c in candidates
+        ]
 
         from app.services.runtime_params import get_runtime_params
         from app.services.task_executor import PushItemError, execute_add_torrent
@@ -207,12 +220,29 @@ class PushFreeService:
                 enq = await tq.enqueue(TaskKind.ADD_TORRENT, payload, idem_key=idem_key)
                 if not enq.created:
                     skipped_dup += 1
+                    push_items.append(
+                        JobStepItem(
+                            c.name or c.item_id or f"#{c.index_id}",
+                            "skip",
+                            None,
+                            "幂等跳过（队列中已有等价任务）",
+                        )
+                    )
                     continue
                 task = await tq.claim_one(enq.task_id)
             if task is None:
                 skipped_dup += 1
+                push_items.append(
+                    JobStepItem(
+                        c.name or c.item_id or f"#{c.index_id}",
+                        "skip",
+                        None,
+                        "幂等跳过（被其他执行者认领）",
+                    )
+                )
                 continue
 
+            label = c.name or c.item_id or f"#{c.index_id}"
             # 3.2) 执行（claim 已落库——此后崩溃，任务停在 running，
             #      超 STALE_RUNNING_MINUTES 后被 drain 作业回收重试）
             try:
@@ -229,12 +259,24 @@ class PushFreeService:
                 await self._mark_push_failed(c.index_id)
                 if exc.category == "download":
                     skipped_dl_failed += 1
+                    push_items.append(
+                        JobStepItem(label, "fail", None, f"下载失败：{exc}")
+                    )
                 elif exc.category == "parse":
                     skipped_parse += 1
+                    push_items.append(
+                        JobStepItem(label, "fail", None, f"解析失败：{exc}")
+                    )
                 elif final_state == "failed":
                     failed += 1
+                    push_items.append(
+                        JobStepItem(label, "fail", None, str(exc))
+                    )
                 else:
                     retried += 1
+                    push_items.append(
+                        JobStepItem(label, "warn", None, f"退避重试：{exc}")
+                    )
                 continue
             except Exception as exc:
                 async with session_scope() as session:
@@ -245,12 +287,21 @@ class PushFreeService:
                 failed += 1
                 errors.append(f"site={c.site_id} item={c.item_id}: {exc}")
                 await self._mark_push_failed(c.index_id)
+                push_items.append(
+                    JobStepItem(
+                        label, "fail", None, f"{type(exc).__name__}: {exc}",
+                    )
+                )
                 continue
 
             async with session_scope() as session:
                 tq = TaskQueueService(session)
                 await tq.mark_done(task.id)
             pushed += 1
+            push_items.append(JobStepItem(label, "ok", None, "推送成功"))
+
+        push_items, push_items_total = build_items(push_items)
+        candidate_items, candidate_items_total = build_items(candidate_items)
 
         result = PushResult(
             selected=len(candidates),
@@ -273,6 +324,8 @@ class PushFreeService:
                     "ok",
                     len(candidates),
                     f"{len(candidates)} 个候选，限时剩余 ≥ {min_remaining_h}h",
+                    items=candidate_items,
+                    items_total=candidate_items_total,
                 ),
                 JobStep(
                     "下载 .torrent",
@@ -286,6 +339,8 @@ class PushFreeService:
                     pushed,
                     f"{pushed} 成功，{failed} 失败，{retried} 退避重试，"
                     f"{skipped_dup} 幂等跳过",
+                    items=push_items,
+                    items_total=push_items_total,
                 ),
             ),
         )
@@ -412,13 +467,16 @@ class PushFreeService:
 
     async def _site_bucket_counts(
         self, session: AsyncSession
-    ) -> tuple[int, int, int]:
+    ) -> tuple[int, int, int, list[JobStepItem]]:
         """统计启用站点按时魔封顶档的分布（未封顶 / 无信号 / 已封顶）。
 
         用于作业步骤卡片——让用户看到「这次按什么优先级排的」。
 
         按**站点**统计（不是候选数）：候选数会随抓取波动，站点数才反映
         「有多少个站还有时魔可拿」。
+
+        :return: ``(未封顶数, 无信号数, 已封顶数, 逐站明细)``。明细让用户
+            能看到「哪个站在哪一档」，而不只是三个数字。
         """
         bucket = case(
             (SiteUserData.hourly_bonus_capped.is_(False), _BUCKET_OPEN),
@@ -435,10 +493,52 @@ class PushFreeService:
         counts = {_BUCKET_OPEN: 0, _BUCKET_UNKNOWN: 0, _BUCKET_CAPPED: 0}
         for bucket_value, n in (await session.execute(stmt)).all():
             counts[int(bucket_value)] = int(n)
+
+        # 逐站明细：站名 + 档位 + 时魔进度
+        detail_stmt = (
+            select(
+                Site.name,
+                bucket.label("bucket"),
+                SiteUserData.hourly_bonus_progress,
+            )
+            .select_from(Site)
+            .outerjoin(SiteUserData, SiteUserData.site_id == Site.id)
+            .where(Site.enabled.is_(True))
+            .order_by(bucket, Site.id)
+        )
+        items: list[JobStepItem] = []
+        for site_name, bucket_value, progress in (
+            await session.execute(detail_stmt)
+        ).all():
+            b = int(bucket_value)
+            if b == _BUCKET_OPEN:
+                label = "未封顶"
+                status = "ok"
+            elif b == _BUCKET_UNKNOWN:
+                label = "无信号"
+                status = "skip"
+            else:
+                label = "已封顶"
+                status = "warn"
+            items.append(
+                JobStepItem(
+                    str(site_name),
+                    status,
+                    None,
+                    f"{label}"
+                    + (
+                        f"，进度 {float(progress) * 100:.0f}%"
+                        if progress is not None
+                        else ""
+                    ),
+                )
+            )
+
         return (
             counts[_BUCKET_OPEN],
             counts[_BUCKET_UNKNOWN],
             counts[_BUCKET_CAPPED],
+            items,
         )
 
     async def _is_already_pushed(

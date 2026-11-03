@@ -313,3 +313,71 @@ def test_job_step_defaults() -> None:
     assert step.status == "ok"
     assert step.count is None
     assert step.detail is None
+    # 明细字段是新增的，默认 None（**向后兼容**：现有 60+ 处调用零改动）
+    assert step.items is None
+    assert step.items_total is None
+
+
+def test_job_step_item_defaults() -> None:
+    from app.services.scheduler import JobStepItem
+
+    item = JobStepItem("站名", "ok")
+    assert item.name == "站名"
+    assert item.status == "ok"
+    assert item.count is None
+    assert item.detail is None
+
+
+def test_job_step_nested_items_are_serializable() -> None:
+    """嵌套的 ``JobStepItem`` 能被 ``asdict`` 递归转换。
+
+    ``_jsonable`` 靠 ``asdict`` 的递归性拿到嵌套 dict——
+    若这里坏了，前端就拿不到 ``items`` 里的字段。
+    """
+    from dataclasses import asdict
+
+    from app.services.scheduler import JobStep, JobStepItem
+
+    step = JobStep(
+        "拉取种子列表", "warn", 2, "2 站失败",
+        items=[JobStepItem("hddolby", "fail", None, "DNS 解析失败")],
+        items_total=9,
+    )
+    data = asdict(step)
+    assert data["items"] == [
+        {"name": "hddolby", "status": "fail", "count": None,
+         "detail": "DNS 解析失败"}
+    ]
+    assert data["items_total"] == 9
+
+
+def test_build_items_truncates_and_reports_total() -> None:
+    """超限时截断并返回**完整**条数。"""
+    from app.services.scheduler import JobStepItem, build_items
+
+    items = [JobStepItem(f"n{i}", "ok") for i in range(60)]
+
+    out, total = build_items(items, limit=50)
+    assert len(out) == 50
+    assert total == 60
+    # 保留**最早**的（明细按执行顺序产生，最早发生的更利于排查）
+    assert out[0].name == "n0"
+    assert out[-1].name == "n49"
+
+
+def test_build_items_no_truncation_returns_none_total() -> None:
+    """未超限 → 第二项为 None（前端不显示「显示 N / 共 M」）。"""
+    from app.services.scheduler import JobStepItem, build_items
+
+    items = [JobStepItem(f"n{i}", "ok") for i in range(10)]
+    out, total = build_items(items, limit=50)
+    assert len(out) == 10
+    assert total is None
+
+
+def test_build_items_empty() -> None:
+    from app.services.scheduler import build_items
+
+    out, total = build_items([])
+    assert out == []
+    assert total is None

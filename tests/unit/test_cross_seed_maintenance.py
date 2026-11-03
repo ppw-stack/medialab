@@ -141,3 +141,82 @@ async def test_无辅种下载器时不报错(monkeypatch: pytest.MonkeyPatch) -
     result = await cross_seed_maintenance.run_cross_seed_maintenance()
     assert result["summary"]
     assert len(result["steps"]) == 3
+
+
+async def test_阶段含逐项明细(monkeypatch: pytest.MonkeyPatch) -> None:
+    """阶段步骤带**逐下载器明细**——回答「哪台下载器出了问题」。"""
+
+    async def _fake_scan() -> dict[str, Any]:
+        return {
+            "summary": "巡查 2 个下载器",
+            "scanned_downloaders": 2,
+            "results": [
+                {"downloader_name": "tr", "total_torrents": 3000,
+                 "anomaly_count": 2},
+                {"downloader_name": "qb", "total_torrents": 100},
+            ],
+        }
+
+    monkeypatch.setattr(
+        cross_seed_maintenance, "_run_scan_cross_seed", _fake_scan
+    )
+    monkeypatch.setattr(
+        "app.services.disk_rotation.run_disk_rotation",
+        _Ok({
+            "summary": "1 个超阈",
+            "deleted": 5,
+            "results": [{"downloader_name": "tr", "usage_pct": 95.0,
+                         "triggered": True, "deleted_count": 5}],
+        }),
+    )
+    monkeypatch.setattr(
+        "app.services.cross_seed_orphan.run_scan_orphans",
+        _Ok({"summary": "孤儿 3 个", "orphan_count": 3}),
+    )
+
+    result = await cross_seed_maintenance.run_cross_seed_maintenance()
+    steps = result["steps"]
+    assert len(steps) == 3
+
+    scan_step = steps[0]
+    assert scan_step.items is not None
+    names = {i.name for i in scan_step.items}
+    assert names == {"tr", "qb"}
+    tr = next(i for i in scan_step.items if i.name == "tr")
+    assert "3000 个种子" in (tr.detail or "")
+
+    rot_step = steps[1]
+    assert rot_step.items is not None
+    assert "删除 5 个" in (rot_step.items[0].detail or "")
+
+
+async def test_阶段失败明细点名(monkeypatch: pytest.MonkeyPatch) -> None:
+    """阶段失败时，明细里点名是哪个下载器失败了。"""
+
+    async def _fake_scan() -> dict[str, Any]:
+        return {
+            "summary": "1 个失败",
+            "scanned_downloaders": 2,
+            "failures": [
+                {"downloader_id": 2, "downloader_name": "qb", "error": "连接超时"},
+            ],
+        }
+
+    monkeypatch.setattr(
+        cross_seed_maintenance, "_run_scan_cross_seed", _fake_scan
+    )
+    monkeypatch.setattr(
+        "app.services.disk_rotation.run_disk_rotation",
+        _Ok({"summary": "无", "deleted": 0}),
+    )
+    monkeypatch.setattr(
+        "app.services.cross_seed_orphan.run_scan_orphans",
+        _Ok({"summary": "无", "orphan_count": 0}),
+    )
+
+    result = await cross_seed_maintenance.run_cross_seed_maintenance()
+    scan_step = result["steps"][0]
+    assert scan_step.items is not None
+    item = next(i for i in scan_step.items if i.name == "qb")
+    assert item.status == "fail"
+    assert "连接超时" in (item.detail or "")

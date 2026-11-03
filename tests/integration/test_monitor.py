@@ -525,3 +525,30 @@ async def test_delete_mode_summary_reports_deletion(db: None) -> None:
     step_names = [s.name for s in result.steps]
     assert "自动删除" in step_names
     assert "自动暂停" not in step_names
+
+
+async def test_steps_含逐种动作明细(db: None) -> None:
+    """暂停步骤带**逐种明细**——回答「动了哪些种子、为什么」。"""
+    fake = await _setup(free_type=FreeType.NEUTRAL)
+    result = await _run(fake)
+
+    step = next(s for s in result.steps if s.name == "自动暂停")
+    assert step.items is not None
+    assert len(step.items) == 1
+    item = step.items[0]
+    assert item.status == "ok"
+    assert "已暂停" in (item.detail or "")
+    # 明细里要说明**为什么**动它
+    assert "非免费种" in (item.detail or "")
+
+
+async def test_steps_删除模式明细标注磁盘数据(db: None) -> None:
+    """删除模式的明细要明确写出「含磁盘数据」（不可逆操作需留痕）。"""
+    _enable_delete_mode()
+    fake = await _setup(free_type=FreeType.NEUTRAL)
+    result = await _run(fake)
+
+    step = next(s for s in result.steps if s.name == "自动删除")
+    assert step.items is not None
+    assert "已删除" in (step.items[0].detail or "")
+    assert "磁盘数据" in (step.items[0].detail or "")

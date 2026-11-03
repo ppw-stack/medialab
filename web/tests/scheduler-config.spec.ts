@@ -214,7 +214,7 @@ test('调度作业 - 历史 modal 展示任务步骤', async ({ page }) => {
   const cnt = await tableRows.count()
   expect(cnt).toBeGreaterThan(0)
   await tableRows.first().click()
-  await page.waitForTimeout(500)
+  await page.waitForTimeout(800)
 
   // 步骤卡片
   const stepCards = modal.locator('.step-card')
@@ -236,6 +236,114 @@ test('调度作业 - 历史 modal 展示任务步骤', async ({ page }) => {
   const dotCount = await dots.count()
   expect(dotCount).toBeGreaterThan(0)
   console.log(`  ✓ 列表步骤小圆点 ${dotCount} 个`)
+
+  await modal.locator('.ant-modal-close').click()
+})
+
+test('调度作业 - 历史 modal 弹框高度不过高', async ({ page }) => {
+  await login(page)
+  await page.goto('/settings')
+  await page.waitForLoadState('networkidle')
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(200)
+
+  const row = page.locator('.job-item').filter({ hasText: 'cross_seed_maintenance' })
+  await row.getByRole('button', { name: /历\s*史/ }).click({ force: true })
+
+  const modal = page.locator('.ant-modal-content').filter({ hasText: '运行历史' })
+  await expect(modal).toBeVisible()
+  await page.waitForTimeout(1500)
+
+  // 弹框不能超出视口（之前 15 行/页 + 耗时列换行 → 1100px+）
+  const box = await modal.boundingBox()
+  const viewport = page.viewportSize()
+  expect(box).not.toBeNull()
+  expect(viewport).not.toBeNull()
+  if (box && viewport) {
+    console.log(
+      `  ✓ 弹框 ${Math.round(box.height)}px ≤ 视口 ${viewport.height}px`,
+    )
+    expect(box.height).toBeLessThanOrEqual(viewport.height)
+  }
+
+  await modal.locator('.ant-modal-close').click()
+})
+
+test('调度作业 - 步骤 detail 不被截断', async ({ page }) => {
+  await login(page)
+  await page.goto('/settings')
+  await page.waitForLoadState('networkidle')
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(200)
+
+  const row = page.locator('.job-item').filter({ hasText: 'cross_seed_maintenance' })
+  await row.getByRole('button', { name: /历\s*史/ }).click({ force: true })
+
+  const modal = page.locator('.ant-modal-content').filter({ hasText: '运行历史' })
+  await expect(modal).toBeVisible()
+  await page.waitForTimeout(1500)
+
+  const tableRows = modal.locator('.ant-table-tbody > tr.ant-table-row')
+  await tableRows.first().click()
+  await page.waitForTimeout(800)
+
+  const details = modal.locator('.step-detail')
+  const detailCount = await details.count()
+  if (detailCount === 0) {
+    console.log('  - 本次运行没有带 detail 的步骤，跳过')
+  } else {
+    // detail 不能是 CSS 截断（ellipsis 会加 overflow:hidden + nowrap）
+    for (let i = 0; i < detailCount; i++) {
+      const styles = await details.nth(i).evaluate((el) => {
+        const cs = window.getComputedStyle(el)
+        return { overflow: cs.overflow, ws: cs.whiteSpace, te: cs.textOverflow }
+      })
+      expect(styles.ws).not.toBe('nowrap')
+      expect(styles.te).not.toBe('ellipsis')
+    }
+    console.log(`  ✓ ${detailCount} 个 detail 均未被 CSS 截断`)
+  }
+
+  await modal.locator('.ant-modal-close').click()
+})
+
+test('调度作业 - 步骤明细默认折叠且可展开', async ({ page }) => {
+  await login(page)
+  await page.goto('/settings')
+  await page.waitForLoadState('networkidle')
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(200)
+
+  const row = page.locator('.job-item').filter({ hasText: 'cross_seed_maintenance' })
+  await row.getByRole('button', { name: /历\s*史/ }).click({ force: true })
+
+  const modal = page.locator('.ant-modal-content').filter({ hasText: '运行历史' })
+  await expect(modal).toBeVisible()
+  await page.waitForTimeout(1500)
+
+  const tableRows = modal.locator('.ant-table-tbody > tr.ant-table-row')
+  await tableRows.first().click()
+  await page.waitForTimeout(800)
+
+  const toggles = modal.locator('.step-items-toggle')
+  const toggleCount = await toggles.count()
+  console.log(`  ✓ 明细展开按钮 ${toggleCount} 个`)
+
+  if (toggleCount > 0) {
+    // 默认折叠：明细列表不可见
+    await expect(modal.locator('.step-items').first()).toBeHidden()
+
+    // 点击后展开
+    await toggles.first().click()
+    await page.waitForTimeout(300)
+    await expect(modal.locator('.step-items').first()).toBeVisible()
+
+    // 明细条目带状态类
+    const items = modal.locator('.step-item')
+    const itemCount = await items.count()
+    expect(itemCount).toBeGreaterThan(0)
+    console.log(`  ✓ 明细展开后 ${itemCount} 条`)
+  }
 
   await modal.locator('.ant-modal-close').click()
 })

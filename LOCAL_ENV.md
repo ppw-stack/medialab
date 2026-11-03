@@ -216,6 +216,22 @@ curl -H "Authorization: Bearer $WEB_TOKEN" http://localhost:8092/api/v1/schedule
 - `push_free_torrents`：`push_min_remaining_hours` / `push_max_per_run` / `push_download_interval_ms`
 - `monitor_free_window`：`monitor_pre_pause_minutes`
 
+### 运行历史（2026-11-03 起）
+
+「设置 → 调度 → 历史」弹框里能看到：
+
+| 内容 | 来源 | 说明 |
+|---|---|---|
+| 顶部统计 | `job_runs` 聚合 | 成功率 / 平均耗时 / 最长耗时 / 最近结果摘要 |
+| **任务步骤** | `result_json.steps` | 每步含聚合描述 + **逐项明细**（默认折叠） |
+| **执行日志** | `result_json.logs` | 作业期间的 Python 日志（时序：哪步慢、中间发生了什么） |
+
+- **逐项明细**回答「**是哪些**」（哪个站失败、推了哪些种）；**执行日志**回答「**什么时候 / 多慢**」
+- 7 个作业都填明细；单步最多 50 条，超出显示「显示 N / 共 M」
+- **接口分层**：`GET /scheduler/runs`（列表）剥掉日志与大字段；`GET /scheduler/runs/{run_id}`（详情）返回完整数据。前端点行时才拉详情
+- **保留期 30 天**，由 `drain_task_queue` 顺带清理（它每 5 分钟跑一次）
+- 日志条数受 `LOG_LEVEL` 影响：默认 `INFO` 收完整时间线；调成 `WARNING` 则只剩警告以上
+
 ### 调度配置**全部落库**（2026-10-24 起）
 
 cron 与运行参数**都不再走 env**：

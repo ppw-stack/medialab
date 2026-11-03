@@ -4,7 +4,8 @@ import { api, errMsg } from '../api'
 import { message } from 'ant-design-vue'
 import HistoryStats from './HistoryStats.vue'
 import JobStepList from './JobStepList.vue'
-import type { JobRunItem as RunItem, JobStep } from '../types'
+import JobLogViewer from './JobLogViewer.vue'
+import type { JobRunItem as RunItem, JobStep, JobLogEntry } from '../types'
 
 const props = defineProps<{
   open: boolean
@@ -19,6 +20,8 @@ const emit = defineEmits<{
 const runs = ref<RunItem[]>([])
 const loading = ref(false)
 const selectedRun = ref<RunItem | null>(null)
+/** 详情加载中（点行时按需拉完整数据） */
+const detailLoading = ref(false)
 
 watch(
   () => props.open,
@@ -41,6 +44,25 @@ async function load() {
     message.error('加载历史失败：' + errMsg(e))
   } finally {
     loading.value = false
+  }
+}
+
+/**
+ * 按需拉取单次运行的**完整**详情。
+ *
+ * 列表接口为了控制响应体积会剥离执行日志与大字段明细（单条 10–30KB，
+ * 100 条就是 MB 级），故选中行时才去详情端点取全量。
+ */
+async function loadDetail(id: number): Promise<void> {
+  detailLoading.value = true
+  try {
+    const r = await api.get<RunItem>(`/scheduler/runs/${id}`)
+    // 用详情替换列表里的精简条目（保持 selectedRun 指向同一条）
+    selectedRun.value = r
+  } catch (e) {
+    message.error('加载详情失败：' + errMsg(e))
+  } finally {
+    detailLoading.value = false
   }
 }
 
@@ -73,6 +95,17 @@ function getSteps(r: RunItem | null): JobStep[] {
   )
 }
 
+/** 执行日志（详情端点才有；列表端点被剥离）。 */
+function getLogs(r: RunItem | null): JobLogEntry[] {
+  if (!r?.result) return []
+  const logs = (r.result as Record<string, unknown>).logs
+  if (!Array.isArray(logs)) return []
+  return logs.filter(
+    (l): l is JobLogEntry =>
+      !!l && typeof l === 'object' && typeof (l as JobLogEntry).message === 'string'
+  )
+}
+
 function formatResult(r: unknown): string {
   if (!r || typeof r !== 'object') return ''
   const obj = r as Record<string, unknown>
@@ -83,7 +116,7 @@ function formatResult(r: unknown): string {
     out.push(`摘要: ${summary}`)
   }
   for (const [k, v] of Object.entries(obj)) {
-    if (k === 'steps' || k === 'summary') continue
+    if (k === 'steps' || k === 'summary' || k === 'logs') continue
     out.push(`${k}: ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`)
   }
   return out.join('\n')
@@ -116,12 +149,30 @@ const stats = computed(() => {
   }
 })
 
+/** 耗时格式化（毫秒 → 人类可读）。与 HistoryStats 同一口径。 */
+function formatDuration(ms: number | null): string {
+  if (ms == null) return '—'
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
+  return `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`
+}
+
+/**
+ * 开始时间压成 ``MM-DD HH:MM:SS``。
+ *
+ * 完整时间太长，表格列会被撑宽导致「耗时」列换行（行高翻倍、
+ * 弹框变高）。完整值放进 tooltip。
+ */
+function shortTime(s: string): string {
+  return s.length >= 19 ? s.substring(5, 19) : s
+}
+
 const columns = [
-  { title: '开始时间', dataIndex: 'started_at', key: 'started_at', width: 175 },
-  { title: '触发', dataIndex: 'trigger', key: 'trigger', width: 70 },
-  { title: '耗时', dataIndex: 'duration_ms', key: 'duration_ms', width: 95 },
-  { title: '状态', dataIndex: 'ok', key: 'ok', width: 80 },
-  { title: '步骤', key: 'steps', width: 90 },
+  { title: '开始时间', dataIndex: 'started_at', key: 'started_at', width: 130 },
+  { title: '触发', dataIndex: 'trigger', key: 'trigger', width: 60 },
+  { title: '耗时', dataIndex: 'duration_ms', key: 'duration_ms', width: 80 },
+  { title: '状态', dataIndex: 'ok', key: 'ok', width: 70 },
+  { title: '步骤', key: 'steps', width: 80 },
   { title: '错误', dataIndex: 'error', key: 'error', ellipsis: true },
 ]
 
@@ -130,6 +181,7 @@ function customRow(record: RunItem) {
   return {
     onClick: () => {
       selectedRun.value = record
+      void loadDetail(record.id)
     },
   }
 }
@@ -141,6 +193,7 @@ function customRow(record: RunItem) {
     :title="`运行历史 · ${jobLabel} (${jobName})`"
     :footer="null"
     width="960px"
+    :body-style="{ maxHeight: 'calc(100vh - 220px)', overflowY: 'auto' }"
     @cancel="emit('update:open', false)"
   >
     <!-- 顶部统计 -->
@@ -167,16 +220,18 @@ function customRow(record: RunItem) {
           row-key="id"
           size="small"
           :loading="loading"
-          :pagination="{ pageSize: 15, showSizeChanger: false }"
+          :pagination="{ pageSize: 8, showSizeChanger: false }"
           :row-class-name="(r: RunItem) => selectedRun?.id === r.id ? 'row-selected' : ''"
           :custom-row="customRow"
         >
           <template #bodyCell="{ column, record }">
             <template v-if="column.key === 'started_at'">
-              <span class="mono dim">{{ record.started_at }}</span>
+              <a-tooltip :title="record.started_at">
+                <span class="mono dim nowrap">{{ shortTime(record.started_at) }}</span>
+              </a-tooltip>
             </template>
             <template v-else-if="column.key === 'duration_ms'">
-              <span class="mono dim">{{ record.duration_ms ?? '—' }} ms</span>
+              <span class="mono dim nowrap">{{ formatDuration(record.duration_ms) }}</span>
             </template>
             <template v-else-if="column.key === 'ok'">
               <a-tag :color="record.ok ? 'green' : 'red'" size="small">
@@ -192,7 +247,9 @@ function customRow(record: RunItem) {
               <span v-else class="dim">—</span>
             </template>
             <template v-else-if="column.key === 'error'">
-              <span v-if="record.error" class="error-text">{{ record.error }}</span>
+              <a-tooltip v-if="record.error" :title="record.error">
+                <span class="error-text">{{ record.error }}</span>
+              </a-tooltip>
               <span v-else class="dim">—</span>
             </template>
           </template>
@@ -204,37 +261,45 @@ function customRow(record: RunItem) {
           <span class="dim">点击左侧行查看详情</span>
         </div>
         <div v-else>
-          <div class="detail-row">
-            <span class="detail-label">开始</span>
-            <span class="mono">{{ selectedRun.started_at }}</span>
-          </div>
-          <div class="detail-row">
-            <span class="detail-label">结束</span>
-            <span class="mono">{{ selectedRun.finished_at ?? '—' }}</span>
-          </div>
-          <div class="detail-row">
-            <span class="detail-label">耗时</span>
-            <span class="mono">{{ selectedRun.duration_ms ?? '—' }} ms</span>
-          </div>
-          <div class="detail-row">
-            <span class="detail-label">触发</span>
-            <span class="mono">{{ selectedRun.trigger }}</span>
-          </div>
+          <a-spin :spinning="detailLoading" size="small">
+            <div class="detail-row">
+              <span class="detail-label">开始</span>
+              <span class="mono">{{ selectedRun.started_at }}</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">结束</span>
+              <span class="mono">{{ selectedRun.finished_at ?? '—' }}</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">耗时</span>
+              <span class="mono">{{ formatDuration(selectedRun.duration_ms) }}</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">触发</span>
+              <span class="mono">{{ selectedRun.trigger }}</span>
+            </div>
 
-          <!-- 步骤卡片 -->
-          <div v-if="getSteps(selectedRun).length" class="detail-section">
-            <div class="detail-label">任务步骤</div>
-            <JobStepList :steps="getSteps(selectedRun)" />
-          </div>
-          <div v-else-if="selectedRun.result" class="detail-section">
-            <div class="detail-label">结果</div>
-            <pre class="result-pre">{{ formatResult(selectedRun.result) }}</pre>
-          </div>
+            <!-- 步骤卡片（含逐项明细，默认折叠） -->
+            <div v-if="getSteps(selectedRun).length" class="detail-section">
+              <div class="detail-label">任务步骤</div>
+              <JobStepList :steps="getSteps(selectedRun)" />
+            </div>
+            <div v-else-if="selectedRun.result" class="detail-section">
+              <div class="detail-label">结果</div>
+              <pre class="result-pre">{{ formatResult(selectedRun.result) }}</pre>
+            </div>
 
-          <div v-if="selectedRun.error" class="detail-row detail-row--error">
-            <span class="detail-label">错误</span>
-            <span class="error-text">{{ selectedRun.error }}</span>
-          </div>
+            <!-- 执行日志（时序视角：哪步慢、中间发生了什么） -->
+            <div class="detail-section">
+              <div class="detail-label">执行日志</div>
+              <JobLogViewer :logs="getLogs(selectedRun)" />
+            </div>
+
+            <div v-if="selectedRun.error" class="detail-row detail-row--error">
+              <span class="detail-label">错误</span>
+              <span class="error-text">{{ selectedRun.error }}</span>
+            </div>
+          </a-spin>
         </div>
       </div>
     </div>
@@ -244,6 +309,7 @@ function customRow(record: RunItem) {
 <style scoped>
 .dim { color: var(--text-tertiary); }
 .mono { font-family: var(--font-mono, monospace); }
+.nowrap { white-space: nowrap; }
 
 .history-toolbar {
   display: flex;
@@ -253,11 +319,22 @@ function customRow(record: RunItem) {
   font-size: var(--text-xs);
 }
 
+/*
+  固定高度 + 两栏等高：
+  之前是 ``min-height: 420px`` + 表格 15 行/页 + 耗时列换行，
+  弹框总高能到 1100px+（超出视口）。现在每页 8 行 + 列不换行，
+  高度收敛在一屏内。
+*/
 .history-grid {
   display: grid;
   grid-template-columns: 1.25fr 1fr;
   gap: var(--sp-3);
-  min-height: 420px;
+  height: min(56vh, 520px);
+}
+
+.history-list {
+  overflow: auto;
+  min-width: 0;
 }
 
 .history-list :deep(.row-selected) {
@@ -273,14 +350,14 @@ function customRow(record: RunItem) {
   padding: var(--sp-3);
   font-size: var(--text-sm);
   overflow: auto;
-  max-height: 520px;
+  min-height: 0;
 }
 .empty-detail {
   display: flex;
   align-items: center;
   justify-content: center;
   height: 100%;
-  min-height: 320px;
+  min-height: 200px;
 }
 .detail-row {
   display: flex;

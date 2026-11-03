@@ -34,7 +34,7 @@ from app.core.timeutils import bj_now
 from app.db.models import Site, SiteUserData
 from app.db.session import get_session_factory, session_scope
 from app.services.factory import AdapterFactory
-from app.services.scheduler import JobStep
+from app.services.scheduler import JobStep, JobStepItem, build_items
 
 logger = get_logger(__name__)
 
@@ -188,19 +188,35 @@ async def refresh_all_sites(factory: AdapterFactory) -> dict[str, object]:
     capped = 0
     failures: list[tuple[str, str]] = []
     to_write: list[tuple[int, SiteUserSnapshot]] = []
+    # 逐站明细（前端「步骤卡片」展开后可见）——回答"哪个站没抓到 / 多少"
+    site_items: list[JobStepItem] = []
     for res in results:
         if res.error is not None:
             failed += 1
             failures.append((res.site_name, res.error))
+            site_items.append(
+                JobStepItem(res.site_name, "fail", None, res.error)
+            )
             continue
         if res.snapshot is None:
             skipped += 1
+            site_items.append(
+                JobStepItem(res.site_name, "skip", None, "不支持 / 无凭据")
+            )
             continue
         ok += 1
         to_write.append((res.site_id, res.snapshot))
         bonus = res.snapshot.hourly_bonus
-        if bonus is not None and bonus.capped:
-            capped += 1
+        detail = (
+            f"上传 {res.snapshot.upload}，下载 {res.snapshot.download}，"
+            f"做种 {res.snapshot.seeding_count}"
+        )
+        if bonus is not None:
+            detail += f"，时魔 {bonus.amount:g} {bonus.unit}"
+            if bonus.capped:
+                capped += 1
+                detail += "（已封顶）"
+        site_items.append(JobStepItem(res.site_name, "ok", None, detail))
 
     if to_write:
         async with session_scope() as session:
@@ -213,6 +229,7 @@ async def refresh_all_sites(factory: AdapterFactory) -> dict[str, object]:
         "refresh_user_data 完成：ok=%d failed=%d skipped=%d capped=%d total=%d",
         ok, failed, skipped, capped, total,
     )
+    items, items_total = build_items(site_items)
     return {
         "ok": ok,
         "failed": failed,
@@ -220,7 +237,9 @@ async def refresh_all_sites(factory: AdapterFactory) -> dict[str, object]:
         "capped": capped,
         "total": total,
         "summary": _build_summary(total, ok, failed, skipped, capped, failures),
-        "steps": _build_steps(total, ok, failed, skipped, capped, failures),
+        "steps": _build_steps(
+            total, ok, failed, skipped, capped, failures, items, items_total,
+        ),
     }
 
 
@@ -251,6 +270,8 @@ def _build_steps(
     skipped: int,
     capped: int,
     failures: list[tuple[str, str]],
+    items: list[JobStepItem] | None = None,
+    items_total: int | None = None,
 ) -> list[JobStep]:
     """步骤卡片（前端「步骤卡片」数据源）。"""
     steps: list[JobStep] = [
@@ -259,10 +280,14 @@ def _build_steps(
 
     if failed:
         detail = f"{ok} 成功，{skipped} 跳过，{failed} 失败"
-        steps.append(JobStep("拉取 user_data", "warn", ok, detail))
+        steps.append(
+            JobStep("拉取 user_data", "warn", ok, detail, items=items,
+                    items_total=items_total)
+        )
     elif ok:
         steps.append(
-            JobStep("拉取 user_data", "ok", ok, f"{ok} 成功，{skipped} 跳过")
+            JobStep("拉取 user_data", "ok", ok, f"{ok} 成功，{skipped} 跳过",
+                    items=items, items_total=items_total)
         )
     else:
         steps.append(JobStep("拉取 user_data", "skip", 0, "无可刷新的站点"))
@@ -285,7 +310,9 @@ def _build_steps(
                 "失败站点",
                 "fail",
                 len(failures),
-                "；".join(f"{name}: {reason}" for name, reason in failures)[:200],
+                # 不再硬截断到 200 字——逐站明细已进 ``items``，
+                # 这里只给一句人话摘要（完整原因在明细里）。
+                "；".join(f"{name}: {reason}" for name, reason in failures),
             )
         )
     return steps

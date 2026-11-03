@@ -257,6 +257,33 @@ async def test_failure_counted_and_not_written_as_zero(
     assert rows[0].upload == 1000, "写 0 兜底 = 把故障伪装成真零"
 
 
+async def test_steps_含逐站明细(db: None, factory_with) -> None:
+    """拉取步骤带**逐站明细**——回答「哪个站失败 / 各站多少」。"""
+    await _add_sites("s1", "s2")
+    result = await refresh_all_sites(
+        factory_with({"s1": "ok", "s2": "raise"})
+    )
+
+    step = next(s for s in result["steps"] if s.name == "拉取 user_data")
+    assert step.items is not None
+    by_name = {i.name: i for i in step.items}
+    assert set(by_name) == {"s1", "s2"}
+    assert by_name["s1"].status == "ok"
+    assert "上传" in (by_name["s1"].detail or "")
+    assert by_name["s2"].status == "fail"
+    assert by_name["s2"].detail
+
+
+async def test_steps_明细含时魔信息(db: None, factory_with) -> None:
+    """成功站的明细里带时魔值（用户最关心的数字）。"""
+    await _add_sites("s1")
+    result = await refresh_all_sites(factory_with({"s1": "ok"}))
+
+    step = next(s for s in result["steps"] if s.name == "拉取 user_data")
+    assert step.items is not None
+    assert "时魔" in (step.items[0].detail or "")
+
+
 async def test_failure_keeps_previous_snapshot(db: None, factory_with) -> None:
     """失败站**保留上一次的快照**（不覆盖成 0，也不清空）。"""
     await _add_sites("s1")

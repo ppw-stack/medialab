@@ -106,6 +106,29 @@
   - **不建表**：结果只进 `job_runs.result_json`（`summary` + `steps`），前端「调度 → 历史」可见
   - 解析规则用**真实页面**固化成 fixture（`tests/fixtures/*_attendance.html`）——手写最小 HTML 会漏掉真实文案（hhanclub 成功页**不含**"签到成功"四字，只有统计文案）
   - 契约由 `tests/unit/test_checkin_parser.py` + `tests/unit/test_site_adapters.py` + `tests/integration/test_checkin_job.py` 固化
+- **作业步骤带逐项明细**（2026-11-03 加入，`JobStep.items`）：
+  - 步骤的 `detail` 是**聚合**描述（如「20 成功，0 失败」）——光看它**回答不了「是哪些出了问题」**。而作业执行时这些数据本来就在内存里（逐站结果、逐种推送结果…），只是没被带出来
+  - `JobStep.items: list[JobStepItem] | None` = 逐项明细（`name` / `status` / `count` / `detail`）；`items_total` = 完整条数（`> len(items)` = 被截断，前端显示「显示 N / 共 M」）
+  - **全部字段带默认值 → 向后兼容**：现有 60+ 处 `JobStep(...)` 调用零改动
+  - **必须限流**：`build_items()` 上限 50 条/步（`monitor` 可能命中几百个种子），超限丢**最早**的（明细按执行顺序产生）
+  - 前端**默认折叠**（点击「明细（N）」展开）——默认展开会把详情面板撑爆
+  - 7 个作业全填：`fetch_all_sites`（逐站）/ `push_free_torrents`（逐种 + 逐档站名）/ `monitor_free_window`（逐 hash 动作）/ `refresh_user_data`（逐站 + 时魔值）/ `drain_task_queue`（逐 task）/ `daily_checkin`（逐站状态）/ `cross_seed_maintenance`（逐下载器）
+  - 顺手干掉硬截断：`user_data.py` / `checkin.py` 的 `[:200]`（完整原因进明细，summary 只给一句人话）
+  - 契约由 `tests/unit/test_scheduler.py` + 各作业的 integration 测试固化
+- **作业执行日志**（2026-11-03 加入，`app/core/job_log.py`）：
+  - `job_runs.result_json.logs` = 作业执行期间的 Python 日志（结构化 `{ts, level, logger, message}`），**不加列**（免 DB 迁移）
+  - 与逐项明细**互补**：明细回答「**是哪些**」，日志回答「**什么时候 / 多慢**」
+  - **`ContextVar` 隔离并发作业**——`emit` 只接受「当前采集器」的记录。普通全局变量会让并发作业互相污染（用户看到 A 作业的日志里有 B 的输出）
+  - `asyncio.gather` 派生的 task **继承 context** → `user_data` 那种「并发抓 9 站」的子任务日志也收得到
+  - 上限 200 条/次，超限丢**最旧**的
+  - **门槛是 root logger 级别**（`LOG_LEVEL`）——`LOG_LEVEL=INFO`（生产默认）收完整时间线；调成 WARNING 则只剩警告以上
+  - 契约由 `tests/unit/test_job_log.py` 固化
+- **作业历史接口必须分层**（2026-11-03 加入）：
+  - `GET /scheduler/runs`（列表）→ **剥离** `logs` 与大字段（`cross_seed.results[].stats` 含完整 40 位 hash 列表，辅种站快照 **590KB**；列表一次 100 条 = **~59MB** 响应）
+  - `GET /scheduler/runs/{run_id}`（详情）→ **完整**数据（用户点开某次运行就该看到全部）
+  - 前端**点行时按需拉详情**（`SchedulerHistoryModal.vue`）
+  - `job_runs` 保留期 **30 天**，清理挂在 `drain_task_queue` 的「清理作业历史」步骤（它已承担 `task_queue` 的定期清理语义，每 5 分钟一次）——为一个 DELETE 单开第 8 个作业属过度设计
+  - 契约由 `tests/integration/test_services.py` + `tests/integration/test_task_drain.py` 固化
 - **monitor 命中后的动作：暂停 or 删除**（2026-10-23 加入，`monitor_delete_expired` 运行参数）：
   - `0`（**默认**）= 仅暂停（`set_pause`）；`1` = 删任务 + 删磁盘数据（`remove(delete_data=True)`）
   - **判定范围与暂停完全一致**——「该暂停的」就是「该删的」，差别只在执行动作（REFUND / TIMED 无 end_at / TIMED 窗口到期 / 非免费种；PERMANENT 永不处理）

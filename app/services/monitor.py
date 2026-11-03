@@ -52,7 +52,7 @@ from app.db.session import session_scope
 from app.domain.enums import FreeType, PushStatus
 from app.services.downloader_query import get_default_downloader
 from app.services.factory import AdapterFactory
-from app.services.scheduler import JobStep
+from app.services.scheduler import JobStep, JobStepItem, build_items
 
 if TYPE_CHECKING:
     from app.adapters.downloaders.base import TorrentInfo
@@ -268,11 +268,39 @@ class MonitorFreeWindowService:
         deleted = 0
         failed = 0
         errors: list[str] = []
+        # 逐种明细（前端「步骤卡片」展开后可见）——回答"动了哪些种子"
+        action_items: list[JobStepItem] = []
 
         # 动作模式（0=仅暂停 / 1=删任务+删数据），作业开始时读一次——
         # 一次巡检内保持同一动作，避免中途改参数导致同一批种子一半暂停
         # 一半删除。
         delete_mode = get_runtime_params().get_int("monitor_delete_expired") == 1
+
+        async def _apply(reason: str) -> None:
+            """对当前种子执行动作（暂停 / 删除），并记录明细。
+
+            闭包：直接改外层的 ``deleted`` / ``pre_paused`` / ``failed`` /
+            ``errors`` / ``action_items``（Python 的 nonlocal 语义）。
+            """
+            nonlocal deleted, pre_paused, failed
+            action, err = await self._act(adapter, info.hash or "", delete_mode)
+            label = (info.name or hash_key)[:80]
+            if err is not None:
+                failed += 1
+                errors.append(f"hash={hash_key} {action}: {err}")
+                action_items.append(
+                    JobStepItem(label, "fail", None, f"{reason}：{err}")
+                )
+            elif action == "deleted":
+                deleted += 1
+                action_items.append(
+                    JobStepItem(label, "ok", None, f"{reason} → 已删除（含磁盘数据）")
+                )
+            else:
+                pre_paused += 1
+                action_items.append(
+                    JobStepItem(label, "ok", None, f"{reason} → 已暂停")
+                )
 
         for info in infos:
             hash_key = (info.hash or "").lower()
@@ -313,54 +341,27 @@ class MonitorFreeWindowService:
                 # 用户规则"当前非免费种直接处理"——与 NEUTRAL/UNKNOWN 走相同路径
                 # 单独计数便于统计退还种规模
                 skipped_refund += 1
-                action, err = await self._act(adapter, info.hash or "", delete_mode)
-                if err is not None:
-                    failed += 1
-                    errors.append(f"hash={hash_key} {action}: {err}")
-                elif action == "deleted":
-                    deleted += 1
-                else:
-                    pre_paused += 1
+                await _apply("退还种")
                 continue
 
             if ft in (FreeType.TIMED, FreeType.TWOU_TIMED):
                 # 限时种（含 2X 限时）：窗口判断
                 if fea is None:
                     # 异常：限时种无 end_at → 保守处理
-                    action, err = await self._act(adapter, info.hash or "", delete_mode)
-                    if err is not None:
-                        failed += 1
-                        errors.append(f"hash={hash_key} {action}: {err}")
-                    elif action == "deleted":
-                        deleted += 1
-                    else:
-                        pre_paused += 1
+                    await _apply("限时种无截止时间")
                     continue
                 if fea > threshold:
                     skipped_far += 1
                     continue
                 # 即将到期 / 已过期 → 处理
-                action, err = await self._act(adapter, info.hash or "", delete_mode)
-                if err is not None:
-                    failed += 1
-                    errors.append(f"hash={hash_key} {action}: {err}")
-                elif action == "deleted":
-                    deleted += 1
-                else:
-                    pre_paused += 1
+                await _apply("临近窗口截止")
                 continue
 
             # 其他 free_type（neutral_leech / unknown / 任何非免费）→ 直接处理
             # 用户规则："当前不是免费种，直接处理"
-            action, err = await self._act(adapter, info.hash or "", delete_mode)
-            if err is not None:
-                failed += 1
-                errors.append(f"hash={hash_key} {action}: {err}")
-            elif action == "deleted":
-                deleted += 1
-            else:
-                pre_paused += 1
+            await _apply("已非免费种")
 
+        action_items, action_items_total = build_items(action_items)
         result = MonitorResult(
             scanned=scanned,
             matched=matched,
@@ -414,6 +415,8 @@ class MonitorFreeWindowService:
                         if delete_mode
                         else f"已暂停 {pre_paused} 个，{failed} 失败"
                     ),
+                    items=action_items,
+                    items_total=action_items_total,
                 ),
             ),
         )
