@@ -175,8 +175,10 @@ cp seedhelper.db  seedhelper.db.bak-$(date +%s)
 docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d
 
 # 5. 验收清单
-curl -fsS http://192.168.0.128:8099/healthz
-curl -fsS http://192.168.0.128:8099/readyz
+#    （端口 8092：2026-11-03 从 8099 迁回——seedhelper 移除后 8092 空闲，
+#      prod 与 dev 统一用 8092）
+curl -fsS http://192.168.0.128:8092/healthz
+curl -fsS http://192.168.0.128:8092/readyz
 #    面板：媒体库域（存储源/媒体库/上传/健康/DAV/签名密钥）
 #          辅种域（站点/下载器/任务/拉取索引/用户数据/辅种统计/调度）
 #    播放一个 .strm → 302 正常

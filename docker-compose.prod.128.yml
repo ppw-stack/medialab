@@ -23,7 +23,7 @@ services:
     container_name: medialab
     restart: unless-stopped
     ports:
-      # 主机 8099：8080 / 8091 / 8096 / 9527 已被 immich / emby /
+      # 主机 8092：8080 / 8091 / 8096 / 9527 已被 immich / emby /
       # cloud-media-sync 占用。
       - "${HOST_PORT:-8092}:8080"
     env_file:

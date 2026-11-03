@@ -29,7 +29,7 @@
 |---|---|---|
 | 位置 | 本机 `192.168.0.92`（arm64） | 远端 `192.168.0.128`（Unraid Tower, x86_64） |
 | 端口 | **8092** | **8092** |
-| 容器名 | `medialab-dev` | `medialab-prod` |
+| 容器名 | `medialab-dev` | `medialab` |
 | 镜像 | 本地 `docker compose build` | `ppw111/medialab:latest`（Docker Hub） |
 | Compose 文件 | `docker-compose.yml` | `docker-compose.prod.128.yml` |
 | 数据目录 | `./data-dev/` | `/mnt/user/appdata/medialab/data` |
@@ -141,8 +141,17 @@ ssh mp "cd /mnt/user/appdata/medialab/app && TAG=latest docker compose -f docker
 > 而 Docker Hub 上只有 `latest` 和 `main`，`0.1.0` 不存在，直接 `up -d` 会拉取失败。
 >
 > ⚠️ 若容器是旧版本手动创建的（没有 compose label），`up -d` 不会替换它，
-> 需先 `docker stop -t 60 medialab-prod && docker rm medialab-prod`。
+> 需先 `docker stop -t 60 medialab && docker rm medialab`。
 > 60s 宽限期对应 `stop_grace_period`，让在途作业收尾。
+>
+> ⚠️ **128 上偶发「stop 不掉」**（2026-11-03 遇到一次）：应用本身已正常
+> 停机（日志有「已停机」+「Application shutdown complete」），但主进程变成
+> 僵尸（`ps aux` 显示 `[uvicorn] <defunct>`），Docker 等不到退出事件，
+> 报 `cannot stop container: tried to kill container, but did not receive
+> an exit event`。Unraid 的 shfs/FUSE 挂载上偶发此问题。
+> 处理：`docker kill -s KILL medialab`（已退出后 `up -d` 会重建）。
+> 若容器名被占（Docker 自动加随机前缀），先 `docker compose down` 清干净
+> 再 `up -d`，容器名即恢复标准 `medialab`。
 
 启动后等待 15 秒让 healthcheck 通过。
 

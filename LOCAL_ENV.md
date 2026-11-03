@@ -42,7 +42,7 @@
 |---|---|---|
 | 位置 | 本机（192.168.0.92） | 远端 `192.168.0.128`（Unraid Tower, x86_64） |
 | 端口 | **8092** | **8092** |
-| 容器名 | `medialab-dev` | `medialab-prod` |
+| 容器名 | `medialab-dev` | `medialab` |
 | 镜像 | `medialab:dev-arm64`（本地构建） | `ppw111/medialab:latest`（Docker Hub） |
 | 数据目录 | `./data-dev/` | `/mnt/user/appdata/medialab/data` |
 | 日志目录 | `./logs-dev/` | `/mnt/user/appdata/medialab/logs` |
@@ -465,7 +465,7 @@ cd web && npx playwright test
 
 # 远端操作
 ssh mp "docker ps --filter name=medialab"
-ssh mp "docker logs -f medialab-prod --tail 100"
+ssh mp "docker logs -f medialab --tail 100"
 ```
 
 ### 本机构建镜像给 prod 用
