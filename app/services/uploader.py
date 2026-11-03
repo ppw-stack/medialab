@@ -28,6 +28,11 @@ worker 立刻处理下一个文件。CIFS 上删一个 6.9 GB 文件要几十秒
 （等 SMB 服务器释放句柄），同步做会让 worker 长时间空转。
 安全校验（fileId / 大小一致 / 路径合法）仍然**同步做**——那是不可绕过的
 闸门，不能把「不该删的文件」丢进后台队列。
+
+**删完文件顺手清空目录**（2026-11-03）：用户勾了「同步成功后删除本地
+文件」就意味着「传走的东西本地不留痕」→ 空壳目录一并删掉，向上递归到
+监听根（不含根）。只用 ``rmdir``（内核保证非空必失败），**绝不**
+``rmtree``。详见 :func:`app.services.upload_cleanup.prune_empty_parents`。
 """
 
 from __future__ import annotations
@@ -345,6 +350,9 @@ async def _cleanup_worker(local_path: Path, root: Path, outcome: SyncOutcome) ->
         if result.status in (upload_cleanup.DELETE_OK, upload_cleanup.DELETE_MISSING):
             # MISSING = 文件已被别处删了，不算错
             logger.info("已删除本地文件 %s", local_path)
+            # 空目录清理的审计（删磁盘数据不可逆 → 必须能回答「删了什么」）
+            for directory in result.removed_dirs:
+                logger.info("已删除空目录 %s", directory)
             return
         logger.warning(
             "后台删除本地文件未成功 %s：%s", local_path, result.reason or result.status

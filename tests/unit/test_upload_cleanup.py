@@ -5,6 +5,7 @@
 - 只删「确认落盘」的文件（云端 fileId + 大小必须一致）
 - 只删监听根内的普通文件（软链 / 目录 / 隐藏文件一律拒绝）
 - ``unchanged`` / 失败 / 大小不符 → **不删**
+- **删完文件顺手清空空目录**（向上递归到监听根，不含根）
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ from app.services.upload_cleanup import (
     DELETE_REJECTED,
     delete_local_file,
     is_safe_to_delete,
+    is_safe_to_prune_dir,
+    prune_empty_parents,
 )
 from app.services.uploader import (
     RESULT_UNCHANGED,
@@ -392,3 +395,344 @@ def test_清理模块常量齐全():
     assert DELETE_MISSING == "missing"
     assert DELETE_REJECTED == "rejected"
     assert DELETE_FAILED == "failed"
+
+
+# --------------------------------------------------------------------------
+# 空目录清理
+#
+# **这是不可逆操作**——删的是磁盘上的目录。测试要覆盖：
+#
+# - 只删**空**目录（``rmdir`` 内核保证，非空必失败）
+# - 向上递归但**停在监听根**（根是用户骨架，永不删）
+# - 隐藏目录 / 软链 / 根外目录一律不动
+# - 非空目录 → 停止向上（不越级删更上层）
+# --------------------------------------------------------------------------
+
+
+def test_删完文件后空目录被删(tmp_path: Path):
+    """文件删掉后，它所在的空目录一并删掉。"""
+    sub = tmp_path / "片名"
+    sub.mkdir()
+    path = sub / "a.mkv"
+    path.write_bytes(b"content")
+
+    result = delete_local_file(path, tmp_path)
+
+    assert result.status == DELETE_OK
+    assert not sub.exists()
+    assert result.removed_dirs == [str(sub)]
+
+
+def test_空目录递归向上删(tmp_path: Path):
+    """**链式向上**：``a/b/c/x.mkv`` 删掉后 ``c`` → ``b`` → ``a`` 全删。
+
+    只到监听根为止（根不删）。
+    """
+    a = tmp_path / "a"
+    b = a / "b"
+    c = b / "c"
+    c.mkdir(parents=True)
+    path = c / "x.mkv"
+    path.write_bytes(b"x")
+
+    result = delete_local_file(path, tmp_path)
+
+    assert result.status == DELETE_OK
+    assert not c.exists()
+    assert not b.exists()
+    assert not a.exists()
+    # **监听根必须还在**
+    assert tmp_path.exists()
+    # 自下而上
+    assert result.removed_dirs == [str(c), str(b), str(a)]
+
+
+def test_监听根本身不删(tmp_path: Path):
+    """监听根是用户指定的骨架 → 永不删除。"""
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    path = sub / "a.mkv"
+    path.write_bytes(b"x")
+
+    result = delete_local_file(path, tmp_path)
+
+    assert result.status == DELETE_OK
+    assert not sub.exists()
+    assert tmp_path.is_dir()
+
+
+def test_非空目录保留且停止向上(tmp_path: Path):
+    """父目录里还有别的文件 → 保留它，**且不再往上删**。
+
+    上层必然也非空（含这个非空目录）→ 越级删是灾难。
+    """
+    a = tmp_path / "a"
+    b = a / "b"
+    b.mkdir(parents=True)
+    path = b / "a.mkv"
+    path.write_bytes(b"x")
+    # b 里还有另一个文件 → b 非空
+    keep = b / "keep.mkv"
+    keep.write_bytes(b"y")
+
+    result = delete_local_file(path, tmp_path)
+
+    assert result.status == DELETE_OK
+    assert not path.exists()
+    # b 非空 → 保留
+    assert b.is_dir()
+    assert keep.exists()
+    # a 里面还有 b → 也保留（不该越级）
+    assert a.is_dir()
+    assert result.removed_dirs == []
+
+
+def test_隐藏目录不删(tmp_path: Path):
+    """隐藏目录里的文件删掉后，隐藏目录本身保留。"""
+    hidden = tmp_path / ".hidden"
+    hidden.mkdir()
+    path = hidden / "a.mkv"
+    path.write_bytes(b"x")
+
+    result = delete_local_file(path, tmp_path)
+
+    assert result.status == DELETE_OK
+    assert not path.exists()
+    # 隐藏目录保留
+    assert hidden.is_dir()
+
+
+def test_回收目录内的文件不删(tmp_path: Path):
+    """``.strmmanger-trash`` 里的文件**根本不许删**（既有行为）。
+
+    故它里面的目录更不会被清空。
+    """
+    trash = tmp_path / ".strmmanger-trash" / "20260101-000000"
+    trash.mkdir(parents=True)
+    path = trash / "old.mkv"
+    path.write_bytes(b"x")
+
+    result = delete_local_file(path, tmp_path)
+
+    assert result.status == DELETE_REJECTED
+    assert path.exists()
+    assert trash.is_dir()
+
+
+def test_软链目录不删(tmp_path: Path):
+    """软链目录里的文件**根本不许删**（软链逃逸，既有行为）。
+
+    故软链目录更不会被清空——真实目录里的文件也不受影响。
+    """
+    outside = tmp_path.parent / "outside_prune"
+    outside.mkdir(exist_ok=True)
+    (outside / "other.mkv").write_bytes(b"x")
+
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("平台不支持软链")
+
+    path = link / "a.mkv"
+    path.write_bytes(b"x")
+
+    result = delete_local_file(path, tmp_path)
+
+    # 软链内的文件被拒（``is_safe_to_delete`` 拦下）
+    assert result.status == DELETE_REJECTED
+    assert path.exists()
+    # 软链本身还在
+    assert link.is_symlink()
+    # 真实目录里的文件没被动
+    assert (outside / "other.mkv").exists()
+    assert result.removed_dirs == []
+
+
+def test_根外目录不删(tmp_path: Path):
+    """监听根外的目录不删。"""
+    root = tmp_path / "watch"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    path = outside / "a.mkv"
+    path.write_bytes(b"x")
+
+    result = delete_local_file(path, root)
+
+    # 根外的文件本来就拒绝删
+    assert result.status == DELETE_REJECTED
+    assert outside.is_dir()
+
+
+def test_目录安全闸校验(tmp_path: Path):
+    """``is_safe_to_prune_dir`` 的四道闸。"""
+    root = tmp_path / "watch"
+    root.mkdir()
+    sub = root / "sub"
+    sub.mkdir()
+    hidden = root / ".hidden"
+    hidden.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = root / "link"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("平台不支持软链")
+
+    # 监听根 → 不删
+    assert is_safe_to_prune_dir(root, root) == "是监听根，不删"
+    # 普通子目录 → 可以
+    assert is_safe_to_prune_dir(sub, root) is None
+    # 隐藏目录 → 不删
+    assert is_safe_to_prune_dir(hidden, root) == "隐藏目录内，不删"
+    # 根外 → 不删
+    assert is_safe_to_prune_dir(outside, root) == "软链逃出监听根"
+    # 软链 → 不删
+    assert is_safe_to_prune_dir(link, root) == "是软链，不删"
+
+
+def test_prune_empty_parents_空目录全删(tmp_path: Path):
+    """直接调 ``prune_empty_parents`` —— 空目录全部删掉。"""
+    a = tmp_path / "a"
+    b = a / "b"
+    b.mkdir(parents=True)
+
+    removed = prune_empty_parents(b, tmp_path)
+
+    assert removed == [str(b), str(a)]
+    assert not a.exists()
+    assert tmp_path.exists()
+
+
+def test_prune_empty_parents_非空即停(tmp_path: Path):
+    """非空目录 → 删不掉，且**停止向上**。"""
+    a = tmp_path / "a"
+    b = a / "b"
+    b.mkdir(parents=True)
+    (b / "keep.mkv").write_bytes(b"x")
+
+    removed = prune_empty_parents(b, tmp_path)
+
+    assert removed == []
+    assert b.is_dir()
+    assert a.is_dir()
+
+
+def test_prune_empty_parents_已不存在则继续向上(tmp_path: Path):
+    """起点目录已被并发任务删了 → 继续向上（父目录可能也空了）。"""
+    a = tmp_path / "a"
+    b = a / "b"
+    b.mkdir(parents=True)
+    b.rmdir()
+
+    removed = prune_empty_parents(b, tmp_path)
+
+    # b 不存在（跳过），a 空了 → 被删
+    assert removed == [str(a)]
+    assert not a.exists()
+
+
+def test_prune_empty_parents_rmdir遇ENOENT则继续向上(tmp_path: Path, monkeypatch):
+    """**回归测试**：`rmdir``ENOENT``（并发竞态）→ 继续向上，不许停。
+
+    ``_try_rmdir`` 对 ``ENOENT`` 返回 ``(False, False)``——第二个 ``False``
+    的语义是「**继续向上**」（父目录可能也空了）。若调用方误把它当
+    「停止」，并发删除时就会漏清上层空目录。
+
+    **只让第一层失败**：上层 ``a`` 必须能正常删掉——这样才能区分
+    「继续向上」（``a`` 被删）与「错误地停止」（``a`` 留着）。
+    """
+    a = tmp_path / "a"
+    b = a / "b"
+    b.mkdir(parents=True)
+
+    import errno as _errno
+
+    real_rmdir = Path.rmdir
+
+    def _rmdir(self: Path) -> None:
+        # 只让 ``b`` 失败——模拟真实的竞态：**目录刚被并发任务删掉**
+        # （先真删掉，再抛 ENOENT）。
+        # 必须真删，否则 ``a`` 确实非空 → ``a`` 保留 → 测不出「是否继续向上」。
+        if self.name == "b":
+            real_rmdir(self)
+            raise FileNotFoundError(
+                _errno.ENOENT, "No such file or directory", str(self)
+            )
+        real_rmdir(self)
+
+    monkeypatch.setattr(Path, "rmdir", _rmdir)
+
+    removed = prune_empty_parents(b, tmp_path)
+
+    # b 删不掉（ENOENT）→ **继续向上** → a 空了 → 被删
+    assert removed == [str(a)]
+    assert not a.exists()
+
+
+async def test_上传删除后目录一并清理(tmp_path: Path):
+    """**集成**：`sync_file``delete_local=True`` → 目录一并清掉。"""
+    driver, uploader = FakeDriver(), FakeUploader()
+    sub = tmp_path / "影视" / "片名"
+    sub.mkdir(parents=True)
+    path = sub / "a.mkv"
+    path.write_bytes(b"x" * 100)
+
+    outcome = await sync_file(
+        _ctx(driver, uploader, tmp_path, delete_local=True),
+        path,
+        "影视/片名/a.mkv",
+    )
+
+    assert outcome.status == RESULT_UPLOADED
+    assert outcome.local_deleted is True
+    await drain_cleanup_tasks(wait_sec=5)
+    # 文件与目录都没了
+    assert not path.exists()
+    assert not sub.exists()
+    assert not (tmp_path / "影视").exists()
+    # 监听根还在
+    assert tmp_path.exists()
+
+
+async def test_不删本地时目录保留(tmp_path: Path):
+    """``delete_local=False`` → 文件都不删，目录**更不能**删。"""
+    driver, uploader = FakeDriver(), FakeUploader()
+    sub = tmp_path / "片名"
+    sub.mkdir()
+    path = sub / "a.mkv"
+    path.write_bytes(b"x" * 100)
+
+    outcome = await sync_file(
+        _ctx(driver, uploader, tmp_path, delete_local=False),
+        path,
+        "片名/a.mkv",
+    )
+
+    assert outcome.status == RESULT_UPLOADED
+    assert outcome.local_deleted is False
+    await drain_cleanup_tasks(wait_sec=5)
+    assert path.exists()
+    assert sub.is_dir()
+
+
+async def test_上传失败时目录保留(tmp_path: Path):
+    """上传失败 → 文件都不删，目录**更不能**删。"""
+    driver, uploader = FakeDriver(), FakeUploader()
+    uploader.fail = True
+    sub = tmp_path / "片名"
+    sub.mkdir()
+    path = sub / "a.mkv"
+    path.write_bytes(b"x" * 100)
+
+    outcome = await sync_file(
+        _ctx(driver, uploader, tmp_path, delete_local=True),
+        path,
+        "片名/a.mkv",
+    )
+
+    assert outcome.status != RESULT_UPLOADED
+    assert path.exists()
+    assert sub.is_dir()

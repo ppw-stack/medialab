@@ -16,6 +16,38 @@
 - 文件名不以 ``.`` 开头（不碰隐藏文件）
 - 必须在**监听根内**（`realpath` 校验，防软链逃逸）
 
+## 空目录清理（删完文件顺手删空壳目录）
+
+文件删完后，它所在的目录可能空了。**空目录一并删掉**，向上递归
+直到监听根（**不含**监听根本身）。
+
+**为什么用 ``rmdir`` 而不是 ``rmtree``**（关键决策）：
+
+``os.rmdir`` **只能删空目录**——非空必然报 ``ENOTEMPTY``。这是**内核级
+保证**，没有「先 list 再判断空」的 TOCTOU 窗口（检查与删除之间不可能
+塞进新文件）。这正是 AGENTS.md「不误删」底线要求的形态。
+
+``rmtree`` **绝不用于此处**——它会递归删非空目录，那是灾难性后果。
+
+**四道安全闸**（每个候选目录逐个校验，见 :func:`is_safe_to_prune_dir`）：
+
+1. 不是监听根本身（监听根是用户指定的骨架，必须保留）
+2. ``realpath`` 在监听根内（防软链逃逸）
+3. 不是软链（不跟随软链删它指向的真实目录）
+4. 相对路径里**任一段**不以 ``.`` 开头（``.strmmanger-trash`` 等隐藏
+   目录一律不动）
+
+**errno 分级**（决定是否继续向上，见 :func:`_try_rmdir`）：
+
+| errno | 含义 | 动作 |
+|---|---|---|
+| ``ENOENT`` | 已被并发任务删了 | **继续向上**（父目录可能也空了） |
+| ``ENOTEMPTY`` / ``EEXIST`` | 目录非空 | **停止向上**（父目录必然也非空） |
+| 其它（EACCES / CIFS 错误） | 权限 / IO 问题 | 记 warning，**停止向上** |
+
+``ENOTEMPTY`` 会**短间隔重试**：CIFS 上 ``unlink`` 返回后目录项可能
+还在服务端缓存，立刻 ``rmdir`` 会误判非空 → 重试 2 次（0.3s）。
+
 ## 不删的情形
 
 | 情形 | 原因 |
@@ -33,7 +65,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import errno
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.core.logging import get_logger
@@ -59,6 +93,8 @@ class DeleteResult:
     removed_path: str = ""
     #: 失败 / 拒绝的原因
     reason: str = ""
+    #: 顺手删掉的**空父目录**（自下而上，已被删的那些）
+    removed_dirs: list[str] = field(default_factory=list)
 
 
 def is_safe_to_delete(path: Path, root: Path) -> str | None:
@@ -113,6 +149,11 @@ def is_safe_to_delete(path: Path, root: Path) -> str | None:
 def delete_local_file(path: Path, root: Path) -> DeleteResult:
     """**彻底删除**本地文件（``unlink``，不可逆）。
 
+    删完后**顺手清空目录**：向上递归删掉连续的空父目录（见
+    :func:`prune_empty_parents`）。这是不可逆操作的一部分——用户勾了
+    「同步成功后删除本地文件」，就意味着「传走的东西本地不留痕」，
+    留着空壳目录只是垃圾。
+
     Args:
         path: 要删除的本地文件。
         root: 监听根（用于路径安全校验）。
@@ -138,7 +179,160 @@ def delete_local_file(path: Path, root: Path) -> DeleteResult:
         return DeleteResult(DELETE_FAILED, reason=str(exc))
 
     logger.info("已删除本地文件 %s", path)
-    return DeleteResult(DELETE_OK, removed_path=str(path))
+    # **同一线程内接着清空目录**——避免「文件删了目录还没删」的中间态
+    # 暴露给监听器（它会看到目录变空又变没）。
+    removed_dirs = prune_empty_parents(path.parent, root)
+    return DeleteResult(DELETE_OK, removed_path=str(path), removed_dirs=removed_dirs)
+
+
+def is_safe_to_prune_dir(path: Path, root: Path) -> str | None:
+    """校验「这个目录能不能被清空」。返回拒绝原因（``None`` = 可以删）。
+
+    **四道闸**（任一不过就拒）：
+
+    1. **不是监听根本身**——监听根是用户指定的骨架，必须保留
+    2. 不是软链（不跟随软链删它指向的真实目录）
+    3. 在监听根内（realpath 校验，防软链逃逸）
+    4. 相对路径里**任一段**不以 ``.`` 开头
+       （``.strmmanger-trash`` 等隐藏目录一律不动）
+
+    与 :func:`is_safe_to_delete` 的区别：那个管**文件**（必须是普通
+    文件），这个管**目录**（必须是目录、且不能是根）。
+    """
+    # ① 软链先查——它可能指向根外
+    if path.is_symlink():
+        return "是软链，不删"
+
+    # ② 必须是目录
+    if not path.is_dir():
+        return "不是目录"
+
+    try:
+        resolved = path.resolve()
+        base = root.resolve()
+    except OSError as exc:
+        return f"路径无法解析：{exc}"
+
+    # ③ 监听根本身不删
+    if resolved == base:
+        return "是监听根，不删"
+
+    # ④ 在监听根内（软链逃逸）
+    if not resolved.is_relative_to(base):
+        return "软链逃出监听根"
+
+    # ⑤ 相对路径里任一段是隐藏目录 → 不删
+    try:
+        rel = resolved.relative_to(base)
+    except ValueError:
+        return "不在监听根内"
+    if any(part.startswith(".") for part in rel.parts):
+        return "隐藏目录内，不删"
+
+    return None
+
+
+def prune_empty_parents(
+    start_dir: Path,
+    root: Path,
+    *,
+    retries: int = 2,
+    delay: float = 0.3,
+) -> list[str]:
+    """向上递归删掉**空**目录，直到监听根（**不含**监听根本身）。
+
+    **只删空目录**——用 ``os.rmdir``（内核保证非空必失败），**绝不**
+    用 ``rmtree``（那会递归删非空目录，是灾难性后果）。
+
+    Args:
+        start_dir: 起点目录（通常是刚删掉的那个文件的父目录）。
+        root: 监听根。**它本身永不删除**，且是向上递归的终点。
+        retries: 目录非空时的重试次数（CIFS 上 ``unlink`` 返回后目录项
+            可能还在服务端缓存，立刻 ``rmdir`` 会误判非空）。
+        delay: 重试间隔（秒）。
+
+    Returns:
+        被删掉的目录绝对路径列表（自下而上）。
+    """
+    removed: list[str] = []
+    current = start_dir
+    # ``resolve()`` 默认非严格——路径不存在也不抛（已被删的目录照样能算）
+    base = root.resolve()
+
+    while True:
+        # ① 到达监听根 → 停（根永不删除）
+        try:
+            if current.resolve() == base:
+                break
+        except OSError:
+            break
+
+        # ② 当前目录已不存在 → 被并发任务删了 → **继续向上**
+        #    （父目录可能也空了）
+        if not current.exists():
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+            continue
+
+        # ③ 安全闸
+        reason = is_safe_to_prune_dir(current, root)
+        if reason is not None:
+            logger.debug("跳过清理目录 %s：%s", current, reason)
+            break
+
+        # ④ 删（空目录才删得掉）
+        ok, stop = _try_rmdir(current, retries=retries, delay=delay)
+        if ok:
+            removed.append(str(current))
+            logger.info("已删除空目录 %s", current)
+        elif stop:
+            # 非空 / 权限错误 → **停止向上**（父目录必然也非空）
+            logger.debug("目录 %s 未清理，停止向上清理", current)
+            break
+        # 否则是 ENOENT（已被并发任务删了）→ 幂等，**继续向上**
+        # （父目录可能也空了）
+
+        # ⑤ 向上继续
+        parent = current.parent
+        if parent == current:
+            # 到达文件系统根 → 停
+            break
+        current = parent
+
+    return removed
+
+
+def _try_rmdir(path: Path, *, retries: int, delay: float) -> tuple[bool, bool]:
+    """删一个空目录。
+
+    Returns:
+        ``(是否删成功, 是否应停止向上)``。
+        - 删成功 → ``(True, False)``（继续向上）
+        - 目录非空 → ``(False, True)``（**停**——父目录必然也非空）
+        - 已不存在 → ``(False, False)``（继续向上——父目录可能也空了）
+        - 其它错误 → ``(False, True)``（停，记日志）
+    """
+    attempts = max(1, retries + 1)
+    for attempt in range(attempts):
+        try:
+            path.rmdir()
+            return True, False
+        except FileNotFoundError:
+            # 已被并发任务删了 → 幂等，继续向上
+            return False, False
+        except OSError as exc:
+            if exc.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                # 非空——重试（可能是 CIFS 的目录项缓存）
+                if attempt < attempts - 1:
+                    time.sleep(delay)
+                    continue
+                return False, True
+            # 权限 / IO 错误 → 停（重试也没用）
+            logger.warning("删除空目录失败 %s：%s", path, exc)
+            return False, True
+    return False, True
 
 
 __all__ = [
@@ -149,4 +343,6 @@ __all__ = [
     "DeleteResult",
     "delete_local_file",
     "is_safe_to_delete",
+    "is_safe_to_prune_dir",
+    "prune_empty_parents",
 ]

@@ -50,6 +50,15 @@
   - 业务代码**不写 `if driver.type == "guangya"`**——一律走工厂 + 协议
   - 上传流程的幂等判据（**同名 + 同大小 = 已同步**）、覆盖流程（删旧 → 确认消失 → 传新）、清本地的三重保护（仅 `uploaded`/`overwritten` + 大小一致 + `delete_after_upload` 显式开启）**与网盘无关**，别改
   - 契约由 `tests/unit/test_upload_base.py` + `tests/integration/test_upload_tasks_api.py` 固化
+- **清本地时，空目录一并删**（2026-11-03 加入，`app/services/upload_cleanup.py`）：
+  - 勾了「同步成功后删除本地文件」= 「传走的东西本地不留痕」→ 文件删完后**向上递归删连续的空父目录**，直到监听根（**监听根本身永不删**）
+  - **只用 `os.rmdir`，绝不用 `rmtree`**——`rmdir` 只能删空目录（非空必然 `ENOTEMPTY`），这是**内核级保证**，没有「先 list 再判断空」的 TOCTOU 窗口。`rmtree` 会递归删非空目录，是灾难性后果
+  - **四道安全闸**（`is_safe_to_prune_dir`）：① 不是监听根 ② 不是软链 ③ realpath 在监听根内 ④ 相对路径任一段不以 `.` 开头（`.strmmanger-trash` 等隐藏目录不动）
+  - **errno 分级**（`_try_rmdir`）：`ENOENT` → 已删（幂等）→ **继续向上**；`ENOTEMPTY`/`EEXIST` → 非空 → **停止向上**（父目录必然也非空），重试 2 次（CIFS 上 `unlink` 后目录项可能还在服务端缓存）；其它（EACCES/CIFS 错误）→ 记 warning，停止向上
+  - 删目录与删文件在**同一个 `to_thread`** 里完成——避免「文件删了目录还没删」的中间态暴露给监听器
+  - **云端目录不动**（`UploadDriver` 只有 `delete_file`，无删目录能力；要删云端空目录得扩协议，是独立工程）
+  - **不加独立开关**——绑定在已有的 `delete_after_upload` 上（用户原话：「如果选择删除，文件夹一并删除」）
+  - 契约由 `tests/unit/test_upload_cleanup.py` 固化
 - **上传只能串行——并发无效**（2026-11-02 实测，见 `docs/upload-bandwidth.md`）：
   - **瓶颈是本机上行带宽**（实测 ~3.2 MB/s，到阿里云 OSS 张家口 RTT 31ms）→ 分片大小几乎不影响速率（1/5/20 片都是 2.25-2.75 MB/s），是**带宽受限非 RTT 受限**
   - **别再尝试并发**：同一 uploadId 分片并发 → 零收益或卡死；不同 uploadId 并发 → `Server disconnected` / 卡死，且总吞吐**低于**串行

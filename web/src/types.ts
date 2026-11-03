@@ -849,7 +849,7 @@ export interface UploadTask {
   watch_root: string
   include_subdirs: boolean
   enabled: boolean
-  /** 同步成功后清理本地文件（移到回收目录，可还原） */
+  /** 同步成功后清理本地文件（**彻底删除 unlink，不可恢复**；空目录一并删） */
   delete_after_upload: boolean
   concurrency: number
   created_at: string
