@@ -113,9 +113,13 @@ test('辅种下载器统计页面 - 读快照而非实时拉取', async ({ page 
   //    （2026-11-03 修：dev 库有快照时这个用例才会跑到这行，之前一直
   //    因 dev 无辅种下载器而提前 return，缺陷被掩盖了。）
   await switchBlockTab(page, '分组')
-  await expect(page.locator('th:has-text("原始名称")').first()).toBeVisible()
-  await expect(page.locator('th:has-text("大小")').first()).toBeVisible()
-  await expect(page.locator('th:has-text("出现次数")').first()).toBeVisible()
+  // ⚠️ 必须按**明细表**定位（用独有的「操作」列），不能用
+  //    `th:has-text("出现次数").first()`——次数分布表也有这一列，
+  //    且它默认收起（hidden），.first() 会选中它而失败。
+  const detailTable = page.locator('.ant-table').filter({ hasText: '操作' }).last()
+  await expect(detailTable.locator('th:has-text("原始名称")')).toBeVisible()
+  await expect(detailTable.locator('th:has-text("大小")')).toBeVisible()
+  await expect(detailTable.locator('th:has-text("出现次数")')).toBeVisible()
 
   // 异常 tag
   const tag = page.locator('.summary-bar .ant-tag').first()
@@ -898,10 +902,23 @@ test('辅种统计页 - 分组 tab 次数分布汇总', async ({ page }) => {
   const distBlock = pane.locator('.space-block').filter({ hasText: '次数分布' })
   await expect(distBlock).toBeVisible({ timeout: 5000 })
 
+  const header = distBlock.locator('.dist-header')
+  await expect(header).toBeVisible()
+
+  // **默认收起**（2026-11-03）：分组明细表有 2237 行，是这个 tab 的
+  // 主角；分布表是辅助视图，默认收起不抢注意力。
+  const distTable = distBlock.locator('.ant-table')
+  await expect(distTable).toBeHidden()
+  console.log('  ✓ 默认收起（表格隐藏，标题保留）')
+
+  // 展开
+  await header.click()
+  await page.waitForTimeout(400)
+  await expect(distTable).toBeVisible()
+  console.log('  ✓ 点击标题 → 展开')
+
   // 分布表 = **含「分组数」表头**的那张
   // （明细表也有「出现次数」列，不能用 hasText: '出现次数' 过滤）
-  const distTable = distBlock.locator('.ant-table')
-  await expect(distTable).toBeVisible()
   for (const h of ['出现次数', '分组数', '涉及种子数', '涉及数据量']) {
     await expect(distTable.locator(`th:has-text("${h}")`)).toBeVisible()
   }
@@ -935,14 +952,7 @@ test('辅种统计页 - 分组 tab 次数分布汇总', async ({ page }) => {
   console.log(`  ✓ ${rowCount} 种次数，恒等式「分组数 × 次数 = 涉及种子数」全部成立`)
 
   // ---- 折叠 / 展开（2026-11-03）----
-  // 分布表只是辅助视图，分组明细有 2237 行——用户想先扫一眼分布时
-  // 不必被它占满屏幕。标题行可点击收起/展开。
-  const header = distBlock.locator('.dist-header')
-  await expect(header).toBeVisible()
-
-  // 默认展开
-  await expect(distTable).toBeVisible()
-
+  // 分布表只是辅助视图，分组明细有 2237 行——默认收起，需要时点标题展开。
   // 点标题 → 收起（表格隐藏，但标题仍在）
   await header.click()
   await page.waitForTimeout(400)
