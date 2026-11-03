@@ -249,11 +249,27 @@ uv run pytest                # 后端测试（642 例）
 cd web && npx vue-tsc -b    # 前端类型检查
 cd web && npx oxlint .      # 前端 lint
 cd web && node scripts/check-types-placement.mjs  # 类型放置约束（API 契约类型集中在 src/types.ts）
+cd web && node scripts/check-css-classes.mjs   # CSS class 定义约束（template 用的 class 必须有样式定义）
 cd web && npx vite build    # 前端构建
 ```
 
 静态检查不通过禁止合并。**CI（`.github/workflows/ci.yml`）会跑上述全部闸门**：
-ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集中检查），全绿才允许合并。
+ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集中检查）
++ css-classes（CSS class 定义检查），全绿才允许合并。
+
+- **CSS class 定义检查**（2026-11-03 加入，`web/scripts/check-css-classes.mjs`）：
+  - 扫每个 `.vue` 的 template 里用到的 class，校验它在「本文件 `<style>`」或
+    「`web/src/styles/global.css`」里有定义
+  - **防的是什么**：`544f8f9 feat(downloaders): 合并「下载器」页与「任务」页`
+    把 `Torrents.vue` 并入 `Downloaders.vue` 时**只搬了 template + script，
+    没搬 `<style scoped>`**——6 个 class 定义就此丢失，页面样式全坏
+    （筛选栏控件挤成一团、进度条与百分比上下堆叠）。**vue-tsc 不管 CSS、
+    oxlint 也不管 CSS** → 没有任何闸门能发现，直到用户截图反馈
+  - **豁免机制**：BEM 子元素（样式由父元素覆盖）可加进脚本里的
+    `EXEMPTIONS`，**必须写豁免理由**——否则会变成垃圾桶
+  - **合并 / 重构页面时必须连 `<style>` 一起搬**——这条闸门只防「完全丢失」，
+    不防「搬漏了某个规则里的某条属性」
+
 
 ## 后端测试
 ```bash

@@ -94,6 +94,13 @@ jobs:
         working-directory: web
         run: node scripts/check-types-placement.mjs
 
+      - name: CSS class check
+        # template 里用到的 class 必须有样式定义（本文件 <style> 或 global.css）。
+        # 防的是「合并页面时丢了 <style scoped>」——vue-tsc / oxlint 都不管 CSS，
+        # 丢了不会有任何报错，页面样式却已经坏了。
+        working-directory: web
+        run: node scripts/check-css-classes.mjs
+
       - name: Lint
         working-directory: web
         run: npx oxlint .

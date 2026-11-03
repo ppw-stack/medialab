@@ -14,6 +14,7 @@
         :columns="columns"
         row-key="id"
         size="small"
+        table-layout="fixed"
         :loading="loading"
         :pagination="false"
         :locale="{ emptyText: '暂无存储源' }"
@@ -693,7 +694,9 @@ const columns = [
   { title: "媒体库", key: "library", width: 220 },
   { title: "本地目录", key: "output_dir", width: 180 },
   { title: "状态", key: "status", width: 100 },
-  { title: "操作", key: "action", width: 280 },
+  // 6 个操作按钮（测连/登录/配置/扫描/增量/删除）需要 ~323px——
+  // 窄于这个宽度时按钮会被挤出行外，导致表格横向溢出。
+  { title: "操作", key: "action", width: 340 },
 ]
 
 const qrImageSrc = computed(() =>
@@ -1276,11 +1279,6 @@ onBeforeUnmount(stopPolling)
 .capacity {
   margin-top: 4px;
   min-width: 170px;
-}
-
-.muted {
-  color: #999;
-  font-size: 12px;
 }
 
 .hint {

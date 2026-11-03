@@ -108,11 +108,6 @@ async function copySecret(): Promise<void> {
 </script>
 
 <style scoped>
-.muted {
-  color: #888;
-  font-size: 13px;
-}
-
 .secret {
   word-break: break-all;
   background: #f5f5f5;

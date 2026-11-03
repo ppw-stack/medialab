@@ -56,7 +56,7 @@
               <a-empty v-if="!report.orphan_files.length" description="无" />
               <a-list v-else size="small">
                 <a-list-item v-for="p in report.orphan_files" :key="p">
-                  <span class="mono truncate">{{ p }}</span>
+                  <span class="mono truncate block-truncate">{{ p }}</span>
                 </a-list-item>
               </a-list>
             </a-collapse-panel>
@@ -70,7 +70,7 @@
             </a-collapse-panel>
           </a-collapse>
 
-          <p class="muted">检查时间：{{ formatTime(report.checked_at) }}</p>
+          <p class="muted" style="margin-top: 16px">检查时间：{{ formatTime(report.checked_at) }}</p>
         </template>
         <a-empty v-else description="尚未检查" />
       </a-spin>
@@ -107,9 +107,8 @@ function formatTime(ts: number): string {
 </script>
 
 <style scoped>
-.muted {
-  color: #999;
-  font-size: 12px;
-  margin-top: 16px;
+/* .truncate 默认 inline-block——列表项里要占满整行才能真正截断 */
+.block-truncate {
+  display: block;
 }
 </style>

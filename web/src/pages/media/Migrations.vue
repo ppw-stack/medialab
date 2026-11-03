@@ -101,7 +101,7 @@
         </a-space>
       </template>
 
-      <div class="mono truncate current" :title="job.current_path">
+      <div class="mono truncate current block-truncate" :title="job.current_path">
         {{ job.current_path || "（等待第一个文件）" }}
       </div>
 
@@ -528,6 +528,11 @@ function logText(line: string): string {
 .current {
   color: #666;
   margin-bottom: 8px;
+}
+
+/* .truncate 默认 inline-block——块级容器里要占满整行才能真正截断 */
+.block-truncate {
+  display: block;
 }
 
 .stats {

@@ -37,6 +37,7 @@
               :columns="columns"
               row-key="key"
               size="small"
+              table-layout="fixed"
               :loading="loadingTree"
               :row-selection="rowSelection"
               :pagination="false"
@@ -113,7 +114,7 @@ const selectedKeys = ref<string[]>([])
 const columns = [
   { title: "名称", key: "name", width: 360 },
   { title: "大小", key: "size", width: 110 },
-  { title: "中转 URL", key: "strm_url" },
+  { title: "中转 URL", key: "strm_url", width: 420 },
   { title: "操作", key: "action", width: 140 },
 ]
 
@@ -367,11 +368,6 @@ async function copyUrl(url: string): Promise<void> {
 </script>
 
 <style scoped>
-.muted {
-  color: #999;
-  font-size: 12px;
-}
-
 .dir-count {
   margin-left: 6px;
 }

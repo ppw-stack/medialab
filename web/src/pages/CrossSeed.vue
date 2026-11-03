@@ -1294,6 +1294,15 @@ onMounted(async () => {
   gap: var(--sp-3);
 }
 
+/* 单个统计卡（数字 + 说明）——白底卡片，与 .stat-tile 同风格 */
+.space-tile {
+  padding: var(--sp-4);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-sm);
+}
+
 /* 次数分布区块的**可点击标题行**（展开/收起） */
 .dist-header {
   cursor: pointer;

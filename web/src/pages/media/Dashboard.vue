@@ -113,8 +113,4 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.muted {
-  color: #999;
-  font-size: 12px;
-}
 </style>

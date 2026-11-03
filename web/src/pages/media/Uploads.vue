@@ -588,15 +588,6 @@ function logText(line: string): string {
 </script>
 
 <style scoped>
-.page {
-  padding: 16px;
-}
-
-.muted {
-  color: #999;
-  font-size: 12px;
-}
-
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;

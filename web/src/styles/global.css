@@ -259,6 +259,9 @@ code, kbd, pre, samp {
   font-size: var(--text-xs) !important;
   padding: var(--sp-3) var(--sp-4) !important;
   height: 44px;
+  /* 表头文字不换行——窄列（如「比例」）扣掉 padding 后空间不足时，
+     会把两字竖排成两行，把表头行高从 44px 撑到 63px。 */
+  white-space: nowrap !important;
 }
 
 .ant-table-tbody > tr > td {
@@ -538,6 +541,30 @@ code, kbd, pre, samp {
 .mono {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
+}
+
+/* 弱化文字（次要说明 / 空值占位） */
+.muted {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+}
+
+/* 页面根容器内边距（媒体库域各页根节点） */
+.page {
+  padding: var(--sp-4);
+}
+
+/* 单行省略号——需要配合 max-width（否则不截断）。
+   默认 max-width:100% 保证不撑破父容器；具体宽度用行内 style 或
+   表格列宽覆盖。inline-block 让它能跟在文字后（表格单元格内），
+   需要占满整行时父级加 display:block。 */
+.truncate {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
 }
 
 .label-caps {

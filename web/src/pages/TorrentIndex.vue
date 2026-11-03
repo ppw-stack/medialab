@@ -273,7 +273,10 @@ const columns = [
       (a.category ?? '').localeCompare(b.category ?? ''),
   },
   {
-    title: '种子名', key: 'name', dataIndex: 'name', ellipsis: true,
+    // **必须给宽度**——不设的话 table-layout:auto 会把它当「弹性列」，
+    // 而其它列的固定宽度总和已超过容器宽，结果这一列被压成 0px，
+    // 种子名完全看不见。配合 <a-table :scroll="{ x: 1580 }"> 横向滚动。
+    title: '种子名', key: 'name', dataIndex: 'name', width: 320, ellipsis: true,
     sorter: (a: TorrentIndexItem, b: TorrentIndexItem) =>
       (a.name ?? '').localeCompare(b.name ?? ''),
   },
@@ -405,6 +408,7 @@ const columns = [
           showSizeChanger: false,
         }"
         :on-change="onTableChange"
+        :scroll="{ x: 1580 }"
         row-key="id"
         size="middle"
       >

@@ -148,6 +148,7 @@
             :columns="auditColumns"
             row-key="id"
             size="small"
+            table-layout="fixed"
             :loading="loadingAudit"
             :pagination="false"
             :locale="{ emptyText: '暂无审计记录' }"

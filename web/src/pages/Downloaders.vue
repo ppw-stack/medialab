@@ -834,6 +834,52 @@ const manageColumns = [
   border-radius: var(--r-md);
 }
 
+/* 筛选行（状态 / 分类 / 搜索 / 统计 / 批量操作）——横向排布，
+   统计数字靠右（margin-left:auto），窄屏换行。 */
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.filter-row__meta {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+/* 进度单元格：进度条 + 百分比同一行 */
+.progress-cell {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.progress-cell :deep(.ant-progress) {
+  flex: 1;
+  margin: 0;
+}
+
+.progress-cell__num {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  flex: 0 0 auto;
+}
+
+.modal-text {
+  color: var(--text-primary);
+  line-height: 1.6;
+}
+
+.modal-actions {
+  display: flex;
+  gap: var(--sp-2);
+  justify-content: flex-end;
+  margin-top: var(--sp-4);
+}
+
 /* 下载器表格：整行可点（切换下方任务列表）+ 选中行高亮 */
 :deep(.ant-table-tbody > tr) {
   cursor: pointer;
