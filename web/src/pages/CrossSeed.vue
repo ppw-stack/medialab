@@ -387,6 +387,55 @@ function countColor(c: number) {
   return 'default'
 }
 
+/**
+ * 分组 tab 的汇总数据（**纯前端从 ``snapshot.stats`` 算**，不改后端）。
+ *
+ * stats 里每行是一个 (name, size) 分组：
+ * - ``count`` = 该组有几个种子（同名同大小）
+ * - ``size_gb`` = 该组单份大小（GB，已 round(2)）
+ *
+ * 由此可算出「辅种的重复度」——同一个数据被几个种子共享。
+ */
+const groupStats = computed(() => {
+  const stats = snapshot.value?.stats ?? []
+  // size_gb 已 round(2)——按字节累加避免浮点误差，再转 GB 展示
+  const GB = 1024 ** 3
+  let totalTorrents = 0
+  let sharedGroups = 0
+  let redundantTorrents = 0
+  let uniqueSizeBytes = 0
+  let claimedSizeBytes = 0
+  for (const s of stats) {
+    const sizeBytes = Math.round(s.size_gb * GB)
+    totalTorrents += s.count
+    uniqueSizeBytes += sizeBytes
+    claimedSizeBytes += sizeBytes * s.count
+    if (s.count >= 2) {
+      sharedGroups += 1
+      redundantTorrents += s.count - 1
+    }
+  }
+  const redundantRatio =
+    totalTorrents > 0 ? (redundantTorrents / totalTorrents) * 100 : 0
+  const avgShareCount =
+    uniqueSizeBytes > 0 ? claimedSizeBytes / uniqueSizeBytes : 0
+  return {
+    totalGroups: stats.length,
+    totalTorrents,
+    sharedGroups,
+    redundantTorrents,
+    redundantRatio: redundantRatio.toFixed(1),
+    uniqueSizeBytes,
+    claimedSizeBytes,
+    avgShareCount: avgShareCount.toFixed(2),
+  }
+})
+
+/** 容量维度的格式化（字节 → GB/MB 自适应，沿用 ``fmtBytes``）。 */
+function formatGroupSize(bytes: number): string {
+  return fmtBytes(bytes)
+}
+
 /** 异常类型的中文标签。 */
 const ANOMALY_LABELS: Record<string, string> = {
   tracker_not_registered: 'Tracker 未注册',
@@ -681,6 +730,71 @@ onMounted(async () => {
 
           <a-tab-pane key="groups">
             <template #tab>分组</template>
+
+          <!--
+            分组汇总卡片（2026-11-03 加入）。
+
+            数据**纯前端从 ``snapshot.stats`` 算**——不打任何下载器接口，
+            不改后端（stats 字段早已落库 cross_seed_snapshot，前端现成可用）。
+
+            7 个指标分两层：
+            - 上层「数量维度」：分组数 / 种子数 / 共享分组 / 冗余种子 / 冗余占比
+            - 下层「容量维度」：唯一数据量 / 种子声明总量
+
+            **口径说明**：
+            - 「唯一数据量」= 各分组 size 求和（一份共享数据只算一次）
+            - 「种子声明总量」= 各分组 size × count 求和（共享的算 N 次）
+            - 后者 ÷ 前者 = 「平均每份数据被几个种子共享」，与冗余占比互为印证
+              （一个看「种子数冗余」，一个看「数据量冗余」）
+            - 两者都含**共享数据重复计入**，不等于磁盘真实占用（与概览页同口径）
+          -->
+          <div class="group-summary">
+            <div class="group-summary__row">
+              <div class="space-tile">
+                <div class="space-tile__label">分组总数</div>
+                <div class="space-tile__value">{{ groupStats.totalGroups }}</div>
+                <div class="space-tile__hint">唯一数据份数（按名称+大小分组）</div>
+              </div>
+              <div class="space-tile">
+                <div class="space-tile__label">种子总数</div>
+                <div class="space-tile__value">{{ groupStats.totalTorrents }}</div>
+                <div class="space-tile__hint">所有分组 count 求和（应等于顶部摘要的「共 N 种子」）</div>
+              </div>
+              <div class="space-tile">
+                <div class="space-tile__label">共享分组</div>
+                <div class="space-tile__value">{{ groupStats.sharedGroups }}</div>
+                <div class="space-tile__hint">count ≥ 2 的分组数（被多个种子共享的数据）</div>
+              </div>
+              <div class="space-tile">
+                <div class="space-tile__label">冗余种子</div>
+                <div class="space-tile__value">{{ groupStats.redundantTorrents }}</div>
+                <div class="space-tile__hint">Σ (count − 1)，即「多出来的辅种个数」</div>
+              </div>
+              <div class="space-tile">
+                <div class="space-tile__label">冗余占比</div>
+                <div class="space-tile__value">{{ groupStats.redundantRatio }}%</div>
+                <div class="space-tile__hint">冗余种子 ÷ 种子总数（辅种的「重复度」）</div>
+              </div>
+            </div>
+            <div class="group-summary__row">
+              <div class="space-tile">
+                <div class="space-tile__label">唯一数据量</div>
+                <div class="space-tile__value">{{ formatGroupSize(groupStats.uniqueSizeBytes) }}</div>
+                <div class="space-tile__hint">各分组 size 求和（一份共享数据只算一次，含共享重复计入）</div>
+              </div>
+              <div class="space-tile">
+                <div class="space-tile__label">种子声明总量</div>
+                <div class="space-tile__value">{{ formatGroupSize(groupStats.claimedSizeBytes) }}</div>
+                <div class="space-tile__hint">Σ size × count（共享数据算 N 次，含共享重复计入）</div>
+              </div>
+              <div class="space-tile">
+                <div class="space-tile__label">平均共享数</div>
+                <div class="space-tile__value">{{ groupStats.avgShareCount }}</div>
+                <div class="space-tile__hint">种子声明总量 ÷ 唯一数据量（平均每份数据被几个种子共享）</div>
+              </div>
+            </div>
+          </div>
+
           <a-alert
             type="info"
             show-icon
@@ -1176,6 +1290,20 @@ onMounted(async () => {
 .space-tiles {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--sp-3);
+}
+
+/* 分组 tab 的汇总卡片：两层，每层 5 / 3 个 tile */
+.group-summary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+}
+
+.group-summary__row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: var(--sp-3);
 }
 
