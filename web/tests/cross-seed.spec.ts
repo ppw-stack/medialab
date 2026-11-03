@@ -933,4 +933,26 @@ test('辅种统计页 - 分组 tab 次数分布汇总', async ({ page }) => {
     prevCount = count
   }
   console.log(`  ✓ ${rowCount} 种次数，恒等式「分组数 × 次数 = 涉及种子数」全部成立`)
+
+  // ---- 折叠 / 展开（2026-11-03）----
+  // 分布表只是辅助视图，分组明细有 2237 行——用户想先扫一眼分布时
+  // 不必被它占满屏幕。标题行可点击收起/展开。
+  const header = distBlock.locator('.dist-header')
+  await expect(header).toBeVisible()
+
+  // 默认展开
+  await expect(distTable).toBeVisible()
+
+  // 点标题 → 收起（表格隐藏，但标题仍在）
+  await header.click()
+  await page.waitForTimeout(400)
+  await expect(distTable).toBeHidden()
+  await expect(header).toBeVisible()
+  console.log('  ✓ 点击标题 → 收起（表格隐藏，标题保留）')
+
+  // 再点 → 展开
+  await header.click()
+  await page.waitForTimeout(400)
+  await expect(distTable).toBeVisible()
+  console.log('  ✓ 再次点击 → 展开')
 })
