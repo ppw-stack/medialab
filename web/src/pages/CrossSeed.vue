@@ -15,6 +15,7 @@ import type {
   CrossSeedSnapshotHeader,
   CrossSeedSnapshotList,
   CrossSeedStatsRow,
+  DistributionRow,
 } from '../types'
 import { formatBytes as fmtBytes } from '../utils/format'
 import { message } from 'ant-design-vue'
@@ -55,6 +56,19 @@ const statsColumns = [
   { title: '大小 (GB)', dataIndex: 'size_gb', key: 'size_gb', width: 120, sorter: (a: CrossSeedStatsRow, b: CrossSeedStatsRow) => a.size_gb - b.size_gb },
   { title: '出现次数', dataIndex: 'count', key: 'count', width: 120, sorter: (a: CrossSeedStatsRow, b: CrossSeedStatsRow) => a.count - b.count },
   { title: '操作', key: 'actions', width: 100, fixed: 'right' as const },
+]
+
+/**
+ * 次数分布表的列。
+ *
+ * ``count`` 是「出现次数」（= 一个分组被几个种子共享），按**降序**排——
+ * 共享最厉害的排最前。
+ */
+const distColumns = [
+  { title: '出现次数', dataIndex: 'count', key: 'count', width: 120, sorter: (a: DistributionRow, b: DistributionRow) => a.count - b.count },
+  { title: '分组数', dataIndex: 'groups', key: 'groups', width: 120, sorter: (a: DistributionRow, b: DistributionRow) => a.groups - b.groups },
+  { title: '涉及种子数', dataIndex: 'torrents', key: 'torrents', width: 140, sorter: (a: DistributionRow, b: DistributionRow) => a.torrents - b.torrents },
+  { title: '涉及数据量', dataIndex: 'sizeBytes', key: 'sizeBytes', width: 160, sorter: (a: DistributionRow, b: DistributionRow) => a.sizeBytes - b.sizeBytes },
 ]
 
 const anomalyColumns = [
@@ -436,6 +450,43 @@ function formatGroupSize(bytes: number): string {
   return fmtBytes(bytes)
 }
 
+/**
+ * **次数分布**（用户要的核心视图）。
+ *
+ * 按「一个分组被多少个种子共享」聚合——即把 stats 里 count 相同的行
+ * 归到一起：
+ *
+ * | 出现次数 | 分组数 | 涉及种子数 | 涉及数据量 |
+ * |---|---|---|---|
+ * | 13 | 3 | 39 | … |
+ * | 10 | 3 | 30 | … |
+ *
+ * **为什么这个视角有用**：count=1 的组占绝大多数 → 说明辅种以「独占」
+ * 为主；count 很大且组数不少 → 说明少量数据被大量站点共享（那才是
+ * 真正「划算」的部分，也是 disk_rotation 优先清理的对象）。
+ *
+ * 与概览卡片是**互补**的：概览给总量，这里给形状（分布）。
+ */
+const countDistribution = computed<DistributionRow[]>(() => {
+  const stats = snapshot.value?.stats ?? []
+  const GB = 1024 ** 3
+  /** count → 聚合桶 */
+  const buckets = new Map<number, DistributionRow>()
+  for (const s of stats) {
+    const sizeBytes = Math.round(s.size_gb * GB)
+    let b = buckets.get(s.count)
+    if (!b) {
+      b = { count: s.count, groups: 0, torrents: 0, sizeBytes: 0 }
+      buckets.set(s.count, b)
+    }
+    b.groups += 1
+    b.torrents += s.count
+    b.sizeBytes += sizeBytes
+  }
+  // 按次数**降序**——「共享最厉害的」排最前，这是最想看的
+  return [...buckets.values()].sort((a, b) => b.count - a.count)
+})
+
 /** 异常类型的中文标签。 */
 const ANOMALY_LABELS: Record<string, string> = {
   tracker_not_registered: 'Tracker 未注册',
@@ -794,6 +845,44 @@ onMounted(async () => {
               </div>
             </div>
           </div>
+
+          <!--
+            **次数分布**（用户要的核心视图，2026-11-03 加入）。
+
+            把明细表里 count 相同的行聚合成一行：
+            「出现 13 次的有 3 个分组」「出现 10 次的有 3 个分组」……
+
+            **为什么这个视角有用**：count=1 的组占绝大多数 → 辅种以「独占」
+            为主；count 很大且组数不少 → 少量数据被大量站点共享（那才是
+            真正「划算」的部分，也是 disk_rotation 优先清理的对象）。
+            概览卡片给总量，这里给**形状**。
+          -->
+          <section v-if="countDistribution.length" class="space-block">
+            <div class="space-block__header">
+              <div class="label-caps">次数分布 · DISTRIBUTION</div>
+              <span class="dim">
+                按「一个分组被几个种子共享」聚合 · 共 {{ countDistribution.length }} 种次数
+              </span>
+            </div>
+            <a-table
+              :columns="distColumns"
+              :data-source="countDistribution"
+              :row-key="(r: DistributionRow) => String(r.count)"
+              :pagination="false"
+              size="small"
+            >
+              <template #bodyCell="{ column, record }">
+                <template v-if="column.key === 'count'">
+                  <a-tag :color="countColor((record as DistributionRow).count)">
+                    {{ (record as DistributionRow).count }}
+                  </a-tag>
+                </template>
+                <template v-else-if="column.key === 'sizeBytes'">
+                  {{ fmtBytes((record as DistributionRow).sizeBytes) }}
+                </template>
+              </template>
+            </a-table>
+          </section>
 
           <a-alert
             type="info"

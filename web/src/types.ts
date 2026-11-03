@@ -299,6 +299,22 @@ export interface CrossSeedStatsRow {
   added_at?: Record<string, number>
 }
 
+/**
+ * 次数分布的一行（分组 tab 的汇总表）。
+ *
+ * 把所有 (name, size) 分组按「被几个种子共享」聚合成一行：
+ * - `count` = 出现次数（= 该组的种子数）
+ * - `groups` = 有多少个分组是这个次数
+ * - `torrents` = 这些分组一共涉及多少个种子
+ * - `sizeBytes` = 这些分组的数据量之和（共享只算一次）
+ */
+export interface DistributionRow {
+  count: number
+  groups: number
+  torrents: number
+  sizeBytes: number
+}
+
 /** 辅种异常种子（快照里的异常明细）。 */
 export interface CrossSeedAnomaly {
   id: number

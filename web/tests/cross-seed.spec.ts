@@ -108,6 +108,11 @@ test('辅种下载器统计页面 - 读快照而非实时拉取', async ({ page 
   expect(summaryText).toMatch(/抓取于/)
 
   // 统计表格列头
+  // ⚠️ 必须先切到「分组」分区——明细表（原始名称/大小/出现次数）在那里，
+  //    默认停在「概览」（空间 + 目录分布），断言必然失败。
+  //    （2026-11-03 修：dev 库有快照时这个用例才会跑到这行，之前一直
+  //    因 dev 无辅种下载器而提前 return，缺陷被掩盖了。）
+  await switchBlockTab(page, '分组')
   await expect(page.locator('th:has-text("原始名称")').first()).toBeVisible()
   await expect(page.locator('th:has-text("大小")').first()).toBeVisible()
   await expect(page.locator('th:has-text("出现次数")').first()).toBeVisible()
@@ -844,4 +849,88 @@ test('辅种统计页 - 孤儿分区有手动扫描入口', async ({ page }) => 
   if ((await timeMark.count()) > 0) {
     console.log('  ✓ 扫描时间标记:', (await timeMark.innerText()).replace(/\s+/g, ' '))
   }
+})
+
+/**
+ * 分组 tab 的**次数分布**汇总（2026-11-03 加入）。
+ *
+ * 用户要的视图：把明细表里 count 相同的行聚合成一行——
+ * 「出现 13 次的有 3 个分组」「出现 10 次的有 3 个分组」……
+ *
+ * **不依赖具体数据**：只断言「表结构在、表头全、行数与各列非空」，
+ * 以及「分组数 × 次数 = 涉及种子数」这个**恒等式**（任何数据都成立）。
+ * 精确数值由单元级的计算验证覆盖（见 cross-seed 汇总逻辑）。
+ */
+test('辅种统计页 - 分组 tab 次数分布汇总', async ({ page }) => {
+  await login(page)
+  await page.goto('/cross-seed')
+
+  const outerTabs = page.locator('.content-tabs > .ant-tabs-nav .ant-tabs-tab')
+  await expect(outerTabs.first()).toBeVisible({ timeout: 15000 }).catch(() => { /* 无下载器 */ })
+  if ((await outerTabs.count()) === 0) {
+    console.log('  ✓ 无辅种下载器：跳过次数分布断言')
+    return
+  }
+
+  // ⚠️ 外层（下载器）与内层（内容分区）**都会**命中
+  //    `.ant-tabs-tabpane-active:visible` —— 内层要用 `.last()`。
+  let pane = page.locator('.ant-tabs-tabpane-active:visible').last()
+  let found = false
+  for (let i = 0; i < (await outerTabs.count()); i++) {
+    await outerTabs.nth(i).click()
+    await page.waitForTimeout(600)
+    const block = page.locator('.block-tabs:visible')
+    if (await block.isVisible().catch(() => false)) {
+      pane = page.locator('.ant-tabs-tabpane-active:visible').last()
+      found = true
+      break
+    }
+  }
+  if (!found) {
+    console.log('  ✓ 还没有快照：跳过次数分布断言')
+    return
+  }
+
+  // 切到「分组」分区
+  await switchBlockTab(page, '分组')
+
+  // 分布区块可见
+  const distBlock = pane.locator('.space-block').filter({ hasText: '次数分布' })
+  await expect(distBlock).toBeVisible({ timeout: 5000 })
+
+  // 分布表 = **含「分组数」表头**的那张
+  // （明细表也有「出现次数」列，不能用 hasText: '出现次数' 过滤）
+  const distTable = distBlock.locator('.ant-table')
+  await expect(distTable).toBeVisible()
+  for (const h of ['出现次数', '分组数', '涉及种子数', '涉及数据量']) {
+    await expect(distTable.locator(`th:has-text("${h}")`)).toBeVisible()
+  }
+  console.log('  ✓ 分布表表头：出现次数 / 分组数 / 涉及种子数 / 涉及数据量')
+
+  const rows = distTable.locator('tbody tr.ant-table-row')
+  const rowCount = await rows.count()
+  if (rowCount === 0) {
+    console.log('  ✓ 分布表无数据行：跳过数值断言')
+    return
+  }
+
+  // 逐行校验恒等式：**分组数 × 次数 = 涉及种子数**
+  let prevCount = Number.POSITIVE_INFINITY
+  for (let i = 0; i < rowCount; i++) {
+    const cells = await rows.nth(i).locator('td').allTextContents()
+    const count = parseInt(cells[0].trim(), 10)
+    const groups = parseInt(cells[1].trim(), 10)
+    const torrents = parseInt(cells[2].trim(), 10)
+    console.log(`  ✓ 行${i}: 次数=${count} 分组数=${groups} 种子数=${torrents}`)
+    expect(Number.isFinite(count)).toBe(true)
+    expect(groups).toBeGreaterThan(0)
+    // 恒等式
+    expect(groups * count).toBe(torrents)
+    // 涉及数据量必须是非空数值
+    expect(cells[3].trim()).toMatch(/\d/)
+    // 按次数**降序**（共享最厉害的排最前）
+    expect(count).toBeLessThanOrEqual(prevCount)
+    prevCount = count
+  }
+  console.log(`  ✓ ${rowCount} 种次数，恒等式「分组数 × 次数 = 涉及种子数」全部成立`)
 })
