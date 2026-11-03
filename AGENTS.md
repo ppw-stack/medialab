@@ -5,6 +5,7 @@
 2. `docs/merge-strmmanger.md` — **合并 strmmanger 的方案与实施记录**（含冲突清单与返工范围）。
 3. `app/adapters/sites/user_data.py` + `app/adapters/sites/parsers/nexus_php.py` — FR-1.6 站点用户数据契约。
 4. `app/adapters/sites/parsers/attendance.py` — FR-3.6 站点签到解析 helper。
+5. `docs/upload-bandwidth.md` — **数据同步上传的带宽瓶颈实测结论**（并发为何无效）。
 
 ## 项目定位
 
@@ -49,6 +50,12 @@
   - 业务代码**不写 `if driver.type == "guangya"`**——一律走工厂 + 协议
   - 上传流程的幂等判据（**同名 + 同大小 = 已同步**）、覆盖流程（删旧 → 确认消失 → 传新）、清本地的三重保护（仅 `uploaded`/`overwritten` + 大小一致 + `delete_after_upload` 显式开启）**与网盘无关**，别改
   - 契约由 `tests/unit/test_upload_base.py` + `tests/integration/test_upload_tasks_api.py` 固化
+- **上传只能串行——并发无效**（2026-11-02 实测，见 `docs/upload-bandwidth.md`）：
+  - **瓶颈是本机上行带宽**（实测 ~3.2 MB/s，到阿里云 OSS 张家口 RTT 31ms）→ 分片大小几乎不影响速率（1/5/20 片都是 2.25-2.75 MB/s），是**带宽受限非 RTT 受限**
+  - **别再尝试并发**：同一 uploadId 分片并发 → 零收益或卡死；不同 uploadId 并发 → `Server disconnected` / 卡死，且总吞吐**低于**串行
+  - `CHUNK_CONCURRENCY = 1`（`guangya_upload.py`）+ 单 worker（`watch_manager.py`）是**正确实现，不是待优化的遗留**
+  - `concurrency` 参数保留但不生效（面板可配，恒为 1）——留给将来支持并发的网盘
+  - ⚠️ **方法论**：测上传吞吐必须用**生产规模**文件（≥100MB）且做**串行/并发交替对照**。曾用 50MB/10 片测出「并发快 2 倍」的**假象**，据此写了两版并发实现再逐一证伪
 - **Bearer 长期凭据只用 `WEB_TOKEN`**（2026-10-30 加入）：`verify_bearer` 同时接受 API Token（`WEB_TOKEN`）与 session cookie 值两种口径，但 session cookie 值 24h 过期（`SESSION_MAX_AGE`）。CLI / 脚本长期使用应存 `WEB_TOKEN`，不可把 session cookie 值当长期 token 存储——后者会突然 401。session 值口径仅为面板/CLI 同源便利，非长期凭据。
 - **自动化 / 合规边界**（2026-10-22 修订，原「不引入未文档化的反爬对抗 / 验证码绕过（R2）」）：
   - ✅ **允许**对**自有账号**做站点自动化，含 AI 读图形验证码（`app/core/ai.py`）、真实浏览器交互
