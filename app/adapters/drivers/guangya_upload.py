@@ -61,8 +61,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import threading
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -417,13 +419,10 @@ class GuangyaUploader:
         if not upload_id:
             raise DriverError("光鸭分片上传初始化失败（未返回 UploadId）")
 
-        # ② 分片上传（并发）
+        # ② 分片上传
         #
-        # **读文件与传文件解耦**：按窗口大小批量读入分片，再一起并发发出。
-        # 若边读边 await，协程会卡在读上 → 等于串行。
-        # 若一次性读完，1.3GB 会撑爆内存 → 故用**滑动窗口**：
-        # 最多 ``CHUNK_CONCURRENCY`` 个分片同时处于「待发」状态。
-        window = max(1, CHUNK_CONCURRENCY)
+        # **读文件与传文件解耦**：读在**线程池**里做（见下），
+        # 传到事件循环里做——两者不能互相阻塞。
 
         async def _put_part(part_number: int, chunk: bytes) -> tuple[int, str]:
             """传一个分片，返回 ``(partNumber, etag)``。"""
@@ -450,26 +449,80 @@ class GuangyaUploader:
 
         parts: list[tuple[int, str]] = []
         sent = 0
-        with path.open("rb") as source:
+        # **读文件必须放线程池**——本地目录在 CIFS 上，读是**同步阻塞**的。
+        # 直接在事件循环里 ``source.read()`` 会**卡住整个事件循环**：
+        # healthz 无响应、API 全部超时、容器停止时收不到退出事件。
+        # （prod 实测：卡住 5 分钟以上，日志完全停更。）
+        #
+        # **背压**：CIFS 读比上传快，若读线程一路狂奔会把整个 1.3GB
+        # 文件塞进内存（OOM）。故用**信号量**限制「在途未消费的片数」：
+        # 最多 2 片（10MB），读线程拿不到许可就等，从而与传输同步。
+        #
+        # ⚠️ **跨线程不能直接用 asyncio 原语**——``asyncio.Queue.put_nowait``
+        # 在工作线程里调用**不会唤醒**事件循环的等待者（实测：消费侧
+        # 永久阻塞）。故用 ``loop.call_soon_threadsafe`` 把片送回
+        # 事件循环再 put。
+        #
+        # ⚠️ **许可数 = 在途片数 + 1**：结束标记（``None``）也走队列，
+        # 但它**不占**数据片的许可——否则读线程会卡在「等许可放结束标记」
+        # 上，而消费侧在等结束标记 → **死锁**（实测复现）。
+        max_inflight = 2
+        slots = threading.Semaphore(max_inflight)
+        chunk_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def _deliver(chunk: bytes | None) -> None:
+            """把分片交给事件循环（线程安全）。"""
+            loop.call_soon_threadsafe(chunk_queue.put_nowait, chunk)
+
+        def _reader() -> None:
+            """线程内：同步读 CIFS，逐片交给事件循环（带背压）。"""
+            try:
+                with path.open("rb") as source:
+                    while True:
+                        chunk = source.read(CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        # 等许可（片数超上限时读线程被堵住 → 背压）
+                        slots.acquire()
+                        try:
+                            _deliver(chunk)
+                        except BaseException:
+                            slots.release()
+                            raise
+            finally:
+                # 结束标记**不占许可**（见上）——否则会与消费侧互相等待
+                _deliver(None)
+
+        def _release_slot() -> None:
+            """消费掉一片后归还许可。"""
+            slots.release()
+
+        reader_task = asyncio.create_task(
+            asyncio.to_thread(_reader),
+        )
+
+        try:
             part_number = 1
-            while sent < size:
-                # 读满一个窗口的片
-                batch: list[tuple[int, bytes]] = []
-                for _ in range(window):
-                    chunk = source.read(CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    batch.append((part_number, chunk))
-                    sent += len(chunk)
-                    part_number += 1
-                if not batch:
+            while True:
+                chunk = await chunk_queue.get()
+                if chunk is None:
                     break
+                sent += len(chunk)
                 # 进度在**读入**时报（并发下「传完」时刻不再单调递增，
                 # 先报能给出稳定的进度曲线）
                 if progress is not None:
                     progress(sent)
-                # **并发发出这一批**
-                parts.extend(await asyncio.gather(*[_put_part(n, c) for n, c in batch]))
+                try:
+                    parts.append(await _put_part(part_number, chunk))
+                finally:
+                    _release_slot()
+                part_number += 1
+        finally:
+            # 读线程可能还卡在 CIFS 上——不能无限等
+            reader_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await reader_task
 
         if not parts:
             raise DriverError("光鸭分片上传失败：没有传任何分片")

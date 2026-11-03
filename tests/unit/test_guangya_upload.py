@@ -11,9 +11,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -221,6 +223,66 @@ async def test_分片上传有进度回调(uploader: GuangyaUploader, client: Fa
     assert progress[-1] == SMALL_FILE_THRESHOLD * 2
     # 单调递增
     assert progress == sorted(progress)
+
+
+async def test_读文件不阻塞事件循环(
+    uploader: GuangyaUploader, client: FakeClient, tmp_path: Path
+):
+    """**回归测试**：读本地文件必须**放线程池**，不能阻塞事件循环。
+
+    prod 实测事故：分片读在事件循环里同步做（``source.read()``），
+    CIFS 上的阻塞把**整个事件循环**卡住——healthz 无响应、API 全部
+    超时、容器停止时收不到退出事件（日志完全停更 5 分钟以上）。
+
+    本地目录在 CIFS 上，读是**同步阻塞**的，必须挪到线程。
+    """
+    from app.adapters.drivers.guangya_upload import CHUNK_SIZE
+
+    size = CHUNK_SIZE * 3
+    path = tmp_path / "big.bin"
+    path.write_bytes(b"x" * size)
+
+    # **模拟 CIFS 的慢读**——本地 tmpfs 读太快，测不出阻塞。
+    # 真实环境里目录在 CIFS 上，读是网络往返（几十~几百 ms）。
+    real_open = Path.open
+
+    def _slow_open(self: Path, *args: Any, **kwargs: Any) -> Any:
+        fh = real_open(self, *args, **kwargs)
+        real_read = fh.read
+
+        def _slow_read(n: int = -1) -> bytes:
+            data = real_read(n)
+            time.sleep(0.05)   # 每次读阻塞 50ms
+            return data
+
+        fh.read = _slow_read  # type: ignore[method-assign]
+        return fh
+
+    # 并行跑一个「探针」协程——若事件循环被阻塞，它就不会推进
+    ticks = 0
+
+    async def _probe() -> None:
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    Path.open = _slow_open  # type: ignore[method-assign]
+    probe = asyncio.create_task(_probe())
+    try:
+        # 先让探针跑起来（否则它一次都没被调度，ticks 恒为 0）
+        await asyncio.sleep(0.05)
+        before = ticks
+        await uploader.upload_file(path, "dir-1")
+    finally:
+        Path.open = real_open  # type: ignore[method-assign]
+        probe.cancel()
+        with suppress(asyncio.CancelledError):
+            await probe
+
+    # 传 3 片（每片慢读 50ms）期间，探针应该跑了几十次
+    moved = ticks - before
+    assert moved > 3, f"事件循环被阻塞（探针只跑了 {moved} 次）"
 
 
 async def test_分片是串行的(uploader: GuangyaUploader, client: FakeClient, tmp_path: Path):
