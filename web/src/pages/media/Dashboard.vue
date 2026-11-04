@@ -1,5 +1,11 @@
 <template>
   <div class="page">
+    <PageHeader
+      eyebrow="媒体库 · MEDIA"
+      title="总览"
+      sub="存储源、媒体条目与中转链路状态"
+      compact
+    />
     <a-spin :spinning="loading">
       <a-row :gutter="16">
         <a-col :xs="24" :sm="12" :lg="6">
@@ -85,6 +91,7 @@
 import { onMounted, ref } from "vue"
 import { mediaApi as api } from "../../api"
 import type { Driver, MediaStats, ReadyResponse } from "../../types"
+import PageHeader from "../../components/PageHeader.vue"
 import { formatBytes, formatTime } from "../../utils/format"
 
 const stats = ref<MediaStats | null>(null)

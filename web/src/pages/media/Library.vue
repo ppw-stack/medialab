@@ -1,25 +1,29 @@
 <template>
   <div class="page">
-    <a-card size="small">
-      <template #title>媒体库</template>
-      <template #extra>
-        <a-space>
-          <a-input
-            v-model:value="keyword"
-            placeholder="搜索文件名 / 路径"
-            allow-clear
-            style="width: 220px"
-          />
-          <a-button
-            size="small"
-            :disabled="!selectedIds.length"
-            @click="onResign"
-          >
-            批量重签 <span v-if="selectedIds.length">({{ selectedIds.length }})</span>
-          </a-button>
-        </a-space>
+    <PageHeader
+      eyebrow="媒体库 · MEDIA"
+      title="媒体库"
+      sub="STRM 条目——每个媒体条目一个 .strm，指向中转链接"
+      compact
+    >
+      <template #actions>
+        <a-input
+          v-model:value="keyword"
+          placeholder="搜索文件名 / 路径"
+          allow-clear
+          class="library-search"
+        />
+        <a-button
+          size="small"
+          :disabled="!selectedIds.length"
+          @click="onResign"
+        >
+          批量重签 <span v-if="selectedIds.length">({{ selectedIds.length }})</span>
+        </a-button>
       </template>
+    </PageHeader>
 
+    <a-card size="small">
       <a-spin :spinning="loadingTabs">
         <a-tabs
           v-if="tabs.length"
@@ -32,7 +36,7 @@
             :key="t.id"
             :tab="`${t.name} (${t.count})`"
           >
-            <a-table
+            <DataTable
               :data-source="treeData"
               :columns="columns"
               row-key="key"
@@ -69,7 +73,7 @@
                   </a-space>
                 </template>
               </template>
-            </a-table>
+            </DataTable>
           </a-tab-pane>
         </a-tabs>
         <a-empty v-else description="暂无媒体条目，请先到「存储源」扫描生成" />
@@ -84,6 +88,8 @@ import { message } from "ant-design-vue"
 import { errMsg, mediaApi as api } from "../../api"
 import type { Driver, MediaItem } from "../../types"
 import { formatBytes } from "../../utils/format"
+import DataTable from '../../components/DataTable.vue'
+import PageHeader from '../../components/PageHeader.vue'
 
 interface TreeNode {
   key: string
@@ -376,6 +382,18 @@ async function copyUrl(url: string): Promise<void> {
   display: inline-block;
   max-width: 280px;
   color: #1677ff;
+}
+
+/* 搜索框：桌面 220px，手机收窄 */
+.library-search {
+  width: 220px;
+  max-width: 100%;
+}
+
+@media (max-width: 767px) {
+  .library-search {
+    width: 100%;
+  }
 }
 
 .lib-tree :deep(.ant-table-tbody > tr > td) {

@@ -14,6 +14,8 @@ import {
 } from '../utils/format'
 import { message } from 'ant-design-vue'
 import type { FormInstance } from 'ant-design-vue'
+import DataTable from '../components/DataTable.vue'
+import PageHeader from '../components/PageHeader.vue'
 
 // 硬编码 fallback（后端 /sites/adapters 不可用时使用）
 const ADAPTERS_FALLBACK: { value: string; label: string; domain: string }[] = [
@@ -296,20 +298,21 @@ const columns = [
 
 <template>
   <div>
-    <header class="page-header">
-      <div>
-        <div class="page-header__eyebrow">站点 · SITES</div>
-        <h1 class="page-header__title">站点适配器</h1>
-        <div class="page-header__sub">凭据脱敏展示 · 支持 9 类私有种子站点</div>
-      </div>
-      <a-space>
-        <a-button :loading="refreshingUserData" @click="refreshAllUserData">
-          刷新用户数据
-        </a-button>
-        <a-button :loading="testingAll" @click="onTestAll">全部测连</a-button>
-        <a-button type="primary" @click="onCreate">新增站点</a-button>
-      </a-space>
-    </header>
+    <PageHeader
+      eyebrow="站点 · SITES"
+      title="站点适配器"
+      sub="凭据脱敏展示 · 支持 9 类私有种子站点"
+    >
+      <template #actions>
+        <a-space>
+          <a-button :loading="refreshingUserData" @click="refreshAllUserData">
+            刷新用户数据
+          </a-button>
+          <a-button :loading="testingAll" @click="onTestAll">全部测连</a-button>
+          <a-button type="primary" @click="onCreate">新增站点</a-button>
+        </a-space>
+      </template>
+    </PageHeader>
 
     <hr class="divider-hairline" style="margin: 0" />
 
@@ -326,7 +329,7 @@ const columns = [
 
     <section class="section">
       <div class="panel">
-      <a-table
+      <DataTable
         :data-source="data"
         :columns="columns"
         row-key="id"
@@ -416,7 +419,7 @@ const columns = [
             </a-space>
           </template>
         </template>
-      </a-table>
+      </DataTable>
       </div>
     </section>
 

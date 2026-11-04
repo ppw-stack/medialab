@@ -1,6 +1,13 @@
 <template>
   <div class="page">
-    <a-card size="small" title="签名密钥" style="margin-bottom: 16px">
+    <PageHeader
+      eyebrow="媒体库 · MEDIA"
+      title="签名密钥"
+      sub="中转 URL 的签名轮换——轮换后旧链接全部失效"
+      compact
+    />
+
+    <a-card size="small" style="margin-bottom: 16px">
       <a-alert
         type="warning"
         show-icon
@@ -18,7 +25,7 @@
         <a-input
           v-model:value="newSecret"
           placeholder="留空则自动生成 32 字节随机密钥"
-          style="width: 380px"
+          class="secret-input"
         />
         <a-popconfirm
           title="轮换后旧链接全部失效，确定？"
@@ -74,6 +81,7 @@
 import { ref } from "vue"
 import { message } from "ant-design-vue"
 import { api, errMsg } from "../../api"
+import PageHeader from "../../components/PageHeader.vue"
 
 const newSecret = ref("")
 const rotatedSecret = ref("")
@@ -113,5 +121,20 @@ async function copySecret(): Promise<void> {
   background: #f5f5f5;
   padding: 8px;
   border-radius: 4px;
+}
+
+/*
+  密钥输入框：桌面 380px 宽，手机收窄到容器宽。
+  固定 380px 会把 375px 的视口撑宽（实测文档宽 410px）。
+*/
+.secret-input {
+  width: 380px;
+  max-width: 100%;
+}
+
+@media (max-width: 767px) {
+  .secret-input {
+    width: 100%;
+  }
 }
 </style>

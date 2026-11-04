@@ -16,13 +16,25 @@ import {
   SwapOutlined,
   UploadOutlined,
   DatabaseFilled,
+  MenuOutlined,
 } from '@ant-design/icons-vue'
 import { useAuthStore } from '../stores/auth'
+import { useResponsive } from '../composables/useResponsive'
 
 const router = useRouter()
 const route = useRoute()
 const auth = useAuthStore()
 const collapsed = ref(false)
+
+const { isMobile } = useResponsive()
+
+/**
+ * 侧栏在手机上的展开态（抽屉）。
+ *
+ * 桌面端侧栏常驻；手机端改成**覆盖式抽屉**（`collapsedWidth: 0`），
+ * 否则 280px 的侧栏会把内容区挤到只剩 95px（375px 视口实测）。
+ */
+const drawerOpen = ref(false)
 
 /**
  * 侧边栏菜单（**两个业务域，两级菜单**）。
@@ -103,6 +115,8 @@ watch(
 
 function onMenuClick({ key }: { key: string }) {
   router.push(key)
+  // 手机端点了菜单就收起抽屉（否则新页面被遮罩挡住）
+  drawerOpen.value = false
 }
 
 async function handleLogout() {
@@ -114,7 +128,24 @@ async function handleLogout() {
 
 <template>
   <a-layout style="min-height: 100vh">
-    <a-layout-sider v-model:collapsed="collapsed" collapsible :width="280">
+    <!--
+      侧栏：桌面常驻（280px），手机**完全隐藏**。
+
+      ⚠️ **不能用** Ant Sider 的 `collapsedWidth: 0`——那只是把宽度收成 0，
+      但侧栏自身是 `overflow: visible`，菜单内容（24px）仍会**溢出**到
+      页面左上角（实测「站点适配器」标题被压在下面）。Ant 为此配的
+      `zeroWidthTrigger`（黑色浮标）又会和我自己的 header 汉堡按钮
+      **重复**。
+
+      故手机端直接 `display: none` 侧栏，导航完全交给下方的
+      `<a-drawer>`。
+    -->
+    <a-layout-sider
+      v-model:collapsed="collapsed"
+      collapsible
+      :width="280"
+      :class="{ 'layout-sider--mobile-hidden': isMobile }"
+    >
       <div class="brand">
         <span class="brand__dot" />
         <template v-if="!collapsed">
@@ -152,6 +183,16 @@ async function handleLogout() {
     </a-layout-sider>
     <a-layout>
       <a-layout-header>
+        <!-- 手机端汉堡按钮（侧栏收起时才有入口） -->
+        <a-button
+          v-if="isMobile"
+          type="text"
+          class="header-menu-btn"
+          aria-label="打开菜单"
+          @click="drawerOpen = true"
+        >
+          <MenuOutlined />
+        </a-button>
         <div class="header-title">
           <span class="header-title__name">{{ activeMenu?.label ?? '总览' }}</span>
           <span class="header-title__sub">{{ activeMenu?.sub ?? '' }}</span>
@@ -175,10 +216,89 @@ async function handleLogout() {
         <RouterView />
       </a-layout-content>
     </a-layout>
+
+    <!--
+      手机端的**抽屉菜单**。
+
+      侧栏用 `collapsedWidth: 0` 收起来后，菜单内容就不可见了——
+      需要另一处把同样的菜单渲染出来。这里复用同一个 `menuGroups` 数据
+      与 `openKeys` 状态，逻辑不分叉。
+    -->
+    <a-drawer
+      v-model:open="drawerOpen"
+      placement="left"
+      :width="280"
+      :closable="false"
+      :body-style="{ padding: 0, background: 'var(--bg-surface)' }"
+      class="mobile-menu-drawer"
+    >
+      <div class="brand brand--drawer">
+        <span class="brand__dot" />
+        <span class="brand__name">MediaLab</span>
+        <span class="brand__name-mono">v0.2</span>
+      </div>
+      <a-menu
+        mode="inline"
+        v-model:open-keys="openKeys"
+        :selected-keys="selectedKeys"
+        @click="onMenuClick"
+      >
+        <a-sub-menu v-for="group in menuGroups" :key="group.key">
+          <template #title>
+            <span class="menu-icon menu-icon--group">
+              <component :is="group.icon" />
+            </span>
+            <span class="menu-group-title">{{ group.title }}</span>
+          </template>
+          <a-menu-item v-for="item in group.items" :key="item.key">
+            <span class="menu-icon" :class="`menu-icon--${item.iconColor}`">
+              <component :is="item.icon" />
+            </span>
+            <span class="menu-label">
+              <span class="menu-label__name">{{ item.label }}</span>
+              <span class="menu-label__sub">{{ item.sub }}</span>
+            </span>
+          </a-menu-item>
+        </a-sub-menu>
+      </a-menu>
+    </a-drawer>
   </a-layout>
 </template>
 
 <style scoped>
+/* 手机端汉堡按钮 */
+.header-menu-btn {
+  margin-right: var(--sp-1);
+  flex: 0 0 auto;
+  font-size: 16px;
+}
+
+/*
+  手机端：侧栏**完全隐藏**（导航走抽屉）。
+
+  不能靠 Ant 的 `collapsedWidth: 0`——那只是把宽度收成 0，侧栏自身
+  `overflow: visible`，菜单内容仍会溢出到页面左上角。
+*/
+.layout-sider--mobile-hidden {
+  display: none !important;
+}
+
+/* Ant 的 zeroWidthTrigger 浮标——与 header 汉堡重复，藏掉 */
+:deep(.ant-layout-sider-zero-width-trigger) {
+  display: none !important;
+}
+
+/* 抽屉：满高、内容可滚 */
+:deep(.mobile-menu-drawer .ant-drawer-body) {
+  padding: 0;
+  overflow-y: auto;
+}
+
+/* 抽屉里的品牌条（无底部边框——抽屉自带边界） */
+.brand--drawer {
+  border-bottom: none;
+}
+
 .user-chip {
   display: flex;
   align-items: center;
@@ -188,7 +308,6 @@ async function handleLogout() {
   border-radius: var(--r-sm);
   transition: background var(--t-fast) var(--ease);
 }
-
 .user-chip:hover {
   background: var(--bg-inset);
 }

@@ -12,6 +12,8 @@ import type {
   TorrentStateMeta,
 } from '../types'
 import { formatBytes } from '../utils/format'
+import DataTable from '../components/DataTable.vue'
+import PageHeader from '../components/PageHeader.vue'
 
 const TYPES = [
   { value: 'qbittorrent', label: 'qBittorrent', implemented: true },
@@ -482,17 +484,19 @@ const manageColumns = [
 
 <template>
   <div>
-    <header class="page-header">
-      <div>
-        <div class="page-header__eyebrow">下载器 · DOWNLOADERS</div>
-        <h1 class="page-header__title">下载器与任务</h1>
-        <div class="page-header__sub">
-          <span v-if="activeTabName()">{{ activeTabName() }}&nbsp;·&nbsp;</span>
-          实例管理 · 实时任务 · qBittorrent / Transmission 已完整适配
-        </div>
-      </div>
-      <a-button type="primary" @click="onCreate">新增下载器</a-button>
-    </header>
+    <PageHeader
+      eyebrow="下载器 · DOWNLOADERS"
+      title="下载器与任务"
+      sub="实例管理 · 实时任务 · qBittorrent / Transmission 已完整适配"
+    >
+      <template #sub>
+        <span v-if="activeTabName()">{{ activeTabName() }}&nbsp;·&nbsp;</span>
+        实例管理 · 实时任务 · qBittorrent / Transmission 已完整适配
+      </template>
+      <template #actions>
+        <a-button type="primary" @click="onCreate">新增下载器</a-button>
+      </template>
+    </PageHeader>
 
     <hr class="divider-hairline" style="margin: 0" />
 
@@ -511,7 +515,7 @@ const manageColumns = [
         <div class="label-caps" style="margin-bottom: var(--sp-2)">
           下载器实例 · DOWNLOADERS
         </div>
-        <a-table
+        <DataTable
           :data-source="data"
           :columns="manageColumns"
           row-key="id"
@@ -572,7 +576,7 @@ const manageColumns = [
               </a-space>
             </template>
           </template>
-        </a-table>
+        </DataTable>
 
         <!-- 下：选中下载器的实时任务 -->
         <div class="label-caps" style="margin: var(--sp-4) 0 var(--sp-2)">
@@ -632,7 +636,7 @@ const manageColumns = [
           </a-space>
         </div>
 
-        <a-table
+        <DataTable
           :data-source="filtered"
           :columns="taskColumns"
           :loading="loading"
@@ -649,7 +653,6 @@ const manageColumns = [
             onChange: (p: number) => { page = p; loadItems() },
             onShowSizeChange: (p: number, ps: number) => { page = p; pageSize = ps; loadItems() },
           }"
-          :scroll="{ x: 1600 }"
           size="small"
         >
           <template #bodyCell="{ column, record }">
@@ -679,7 +682,7 @@ const manageColumns = [
               <span class="mono">{{ column.customRender?.({ record }) }}</span>
             </template>
           </template>
-        </a-table>
+        </DataTable>
       </div>
     </section>
 

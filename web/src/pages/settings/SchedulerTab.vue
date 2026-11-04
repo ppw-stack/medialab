@@ -288,6 +288,9 @@ function formatRunFull(s: string): string {
   padding: var(--sp-3) var(--sp-4);
   gap: var(--sp-4);
   border-bottom: 1px solid var(--border-hairline);
+  /* 窄屏：作业名 / cron / 动作区换行堆叠，否则一行挤不下 */
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .job-item:last-child {
@@ -296,6 +299,19 @@ function formatRunFull(s: string): string {
 
 .job-item:hover {
   background: var(--bg-inset);
+}
+
+/* 手机端：动作区整行靠左 */
+@media (max-width: 767px) {
+  .job-item {
+    gap: var(--sp-2);
+    padding: var(--sp-3);
+  }
+
+  .job-item__actions {
+    flex: 1 1 100%;
+    justify-content: flex-start;
+  }
 }
 
 .job-item__main {
@@ -357,6 +373,9 @@ function formatRunFull(s: string): string {
   flex-wrap: wrap;
   padding-top: var(--sp-2);
   border-top: 1px dashed var(--border-hairline);
+  /* 窄屏下别让这一行把作业卡片撑宽 */
+  min-width: 0;
+  max-width: 100%;
 }
 
 .run-chip {
@@ -369,6 +388,9 @@ function formatRunFull(s: string): string {
   border: 1px solid var(--border-hairline);
   background: var(--bg-surface);
   cursor: default;
+  /* 窄屏下时间戳不能把卡片撑宽（flex item 默认 min-width:auto） */
+  min-width: 0;
+  max-width: 100%;
 }
 
 .run-chip--ok {

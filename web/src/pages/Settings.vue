@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { useAuthStore } from '../stores/auth'
 import SchedulerTab from './settings/SchedulerTab.vue'
 import EnvTab from './settings/EnvTab.vue'
+import PageHeader from '../components/PageHeader.vue'
 
 const auth = useAuthStore()
 
@@ -11,15 +12,15 @@ const activeKey = ref('scheduler')
 
 <template>
   <div>
-    <header class="page-header">
-      <div>
-        <div class="page-header__eyebrow">设置 · SETTINGS</div>
-        <h1 class="page-header__title">系统配置</h1>
-        <div class="page-header__sub">
-          当前会话 · <span class="mono">{{ auth.username }}</span>
-        </div>
-      </div>
-    </header>
+    <PageHeader
+      eyebrow="设置 · SETTINGS"
+      title="系统配置"
+      sub="调度作业与环境变量"
+    >
+      <template #sub>
+        当前会话 · <span class="mono">{{ auth.username }}</span>
+      </template>
+    </PageHeader>
 
     <hr class="divider-hairline" style="margin: 0" />
 

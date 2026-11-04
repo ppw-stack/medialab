@@ -1,13 +1,18 @@
 <template>
   <div class="page">
-    <a-card size="small" title="迁移（115 → 光鸭盘）">
-      <template #extra>
-        <a-space>
-          <a-tag v-if="sourceDriver" color="blue">源：{{ sourceDriver.name }}</a-tag>
-          <a-tag v-if="targetDriver" color="cyan">目标：{{ targetDriver.name }}</a-tag>
-        </a-space>
+    <PageHeader
+      eyebrow="媒体库 · MEDIA"
+      title="迁移（115 → 光鸭盘）"
+      sub="边扫边迁——爬到合格文件就提交光鸭离线下载"
+      compact
+    >
+      <template #actions>
+        <a-tag v-if="sourceDriver" color="blue">源：{{ sourceDriver.name }}</a-tag>
+        <a-tag v-if="targetDriver" color="cyan">目标：{{ targetDriver.name }}</a-tag>
       </template>
+    </PageHeader>
 
+    <a-card size="small">
       <a-alert type="info" show-icon :closable="false" class="tip">
         <template #message>
           边扫边迁：不预先遍历整棵树，爬到合格文件就提交光鸭离线下载。
@@ -163,7 +168,7 @@
 
       <template v-if="job.failed_items.length">
         <div class="section">失败明细（{{ job.failed }})</div>
-        <a-table
+        <DataTable
           :data-source="job.failed_items"
           :columns="failedColumns"
           row-key="path"
@@ -175,12 +180,12 @@
               {{ record.size_gb }} GB
             </template>
           </template>
-        </a-table>
+        </DataTable>
       </template>
 
       <template v-if="job.conflict_items.length">
         <div class="section">同名不同大小（{{ job.conflicts }}）—— 未覆盖、未重传</div>
-        <a-table
+        <DataTable
           :data-source="job.conflict_items"
           :columns="conflictColumns"
           row-key="path"
@@ -191,7 +196,7 @@
             <template v-if="column.key === 'local'">{{ record.local_gb }} GB</template>
             <template v-else-if="column.key === 'remote'">{{ record.remote_gb }} GB</template>
           </template>
-        </a-table>
+        </DataTable>
       </template>
 
       <div class="section">
@@ -212,9 +217,11 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue"
 import { message } from "ant-design-vue"
 import DirBrowser from "../../components/DirBrowser.vue"
+import PageHeader from "../../components/PageHeader.vue"
 import { errMsg, mediaApi as api } from "../../api"
 import type { DirEntry, Driver, MigrationJob, MigrationRunInput } from "../../types"
 import { formatBytes } from "../../utils/format"
+import DataTable from '../../components/DataTable.vue'
 
 const drivers = ref<Driver[]>([])
 const sourceDriver = ref<Driver | null>(null)

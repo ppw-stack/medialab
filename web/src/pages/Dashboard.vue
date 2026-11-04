@@ -3,6 +3,8 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { api, mediaApi } from '../api'
 import type { DashboardSnap, MediaStats, ReadyResponse, SchedulerInfo } from '../types'
 import { formatBytes } from '../utils/format'
+import DataTable from '../components/DataTable.vue'
+import PageHeader from '../components/PageHeader.vue'
 
 const snap = ref<DashboardSnap | null>(null)
 const scheduler = ref<SchedulerInfo | null>(null)
@@ -119,19 +121,18 @@ function jobTitle(job: { title?: string; name: string }): string {
 
 <template>
   <div>
-    <header class="page-header">
-      <div>
-        <div class="page-header__eyebrow">总览 · OVERVIEW</div>
-        <h1 class="page-header__title">系统当前状态</h1>
-        <div class="page-header__sub">
-          {{ dateStr }}&nbsp;&nbsp;<span class="mono">{{ timeStr }}</span>
+    <PageHeader
+      eyebrow="总览 · OVERVIEW"
+      title="系统当前状态"
+      :sub="`${dateStr}    ${timeStr}`"
+    >
+      <template #actions>
+        <div class="mono page-header__meta">
+          <span class="live-dot" :class="{ 'live-dot--idle': !accepting }" />
+          <span>{{ accepting ? `调度器 · ${inflightJobs} 在途` : '调度器 · 停机' }}</span>
         </div>
-      </div>
-      <div class="mono page-header__meta">
-        <span class="live-dot" :class="{ 'live-dot--idle': !accepting }" />
-        <span>{{ accepting ? `调度器 · ${inflightJobs} 在途` : '调度器 · 停机' }}</span>
-      </div>
-    </header>
+      </template>
+    </PageHeader>
 
     <hr class="divider-hairline" style="margin: 0" />
 
@@ -198,7 +199,7 @@ function jobTitle(job: { title?: string; name: string }): string {
 
     <section class="section">
       <div class="label-caps" style="margin-bottom: var(--sp-3)">调度作业 · SCHEDULER</div>
-      <a-table
+      <DataTable
         v-if="scheduler"
         :data-source="scheduler.jobs"
         :columns="[{ title: '', key: 'job' }]"
@@ -224,7 +225,7 @@ function jobTitle(job: { title?: string; name: string }): string {
             </span>
           </div>
         </template>
-      </a-table>
+      </DataTable>
       <a-empty v-else description="调度器未连接" />
     </section>
 

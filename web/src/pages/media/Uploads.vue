@@ -1,14 +1,21 @@
 <template>
   <div class="page">
+    <PageHeader
+      eyebrow="媒体库 · MEDIA"
+      title="数据同步"
+      sub="本地 → 网盘——监听目录、上传、同步后可删本地"
+      compact
+    >
+      <template #actions>
+        <a-button type="primary" size="small" @click="openCreate">
+          新建任务
+        </a-button>
+      </template>
+    </PageHeader>
+
     <a-row :gutter="16">
       <a-col :xs="24" :lg="14">
-        <a-card size="small" title="数据同步任务">
-          <template #extra>
-            <a-button type="primary" size="small" @click="openCreate">
-              新建任务
-            </a-button>
-          </template>
-
+        <a-card size="small">
           <a-spin :spinning="loading">
             <a-list :data-source="tasks" size="small" :locale="{ emptyText: '暂无上传任务' }">
               <template #renderItem="{ item }">
@@ -216,6 +223,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from "vue"
 import { message } from "ant-design-vue"
 import DirBrowser from "../../components/DirBrowser.vue"
+import PageHeader from "../../components/PageHeader.vue"
 import { errMsg, mediaApi as api } from "../../api"
 import type {
   DirEntry,

@@ -6,6 +6,7 @@ import HistoryStats from './HistoryStats.vue'
 import JobStepList from './JobStepList.vue'
 import JobLogViewer from './JobLogViewer.vue'
 import type { JobRunItem as RunItem, JobStep, JobLogEntry } from '../types'
+import DataTable from './DataTable.vue'
 
 const props = defineProps<{
   open: boolean
@@ -229,7 +230,7 @@ function customRow(record: RunItem) {
 
     <div class="history-grid">
       <div class="history-list">
-        <a-table
+        <DataTable
           :columns="columns"
           :data-source="runs"
           row-key="id"
@@ -268,7 +269,7 @@ function customRow(record: RunItem) {
               <span v-else class="dim">—</span>
             </template>
           </template>
-        </a-table>
+        </DataTable>
       </div>
 
       <div class="history-detail">

@@ -554,6 +554,22 @@ code, kbd, pre, samp {
   padding: var(--sp-4);
 }
 
+/*
+  页面根容器里的标题区——<PageHeader> 组件。
+
+  媒体库域的 `.page` 是 `16px` 内边距，而辅种域的 `.page-header` 是
+  `32px`——两者不在同一层级。统一后：**页面级标题**由 <PageHeader>
+  负责（自带 padding），`.page` 只管**内容区**的内边距。
+
+  负 margin 让标题区「顶到」容器边缘（与辅种域的效果一致），
+  再用 border-bottom 分隔内容。
+*/
+.page > .page-header {
+  margin: calc(var(--sp-4) * -1) calc(var(--sp-4) * -1) var(--sp-4);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-hairline);
+}
+
 /* 单行省略号——需要配合 max-width（否则不截断）。
    默认 max-width:100% 保证不撑破父容器；具体宽度用行内 style 或
    表格列宽覆盖。inline-block 让它能跟在文字后（表格单元格内），
@@ -691,6 +707,19 @@ code, kbd, pre, samp {
   justify-content: space-between;
   padding: var(--sp-8) var(--sp-8) var(--sp-5);
   gap: var(--sp-4);
+  /* 窄屏时动作区换行到标题下方——不换行会把标题压成竖排（一字一行） */
+  flex-wrap: wrap;
+}
+
+/*
+  标题主区：**必须**能收缩 + 允许内部换行。
+  没有 min-width:0 时，flex 子项的最小尺寸是内容宽，长标题会把主区
+  撑开、反而把旁边的动作区挤没；没有 word-break 时中文长串会一字一行。
+*/
+.page-header > div:first-child {
+  min-width: 0;
+  flex: 1 1 auto;
+  word-break: break-word;
 }
 
 .page-header__eyebrow {
@@ -708,6 +737,8 @@ code, kbd, pre, samp {
   letter-spacing: -0.02em;
   line-height: 1.15;
   margin: 0;
+  /* 中文长标题在窄屏下会一字一行——允许正常换行 */
+  word-break: break-word;
 }
 
 .page-header__sub {
@@ -824,4 +855,162 @@ code, kbd, pre, samp {
   border-radius: var(--r-md);
   box-shadow: var(--shadow-sm);
   padding: var(--sp-4) var(--sp-5);
+}
+
+/* ============================================================
+   响应式（手机适配）
+
+   断点与 Ant 的 `a-col` 断点一致：
+     < 768px  手机（`sm` 以下）
+     < 992px  平板（`md` 以下）
+
+   此前全站**零** `@media`——侧栏恒占 280px，375px 视口下内容区只剩
+   95px（13 个页面实测全是 95px）。这里的规则只做「收紧」，
+   布局结构的改变（侧栏变抽屉、表格横滚）由组件层负责。
+   ============================================================ */
+
+@media (max-width: 991px) {
+  /* 平板：横向 padding 收紧（32px → 20px） */
+  .section {
+    padding: var(--sp-5) var(--sp-5);
+  }
+
+  .page-header {
+    padding: var(--sp-5) var(--sp-5) var(--sp-4);
+  }
+
+  /*
+    输入控件**不许超出容器**（平板也要）。
+
+    页面上大量用行内 `style="width: 380px"` 固定宽（media 域从
+    strmmanger 合并时带过来的），在窄视口下会把页面**撑宽**
+    （实测 iPad 768px 下 `/media-settings` 的文档宽 793px）。
+
+    这里统一兜底：行内样式的 width 是行内样式（优先级高），但
+    `max-width: 100%` 能限制它**不超出父容器**——两者不冲突
+    （width 定宽度、max-width 定上限）。
+  */
+  .ant-input,
+  .ant-input-number,
+  .ant-input-password,
+  .ant-select,
+  .ant-picker {
+    max-width: 100% !important;
+  }
+
+  /*
+    `a-space` 是 flex 容器——**默认不换行**。子项（输入框 + 按钮）
+    排在一行上会把父容器撑宽，而子项的 `max-width:100%` 参照的正是
+    那个被撑宽的父容器 → 循环，max-width 形同虚设。
+
+    实测 `/media-settings` 的文档宽 506px（视口 375px）就是这么来的。
+
+    `max-width: 100%` 打在 `.ant-space` 自身——它是 `inline-flex`，不给
+    上限的话会按内容宽度撑开，下面的 `.ant-space-item` 的
+    `max-width:100%` 参照的就是这个被撑开的宽度。
+  */
+  .ant-space {
+    flex-wrap: wrap;
+    max-width: 100%;
+  }
+
+  /*
+    `a-space-item` 是 flex item——**默认 min-width:auto**，内容多宽它就
+    多宽，不会被父容器压缩。上面的 max-width 对它无效（它不是输入框）。
+    显式给 min-width:0 + max-width:100% 才能让它随容器收缩。
+  */
+  .ant-space-item {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  /*
+    `a-form layout="inline"` 的表单项同理——inline 布局下多个表单项
+    排在一行，不收缩就把表单撑宽（实测 `/migrations` 文档宽 360px，
+    视口 320px）。
+  */
+  .ant-form-inline .ant-form-item {
+    min-width: 0;
+    max-width: 100%;
+  }
+}
+
+@media (max-width: 767px) {
+  /* 手机：横向 padding 收到 12px（32px → 12px） */
+  .section {
+    padding: var(--sp-4) var(--sp-3);
+  }
+
+  .page-header {
+    padding: var(--sp-4) var(--sp-3) var(--sp-3);
+    gap: var(--sp-3);
+  }
+
+  /* 标题缩小——28px 在 375px 宽的屏上占掉大半行 */
+  .page-header__title {
+    font-size: var(--text-lg);
+  }
+
+  /* 手机端：标题区纵向排列，动作区换行到下方 */
+  .page-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--sp-3);
+  }
+
+  .page-header__sub {
+    font-size: var(--text-xs);
+  }
+
+  /* 面板内边距收紧 */
+  .panel {
+    padding: var(--sp-3);
+  }
+
+  /* 统计卡：数值缩小（36px 在手机上过大） */
+  .stat-tile {
+    padding: var(--sp-3);
+  }
+
+  .stat-tile__value {
+    font-size: var(--text-xl);
+  }
+
+  /* 表格：字号略降 + 单元格内边距收紧（横向空间宝贵） */
+  .ant-table {
+    font-size: var(--text-sm) !important;
+  }
+
+  .ant-table-thead > tr > th {
+    padding: var(--sp-2) var(--sp-2) !important;
+  }
+
+  .ant-table-tbody > tr > td {
+    padding: var(--sp-2) var(--sp-2) !important;
+  }
+
+  /* 卡片（媒体库域大量使用）内边距收紧 */
+  .ant-card-body {
+    padding: var(--sp-3) !important;
+  }
+
+  /*
+    输入控件的 max-width 兜底已放在 991px 断点（平板也要）——
+    这里不再重复。
+  */
+
+  /* 数字输入框：窄屏下别再固定 100px 宽 */
+  .ant-input-number {
+    width: 100% !important;
+  }
+
+  /* 弹框：占满宽度（960px 固定宽在手机上会溢出） */
+  .ant-modal {
+    max-width: calc(100vw - 16px) !important;
+    margin: 8px auto !important;
+  }
+
+  .ant-modal-content {
+    padding: var(--sp-3) !important;
+  }
 }

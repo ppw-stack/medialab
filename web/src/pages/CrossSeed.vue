@@ -19,6 +19,8 @@ import type {
 } from '../types'
 import { formatBytes as fmtBytes } from '../utils/format'
 import { message } from 'ant-design-vue'
+import DataTable from '../components/DataTable.vue'
+import PageHeader from '../components/PageHeader.vue'
 
 
 //: 辅种下载器数据来自**定时抓取的快照**（表 cross_seed_snapshot），
@@ -541,15 +543,12 @@ onMounted(async () => {
 
 <template>
   <div>
-    <header class="page-header">
-      <div>
-        <div class="page-header__eyebrow">辅种 · CROSS-SEED</div>
-        <h1 class="page-header__title">辅种下载器统计</h1>
-        <div class="page-header__sub">
-          按下载器分 Tab, 展示 (名称, 大小) 相同的种子分组 · 定时抓取落库, 异常自动暂停
-        </div>
-      </div>
-      <div class="page-header__meta">
+    <PageHeader
+      eyebrow="辅种 · CROSS-SEED"
+      title="辅种下载器统计"
+      sub="按下载器分 Tab, 展示 (名称, 大小) 相同的种子分组 · 定时抓取落库, 异常自动暂停"
+    >
+      <template #actions>
         <a-button @click="loadSnapshotList" :loading="loading">刷新列表</a-button>
         <a-button
           type="primary"
@@ -559,8 +558,8 @@ onMounted(async () => {
         >
           立即抓取
         </a-button>
-      </div>
-    </header>
+      </template>
+    </PageHeader>
 
     <hr class="divider-hairline" style="margin: 0" />
 
@@ -710,7 +709,7 @@ onMounted(async () => {
             </div>
 
             <!-- 按目录分布 -->
-            <a-table
+            <DataTable
               v-if="snapshot.by_dir.length"
               :columns="dirColumns"
               :data-source="snapshot.by_dir"
@@ -733,7 +732,7 @@ onMounted(async () => {
                   {{ fmtBytes((record as CrossSeedDirUsage).total_bytes) }}
                 </template>
               </template>
-            </a-table>
+            </DataTable>
           </section>
           </a-tab-pane>
 
@@ -775,7 +774,7 @@ onMounted(async () => {
                 <span class="dist-toggle-hint">（点击{{ distExpanded ? '收起' : '展开' }}）</span>
               </span>
             </div>
-            <a-table
+            <DataTable
               v-show="distExpanded"
               :columns="distColumns"
               :data-source="countDistribution"
@@ -793,7 +792,7 @@ onMounted(async () => {
                   {{ fmtBytes((record as DistributionRow).sizeBytes) }}
                 </template>
               </template>
-            </a-table>
+            </DataTable>
           </section>
 
           <a-alert
@@ -803,7 +802,7 @@ onMounted(async () => {
             style="margin-bottom: var(--sp-3)"
           />
 
-          <a-table
+          <DataTable
             :columns="statsColumns"
             :data-source="snapshot.stats"
             :row-key="(r: CrossSeedStatsRow) => r.name + '|' + r.size_gb"
@@ -843,7 +842,7 @@ onMounted(async () => {
                 </a-button>
               </template>
             </template>
-          </a-table>
+          </DataTable>
           </a-tab-pane>
 
           <a-tab-pane key="anomalies">
@@ -881,7 +880,7 @@ onMounted(async () => {
                 </span>
               </div>
 
-              <a-table
+              <DataTable
                 :columns="anomalyColumns"
                 :data-source="snapshot.anomalies"
                 :row-key="(r: CrossSeedAnomaly) => r.hash"
@@ -926,7 +925,7 @@ onMounted(async () => {
                     <a-tag v-else color="red">待暂停</a-tag>
                   </template>
                 </template>
-              </a-table>
+              </DataTable>
           </div>
           </a-tab-pane>
           <a-tab-pane key="orphans">
@@ -1015,7 +1014,7 @@ onMounted(async () => {
               </div>
 
               <!-- 逐目录统计（多路径配置时每个目录一行） -->
-              <a-table
+              <DataTable
                 v-if="currentOrphan.scanned_dirs.length > 1"
                 :columns="scannedDirColumns"
                 :data-source="currentOrphan.scanned_dirs"
@@ -1033,7 +1032,7 @@ onMounted(async () => {
                     {{ fmtBytes((record as CrossSeedScannedDir).orphan_bytes) }}
                   </template>
                 </template>
-              </a-table>
+              </DataTable>
 
               <a-alert
                 v-if="currentOrphan.orphan_count"
@@ -1060,7 +1059,7 @@ onMounted(async () => {
                       删除选中（{{ selectedOrphanPaths.length }}）
                     </a-button>
                   </div>
-                  <a-table
+                  <DataTable
                     :columns="orphanColumns"
                     :data-source="currentOrphan.orphans"
                     :row-key="(r: CrossSeedOrphan) => r.path"
@@ -1084,7 +1083,7 @@ onMounted(async () => {
                         {{ fmtBytes((record as CrossSeedOrphan).bytes) }}
                       </template>
                     </template>
-                  </a-table>
+                  </DataTable>
               </div>
             </template>
           </section>

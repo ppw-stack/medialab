@@ -11,6 +11,8 @@ import type {
 } from '../types'
 import { formatBytes } from '../utils/format'
 import { message } from 'ant-design-vue'
+import DataTable from '../components/DataTable.vue'
+import PageHeader from '../components/PageHeader.vue'
 
 
 
@@ -275,7 +277,7 @@ const columns = [
   {
     // **必须给宽度**——不设的话 table-layout:auto 会把它当「弹性列」，
     // 而其它列的固定宽度总和已超过容器宽，结果这一列被压成 0px，
-    // 种子名完全看不见。配合 <a-table :scroll="{ x: 1580 }"> 横向滚动。
+    // 种子名完全看不见。<DataTable> 会按列宽总和自动注入横向滚动。
     title: '种子名', key: 'name', dataIndex: 'name', width: 320, ellipsis: true,
     sorter: (a: TorrentIndexItem, b: TorrentIndexItem) =>
       (a.name ?? '').localeCompare(b.name ?? ''),
@@ -320,17 +322,18 @@ const columns = [
 
 <template>
   <div>
-    <header class="page-header">
-      <div>
-        <div class="page-header__eyebrow">拉取索引 · INDEX</div>
-        <h1 class="page-header__title">免费种信号池</h1>
-        <div class="page-header__sub">自动拉取的种子清单（API/HTML），按免费类型筛选</div>
-      </div>
-      <div class="mono" style="font-size: var(--text-xs); color: var(--text-tertiary); letter-spacing: 0.06em">
-        <span class="live-dot" :class="{ 'live-dot--idle': !loading }" />
-        <span style="margin-left: var(--sp-2)">{{ loading ? '拉取中' : '已同步' }}</span>
-      </div>
-    </header>
+    <PageHeader
+      eyebrow="拉取索引 · INDEX"
+      title="免费种信号池"
+      sub="自动拉取的种子清单（API/HTML），按免费类型筛选"
+    >
+      <template #actions>
+        <div class="mono" style="font-size: var(--text-xs); color: var(--text-tertiary); letter-spacing: 0.06em">
+          <span class="live-dot" :class="{ 'live-dot--idle': !loading }" />
+          <span style="margin-left: var(--sp-2)">{{ loading ? '拉取中' : '已同步' }}</span>
+        </div>
+      </template>
+    </PageHeader>
 
     <hr class="divider-hairline" style="margin: 0" />
 
@@ -397,7 +400,7 @@ const columns = [
         </span>
       </div>
 
-      <a-table
+      <DataTable
         :data-source="items"
         :columns="columns"
         :loading="loading"
@@ -408,7 +411,6 @@ const columns = [
           showSizeChanger: false,
         }"
         :on-change="onTableChange"
-        :scroll="{ x: 1580 }"
         row-key="id"
         size="middle"
       >
@@ -481,7 +483,7 @@ const columns = [
             </a-tooltip>
           </template>
         </template>
-      </a-table>
+      </DataTable>
       </div>
     </section>
 

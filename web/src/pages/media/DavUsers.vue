@@ -1,15 +1,19 @@
 <template>
   <div class="page">
+    <PageHeader
+      eyebrow="媒体库 · MEDIA"
+      title="WebDAV"
+      sub="只读共享——把同步下来的媒体库目录暴露给播放器与文件管理器"
+      compact
+    >
+      <template #actions>
+        <a-tag color="green">只读</a-tag>
+        <a-button size="small" @click="loadAll">刷新</a-button>
+      </template>
+    </PageHeader>
+
     <!-- 顶部：连接信息 + 根目录配置 -->
     <a-card size="small" class="mb">
-      <template #title>WebDAV</template>
-      <template #extra>
-        <a-space>
-          <a-tag color="green">只读</a-tag>
-          <a-button size="small" @click="loadAll">刷新</a-button>
-        </a-space>
-      </template>
-
       <a-descriptions :column="1" size="small" bordered>
         <a-descriptions-item label="连接地址">
           <div class="mono">{{ davUrl }}</div>
@@ -18,10 +22,10 @@
           </div>
         </a-descriptions-item>
         <a-descriptions-item label="媒体库根目录">
-          <a-space>
+          <a-space wrap>
             <a-select
               v-model:value="rootDriverId"
-              style="min-width: 260px"
+              class="dav-select"
               :options="rootOptions"
               @change="onRootChange"
             />
@@ -61,7 +65,7 @@
             <a-button type="primary" size="small" @click="openCreate">新增账号</a-button>
           </template>
 
-          <a-table
+          <DataTable
             :data-source="users"
             :columns="userColumns"
             row-key="id"
@@ -103,7 +107,7 @@
                 </a-space>
               </template>
             </template>
-          </a-table>
+          </DataTable>
         </a-card>
       </a-tab-pane>
 
@@ -143,7 +147,7 @@
             <span class="muted">共 {{ auditTotal }} 条</span>
           </a-space>
 
-          <a-table
+          <DataTable
             :data-source="auditItems"
             :columns="auditColumns"
             row-key="id"
@@ -192,7 +196,7 @@
                 <span class="muted">{{ formatTime(record.created_at, "从未") }}</span>
               </template>
             </template>
-          </a-table>
+          </DataTable>
         </a-card>
       </a-tab-pane>
 
@@ -298,6 +302,8 @@ import type {
   DavUser,
 } from "../../types"
 import { formatTime } from "../../utils/format"
+import DataTable from '../../components/DataTable.vue'
+import PageHeader from '../../components/PageHeader.vue'
 
 const activeTab = ref("users")
 
@@ -557,5 +563,22 @@ onMounted(loadAll)
 .traversal {
   color: #cf1322;
   font-weight: 600;
+}
+
+/*
+  根目录下拉：桌面 260px 宽，手机收窄。
+  固定 min-width:260px 会把 375px 的视口**撑宽**（实测 innerWidth 变成
+  426px）——页面级横向溢出的元凶。
+*/
+.dav-select {
+  min-width: 260px;
+  max-width: 100%;
+}
+
+@media (max-width: 767px) {
+  .dav-select {
+    min-width: 0;
+    width: 100%;
+  }
 }
 </style>

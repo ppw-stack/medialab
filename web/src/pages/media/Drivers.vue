@@ -1,15 +1,19 @@
 <template>
   <div class="page">
-    <a-card size="small">
-      <template #title>存储源</template>
-      <template #extra>
-        <a-space>
-          <a-button size="small" :loading="probingAll" @click="probeAll">全部测连</a-button>
-          <a-button type="primary" size="small" @click="openCreate">新增</a-button>
-        </a-space>
+    <PageHeader
+      eyebrow="媒体库 · MEDIA"
+      title="存储源"
+      sub="网盘账号（115 / 光鸭盘）——凭据、容量与直链能力"
+      compact
+    >
+      <template #actions>
+        <a-button size="small" :loading="probingAll" @click="probeAll">全部测连</a-button>
+        <a-button type="primary" size="small" @click="openCreate">新增</a-button>
       </template>
+    </PageHeader>
 
-      <a-table
+    <a-card size="small">
+      <DataTable
         :data-source="drivers"
         :columns="columns"
         row-key="id"
@@ -129,7 +133,7 @@
             </a-space>
           </template>
         </template>
-      </a-table>
+      </DataTable>
     </a-card>
 
     <!-- 新增存储源 -->
@@ -627,6 +631,8 @@ import type {
   SmsVerifyResult,
 } from "../../types"
 import { formatBytes } from "../../utils/format"
+import DataTable from '../../components/DataTable.vue'
+import PageHeader from '../../components/PageHeader.vue'
 
 const drivers = ref<Driver[]>([])
 const loading = ref(false)

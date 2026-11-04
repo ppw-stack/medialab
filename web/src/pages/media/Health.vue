@@ -1,11 +1,17 @@
 <template>
   <div class="page">
-    <a-card size="small">
-      <template #title>库健康检查</template>
-      <template #extra>
+    <PageHeader
+      eyebrow="媒体库 · MEDIA"
+      title="库健康检查"
+      sub="断链检查——签名失效、文件缺失、孤儿文件"
+      compact
+    >
+      <template #actions>
         <a-button size="small" :loading="loading" @click="check">重新检查</a-button>
       </template>
+    </PageHeader>
 
+    <a-card size="small">
       <a-spin :spinning="loading">
         <template v-if="report">
           <a-alert
@@ -83,6 +89,7 @@ import { onMounted, ref } from "vue"
 import { message } from "ant-design-vue"
 import { errMsg, mediaApi as api } from "../../api"
 import type { HealthReport } from "../../types"
+import PageHeader from "../../components/PageHeader.vue"
 
 const report = ref<HealthReport | null>(null)
 const loading = ref(false)
@@ -105,7 +112,6 @@ function formatTime(ts: number): string {
   return new Date(ts * 1000).toLocaleString("zh-CN")
 }
 </script>
-
 <style scoped>
 /* .truncate 默认 inline-block——列表项里要占满整行才能真正截断 */
 .block-truncate {

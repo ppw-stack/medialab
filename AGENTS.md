@@ -308,6 +308,39 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
     `EXEMPTIONS`，**必须写豁免理由**——否则会变成垃圾桶
   - **合并 / 重构页面时必须连 `<style>` 一起搬**——这条闸门只防「完全丢失」，
     不防「搬漏了某个规则里的某条属性」
+- **响应式（手机适配，2026-11-04 加入）**：
+  - **此前全站零 `@media`、零断点**——侧栏恒占 280px，375px 视口下内容区
+    只剩 95px（13 个页面实测全是 95px）；表格不配 `:scroll` 时 Ant 的
+    `table-layout:auto` 按内容撑开，`/sites` 文档宽 1503px、`/downloaders`
+    1551px（视口只有 375px）
+  - **断点**：`<768px` 手机 / `<992px` 平板 / `≥992px` 桌面。与 Ant 的
+    `a-col` 断点一致
+  - **`<DataTable>` 是表格的唯一入口**（`web/src/components/DataTable.vue`）：
+    自动按列宽总和注入 `:scroll="{ x }"` + `table-layout: fixed`。
+    **新增表格一律用它**，别直接写 `<a-table>`——否则又是一个「忘了配
+    scroll」的表格
+    - `fixed` 是**全局约定**：`auto` 时列宽只是建议值，浏览器按内容重新
+      分配，设了宽度也白设
+  - **`<PageHeader>` 是页面标题的唯一入口**：统一两个业务域的页面骨架
+    （此前辅种域用 `.page-header`、媒体库域把标题写在 `a-card` 的
+    `#title` 里——两套契约，手机端没法统一折叠）。媒体库域用 `compact`
+  - **`useResponsive()` 是断点判断的唯一入口**（`web/src/composables/`）：
+    基于 Ant 的 `Grid.useBreakpoint()`。**别写 `window.innerWidth`**——
+    不响应窗口尺寸变化，且会散落成灾
+  - **窄屏的关键 CSS 陷阱**：
+    - flex item 默认 `min-width: auto` → 内容多宽它就多宽。要显式
+      `min-width: 0`
+    - `max-width: 100%` 参照的是**父容器**宽度；父容器被内容撑开时
+      max-width 形同虚设（循环）
+    - `a-space` 是 flex 容器，**默认不换行** → 要 `flex-wrap: wrap`
+    - 行内 `style="width: 380px"` 会把视口**撑宽**（`innerWidth` 变成
+      506px）→ 用 `max-width: 100%` 兜底 + 组件级 `compact` 类
+  - **侧栏在手机端必须 `display: none`**——不能用 Ant Sider 的
+    `collapsedWidth: 0`：那只是把宽度收成 0，侧栏自身 `overflow: visible`，
+    菜单内容仍会溢出到页面左上角（Ant 为此配的 `zeroWidthTrigger` 黑色
+    浮标又会和 header 汉堡重复）。导航走 `<a-drawer>`
+  - 契约由 `web/tests/responsive.spec.ts` 固化（13 页 × 无横向溢出 /
+    侧栏隐藏 + 抽屉可开 / 桌面端不溢出 / 每页都有统一标题）
 
 
 ## 后端测试
