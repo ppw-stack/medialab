@@ -91,6 +91,10 @@ class OfflineParams:
     max_size_mb: int = 0
     #: 排除原盘（iso / m2ts / BDMV / CERTIFICATE）
     exclude_disc: bool = True
+    #:
+    #: **只要这些扩展名**（小写，不含点）。空 = 不限（全传）。
+    #: 如 ``("mkv", "mp4")`` 只传视频，跳过 nfo / 字幕 / 图片。
+    exts: tuple[str, ...] = ()
     #: 同时进行的离线任务数
     concurrency: int = 2
     #: 两次提交之间的最小间隔（秒）。**没有 115 频控，可以很小**
@@ -110,6 +114,7 @@ class OfflineParams:
             "min_size_mb": self.min_size_mb,
             "max_size_mb": self.max_size_mb,
             "exclude_disc": self.exclude_disc,
+            "exts": list(self.exts),
             "concurrency": self.concurrency,
             "submit_interval_sec": self.submit_interval_sec,
             "public_base": self.public_base,
@@ -131,13 +136,19 @@ def collect_files(
     min_bytes: int,
     max_bytes: int,
     exclude_disc: bool,
+    exts: set[str] | None = None,
 ) -> list[OfflineFile]:
     """遍历本地目录，挑出该传的文件。
 
     **不跟随符号链接**——避免环，也避免把不该暴露的东西带出去。
+
+    Args:
+        exts: **只要这些扩展名**（小写，不含点）。``None`` / 空集 = 不限
+            （全传）。如 ``{"mkv", "mp4"}`` 只传视频。
     """
     out: list[OfflineFile] = []
     base = root.resolve()
+    wanted = {e.lower().lstrip(".") for e in (exts or set())}
     for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
         current = Path(dirpath)
         rel_dir = current.relative_to(base)
@@ -160,7 +171,10 @@ def collect_files(
 
             if size == 0:
                 continue
-            if exclude_disc and fname.rsplit(".", 1)[-1].lower() in DISC_EXTS:
+            ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+            if exclude_disc and ext in DISC_EXTS:
+                continue
+            if wanted and ext not in wanted:
                 continue
             if min_bytes > 0 and size < min_bytes:
                 continue
@@ -401,9 +415,11 @@ async def run_offline_download(job: OfflineJob) -> None:
         min_bytes=params.min_size_mb * 1024 * 1024,
         max_bytes=params.max_size_mb * 1024 * 1024,
         exclude_disc=params.exclude_disc,
+        exts=set(params.exts),
     )
     job.discovered = len(files)
-    job.log(f"🔍 发现 {len(files)} 个待传文件")
+    suffix = f"（仅 {', '.join(params.exts)}）" if params.exts else ""
+    job.log(f"🔍 发现 {len(files)} 个待传文件{suffix}")
 
     if not files:
         job.state = "success"

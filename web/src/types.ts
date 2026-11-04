@@ -1237,6 +1237,8 @@ export interface OfflineRunInput {
   min_size_mb: number
   max_size_mb: number
   exclude_disc: boolean
+  /** 只要这些扩展名（逗号分隔，如 "mkv,mp4"）；空 = 不限 */
+  exts: string
   concurrency: number
   submit_interval_sec: number
 }

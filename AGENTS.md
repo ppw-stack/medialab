@@ -80,6 +80,7 @@
   - ⚠️ **迁移功能把 `progress` 当百分比显示**（`migration.py` 的 `_progress_text`）——**那个显示是错的**，大文件时会显示个位数。本次未改（不在任务范围内）
   - **分层**：纯逻辑（token / 路径安全 / Range 解析）在 `app/services/offline_files.py`（**不 import fastapi**），HTTP handler 在 `app/api/routes/offline_files.py`（services 层不得 import fastapi，见 `tests/unit/test_layering.py`）
   - **UI**：媒体库域 → **「离线下载」**页（`web/src/pages/media/Offline.vue`）。功能未启用时页面**说明怎么开**（列出三项配置），不给一个点了就报错的入口
+  - **只传指定格式**（任务级 `exts`，逗号分隔，如 `mkv,mp4`）：空 = 全传。用于「只传视频，跳过 nfo / 字幕 / 海报」。扩展名**大小写不敏感**。前端预览**实时跟随过滤**（勾了 mkv 立刻只剩 mkv）
   - **源目录浏览必须限权**（`/offline-downloads/local-dirs`）：**只能列 `OFFLINE_FILES_ROOT` 之下**的目录——与「数据同步」的 `/upload-tasks/local-dirs` 不同，那个能列服务能看到的**任何**目录（含 `/app/.env` 的明文密钥）。离线下载的文件要经**公网**暴露，暴露面更大，故必须收窄
   - **鉴权只能做在 URL 里**——光鸭的 `cloud_create_task(url, parent_id)` 只收 URL、不支持自定义 Header → 每文件一个 HMAC token（`HMAC(secret, 相对路径)` 前 32 位十六进制）
   - **文件服务必须挂在 SPA 兜底之前**（`app/main.py` 的 `_mount_offline_files`）——否则被 `/{full_path:path}` 吞掉

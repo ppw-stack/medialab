@@ -52,6 +52,10 @@ class OfflineRunIn(BaseModel):
     max_size_mb: int = Field(default=0, ge=0)
     #: 排除原盘（iso / m2ts / BDMV / CERTIFICATE）
     exclude_disc: bool = True
+    #:
+    #: **只要这些扩展名**（逗号分隔，如 ``mkv,mp4``）。空 = 不限（全传）。
+    #: 用于「只传视频，跳过 nfo / 字幕 / 海报」。
+    exts: str = Field(default="", max_length=256)
     #: 同时进行的离线任务数
     concurrency: int = Field(default=2, ge=1, le=20)
     #: 两次提交之间的最小间隔（秒）
@@ -203,6 +207,15 @@ async def run_offline(payload: OfflineRunIn) -> dict[str, Any]:
             detail=f"已有离线下载任务在跑（job={running.id}）",
         )
 
+    # 扩展名过滤：逗号分隔 → 去空白 / 去点 / 小写 / 去重
+    exts = tuple(
+        dict.fromkeys(
+            e.strip().lower().lstrip(".")
+            for e in payload.exts.split(",")
+            if e.strip().strip(".")
+        )
+    )
+
     params = OfflineParams(
         target_driver_id=payload.target_driver_id,
         target_file_id=payload.target_file_id,
@@ -212,6 +225,7 @@ async def run_offline(payload: OfflineRunIn) -> dict[str, Any]:
         min_size_mb=payload.min_size_mb,
         max_size_mb=payload.max_size_mb,
         exclude_disc=payload.exclude_disc,
+        exts=exts,
         concurrency=payload.concurrency,
         submit_interval_sec=payload.submit_interval_sec,
         public_base=settings.offline_public_base,

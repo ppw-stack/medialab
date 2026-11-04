@@ -188,6 +188,72 @@ def test_collect_files_keeps_disc_when_not_excluded(tmp_path: Path) -> None:
     assert {f.rel_path for f in got} == {"disc.iso"}
 
 
+# ------------------------------------------------------------ 扩展名过滤
+
+
+def test_collect_files_filters_by_extension(tmp_path: Path) -> None:
+    """只要指定扩展名（跳过 nfo / 字幕 / 海报）。"""
+    _make(tmp_path, "movie.mkv", 100)
+    _make(tmp_path, "clip.mp4", 100)
+    _make(tmp_path, "movie.nfo", 10)
+    _make(tmp_path, "sub.srt", 10)
+    _make(tmp_path, "poster.jpg", 10)
+    got = collect_files(
+        tmp_path,
+        include_subdirs=True,
+        min_bytes=0,
+        max_bytes=0,
+        exclude_disc=False,
+        exts={"mkv", "mp4"},
+    )
+    assert {f.rel_path for f in got} == {"movie.mkv", "clip.mp4"}
+
+
+def test_collect_files_empty_exts_means_all(tmp_path: Path) -> None:
+    """空集合 = 不限（全传）。"""
+    _make(tmp_path, "movie.mkv", 100)
+    _make(tmp_path, "movie.nfo", 10)
+    got = collect_files(
+        tmp_path,
+        include_subdirs=True,
+        min_bytes=0,
+        max_bytes=0,
+        exclude_disc=False,
+        exts=set(),
+    )
+    assert {f.rel_path for f in got} == {"movie.mkv", "movie.nfo"}
+
+
+def test_collect_files_ext_filter_is_case_insensitive(tmp_path: Path) -> None:
+    """扩展名**大小写不敏感**（``.MKV`` 也算 ``mkv``）。"""
+    _make(tmp_path, "Movie.MKV", 100)
+    _make(tmp_path, "other.mp4", 100)
+    got = collect_files(
+        tmp_path,
+        include_subdirs=True,
+        min_bytes=0,
+        max_bytes=0,
+        exclude_disc=False,
+        exts={"mkv"},
+    )
+    assert {f.rel_path for f in got} == {"Movie.MKV"}
+
+
+def test_collect_files_ext_filter_handles_no_extension(tmp_path: Path) -> None:
+    """无扩展名的文件被过滤掉（不匹配任何 ext）。"""
+    _make(tmp_path, "README", 100)
+    _make(tmp_path, "movie.mkv", 100)
+    got = collect_files(
+        tmp_path,
+        include_subdirs=True,
+        min_bytes=0,
+        max_bytes=0,
+        exclude_disc=False,
+        exts={"mkv"},
+    )
+    assert {f.rel_path for f in got} == {"movie.mkv"}
+
+
 # ---------------------------------------------------------------- URL
 
 

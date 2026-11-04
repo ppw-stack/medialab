@@ -74,14 +74,31 @@
           </a-col>
         </a-row>
 
-        <!-- 源目录下的文件（让用户知道要传什么） -->
+        <!--
+          源目录下的文件（让用户知道要传什么）。
+
+          **跟随格式过滤实时变化**——用户在下面勾了「只传 mkv」，
+          这里立刻只剩 mkv，不用提交后才发现传错了。
+        -->
         <div v-if="localFiles.length" class="files">
-          <div class="section">将要上传的文件（{{ localFiles.length }} 个）</div>
+          <div class="section">
+            将要上传的文件（{{ filteredLocalFiles.length }} 个<template
+              v-if="form.exts.length"
+            >，已按格式过滤，原 {{ localFiles.length }} 个）</template
+            >）
+          </div>
           <div class="file-list">
-            <span v-for="f in localFiles" :key="f.name" class="file-item">
+            <span
+              v-for="f in filteredLocalFiles"
+              :key="f.name"
+              class="file-item"
+            >
               <span class="file-name">{{ f.name }}</span>
               <span class="muted mono">{{ formatBytes(f.size) }}</span>
             </span>
+          </div>
+          <div v-if="!filteredLocalFiles.length" class="muted" style="margin-top: 6px">
+            当前格式过滤下没有匹配的文件——放宽「只传指定格式」或换个源目录。
           </div>
         </div>
 
@@ -91,7 +108,7 @@
           参数区：用**栅格**而非 inline 表单——inline 表单项太多会挤成
           好几行（"递归子目录"被挤到单独一行），且宽度不可控。
         -->
-        <a-row :gutter="[12, 8]" :wrap="true">
+        <a-row :gutter="[12, 8]" :wrap="true" class="param-row" :class="{ 'exts-open': extsOpen }">
           <a-col :xs="12" :sm="8" :md="4" :lg="3">
             <div class="param">
               <div class="param-label">最小体积 (GB)</div>
@@ -127,6 +144,25 @@
               <div class="param-label">排除原盘</div>
               <a-switch v-model:checked="form.excludeDisc" />
               <span class="hint">iso / m2ts / BDMV</span>
+            </div>
+          </a-col>
+          <a-col :xs="24" :sm="12" :md="8" :lg="6">
+            <div class="param">
+              <div class="param-label">
+                只传指定格式
+                <a-tooltip title="逗号分隔的扩展名，如 mkv,mp4。留空 = 全传。用于「只传视频，跳过 nfo / 字幕 / 海报」">
+                  <QuestionCircleOutlined class="param-help" />
+                </a-tooltip>
+              </div>
+              <a-select
+                v-model:value="form.exts"
+                mode="tags"
+                :placeholder="EXT_PRESETS.map((e) => e.label).join(' / ') + '（留空 = 全传）'"
+                style="width: 100%"
+                :token-separators="[',', '，', ' ']"
+                :open="extsOpen"
+                @open-change="extsOpen = $event"
+              />
             </div>
           </a-col>
           <a-col :xs="24" :md="6" :lg="4">
@@ -219,6 +255,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue"
 import { message } from "ant-design-vue"
+import { QuestionCircleOutlined } from "@ant-design/icons-vue"
 import DirBrowser from "../../components/DirBrowser.vue"
 import DataTable from "../../components/DataTable.vue"
 import PageHeader from "../../components/PageHeader.vue"
@@ -259,12 +296,40 @@ const form = reactive({
   submitIntervalSec: 2,
   includeSubdirs: true,
   excludeDisc: true,
+  /** 只要这些扩展名（空 = 全传） */
+  exts: [] as string[],
 })
+
+/**
+ * 常用格式预设（只是**占位提示**，不是限制）。
+ *
+ * 用 `mode="tags"` 的下拉——用户可以直接输入任意扩展名（如 `iso`、
+ * `wmv`），预设只是省得一个个敲。
+ */
+const EXT_PRESETS = [
+  { value: "mkv", label: "mkv" },
+  { value: "mp4", label: "mp4" },
+  { value: "ts", label: "ts" },
+  { value: "m2ts", label: "m2ts" },
+  { value: "avi", label: "avi" },
+  { value: "mov", label: "mov" },
+  { value: "flv", label: "flv" },
+  { value: "wmv", label: "wmv" },
+  { value: "iso", label: "iso" },
+]
 
 const job = ref<OfflineJob | null>(null)
 const starting = ref(false)
 const cancelling = ref(false)
 const logBox = ref<HTMLElement | null>(null)
+/**
+ * 格式下拉的展开态。
+ *
+ * 手动控制展开——tags 模式的默认下拉会**盖住**「开始离线下载」按钮
+ * （下拉是 absolute 定位，父级没给足够高度）。展开时把按钮那一列
+ * 顶下去就没了。
+ */
+const extsOpen = ref(false)
 
 let timer: number | undefined
 
@@ -276,6 +341,22 @@ const failedColumns = [
 
 const currentSource = computed(() => sourceStack.value[sourceStack.value.length - 1])
 const currentTarget = computed(() => targetStack.value[targetStack.value.length - 1])
+
+/**
+ * 按「只传指定格式」过滤后的文件预览。
+ *
+ * 与后端 `collect_files(exts=...)` 同一口径（扩展名小写、不含点）。
+ * 后端还会过滤 0 字节 / 原盘 / 体积阈值——这里只做**格式**这一项，
+ * 因为用户最关心「我勾的格式对不对」。
+ */
+const filteredLocalFiles = computed(() => {
+  const wanted = new Set(form.exts.map((e) => e.trim().toLowerCase().replace(/^\./, "")))
+  if (!wanted.size) return localFiles.value
+  return localFiles.value.filter((f) => {
+    const ext = f.name.includes(".") ? f.name.split(".").pop()!.toLowerCase() : ""
+    return wanted.has(ext)
+  })
+})
 
 const canRun = computed(
   () =>
@@ -435,6 +516,7 @@ async function start(): Promise<void> {
       min_size_mb: Math.round(form.minSizeGb * 1024),
       max_size_mb: Math.round(form.maxSizeGb * 1024),
       exclude_disc: form.excludeDisc,
+      exts: form.exts.join(","),
       concurrency: form.concurrency,
       submit_interval_sec: form.submitIntervalSec,
     }
@@ -544,8 +626,22 @@ function logText(line: string): string {
   color: var(--text-secondary);
 }
 
+/* 参数标签旁的问号图标 */
+.param-help {
+  color: var(--text-tertiary);
+  margin-left: 2px;
+}
+
 .param--action {
   justify-content: flex-end;
+}
+
+/*
+  格式下拉展开时需要**额外高度**——Ant 的下拉面板是 absolute 定位，
+  会盖住下面的「开始离线下载」按钮。展开时给参数区加一段底部留白。
+*/
+.exts-open .param-row {
+  padding-bottom: 200px;
 }
 
 /*
