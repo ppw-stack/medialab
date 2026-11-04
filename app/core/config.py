@@ -186,6 +186,27 @@ class AppSettings(BaseSettings):
     #: 认证失败锁定**（5 次 / 锁 15 分钟），不是这个限流。
     dav_rate_limit_per_min: int = Field(default=1200, ge=0)
 
+    # -- 离线下载（本地文件 → 光鸭，走光鸭服务端拉取）--
+    #
+    # 光鸭的离线下载是**服务端主动来拉**——流量方向是**下行**，本机只
+    # 承担接收，上行需求 ≈ 0。这绕开了「本机上行 ~3.3 MB/s」这个瓶颈
+    # （见 ``docs/upload-bandwidth.md``）。
+    #
+    # 光鸭的 ``cloud_create_task(url, parent_id)`` **只收 URL、不支持
+    # 自定义 Header** → 鉴权只能做在 URL 里（每文件一个 HMAC token）。
+    #: 离线下载的 HMAC 密钥。**空 = 不启用**（不挂载本地文件服务）。
+    #:
+    #: **临时使用**：传完就关掉端口映射即可，不必改这个值——密钥只在
+    #: URL 生成时起作用，映射关掉后外部就访问不到了。
+    offline_hmac_secret: str = ""
+
+    #: 离线下载暴露的根目录（容器内绝对路径）。空 = 用监听目录。
+    offline_files_root: str = ""
+
+    #: 离线下载对外的**公网入口**（光鸭用它拼 URL）。
+    #: 例：``http://home.banstack.top:8092``。**不带尾斜杠**。
+    offline_public_base: str = ""
+
     #: 按用户的请求数限流（每分钟）。0 = 不限流。
     #:
     #: 单个账号不能无限拉 —— 多个账号共用同一份媒体库，一个账号狂刷

@@ -65,6 +65,23 @@
   - `CHUNK_CONCURRENCY = 1`（`guangya_upload.py`）+ 单 worker（`watch_manager.py`）是**正确实现，不是待优化的遗留**
   - `concurrency` 参数保留但不生效（面板可配，恒为 1）——留给将来支持并发的网盘
   - ⚠️ **方法论**：测上传吞吐必须用**生产规模**文件（≥100MB）且做**串行/并发交替对照**。曾用 50MB/10 片测出「并发快 2 倍」的**假象**，据此写了两版并发实现再逐一证伪
+- **离线下载（本地 → 光鸭走光鸭服务端拉取）**（2026-11-04 加入，见 `docs/offline-download.md`）：
+  - **原理**：光鸭的离线下载是**光鸭服务器主动来拉**——流量方向是**下行**，本机只承担接收，上行需求 ≈ 0。这本该绕开上行瓶颈
+  - **实测结论：功能可行但速率更差**——文件完整落地光鸭、md5 一致，但实际速率 **~0.75 MB/s**（比直传的 3.3 MB/s **慢 4.4 倍**）
+    - 链路不是瓶颈：公网入口单个 100MB 分片实测 **17.2 MB/s**；服务实现不是瓶颈：内网经 HTTP 读 **626 MB/s**
+    - 真正原因：**光鸭把文件切成变长的随机区间并并发拉取，其中 73% 是重复请求**（5MB 文件同一区间被拉 130 次）——光鸭下载器的固有行为，客户端不可控
+  - **它什么时候才划算**：源文件**本来就在大带宽 CDN 上**（如 115 直链）→ 那正是**迁移功能**（115→光鸭）的场景。**「本地 → 光鸭」用离线下载反而更慢**
+  - **代码保留但不推荐使用**（用户明确要求才开）：`app/services/offline_download.py` + `app/api/routes/offline_files.py`
+  - **踩过的坑**（都已在代码里修掉）：
+    - 光鸭会发 **HEAD** 探文件大小 → 不支持则 405、任务可能直接失败
+    - 光鸭有两条路径的 **URL 编码方式不同**：正常是单次编码，**重试路径是双重编码**（`%` → `%25`）→ 那些请求原本全部 403。解法：服务端**再 `unquote` 一次**
+    - **模块级 `APIRouter` 不能复用**——多次 `include_router` 到不同 app 时路由会绑在第一次的 app 上。必须在挂载函数内部新建
+    - **光鸭的 `progress` 字段不是可靠的百分比**（2.3GB 文件下载到 88% 时它只有 4）→ **不用它判定完成**，等任务从活跃列表消失 + 以「目标目录出现同名同大小文件」为准
+  - ⚠️ **迁移功能把 `progress` 当百分比显示**（`migration.py` 的 `_progress_text`）——**那个显示是错的**，大文件时会显示个位数。本次未改（不在任务范围内）
+  - **分层**：纯逻辑（token / 路径安全 / Range 解析）在 `app/services/offline_files.py`（**不 import fastapi**），HTTP handler 在 `app/api/routes/offline_files.py`（services 层不得 import fastapi，见 `tests/unit/test_layering.py`）
+  - **鉴权只能做在 URL 里**——光鸭的 `cloud_create_task(url, parent_id)` 只收 URL、不支持自定义 Header → 每文件一个 HMAC token（`HMAC(secret, 相对路径)` 前 32 位十六进制）
+  - **文件服务必须挂在 SPA 兜底之前**（`app/main.py` 的 `_mount_offline_files`）——否则被 `/{full_path:path}` 吞掉
+  - 契约由 `tests/unit/test_offline_download.py` + `tests/integration/test_offline_files_http.py` 固化；实测脚本 `scripts/verify_offline.py`
 - **Bearer 长期凭据只用 `WEB_TOKEN`**（2026-10-30 加入）：`verify_bearer` 同时接受 API Token（`WEB_TOKEN`）与 session cookie 值两种口径，但 session cookie 值 24h 过期（`SESSION_MAX_AGE`）。CLI / 脚本长期使用应存 `WEB_TOKEN`，不可把 session cookie 值当长期 token 存储——后者会突然 401。session 值口径仅为面板/CLI 同源便利，非长期凭据。
 - **自动化 / 合规边界**（2026-10-22 修订，原「不引入未文档化的反爬对抗 / 验证码绕过（R2）」）：
   - ✅ **允许**对**自有账号**做站点自动化，含 AI 读图形验证码（`app/core/ai.py`）、真实浏览器交互
