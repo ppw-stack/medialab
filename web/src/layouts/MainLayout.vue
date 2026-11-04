@@ -72,7 +72,7 @@ const menuGroups = [
       { key: '/migrations', icon: SwapOutlined, label: '迁移', sub: '115 → 光鸭', iconColor: 'amber' },
       { key: '/uploads', icon: UploadOutlined, label: '数据同步', sub: '本地 → 网盘', iconColor: 'green' },
       { key: '/health', icon: HeartOutlined, label: '健康监控', sub: '断链检查', iconColor: 'red' },
-      { key: '/dav', icon: CloudUploadOutlined, label: 'WebDAV', sub: '账号与审计', iconColor: 'cyan' },
+      { key: '/dav-users', icon: CloudUploadOutlined, label: 'WebDAV', sub: '账号与审计', iconColor: 'cyan' },
       { key: '/media-settings', icon: SettingOutlined, label: '签名密钥', sub: '中转签名轮换', iconColor: 'pink' },
     ],
   },
