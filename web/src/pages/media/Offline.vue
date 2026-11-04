@@ -482,6 +482,36 @@ const currentSource = computed(() => sourceStack.value[sourceStack.value.length 
 const currentTarget = computed(() => targetStack.value[targetStack.value.length - 1])
 
 /**
+ * 规范化扩展名列表：**拆逗号**（Ant tags 模式整串粘贴不触发分词，
+ * `mkv,mp4` 会变成一个标签）、去空白、去点、小写、去重。
+ *
+ * 与后端 `collect_files` 的 exts 口径一致——预览和提交都用这里的结果，
+ * 保证「看到的就是要传的」。
+ */
+function normalizeExts(values: string[]): string[] {
+  return [
+    ...new Set(
+      values
+        .flatMap((v) => v.split(/[,，\s]+/))
+        .map((e) => e.trim().toLowerCase().replace(/^\./, ""))
+        .filter(Boolean),
+    ),
+  ]
+}
+
+/** 粘贴整串（如 `mkv,mp4`）时立刻拆成独立标签，不留复合标签。 */
+watch(
+  () => form.exts,
+  (v) => {
+    const fixed = normalizeExts(v)
+    if (fixed.length !== v.length || fixed.some((e, i) => e !== v[i])) {
+      form.exts = fixed
+    }
+  },
+  { deep: true },
+)
+
+/**
  * 按「只传指定格式」过滤后的文件预览。
  *
  * 与后端 `collect_files(exts=...)` 同一口径（扩展名小写、不含点）。
@@ -489,7 +519,7 @@ const currentTarget = computed(() => targetStack.value[targetStack.value.length 
  * 因为用户最关心「我勾的格式对不对」。
  */
 const filteredLocalFiles = computed(() => {
-  const wanted = new Set(form.exts.map((e) => e.trim().toLowerCase().replace(/^\./, "")))
+  const wanted = new Set(normalizeExts(form.exts))
   if (!wanted.size) return localFiles.value
   return localFiles.value.filter((f) => {
     const ext = f.name.includes(".") ? f.name.split(".").pop()!.toLowerCase() : ""
@@ -759,7 +789,7 @@ async function start(): Promise<void> {
       min_size_mb: Math.round(form.minSizeGb * 1024),
       max_size_mb: Math.round(form.maxSizeGb * 1024),
       exclude_disc: form.excludeDisc,
-      exts: form.exts.join(","),
+      exts: normalizeExts(form.exts).join(","),
       delete_after_upload: form.deleteAfterUpload,
       concurrency: form.concurrency,
       submit_interval_sec: form.submitIntervalSec,
