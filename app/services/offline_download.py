@@ -485,7 +485,11 @@ async def run_offline_download(job: OfflineJob) -> None:
     dir_cache: dict[str, str] = {}  # rel_dir → fileId（同一目录只 ensure 一次）
 
     def _walk() -> None:
-        """扫描线程：走目录树，逐个把文件丢进队列。**必须**以哨兵收尾。"""
+        """扫描线程：走目录树，逐个把文件丢进队列。**必须**以哨兵收尾。
+
+        ``discovered`` 由本线程**唯一**写入（worker 不碰）——单写者无竞态，
+        前端轮询看到的是「已扫到多少」的实时总数，而不是「已处理多少」。
+        """
         try:
             for item in iter_files(
                 root,
@@ -495,6 +499,7 @@ async def run_offline_download(job: OfflineJob) -> None:
                 exclude_disc=params.exclude_disc,
                 exts=set(params.exts),
             ):
+                job.discovered += 1
                 loop.call_soon_threadsafe(queue.put_nowait, item)
         except Exception as exc:
             job.log(f"❌ 扫描中断：{type(exc).__name__}: {exc}")
@@ -515,7 +520,6 @@ async def run_offline_download(job: OfflineJob) -> None:
                     # 队列的 unfinished 计数才能归零（join() 返回的前提）。
                     queue.put_nowait(_WALK_DONE)
                 return
-            job.discovered += 1  # 随扫描实时增长（前端轮询可见）
             try:
                 await _process_one(
                     job,
