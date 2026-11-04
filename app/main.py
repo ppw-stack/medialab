@@ -218,23 +218,24 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     # ``cloud_create_task(url, parent_id)`` 只收 URL、不支持自定义
     # Header → 鉴权做在 URL 的 HMAC token 里。
     #
-    # **未配置密钥就不挂**（不影响主服务启动）——临时用完把端口映射
-    # 关掉即可，不必改配置。
-    _mount_offline_files(app, get_settings())
+    # **无条件挂载**：配置在页面上改（DB 持久化），路由常驻、请求时读
+    # 配置决定放行与否。三项未配齐时返回 403，不暴露任何文件。
+    _mount_offline_files(app)
 
     _mount_frontend(app, get_settings().frontend_dist)
     return app
 
 
-def _mount_offline_files(app: FastAPI, settings: AppSettings) -> None:
-    """挂载离线下载用的只读文件服务。"""
+def _mount_offline_files(app: FastAPI) -> None:
+    """挂载离线下载用的只读文件服务。
+
+    **无条件挂载**——FastAPI 不支持运行时增删路由，而配置现在可以在
+    页面上改（DB 持久化，改完立即生效）。路由常驻，请求时读配置决定
+    放行与否；未启用时返回 403。
+    """
     from app.api.routes.offline_files import mount_offline_files
 
-    root = settings.offline_files_root
-    if not root:
-        logger.info("未配置 OFFLINE_FILES_ROOT，跳过挂载离线下载文件服务")
-        return
-    mount_offline_files(app, root, settings.offline_hmac_secret)
+    mount_offline_files(app)
 
 
 def _mount_routes(app: FastAPI) -> None:

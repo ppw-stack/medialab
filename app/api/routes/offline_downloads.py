@@ -18,8 +18,16 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.auth import require_session
-from app.core.config import get_settings
 from app.services import offline_jobs
+from app.services.offline_config import (
+    KEY_FILES_ROOT,
+    KEY_PUBLIC_BASE,
+    KEY_SECRET,
+    OfflineConfigError,
+    apply_offline_config,
+    current_config,
+    normalize_public_base,
+)
 from app.services.offline_download import (
     OfflineParams,
 )
@@ -56,6 +64,18 @@ class OfflineRunIn(BaseModel):
     #: **只要这些扩展名**（逗号分隔，如 ``mkv,mp4``）。空 = 不限（全传）。
     #: 用于「只传视频，跳过 nfo / 字幕 / 海报」。
     exts: str = Field(default="", max_length=256)
+    #:
+    #: **下载成功后删除本地文件**（不可逆）。
+    #:
+    #: 破坏性操作——但有三道保护（与「数据同步」同一套
+    #: :mod:`app.services.upload_cleanup` 机制）：
+    #:
+    #: 1. 只对**确实下载成功**的文件删（云端出现同名同大小才算）
+    #: 2. 云端大小必须与本地一致
+    #: 3. 路径安全（普通文件 / 非隐藏 / 在源根目录内）
+    #:
+    #: 空目录会一并删掉（向上递归，源根目录本身保留）。
+    delete_after_upload: bool = False
     #: 同时进行的离线任务数
     concurrency: int = Field(default=2, ge=1, le=20)
     #: 两次提交之间的最小间隔（秒）
@@ -64,64 +84,88 @@ class OfflineRunIn(BaseModel):
 
 @router.get("/capabilities")
 async def capabilities() -> dict[str, Any]:
-    """离线下载的能力与配置（前端用它决定是否显示这个功能）。"""
-    settings = get_settings()
-    enabled = bool(settings.offline_hmac_secret and settings.offline_public_base)
+    """离线下载的能力与配置（前端用它决定显示什么）。"""
+    cfg = current_config()
     return {
-        "enabled": enabled,
-        "public_base": settings.offline_public_base,
-        "files_root": settings.offline_files_root,
+        "enabled": cfg.enabled,
+        "public_base": cfg.public_base,
+        "files_root": cfg.files_root,
         # 源目录浏览的根（前端从这里开始逐层选）
-        "browse_root": settings.offline_files_root,
+        "browse_root": cfg.files_root,
+        # 三项配置是否齐全（前端逐项显示「已配置 / 未配置」）
+        "has_secret": bool(cfg.secret),
+        "has_public_base": bool(cfg.public_base),
+        "has_files_root": bool(cfg.files_root),
         "hint": (
-            "离线下载需要：1) 配置 OFFLINE_HMAC_SECRET 与 OFFLINE_PUBLIC_BASE；"
-            "2) 公网入口能访问到本服务（端口映射）。"
-            "不需要时直接关掉端口映射即可——服务只在有请求时才暴露文件。"
+            "离线下载需要配齐三项：密钥、公网入口、源根目录。"
+            "在本页「配置」区改完立即生效（不用重启容器）。"
+            "不用时把端口映射关掉即可——服务没配齐时不暴露任何文件。"
         ),
     }
 
 
-@router.get("/local-dirs")
-async def browse_local_dirs(path: str = "") -> dict[str, Any]:
-    """浏览**源目录**的子目录。
+class OfflineConfigIn(BaseModel):
+    """离线下载配置（partial update——只传要改的）。"""
 
-    ⚠️ **必须限定在 ``OFFLINE_FILES_ROOT`` 之下**——与「数据同步」的
-    ``/upload-tasks/local-dirs`` 不同，那个端点能列服务能看到的**任何**
-    目录（含 ``/app/.env``）。离线下载的文件要经**公网**暴露给光鸭拉，
-    暴露面更大，故源目录必须收窄到配置的根之下。
+    model_config = ConfigDict(extra="forbid")
+
+    #: HMAC 密钥（省略/空 = 不修改——密钥永不回显，不能用空串清除）
+    secret: str | None = Field(default=None, max_length=128)
+    #: 公网入口
+    public_base: str | None = Field(default=None, max_length=256)
+    #: 源根目录
+    files_root: str | None = Field(default=None, max_length=1024)
+
+
+@router.put("/config")
+async def update_config(payload: OfflineConfigIn) -> dict[str, Any]:
+    """修改离线下载配置（**落库 + 立即生效**，不用重启容器）。
+
+    三项配置写进 ``app_env_settings`` 表（与「辅种扫描目录」同一套机制），
+    文件服务**每次请求时**读当前配置决定放行与否——故改完立即生效。
+    """
+    updates: dict[str, str] = {}
+    # 密钥留空 = 不修改（它永不回显，故「空串」不能解释成「清除」）
+    if payload.secret:
+        updates[KEY_SECRET] = payload.secret.strip()
+    if payload.public_base is not None:
+        updates[KEY_PUBLIC_BASE] = normalize_public_base(payload.public_base)
+    if payload.files_root is not None:
+        updates[KEY_FILES_ROOT] = payload.files_root.strip()
+
+    try:
+        await apply_offline_config(updates)
+    except OfflineConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # DB 写失败：内存未变，但要明确告知
+        raise HTTPException(status_code=500, detail=f"保存配置失败：{exc}") from exc
+
+    return await capabilities()
+
+
+@router.get("/local-dirs")
+async def browse_local_dirs(path: str = "/") -> dict[str, Any]:
+    """浏览**本地**目录（列子目录）——用来选源根目录 / 源目录。
+
+    **没有白名单**：目录完全由用户在面板上配置，与「数据同步」的
+    ``/upload-tasks/local-dirs`` 一致。**因此这个端点能列出服务进程能
+    看到的任何目录**——包括 ``/app``（含明文密钥的 ``.env``）。故它与
+    「面板登录」同级别地敏感（面板本身已是管理员权限）。
     """
     from pathlib import Path
 
-    settings = get_settings()
-    root_str = settings.offline_files_root
-    if not root_str:
-        raise HTTPException(
-            status_code=503, detail="未配置 OFFLINE_FILES_ROOT，离线下载未启用"
-        )
-    root = Path(root_str).resolve()
-    if not root.is_dir():
-        raise HTTPException(status_code=503, detail=f"源根目录不存在：{root_str}")
-
-    target = (root / (path or "")).resolve() if path else root
-    # 防目录穿越——必须在 root 之下
-    try:
-        target.relative_to(root)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="目录超出配置的源根目录") from None
-    if not target.is_dir():
-        raise HTTPException(status_code=400, detail=f"目录不存在：{target}")
-
     from app.services.upload_paths import list_subdirs
 
+    target = Path(path or "/")
+    if not target.is_absolute():
+        raise HTTPException(status_code=400, detail="必须是绝对路径")
+    if not target.is_dir():
+        raise HTTPException(status_code=400, detail=f"目录不存在：{target}")
     return {
         "path": str(target),
-        "root": str(root),
-        # ``id`` = 相对 root 的路径（前端拿它当「下一层」直接请求）
+        # ``id`` = 完整路径（前端拿它当「下一层路径」直接请求）
         "dirs": [
-            {
-                "id": str(Path(full).relative_to(root)),
-                "name": Path(full).name,
-            }
+            {"id": full, "name": full.rsplit("/", 1)[-1]}
             for full in list_subdirs(target)
         ],
     }
@@ -135,18 +179,9 @@ async def list_local_files(path: str = "") -> dict[str, Any]:
     """
     from pathlib import Path
 
-    settings = get_settings()
-    root_str = settings.offline_files_root
-    if not root_str:
-        raise HTTPException(
-            status_code=503, detail="未配置 OFFLINE_FILES_ROOT，离线下载未启用"
-        )
-    root = Path(root_str).resolve()
-    target = (root / (path or "")).resolve() if path else root
-    try:
-        target.relative_to(root)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="目录超出配置的源根目录") from None
+    target = Path(path or "/")
+    if not target.is_absolute():
+        raise HTTPException(status_code=400, detail="必须是绝对路径")
     if not target.is_dir():
         raise HTTPException(status_code=400, detail=f"目录不存在：{target}")
 
@@ -181,23 +216,23 @@ async def browse_targets(driver_id: int, parent_id: str = "") -> dict[str, Any]:
 @router.post("/run", status_code=201)
 async def run_offline(payload: OfflineRunIn) -> dict[str, Any]:
     """开跑（**立即返回 job_id**，下载在后台跑）。"""
-    settings = get_settings()
-    if not settings.offline_hmac_secret:
+    cfg = current_config()
+    if not cfg.secret:
         raise HTTPException(
             status_code=503,
-            detail="未配置 OFFLINE_HMAC_SECRET，离线下载未启用",
+            detail="未配置离线下载密钥，离线下载未启用",
         )
-    if not settings.offline_public_base:
+    if not cfg.public_base:
         raise HTTPException(
             status_code=503,
-            detail="未配置 OFFLINE_PUBLIC_BASE，无法生成公网 URL",
+            detail="未配置离线下载公网入口，无法生成公网 URL",
         )
 
-    root = settings.offline_files_root
+    root = cfg.files_root
     if not root:
         raise HTTPException(
             status_code=503,
-            detail="未配置 OFFLINE_FILES_ROOT，不知道要暴露哪个目录",
+            detail="未配置离线下载源根目录，不知道要暴露哪个目录",
         )
 
     running = await offline_jobs.find_running()
@@ -226,10 +261,11 @@ async def run_offline(payload: OfflineRunIn) -> dict[str, Any]:
         max_size_mb=payload.max_size_mb,
         exclude_disc=payload.exclude_disc,
         exts=exts,
+        delete_after_upload=payload.delete_after_upload,
         concurrency=payload.concurrency,
         submit_interval_sec=payload.submit_interval_sec,
-        public_base=settings.offline_public_base,
-        secret=settings.offline_hmac_secret,
+        public_base=cfg.public_base,
+        secret=cfg.secret,
     )
     job = await offline_jobs.start_offline_job(params)
     return {"job_id": job.id, "state": job.state}

@@ -81,10 +81,12 @@
   - **分层**：纯逻辑（token / 路径安全 / Range 解析）在 `app/services/offline_files.py`（**不 import fastapi**），HTTP handler 在 `app/api/routes/offline_files.py`（services 层不得 import fastapi，见 `tests/unit/test_layering.py`）
   - **UI**：媒体库域 → **「离线下载」**页（`web/src/pages/media/Offline.vue`）。功能未启用时页面**说明怎么开**（列出三项配置），不给一个点了就报错的入口
   - **只传指定格式**（任务级 `exts`，逗号分隔，如 `mkv,mp4`）：空 = 全传。用于「只传视频，跳过 nfo / 字幕 / 海报」。扩展名**大小写不敏感**。前端预览**实时跟随过滤**（勾了 mkv 立刻只剩 mkv）
-  - **源目录浏览必须限权**（`/offline-downloads/local-dirs`）：**只能列 `OFFLINE_FILES_ROOT` 之下**的目录——与「数据同步」的 `/upload-tasks/local-dirs` 不同，那个能列服务能看到的**任何**目录（含 `/app/.env` 的明文密钥）。离线下载的文件要经**公网**暴露，暴露面更大，故必须收窄
+  - **源目录浏览不限权**（2026-11-04 修订，用户明确要求「所有目录都能选中」）：`/offline-downloads/local-dirs` 能列服务能看到的**任何**目录（含 `/app`）——与「数据同步」的 `/upload-tasks/local-dirs` 一致（面板本身已是管理员权限）。暴露面靠「三项没配齐时文件服务 403、不暴露任何文件」控制，而非目录白名单
+  - **三项配置页面上改、立即生效**（2026-11-04 修订，用户明确要求「配置在页面上做」）：`OFFLINE_HMAC_SECRET` / `OFFLINE_PUBLIC_BASE` / `OFFLINE_FILES_ROOT` 落在 `app_env_settings` 表（**hidden 项**——不进「设置 → 环境变量」通用列表，由「离线下载」页的配置区专用端点 `PUT /api/offline-downloads/config` 写入，源根目录带目录浏览器）。⚠️ FastAPI 不支持运行时增删路由 → `mount_offline_files()` **无条件挂载**，每次请求时读当前配置决定放行：三项没配齐 → **403**（不是 SPA 的 index.html，更诚实）。密钥**永不回显**（API 只返回 `has_secret`）、**不进启动日志**、保存时留空 = 不修改
+  - **下载成功后删除本地文件**（2026-11-04 加入）：`delete_after_upload` 参数（前端开关打开时**二次确认**）。与「数据同步」**同一套** `upload_cleanup` 机制（三重保护 + 空目录 `rmdir` 递归清理），唯一差异是时机——离线下载要等「任务结束 + 校验落盘（同名同大小）」才删。删除失败只记日志，不翻转结果
   - **鉴权只能做在 URL 里**——光鸭的 `cloud_create_task(url, parent_id)` 只收 URL、不支持自定义 Header → 每文件一个 HMAC token（`HMAC(secret, 相对路径)` 前 32 位十六进制）
   - **文件服务必须挂在 SPA 兜底之前**（`app/main.py` 的 `_mount_offline_files`）——否则被 `/{full_path:path}` 吞掉
-  - 契约由 `tests/unit/test_offline_download.py` + `tests/integration/test_offline_files_http.py` 固化；实测脚本 `scripts/verify_offline.py`
+  - 契约由 `tests/unit/test_offline_download.py` + `tests/unit/test_env_settings.py` + `tests/integration/test_offline_files_http.py` + `tests/integration/test_offline_api.py` 固化；实测脚本 `scripts/verify_offline.py`
 - **Bearer 长期凭据只用 `WEB_TOKEN`**（2026-10-30 加入）：`verify_bearer` 同时接受 API Token（`WEB_TOKEN`）与 session cookie 值两种口径，但 session cookie 值 24h 过期（`SESSION_MAX_AGE`）。CLI / 脚本长期使用应存 `WEB_TOKEN`，不可把 session cookie 值当长期 token 存储——后者会突然 401。session 值口径仅为面板/CLI 同源便利，非长期凭据。
 - **自动化 / 合规边界**（2026-10-22 修订，原「不引入未文档化的反爬对抗 / 验证码绕过（R2）」）：
   - ✅ **允许**对**自有账号**做站点自动化，含 AI 读图形验证码（`app/core/ai.py`）、真实浏览器交互

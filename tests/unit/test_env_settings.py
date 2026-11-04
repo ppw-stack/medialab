@@ -39,16 +39,28 @@ def test_specs_registered() -> None:
 
 
 def test_api_model_covers_all_specs() -> None:
-    """API 层的 EnvSettingsUpdateIn 必须覆盖全部 spec（导入时已校验）。
+    """API 层的 EnvSettingsUpdateIn 必须覆盖全部**可见** spec（导入时已校验）。
 
     显式断言一次——若有人在 ENV_SETTING_SPECS 加新 key 忘了加 API
     字段，导入时就抛 RuntimeError，本测试也会失败。
+
+    隐藏项（``hidden=True``，如离线下载的三项）**不在**通用更新模型里
+    ——它们有自己的专用端点，故按 ``not s.hidden`` 过滤。
     """
     from app.api.routes.env_settings import EnvSettingsUpdateIn
 
-    spec_keys = {s.key for s in ENV_SETTING_SPECS}
+    spec_keys = {s.key for s in ENV_SETTING_SPECS if not s.hidden}
     model_keys = set(EnvSettingsUpdateIn.model_fields)
     assert spec_keys <= model_keys
+
+
+def test_hidden_specs_are_not_in_generic_model() -> None:
+    """隐藏项**不能**出现在通用更新模型里（否则会被通用页面改，两处矛盾）。"""
+    from app.api.routes.env_settings import EnvSettingsUpdateIn
+
+    hidden = {s.key for s in ENV_SETTING_SPECS if s.hidden}
+    assert hidden, "至少应注册离线下载的三项隐藏配置"
+    assert not (hidden & set(EnvSettingsUpdateIn.model_fields))
 
 
 # ------------------------------------------------------------------ validate
@@ -205,6 +217,36 @@ async def test_init_uses_db_value_when_present(db: None) -> None:
 
     mgr = await init_env_settings_async()
     assert mgr.get("cross_seed_scan_dirs") == "/from-db"
+
+
+async def test_init_log_never_leaks_secret(
+    db: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """启动日志只记 key 与「是否已配置」，**不打配置值**（里面有 HMAC 密钥）。"""
+    import logging
+
+    from app.core.config import AppSettings, set_settings
+    from pydantic import SecretStr
+
+    s = AppSettings(
+        env="test",
+        app_name="t",
+        data_dir="/tmp",
+        log_dir="/tmp",
+        db_path="/tmp/x.db",
+        web_username="t",
+        web_password=SecretStr("test-pass-123"),
+        web_token=SecretStr("test-token-32-chars-abcdefgh"),
+        offline_hmac_secret="super-secret-value",
+    )
+    set_settings(s)
+    try:
+        with caplog.at_level(logging.INFO, logger="app.services.env_settings"):
+            await init_env_settings_async()
+        assert "环境变量配置已初始化" in caplog.text
+        assert "super-secret-value" not in caplog.text
+    finally:
+        set_settings(None)
 
 
 # ------------------------------------------------------------------ apply_env_settings

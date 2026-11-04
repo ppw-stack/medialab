@@ -2,14 +2,26 @@
 
 用 FastAPI 的 ``TestClient`` 打真实的 HTTP 请求——验证「光鸭能不能
 拉到文件」这件事的**每一环**：鉴权、路径穿越、Range、内容长度。
+
+⚠️ **路由是常驻的**（FastAPI 不支持运行时增删路由，而配置现在可以在
+页面上改）。故「未启用」表现为 **403**，而不是「路由不存在」——
+比让 SPA 兜底吞掉更诚实（明确「这里有个服务但没开」）。
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from app.api.routes.offline_files import mount_offline_files
+from app.services import env_settings
+from app.services.env_settings import EnvSettingsManager
+from app.services.offline_config import (
+    KEY_FILES_ROOT,
+    KEY_PUBLIC_BASE,
+    KEY_SECRET,
+)
 from app.services.offline_files import URL_PREFIX
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -18,11 +30,21 @@ SECRET = "http-test-secret"
 
 
 @pytest.fixture()
-def client(tmp_path: Path) -> TestClient:
-    """一个挂了文件服务的 app（根目录 = tmp_path）。"""
+def client(tmp_path: Path) -> Iterator[TestClient]:
+    """一个挂了文件服务的 app（根目录 = tmp_path，三项配置齐全）。"""
+    env_settings.set_env_settings(
+        EnvSettingsManager(
+            {
+                KEY_SECRET: SECRET,
+                KEY_PUBLIC_BASE: "http://example.test:8092",
+                KEY_FILES_ROOT: str(tmp_path),
+            }
+        )
+    )
     app = FastAPI()
-    mount_offline_files(app, tmp_path, SECRET)
-    return TestClient(app)
+    mount_offline_files(app)
+    yield TestClient(app)
+    env_settings.set_env_settings(None)
 
 
 def _write(root: Path, rel: str, size: int) -> None:
@@ -135,19 +157,44 @@ def test_head_rejects_bad_token(client: TestClient, tmp_path: Path) -> None:
     assert r.status_code == 403
 
 
-def test_no_secret_means_not_mounted(tmp_path: Path) -> None:
-    """**没配密钥就不挂载**——不留下无鉴权的文件入口。"""
-    app = FastAPI()
-    assert mount_offline_files(app, tmp_path, "") is False
-    client = TestClient(app)
-    r = client.get(f"{URL_PREFIX}/whatever/a.mkv")
-    assert r.status_code == 404
+def test_not_configured_returns_403(tmp_path: Path) -> None:
+    """**三项没配齐 → 403**（路由常驻，但不暴露任何文件）。"""
+    env_settings.set_env_settings(EnvSettingsManager({}))
+    try:
+        app = FastAPI()
+        mount_offline_files(app)
+        client = TestClient(app)
+        r = client.get(f"{URL_PREFIX}/{_token('a.mkv')}/a.mkv")
+        assert r.status_code == 403
+    finally:
+        env_settings.set_env_settings(None)
 
 
-def test_missing_root_means_not_mounted(tmp_path: Path) -> None:
-    """根目录不存在 → 不挂载（不影响主服务启动）。"""
-    app = FastAPI()
-    assert mount_offline_files(app, tmp_path / "nope", SECRET) is False
+def test_config_change_takes_effect_immediately(tmp_path: Path) -> None:
+    """**改配置立即生效**——路由常驻，每次请求时读当前配置。
+
+    这是「配置搬到页面上」的核心前提：FastAPI 不能运行时增删路由，
+    所以只能让 handler 每次读配置。
+    """
+    mgr = EnvSettingsManager({})
+    env_settings.set_env_settings(mgr)
+    try:
+        app = FastAPI()
+        mount_offline_files(app)
+        client = TestClient(app)
+
+        _write(tmp_path, "a.mkv", 100)
+        # 未配置 → 403
+        assert client.get(f"{URL_PREFIX}/{_token('a.mkv')}/a.mkv").status_code == 403
+
+        # 配齐三项（模拟页面上的「保存配置」）→ 立刻能取
+        mgr.set_memory(KEY_SECRET, SECRET)
+        mgr.set_memory(KEY_PUBLIC_BASE, "http://example.test:8092")
+        mgr.set_memory(KEY_FILES_ROOT, str(tmp_path))
+        r = client.get(f"{URL_PREFIX}/{_token('a.mkv')}/a.mkv")
+        assert r.status_code == 200
+    finally:
+        env_settings.set_env_settings(None)
 
 
 def test_directory_request_returns_404(client: TestClient, tmp_path: Path) -> None:

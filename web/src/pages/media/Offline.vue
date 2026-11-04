@@ -11,27 +11,103 @@
       </template>
     </PageHeader>
 
-    <!-- 功能未启用：说明怎么开，而不是给一个点了就报错的入口 -->
-    <a-alert
-      v-if="capabilities && !capabilities.enabled"
-      type="warning"
-      show-icon
-      class="tip"
-    >
-      <template #message>离线下载未启用</template>
-      <template #description>
-        需要同时配置三项（见 <code>.env.prod</code>）：
-        <br />① <code>OFFLINE_HMAC_SECRET</code> —— 访问 token 的 HMAC 密钥
-        <br />② <code>OFFLINE_PUBLIC_BASE</code> —— 公网入口，如
-        <code>http://home.banstack.top:8092</code>（光鸭用它拉文件）
-        <br />③ <code>OFFLINE_FILES_ROOT</code> —— 要暴露的源目录
-        <br />
-        <b>临时使用</b>：传完把端口映射关掉即可，不必改配置——
-        服务在没配密钥时**不会挂载**，文件完全不可访问。
-      </template>
-    </a-alert>
+    <!--
+      配置区：**始终可见**。
 
-    <template v-else>
+      三项配置存 DB（``app_env_settings``），改完**立即生效**——
+      文件服务的路由是常驻的，每次请求时读当前配置决定放行与否，
+      所以不用重启容器。未配齐时返回 403，不暴露任何文件。
+    -->
+    <a-card size="small" class="tip">
+      <template #title>
+        配置
+        <a-tag
+          :color="capabilities?.enabled ? 'green' : 'orange'"
+          class="cfg-tag"
+        >
+          {{ capabilities?.enabled ? "已启用" : "未启用" }}
+        </a-tag>
+      </template>
+      <template #extra>
+        <a-button
+          size="small"
+          type="primary"
+          ghost
+          :loading="savingConfig"
+          @click="saveConfig"
+        >
+          保存配置
+        </a-button>
+      </template>
+
+      <a-alert
+        v-if="capabilities && !capabilities.enabled"
+        type="warning"
+        show-icon
+        class="mb"
+      >
+        <template #message>配齐下面三项即可启用</template>
+        <template #description>
+          配置保存在数据库里，<b>改完立即生效</b>——不用改
+          <code>.env</code>、不用重启容器。不用时把端口映射关掉即可：
+          三项没配齐时文件服务<b>不暴露任何文件</b>。
+        </template>
+      </a-alert>
+
+      <a-row :gutter="[12, 8]" :wrap="true">
+        <a-col :xs="24" :md="8">
+          <div class="param">
+            <div class="param-label">
+              ① 密钥
+              <a-tag v-if="capabilities?.has_secret" color="green" class="mini">
+                已配置
+              </a-tag>
+            </div>
+            <a-input-password
+              v-model:value="configForm.secret"
+              :placeholder="
+                capabilities?.has_secret
+                  ? '已配置（留空 = 不修改）'
+                  : 'openssl rand -hex 32 的输出'
+              "
+            />
+          </div>
+        </a-col>
+        <a-col :xs="24" :md="8">
+          <div class="param">
+            <div class="param-label">
+              ② 公网入口
+              <a-tooltip title="光鸭用这个 URL 来拉本地文件——必须从公网能访问到本服务">
+                <QuestionCircleOutlined class="param-help" />
+              </a-tooltip>
+            </div>
+            <a-input
+              v-model:value="configForm.publicBase"
+              placeholder="http://home.banstack.top:8092"
+            />
+          </div>
+        </a-col>
+        <a-col :xs="24" :md="8">
+          <div class="param">
+            <div class="param-label">
+              ③ 源根目录
+              <a-tooltip title="要暴露给光鸭的本地目录（容器内绝对路径）">
+                <QuestionCircleOutlined class="param-help" />
+              </a-tooltip>
+            </div>
+            <div class="root-row">
+              <a-input
+                v-model:value="configForm.filesRoot"
+                placeholder="/mnt/remotes/…/home/movietmp"
+              />
+              <a-button @click="openRootBrowser">浏览…</a-button>
+            </div>
+          </div>
+        </a-col>
+      </a-row>
+    </a-card>
+
+    <template v-if="capabilities?.enabled">
       <a-alert type="info" show-icon :closable="false" class="tip">
         <template #message>
           光鸭的离线下载是<b>光鸭服务器主动来拉</b>——流量方向是下行，
@@ -146,6 +222,22 @@
               <span class="hint">iso / m2ts / BDMV</span>
             </div>
           </a-col>
+          <a-col :xs="12" :sm="8" :md="4" :lg="3">
+            <div class="param">
+              <div class="param-label">
+                下载后删本地
+                <a-tooltip
+                  title="光鸭确认落盘且大小一致后才删；所在目录空了会一并删掉（源根目录本身保留）。不可逆。"
+                >
+                  <QuestionCircleOutlined class="param-help" />
+                </a-tooltip>
+              </div>
+              <a-switch
+                v-model:checked="form.deleteAfterUpload"
+                @change="onToggleDeleteAfter"
+              />
+            </div>
+          </a-col>
           <a-col :xs="24" :sm="12" :md="8" :lg="6">
             <div class="param">
               <div class="param-label">
@@ -210,6 +302,9 @@
           <a-descriptions-item label="已下载">
             {{ formatBytes(job.downloaded_bytes) }}
           </a-descriptions-item>
+          <a-descriptions-item v-if="job.local_deleted" label="已删本地">
+            {{ job.local_deleted }} 个文件
+          </a-descriptions-item>
           <a-descriptions-item label="在途">
             {{ job.in_flight }} 个任务
             <span v-if="job.in_flight_items" class="muted mono">
@@ -249,12 +344,37 @@
         </div>
       </a-card>
     </template>
+
+    <!-- 源根目录的目录浏览器（不限权：服务能看到的目录都能选） -->
+    <a-modal
+      v-model:open="rootModal"
+      title="选择源根目录"
+      :footer="null"
+      :width="720"
+    >
+      <div class="param-label root-current">
+        当前：
+        <code class="mono">{{ rootStack[rootStack.length - 1]?.id || "/" }}</code>
+      </div>
+      <DirBrowser
+        title="目录"
+        :stack="rootStack"
+        :dirs="rootDirs"
+        :loading="loadingRoot"
+        @open="openRootDir"
+        @go="goRootDir"
+      />
+      <div class="modal-actions">
+        <a-button @click="rootModal = false">取消</a-button>
+        <a-button type="primary" @click="pickRoot">使用此目录</a-button>
+      </div>
+    </a-modal>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue"
-import { message } from "ant-design-vue"
+import { message, Modal } from "ant-design-vue"
 import { QuestionCircleOutlined } from "@ant-design/icons-vue"
 import DirBrowser from "../../components/DirBrowser.vue"
 import DataTable from "../../components/DataTable.vue"
@@ -264,6 +384,7 @@ import type {
   DirEntry,
   Driver,
   OfflineCapabilities,
+  OfflineConfigInput,
   OfflineJob,
   OfflineLocalFile,
   OfflineRunInput,
@@ -273,6 +394,22 @@ import { formatBytes } from "../../utils/format"
 const capabilities = ref<OfflineCapabilities | null>(null)
 const drivers = ref<Driver[]>([])
 const targetDriver = ref<Driver | null>(null)
+
+// ---- 配置（三项：密钥 / 公网入口 / 源根目录）----
+
+const configForm = reactive({
+  secret: "",
+  publicBase: "",
+  filesRoot: "",
+})
+const savingConfig = ref(false)
+
+// ---- 源根目录的目录浏览器（不限权）----
+
+const rootModal = ref(false)
+const rootStack = ref<DirEntry[]>([])
+const rootDirs = ref<DirEntry[]>([])
+const loadingRoot = ref(false)
 
 // ---- 源目录浏览（相对 files_root）----
 
@@ -296,6 +433,8 @@ const form = reactive({
   submitIntervalSec: 2,
   includeSubdirs: true,
   excludeDisc: true,
+  /** 下载成功后删除本地文件（不可逆） */
+  deleteAfterUpload: false,
   /** 只要这些扩展名（空 = 全传） */
   exts: [] as string[],
 })
@@ -367,6 +506,13 @@ const canRun = computed(
 )
 
 onMounted(async () => {
+  await loadCapabilities()
+})
+
+onUnmounted(stopPolling)
+
+/** 拉配置（同时刷新表单初值）。 */
+async function loadCapabilities(): Promise<void> {
   try {
     capabilities.value = await api.get<OfflineCapabilities>(
       "/offline-downloads/capabilities",
@@ -375,7 +521,15 @@ onMounted(async () => {
     message.error(errMsg(e, "加载离线下载配置失败"))
     return
   }
-  if (!capabilities.value.enabled) return
+  configForm.publicBase = capabilities.value.public_base
+  configForm.filesRoot = capabilities.value.files_root
+  configForm.secret = ""
+  if (capabilities.value.enabled) await initWorkflow()
+}
+
+/** 启用后才做的事：加载驱动 + 初始化两个目录浏览器 + 找回上次任务。 */
+async function initWorkflow(): Promise<void> {
+  if (targetDriver.value && sourceStack.value.length) return // 已初始化过
 
   try {
     drivers.value = await api.get<Driver[]>("/drivers")
@@ -385,10 +539,11 @@ onMounted(async () => {
   }
   targetDriver.value = drivers.value.find((d) => d.type === "guangya") ?? null
 
-  // 源目录：从配置的根开始
-  const root = capabilities.value.browse_root
+  // 源目录：从配置的根开始（id 必须是**绝对路径**——/local-dirs 以
+  // 绝对路径寻址；根条目 id 留空会退化成列 /）
+  const root = capabilities.value?.browse_root ?? ""
   if (root) {
-    sourceStack.value = [{ id: "", name: root }]
+    sourceStack.value = [{ id: root, name: root }]
     await loadSource()
   }
   if (targetDriver.value) {
@@ -406,9 +561,98 @@ onMounted(async () => {
   } catch {
     // 没有任务不算错
   }
-})
+}
 
-onUnmounted(stopPolling)
+// ---- 配置保存 ----
+
+async function saveConfig(): Promise<void> {
+  const payload: OfflineConfigInput = {}
+  // 密钥：留空 = 不修改（永不回显，故不能用「空串 = 清除」的语义）
+  if (configForm.secret) payload.secret = configForm.secret
+  payload.public_base = configForm.publicBase.trim()
+  payload.files_root = configForm.filesRoot.trim()
+
+  if (!payload.public_base || !payload.files_root) {
+    message.warning("公网入口与源根目录不能为空")
+    return
+  }
+
+  savingConfig.value = true
+  try {
+    capabilities.value = await api.put<OfflineCapabilities>(
+      "/offline-downloads/config",
+      payload,
+    )
+    configForm.secret = ""
+    message.success(
+      capabilities.value.enabled ? "已保存，功能已启用" : "已保存",
+    )
+    if (capabilities.value.enabled) await initWorkflow()
+  } catch (e) {
+    message.error(errMsg(e, "保存配置失败"))
+  } finally {
+    savingConfig.value = false
+  }
+}
+
+// ---- 源根目录浏览（不限权：从 / 开始）----
+
+async function openRootBrowser(): Promise<void> {
+  rootModal.value = true
+  rootStack.value = [{ id: "/", name: "/" }]
+  await loadRootDirs()
+}
+
+async function loadRootDirs(): Promise<void> {
+  const cur = rootStack.value[rootStack.value.length - 1]
+  if (!cur) return
+  loadingRoot.value = true
+  try {
+    const res = await api.get<{ dirs: DirEntry[] }>(
+      `/offline-downloads/local-dirs?path=${encodeURIComponent(cur.id)}`,
+    )
+    rootDirs.value = res.dirs ?? []
+  } catch (e) {
+    message.error(errMsg(e, "读取目录失败"))
+    rootDirs.value = []
+  } finally {
+    loadingRoot.value = false
+  }
+}
+
+function openRootDir(dir: DirEntry): void {
+  rootStack.value = [...rootStack.value, dir]
+  void loadRootDirs()
+}
+
+function goRootDir(index: number): void {
+  rootStack.value = rootStack.value.slice(0, index + 1)
+  void loadRootDirs()
+}
+
+function pickRoot(): void {
+  const cur = rootStack.value[rootStack.value.length - 1]
+  if (cur) configForm.filesRoot = cur.id
+  rootModal.value = false
+}
+
+/** 打开「下载后删本地」时**二次确认**——不可逆操作。 */
+function onToggleDeleteAfter(checked: unknown): void {
+  if (!checked) return
+  form.deleteAfterUpload = false
+  Modal.confirm({
+    title: "确认：下载成功后删除本地文件？",
+    content:
+      "光鸭确认落盘、且云端大小与本地一致后才会删；所在目录空了会一并删掉" +
+      "（源根目录本身保留）。这是不可逆操作，本地文件不会进回收站。",
+    okText: "我确认",
+    okType: "danger",
+    cancelText: "取消",
+    onOk: () => {
+      form.deleteAfterUpload = true
+    },
+  })
+}
 
 watch(
   () => job.value?.logs.length,
@@ -499,11 +743,10 @@ async function start(): Promise<void> {
   if (!targetDriver.value || !currentSource.value || !currentTarget.value) return
   starting.value = true
   try {
-    // 源目录用**绝对路径**提交（后端会校验它在 files_root 之下）
+    // 目录浏览器的 id 本身就是**绝对路径**（/local-dirs 返回完整路径），
+    // 直接提交；浏览器停在根时 id 为空 → 退回配置的根目录。
     const root = capabilities.value?.browse_root ?? ""
-    const localRoot = currentSource.value.id
-      ? `${root}/${currentSource.value.id}`.replace(/\/+/g, "/")
-      : root
+    const localRoot = currentSource.value.id || root
     const payload: OfflineRunInput = {
       target_driver_id: targetDriver.value.id,
       target_file_id: currentTarget.value.id,
@@ -517,6 +760,7 @@ async function start(): Promise<void> {
       max_size_mb: Math.round(form.maxSizeGb * 1024),
       exclude_disc: form.excludeDisc,
       exts: form.exts.join(","),
+      delete_after_upload: form.deleteAfterUpload,
       concurrency: form.concurrency,
       submit_interval_sec: form.submitIntervalSec,
     }
@@ -654,6 +898,43 @@ function logText(line: string): string {
 
 .tip {
   margin-bottom: 12px;
+}
+
+/* 配置卡标题里的状态标签 */
+.cfg-tag {
+  margin-left: 8px;
+}
+
+.mini {
+  margin-left: 4px;
+  font-size: 11px;
+  line-height: 16px;
+  padding: 0 5px;
+}
+
+/* 源根目录输入 + 「浏览…」按钮 */
+.root-row {
+  display: flex;
+  gap: 6px;
+}
+
+.mb {
+  margin-bottom: 10px;
+}
+
+/* 目录浏览器弹框的当前路径 + 底部按钮 */
+.root-current {
+  margin-bottom: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
 }
 
 .section {

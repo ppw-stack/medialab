@@ -95,6 +95,13 @@ class OfflineParams:
     #: **只要这些扩展名**（小写，不含点）。空 = 不限（全传）。
     #: 如 ``("mkv", "mp4")`` 只传视频，跳过 nfo / 字幕 / 图片。
     exts: tuple[str, ...] = ()
+    #:
+    #: **下载成功后删除本地文件**（不可逆）。
+    #:
+    #: 破坏性操作——三道保护与「数据同步」一致（见
+    #: :func:`_maybe_delete_local`）：只在「云端确有同名同大小文件」
+    #: 时删、路径安全（普通文件 / 非隐藏 / 在源根目录内）、空目录一并删。
+    delete_after_upload: bool = False
     #: 同时进行的离线任务数
     concurrency: int = 2
     #: 两次提交之间的最小间隔（秒）。**没有 115 频控，可以很小**
@@ -115,6 +122,7 @@ class OfflineParams:
             "max_size_mb": self.max_size_mb,
             "exclude_disc": self.exclude_disc,
             "exts": list(self.exts),
+            "delete_after_upload": self.delete_after_upload,
             "concurrency": self.concurrency,
             "submit_interval_sec": self.submit_interval_sec,
             "public_base": self.public_base,
@@ -217,6 +225,8 @@ class OfflineJob:
     conflicts: int = 0
     #: 已成功下载的字节数
     downloaded_bytes: int = 0
+    #: 已删除的本地文件数（``delete_after_upload`` 开启时）
+    local_deleted: int = 0
 
     failed_items: list[dict[str, Any]] = field(default_factory=list)
     conflict_items: list[dict[str, Any]] = field(default_factory=list)
@@ -262,6 +272,7 @@ class OfflineJob:
             "skipped_existing": self.skipped_existing,
             "conflicts": self.conflicts,
             "downloaded_bytes": self.downloaded_bytes,
+            "local_deleted": self.local_deleted,
             "failed_items": self.failed_items[:100],
             "conflict_items": self.conflict_items[:100],
             "logs": self.logs[-500:],
@@ -531,6 +542,8 @@ async def _process_one(
             job.success += 1
             job.downloaded_bytes += item.size
             job.log(f"✅ 完成：{item.rel_path}")
+            # ⑥ 下载成功后删本地（可选的破坏性操作）
+            await _maybe_delete_local(job, item)
             return
         if attempt + 1 < VERIFY_RETRIES:
             await asyncio.sleep(VERIFY_DELAY_SEC)
@@ -540,6 +553,44 @@ async def _process_one(
         item, reason or "任务已结束但目标目录未出现同名同大小文件"
     )
     job.log(f"❌ 校验失败：{item.rel_path}")
+
+
+async def _maybe_delete_local(job: OfflineJob, item: OfflineFile) -> None:
+    """下载成功后删本地文件（**可选的破坏性操作**）。
+
+    与「数据同步」的删除路径**同一套机制**
+    （:mod:`app.services.upload_cleanup`），故三重保护一致：
+
+    1. 云端确有同名同大小文件（**已在校验里确认过**）
+    2. 路径安全：普通文件 / 非隐藏 / 在**源根目录**内
+    3. 空目录一并删掉（向上递归，源根目录本身保留）
+
+    **失败只记提示，不翻转结果**——下载已经成功了。
+    """
+    if not job.params.delete_after_upload:
+        return
+
+    # 源根目录 = 删除的边界（不能删到它外面去）
+    root = Path(job.params.local_root)
+    try:
+        from app.services import upload_cleanup
+
+        result = await asyncio.to_thread(
+            upload_cleanup.delete_local_file, item.abs_path, root
+        )
+    except Exception as exc:
+        job.log(f"⚠️ 删除本地文件失败：{item.rel_path}（{exc}）")
+        return
+
+    if result.status in (upload_cleanup.DELETE_OK, upload_cleanup.DELETE_MISSING):
+        job.local_deleted += 1
+        job.log(f"🗑️ 已删除本地文件：{item.rel_path}")
+        for directory in result.removed_dirs:
+            job.log(f"🗑️ 已删除空目录：{directory}")
+    else:
+        job.log(
+            f"⚠️ 本地未删除：{item.rel_path}（{result.reason or result.status}）"
+        )
 
 
 async def _failure_reason(driver: Any, task_id: str) -> str:

@@ -24,7 +24,6 @@ services 层不得 import fastapi（``tests/unit/test_layering.py``）。
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -32,6 +31,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from app.core.logging import get_logger
+from app.services.offline_config import current_config
 from app.services.offline_files import (
     URL_PREFIX,
     decode_rel_path,
@@ -64,33 +64,22 @@ async def _iter_file(path: Path, start: int, length: int) -> AsyncIterator[bytes
             yield chunk
 
 
-def mount_offline_files(
-    app: FastAPI,
-    root: str | os.PathLike[str],
-    secret: str,
-) -> bool:
+def mount_offline_files(app: FastAPI) -> bool:
     """把只读文件服务挂到 app 上。
+
+    ⚠️ **无条件挂载**——FastAPI 不支持运行时增删路由，而配置（密钥 /
+    公网入口 / 源根目录）现在可以在**页面上改**（DB 持久化，改完立即生效，
+    不用重启容器）。故路由常驻，**每次请求时**读当前配置决定放行与否。
+
+    未启用（三项未配齐）时返回 **403**——比让 SPA 兜底吞掉更诚实
+    （明确「这里有个服务但没开」，而不是「页面不存在」）。
 
     Args:
         app: FastAPI 应用。
-        root: 待暴露的根目录（**绝对路径**）。
-        secret: HMAC 密钥。
 
     Returns:
-        True = 已挂载；False = 根目录不存在或未配置密钥（**跳过**，不影响
-        主服务启动）。
+        True = 已挂载。
     """
-    if not secret:
-        logger.info("未配置离线下载密钥，跳过挂载本地文件服务")
-        return False
-
-    base = Path(root)
-    if not base.is_dir():
-        logger.warning("离线下载根目录不存在，跳过挂载：%s", base)
-        return False
-
-    resolved = base.resolve()
-
     # ⚠️ **router 必须在这里新建**——不能用模块级全局对象。
     # 模块级 router 被多次 include_router 到不同 app 时，路由会绑在
     # **第一次**的 app 上（后挂的 app 拿不到），测试里尤其明显。
@@ -100,13 +89,19 @@ def mount_offline_files(
         token: str, raw_path: str, request: Request, *, head_only: bool
     ) -> Response:
         """按 token 暴露根目录下的一个文件（**只读**）。"""
+        cfg = current_config()
+        if not cfg.enabled:
+            raise HTTPException(
+                status_code=403, detail="离线下载未启用（配置不完整）"
+            )
+
         rel_path = decode_rel_path(raw_path)
 
-        if not verify_token(secret, rel_path, token):
+        if not verify_token(cfg.secret, rel_path, token):
             logger.warning("离线下载 token 校验失败：%s", raw_path)
             raise HTTPException(status_code=403, detail="token 无效")
 
-        path = safe_join(resolved, rel_path)
+        path = safe_join(Path(cfg.files_root), rel_path)
         if path is None or not path.is_file():
             raise HTTPException(status_code=404, detail="文件不存在")
 
@@ -166,7 +161,10 @@ def mount_offline_files(
         return await _serve(token, rel_path, request, head_only=True)
 
     app.include_router(router)
-    logger.info("已挂载离线下载文件服务：%s（前缀 %s）", resolved, URL_PREFIX)
+    logger.info(
+        "已挂载离线下载文件服务（前缀 %s，未配齐三项配置时返回 403）",
+        URL_PREFIX,
+    )
     return True
 
 

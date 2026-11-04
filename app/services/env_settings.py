@@ -61,6 +61,13 @@ class EnvSettingSpec:
     placeholder: str
     #: 值的最大长度（拒超长，防止异常输入塞爆 DB / 解析）
     max_length: int = 4096
+    #: 是否从「设置 → 环境变量」通用列表中隐藏
+    #:
+    #: 隐藏的配置仍有自己的专用 UI（如离线下载的三项在「离线下载」页
+    #: 的配置区，源根目录还带目录浏览器）——放到通用 textarea 列表里
+    #: 既不好用（密钥明文、目录要手敲），又容易两边改出矛盾。
+    #: 隐藏项**不走** ``PUT /env-settings``，由各自的专用端点写入。
+    hidden: bool = False
 
 
 #: 已注册的环境变量配置。
@@ -81,6 +88,43 @@ ENV_SETTING_SPECS: tuple[EnvSettingSpec, ...] = (
         ),
         placeholder="/share/Public/home/downloads/辅种",
         max_length=4096,
+    ),
+    # -- 离线下载（本地 → 光鸭）--
+    EnvSettingSpec(
+        key="offline_hmac_secret",
+        label="离线下载密钥",
+        note=(
+            "访问本地文件的 HMAC 密钥——**每个文件一个 token**（HMAC(密钥, 相对路径)）。"
+            "留空 = 不启用离线下载，文件服务不挂载、文件完全不可访问。"
+            "改它会让所有已生成的下载链接失效（下次提交时重新生成）。"
+        ),
+        placeholder="openssl rand -hex 32 的输出",
+        max_length=128,
+        hidden=True,
+    ),
+    EnvSettingSpec(
+        key="offline_public_base",
+        label="离线下载公网入口",
+        note=(
+            "光鸭用它来拉本地文件——**必须从公网能访问到本服务**。"
+            "如 http://home.banstack.top:8092（不带尾斜杠）。"
+            "留空 = 不启用。"
+        ),
+        placeholder="http://home.banstack.top:8092",
+        max_length=256,
+        hidden=True,
+    ),
+    EnvSettingSpec(
+        key="offline_files_root",
+        label="离线下载源根目录",
+        note=(
+            "要暴露给光鸭的本地目录（容器内绝对路径）。"
+            "源目录在此之下选择；**所有目录都能选**（面板本身已是管理员权限，"
+            "与「数据同步」的监听目录一致）。留空 = 不启用。"
+        ),
+        placeholder="/mnt/remotes/192.168.0.172_Public/home/movietmp",
+        max_length=1024,
+        hidden=True,
     ),
 )
 
@@ -187,7 +231,11 @@ async def _load_and_seed_async(mgr: EnvSettingsManager) -> None:
                 "环境变量配置 %s 默认值已写入 DB（长度 %d）",
                 spec.key, len(default),
             )
-    logger.info("环境变量配置已初始化：%s", mgr._values)
+    # 只记 key 与「已配置/未配置」，不打值——里面有 HMAC 密钥这类敏感项
+    logger.info(
+        "环境变量配置已初始化：%s",
+        {k: ("<set>" if v else "") for k, v in mgr._values.items()},
+    )
 
 
 async def init_env_settings_async() -> EnvSettingsManager:

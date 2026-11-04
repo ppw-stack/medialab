@@ -89,6 +89,29 @@
 > （`migration.py` 的 `_progress_text`）——**那个显示是错的**，
 > 大文件时会显示个位数。本次未改（不在任务范围内），但别学它。
 
+### ⑤ FastAPI 不支持运行时增删路由 → 配置页面上改、**路由常驻**
+
+三项配置（`OFFLINE_HMAC_SECRET` / `OFFLINE_PUBLIC_BASE` / `OFFLINE_FILES_ROOT`）
+原本只能改 `.env.prod` 重启容器。现在它们落在 `app_env_settings` 表，
+在**「离线下载」页的配置区改完立即生效**（不用重启）。
+
+但 FastAPI 不能运行时增删路由——所以 `mount_offline_files()` **无条件
+挂载**，由每次请求时读当前配置决定放行：三项没配齐 → **403**（不暴露
+任何文件，比 SPA 兜底吞掉更诚实）。
+
+### ⑥ 目录浏览不限权（用户明确要求）
+
+源目录浏览能列服务能看到的**任何目录**——与「数据同步」的
+`/upload-tasks/local-dirs` 一致（面板本身已是管理员权限）。暴露面靠
+「没配齐不暴露文件」控制，而非目录白名单。
+
+### ⑦ 密钥永不回显、不进日志
+
+- API 只返回 `has_secret: true/false`，不返回密钥值
+- 「保存配置」时密钥留空 = **不修改**（不能用「空串 = 清除」语义——
+  密钥永不回显，用户没法区分「已配置」与「想清空」）
+- 启动期初始化日志只打 key 与 `<set>` 占位（`test_init_log_never_leaks_secret`）
+
 ## 结论
 
 | | 直传（现有「数据同步」） | 离线下载（本次） |
@@ -111,8 +134,26 @@
 
 ## 相关代码
 
-- `app/services/offline_files.py` —— 只读 HTTP 服务（HMAC token + Range + HEAD）
-- `app/services/offline_download.py` —— 提交 / 轮询 / 校验落盘
+- `app/services/offline_files.py` —— 纯逻辑（token / 路径安全 / Range）
+- `app/api/routes/offline_files.py` —— 只读 HTTP 服务（**路由常驻**，请求时读配置）
+- `app/services/offline_config.py` —— 配置读取/保存（DB 持久化，改完立即生效）
+- `app/services/offline_download.py` —— 提交 / 轮询 / 校验落盘 / 删本地
 - `app/services/offline_jobs.py` —— 内存态后台任务
-- `app/api/routes/offline_downloads.py` —— API
+- `app/api/routes/offline_downloads.py` —— API（`/capabilities` / `/config` / 目录浏览 / `/run` / `/jobs`）
+- `web/src/pages/media/Offline.vue` —— 配置区（三项 + 目录浏览器）+ 任务区
 - `app/main.py` —— `_mount_offline_files()`（**必须在 SPA 兜底之前**）
+
+## 下载成功后删除本地文件（2026-11-04 加入）
+
+参数 `delete_after_upload`（前端「下载后删本地」开关，打开时**二次确认**）。
+
+与「数据同步」**同一套机制**（`app/services/upload_cleanup.py`），
+三重保护一致：
+
+1. 只对**云端确认落盘**的文件删（目标目录出现同名同大小才算）
+2. 路径安全：普通文件 / 非隐藏 / 在**用户选的源目录**内
+3. 空目录一并删掉（向上递归 `os.rmdir`，源目录本身保留）
+
+**与数据同步的唯一差异**：直传上传完文件**已在云端**，立即校验；离线
+下载提交任务后文件**还没到**，要等「任务结束 + 校验落盘」才删。
+删除失败只记日志，不翻转结果（下载已成功）。

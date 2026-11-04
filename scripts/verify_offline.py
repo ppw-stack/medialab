@@ -6,10 +6,10 @@
 **这是诊断工具，不是应用代码**（应用代码在
 ``app/services/offline_download.py``）。跑法：
 
-    # 在生产容器里（需配好 OFFLINE_* 环境变量）
+    # 在页面上配好三项（配置已落库，读取走 app_env_settings）
     docker exec -i medialab /opt/venv/bin/python - < scripts/verify_offline.py
 
-    # 或在本地（用 dev 的 .env）
+    # 或在本地（用 dev 的 .env；env 只作**首次启动的默认值**，之后以 DB 为准）
     OFFLINE_HMAC_SECRET=... OFFLINE_PUBLIC_BASE=... \\
     TEST_REL='电影/xxx.mkv' uv run python scripts/verify_offline.py
 
@@ -44,14 +44,26 @@ async def _main() -> None:
     from app.db.models import Driver
     from app.db.session import init_db, session_scope
     from app.services.driver_factory import build_driver
+    from app.services.offline_config import current_config
     from sqlalchemy import select
 
     settings = get_settings()
-    secret = os.environ.get("OFFLINE_HMAC_SECRET") or settings.offline_hmac_secret
-    public_base = (
-        os.environ.get("OFFLINE_PUBLIC_BASE") or settings.offline_public_base
-    )
-    root = os.environ.get("OFFLINE_FILES_ROOT") or settings.offline_files_root
+
+    settings.db_path = Path("/app/data/medialab.db")
+    if not settings.db_path.exists():
+        settings.db_path = Path(settings.db_path)
+    init_db(settings)
+
+    # 初始化环境变量配置（读 DB 里的 OFFLINE_*）——必须在 init_db 之后。
+    # 配置落库后，真源是 app_env_settings（页面上改的）——env 只是首次默认值。
+    from app.services.env_settings import init_env_settings_async, set_env_settings
+
+    set_env_settings(await init_env_settings_async())
+
+    cfg = current_config()
+    secret = os.environ.get("OFFLINE_HMAC_SECRET") or cfg.secret
+    public_base = os.environ.get("OFFLINE_PUBLIC_BASE") or cfg.public_base
+    root = os.environ.get("OFFLINE_FILES_ROOT") or cfg.files_root
     test_rel = os.environ.get("TEST_REL", "")
 
     if not secret or not public_base or not root:
@@ -60,11 +72,6 @@ async def _main() -> None:
     if not test_rel:
         print("❌ 缺 TEST_REL（要传的文件的相对路径）")
         return
-
-    settings.db_path = Path("/app/data/medialab.db")
-    if not settings.db_path.exists():
-        settings.db_path = Path(settings.db_path)
-    init_db(settings)
 
     async with session_scope() as session:
         row = (

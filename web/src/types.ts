@@ -1179,7 +1179,21 @@ export interface OfflineCapabilities {
   files_root: string
   /** 源目录浏览的起点（= files_root） */
   browse_root: string
+  /** 密钥是否已配置（密钥本身**永不**返回给前端） */
+  has_secret: boolean
+  /** 公网入口是否已配置 */
+  has_public_base: boolean
+  /** 源根目录是否已配置 */
+  has_files_root: boolean
   hint: string
+}
+
+/** 离线下载配置（partial update——只传要改的）。 */
+export interface OfflineConfigInput {
+  /** HMAC 密钥（空/省略 = 不修改；永不回显） */
+  secret?: string
+  public_base?: string
+  files_root?: string
 }
 
 /** 源目录下的一个待传文件。 */
@@ -1220,6 +1234,8 @@ export interface OfflineJob {
   skipped_existing: number
   conflicts: number
   downloaded_bytes: number
+  /** 已删除的本地文件数（勾了「下载成功后删除本地文件」时） */
+  local_deleted: number
   failed_items: { path: string; size: number; reason: string }[]
   conflict_items: { path: string; local_size: number; remote_size: number }[]
   logs: string[]
@@ -1239,6 +1255,8 @@ export interface OfflineRunInput {
   exclude_disc: boolean
   /** 只要这些扩展名（逗号分隔，如 "mkv,mp4"）；空 = 不限 */
   exts: string
+  /** 下载成功后删除本地文件（不可逆；空目录一并删） */
+  delete_after_upload?: boolean
   concurrency: number
   submit_interval_sec: number
 }
