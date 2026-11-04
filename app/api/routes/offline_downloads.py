@@ -62,16 +62,100 @@ class OfflineRunIn(BaseModel):
 async def capabilities() -> dict[str, Any]:
     """离线下载的能力与配置（前端用它决定是否显示这个功能）。"""
     settings = get_settings()
+    enabled = bool(settings.offline_hmac_secret and settings.offline_public_base)
     return {
-        "enabled": bool(settings.offline_hmac_secret and settings.offline_public_base),
+        "enabled": enabled,
         "public_base": settings.offline_public_base,
         "files_root": settings.offline_files_root,
+        # 源目录浏览的根（前端从这里开始逐层选）
+        "browse_root": settings.offline_files_root,
         "hint": (
             "离线下载需要：1) 配置 OFFLINE_HMAC_SECRET 与 OFFLINE_PUBLIC_BASE；"
             "2) 公网入口能访问到本服务（端口映射）。"
             "不需要时直接关掉端口映射即可——服务只在有请求时才暴露文件。"
         ),
     }
+
+
+@router.get("/local-dirs")
+async def browse_local_dirs(path: str = "") -> dict[str, Any]:
+    """浏览**源目录**的子目录。
+
+    ⚠️ **必须限定在 ``OFFLINE_FILES_ROOT`` 之下**——与「数据同步」的
+    ``/upload-tasks/local-dirs`` 不同，那个端点能列服务能看到的**任何**
+    目录（含 ``/app/.env``）。离线下载的文件要经**公网**暴露给光鸭拉，
+    暴露面更大，故源目录必须收窄到配置的根之下。
+    """
+    from pathlib import Path
+
+    settings = get_settings()
+    root_str = settings.offline_files_root
+    if not root_str:
+        raise HTTPException(
+            status_code=503, detail="未配置 OFFLINE_FILES_ROOT，离线下载未启用"
+        )
+    root = Path(root_str).resolve()
+    if not root.is_dir():
+        raise HTTPException(status_code=503, detail=f"源根目录不存在：{root_str}")
+
+    target = (root / (path or "")).resolve() if path else root
+    # 防目录穿越——必须在 root 之下
+    try:
+        target.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="目录超出配置的源根目录") from None
+    if not target.is_dir():
+        raise HTTPException(status_code=400, detail=f"目录不存在：{target}")
+
+    from app.services.upload_paths import list_subdirs
+
+    return {
+        "path": str(target),
+        "root": str(root),
+        # ``id`` = 相对 root 的路径（前端拿它当「下一层」直接请求）
+        "dirs": [
+            {
+                "id": str(Path(full).relative_to(root)),
+                "name": Path(full).name,
+            }
+            for full in list_subdirs(target)
+        ],
+    }
+
+
+@router.get("/local-files")
+async def list_local_files(path: str = "") -> dict[str, Any]:
+    """列出源目录下的**文件**（前端展示「将要传哪些」）。
+
+    只列文件、不递归——递归由任务参数 ``include_subdirs`` 控制。
+    """
+    from pathlib import Path
+
+    settings = get_settings()
+    root_str = settings.offline_files_root
+    if not root_str:
+        raise HTTPException(
+            status_code=503, detail="未配置 OFFLINE_FILES_ROOT，离线下载未启用"
+        )
+    root = Path(root_str).resolve()
+    target = (root / (path or "")).resolve() if path else root
+    try:
+        target.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="目录超出配置的源根目录") from None
+    if not target.is_dir():
+        raise HTTPException(status_code=400, detail=f"目录不存在：{target}")
+
+    files: list[dict[str, Any]] = []
+    for entry in sorted(target.iterdir(), key=lambda p: p.name):
+        if not entry.is_file() or entry.is_symlink():
+            continue
+        try:
+            size = entry.stat().st_size
+        except OSError:
+            continue
+        files.append({"name": entry.name, "size": size})
+    return {"path": str(target), "files": files}
 
 
 @router.get("/targets")

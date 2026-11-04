@@ -1163,6 +1163,84 @@ export interface MigrationRunInput {
   exclude_disc: boolean
 }
 
+// ---- 离线下载（本地 → 光鸭，走光鸭服务端拉取）----
+
+/**
+ * 离线下载的能力与配置。
+ *
+ * `enabled` = 三项配置齐了（密钥 / 公网入口 / 源根目录）才为 true。
+ * 未启用时前端**隐藏整个入口**——功能没配好时不该让用户点进去撞墙。
+ */
+export interface OfflineCapabilities {
+  enabled: boolean
+  /** 公网入口（如 http://home.banstack.top:8092） */
+  public_base: string
+  /** 暴露给光鸭的源根目录（容器内绝对路径） */
+  files_root: string
+  /** 源目录浏览的起点（= files_root） */
+  browse_root: string
+  hint: string
+}
+
+/** 源目录下的一个待传文件。 */
+export interface OfflineLocalFile {
+  name: string
+  size: number
+}
+
+/** 离线下载任务的运行态（轮询用）。 */
+export interface OfflineJob {
+  id: string
+  target_driver_id: number
+  target_file_id: string
+  target_path: string
+  local_root: string
+  state: "running" | "success" | "failed" | "cancelled"
+  started_at: number
+  finished_at: number | null
+  elapsed_sec: number
+  /** 当前处理的文件 */
+  current_path: string
+  /** 已发现的文件数 */
+  discovered: number
+  /** 已提交、仍在光鸭上跑的任务数 */
+  in_flight: number
+  /**
+   * 在途任务明细。
+   *
+   * ⚠️ `progress` 是**光鸭的原始计数**，不是百分比——实测 2.3GB 文件
+   * 下载到 88% 时它只有 4。别当百分比展示。
+   */
+  in_flight_items: Record<
+    string,
+    { name: string; progress: number | null; size: number | null }
+  >
+  success: number
+  failed: number
+  skipped_existing: number
+  conflicts: number
+  downloaded_bytes: number
+  failed_items: { path: string; size: number; reason: string }[]
+  conflict_items: { path: string; local_size: number; remote_size: number }[]
+  logs: string[]
+  error: string | null
+}
+
+/** 开跑参数。 */
+export interface OfflineRunInput {
+  target_driver_id: number
+  target_file_id: string
+  target_path: string
+  /** 源目录（相对 files_root 的路径，或绝对路径） */
+  local_root: string
+  include_subdirs: boolean
+  min_size_mb: number
+  max_size_mb: number
+  exclude_disc: boolean
+  concurrency: number
+  submit_interval_sec: number
+}
+
 // ---- WebDAV ----
 
 /** WebDAV 账号。 */

@@ -79,6 +79,8 @@
     - **光鸭的 `progress` 字段不是可靠的百分比**（2.3GB 文件下载到 88% 时它只有 4）→ **不用它判定完成**，等任务从活跃列表消失 + 以「目标目录出现同名同大小文件」为准
   - ⚠️ **迁移功能把 `progress` 当百分比显示**（`migration.py` 的 `_progress_text`）——**那个显示是错的**，大文件时会显示个位数。本次未改（不在任务范围内）
   - **分层**：纯逻辑（token / 路径安全 / Range 解析）在 `app/services/offline_files.py`（**不 import fastapi**），HTTP handler 在 `app/api/routes/offline_files.py`（services 层不得 import fastapi，见 `tests/unit/test_layering.py`）
+  - **UI**：媒体库域 → **「离线下载」**页（`web/src/pages/media/Offline.vue`）。功能未启用时页面**说明怎么开**（列出三项配置），不给一个点了就报错的入口
+  - **源目录浏览必须限权**（`/offline-downloads/local-dirs`）：**只能列 `OFFLINE_FILES_ROOT` 之下**的目录——与「数据同步」的 `/upload-tasks/local-dirs` 不同，那个能列服务能看到的**任何**目录（含 `/app/.env` 的明文密钥）。离线下载的文件要经**公网**暴露，暴露面更大，故必须收窄
   - **鉴权只能做在 URL 里**——光鸭的 `cloud_create_task(url, parent_id)` 只收 URL、不支持自定义 Header → 每文件一个 HMAC token（`HMAC(secret, 相对路径)` 前 32 位十六进制）
   - **文件服务必须挂在 SPA 兜底之前**（`app/main.py` 的 `_mount_offline_files`）——否则被 `/{full_path:path}` 吞掉
   - 契约由 `tests/unit/test_offline_download.py` + `tests/integration/test_offline_files_http.py` 固化；实测脚本 `scripts/verify_offline.py`
