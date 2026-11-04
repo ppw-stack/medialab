@@ -43,7 +43,10 @@ function jobTitleByName(name: string): string {
 
 async function loadRuns() {
   try {
-    const page = await api.get<JobRunPage>('/scheduler/runs?limit=50')
+    // 取 200 条（后端上限）：作业节奏从 5 分钟到 3 小时不等，50 条只
+    // 覆盖 ~2 小时，会让 3 小时间隔的辅种维护经常「最近运行」空白
+    // （2026-11-04 用户反馈）。200 条 ≈ 7 小时，覆盖最长间隔。
+    const page = await api.get<JobRunPage>('/scheduler/runs?limit=200')
     const grouped: Record<string, JobRunItem[]> = {}
     for (const r of page.items) {
       (grouped[r.job_name] ??= []).push(r)
