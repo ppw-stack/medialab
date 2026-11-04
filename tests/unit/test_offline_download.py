@@ -330,12 +330,23 @@ def test_iter_files_is_lazy() -> None:
 
 
 class _FakeDriver:
-    """最小光鸭驱动桩：提交后目标目录立刻出现同名同大小文件（模拟下载完成）。"""
+    """最小光鸭驱动桩：提交后目标目录立刻出现同名同大小文件（模拟下载完成）。
+
+    ``ensure_dir`` 按真驱动的契约返回**最终 fileId 字符串**——
+    prod 事故（``current, _ = await driver.ensure_dir(...)`` 对字符串
+    解包）的回归防线就在这里。
+    """
 
     def __init__(self, sizes: dict[str, int]) -> None:
         self.sizes = sizes  # 文件名 → 字节数（本地文件的真实大小）
         self.files: dict[str, int] = {}  # 目标目录当前内容
         self.submitted: list[str] = []
+        self.ensure_calls: list[str] = []
+
+    async def ensure_dir(self, rel_path: str, root_id: str = "") -> str:
+        """逐层确保目录存在，返回最终 fileId 字符串（与真驱动同契约）。"""
+        self.ensure_calls.append(rel_path)
+        return f"dir-{rel_path}"
 
     async def list_files(self, file_id: str) -> dict[str, int]:
         return dict(self.files)
@@ -423,3 +434,50 @@ async def test_run_offline_download_empty_dir_succeeds(tmp_path: Path) -> None:
     assert job.state == "success"
     assert job.discovered == 0
     assert any("没有需要传的文件" in line for line in job.logs)
+
+
+@pytest.mark.asyncio
+async def test_run_offline_download_subdirs_use_ensure_dir(tmp_path: Path) -> None:
+    """**子目录里的文件**走 ensure_dir（prod 事故回归线）。
+
+    事故：``_resolve_target_dir`` 写成 ``current, _ = await driver.ensure_dir(...)``
+    ——对返回的 fileId 字符串按字符解包，fileId 长度不是 2 就抛
+    ``too many values to unpack (expected 2)``。根目录文件不走这段，
+    故当时全挂在子目录文件上（电影/动画电影/…），根目录的反而成功。
+    """
+    import app.services.offline_download as mod
+
+    sub = tmp_path / "电影" / "动画电影"
+    sub.mkdir(parents=True)
+    (sub / "a.mkv").write_bytes(b"x" * 100)
+    (sub / "b.mkv").write_bytes(b"y" * 200)
+    (sub / "c.nfo").write_bytes(b"z" * 5)  # 不在 exts → 不传
+
+    driver = _FakeDriver(sizes={"a.mkv": 100, "b.mkv": 200})
+
+    async def fake_load(driver_id: int) -> _FakeDriver:
+        return driver
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(mod, "_load_target_driver", fake_load)
+    try:
+        params = OfflineParams(
+            target_driver_id=1,
+            local_root=str(tmp_path),
+            exts=("mkv",),
+            concurrency=2,
+            submit_interval_sec=0,
+            public_base="http://example.test:8092",
+            secret=SECRET,
+        )
+        job = mod.OfflineJob(id="t3", params=params, seq=1)
+        await mod.run_offline_download(job)
+    finally:
+        monkeypatch.undo()
+
+    assert job.state == "success", job.logs
+    assert job.success == 2
+    assert job.failed == 0
+    assert len(driver.submitted) == 2
+    # 同一子目录只 ensure 一次（缓存生效）——两个文件共享同一目标目录
+    assert driver.ensure_calls == ["电影/动画电影"]

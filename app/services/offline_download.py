@@ -426,14 +426,28 @@ async def _load_target_driver(driver_id: int) -> Any:
     )
 
 
-async def _resolve_target_dir(driver: Any, file_id: str, rel_dir: str) -> str:
-    """在光鸭上定位/创建目标目录，返回 fileId。"""
+async def _resolve_target_dir(
+    driver: Any, file_id: str, rel_dir: str, cache: dict[str, str] | None = None
+) -> str:
+    """在光鸭上定位/创建目标目录，返回 fileId。
+
+    ``ensure_dir`` 的契约是**返回最终 fileId 字符串**（它自己逐层建，
+    目录已存在时幂等返回现有 id）——不是元组。⚠️ 曾经写成
+    ``current, _ = await driver.ensure_dir(...)``：对字符串按字符解包，
+    fileId 长度不是 2 就抛 ``too many values to unpack``——且只有
+    **子目录里的文件**才走这段，根目录文件正常，问题被掩盖到 prod。
+
+    Args:
+        cache: ``rel_dir → fileId`` 缓存（同一次任务里同一目录只建一次）。
+    """
     if not rel_dir:
         return file_id
-    current = file_id
-    for part in [p for p in rel_dir.split("/") if p]:
-        current, _ = await driver.ensure_dir(part, current)
-    return current
+    if cache is not None and rel_dir in cache:
+        return cache[rel_dir]
+    resolved: str = await driver.ensure_dir(rel_dir, file_id)
+    if cache is not None:
+        cache[rel_dir] = resolved
+    return resolved
 
 
 #: 队列哨兵：扫描线程用它告诉所有工作协程「没有更多文件了」
@@ -468,6 +482,7 @@ async def run_offline_download(job: OfflineJob) -> None:
     queue: asyncio.Queue[Any] = asyncio.Queue()
     loop = asyncio.get_running_loop()
     workers_left = concurrency  # 还有多少工作协程没消费过哨兵
+    dir_cache: dict[str, str] = {}  # rel_dir → fileId（同一目录只 ensure 一次）
 
     def _walk() -> None:
         """扫描线程：走目录树，逐个把文件丢进队列。**必须**以哨兵收尾。"""
@@ -503,7 +518,13 @@ async def run_offline_download(job: OfflineJob) -> None:
             job.discovered += 1  # 随扫描实时增长（前端轮询可见）
             try:
                 await _process_one(
-                    job, item, driver=driver, watcher=watcher, gate=gate, sem=sem
+                    job,
+                    item,
+                    driver=driver,
+                    watcher=watcher,
+                    gate=gate,
+                    sem=sem,
+                    dir_cache=dir_cache,
                 )
             except asyncio.CancelledError:
                 raise
@@ -546,12 +567,15 @@ async def _process_one(
     watcher: _TaskWatcher,
     gate: _SubmitGate,
     sem: asyncio.Semaphore,
+    dir_cache: dict[str, str] | None = None,
 ) -> None:
     """处理单个文件：预检 → 提交 → 等结束 → 校验落盘。"""
     job.current_path = item.rel_path
 
-    # ① 目标目录定位
-    target_dir_id = await _resolve_target_dir(driver, job.params.target_file_id, item.parent_rel)
+    # ① 目标目录定位（同一次任务里同一目录只 ensure 一次）
+    target_dir_id = await _resolve_target_dir(
+        driver, job.params.target_file_id, item.parent_rel, cache=dir_cache
+    )
 
     # ② 预检：同名同大小 → 跳过；同名不同大小 → 冲突
     existing = await driver.list_files(target_dir_id)
