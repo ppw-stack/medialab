@@ -111,6 +111,12 @@ class OfflineParams:
     public_base: str = ""
     #: HMAC 密钥
     secret: str = ""
+    #:
+    #: **源根目录**（文件服务的曝光根）。URL 里的路径、token 都以它为
+    #: 基准——文件服务按它解析路径，故 ``local_root`` 必须在它之下，
+    #: 否则光鸭来拉时全部 404（2026-11-04 prod 事故：URL 用了相对
+    #: ``local_root`` 的路径，源目录 ≠ 源根目录时全 404）。
+    files_root: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -127,6 +133,7 @@ class OfflineParams:
             "concurrency": self.concurrency,
             "submit_interval_sec": self.submit_interval_sec,
             "public_base": self.public_base,
+            "files_root": self.files_root,
         }
 
 
@@ -472,6 +479,25 @@ async def run_offline_download(job: OfflineJob) -> None:
         job.finished_at = int(time.time())
         return
 
+    # URL / token 的路径基准是**源根目录**（文件服务按它解析），不是
+    # local_root——2026-11-04 prod 事故：源目录是源根目录的**子目录**时，
+    # URL 缺了中间段，光鸭来拉全部 404。这里强制对齐，不齐直接失败。
+    files_root = Path(params.files_root).resolve() if params.files_root else None
+    if files_root is None:
+        job.error = "任务缺少 files_root（源根目录）——旧版本任务参数，请重新提交"
+        job.state = "failed"
+        job.finished_at = int(time.time())
+        return
+    resolved_root = root.resolve()
+    if resolved_root != files_root and files_root not in resolved_root.parents:
+        job.error = (
+            f"源目录 {resolved_root} 不在源根目录 {files_root} 之下"
+            "——文件服务只能暴露源根目录内的文件"
+        )
+        job.state = "failed"
+        job.finished_at = int(time.time())
+        return
+
     suffix = f"（仅 {', '.join(params.exts)}）" if params.exts else ""
     job.log(f"📂 边扫描边提交：{root}{suffix}")
 
@@ -529,6 +555,7 @@ async def run_offline_download(job: OfflineJob) -> None:
                     gate=gate,
                     sem=sem,
                     dir_cache=dir_cache,
+                    files_root=files_root,
                 )
             except asyncio.CancelledError:
                 raise
@@ -571,7 +598,8 @@ async def _process_one(
     watcher: _TaskWatcher,
     gate: _SubmitGate,
     sem: asyncio.Semaphore,
-    dir_cache: dict[str, str] | None = None,
+    dir_cache: dict[str, str],
+    files_root: Path,
 ) -> None:
     """处理单个文件：预检 → 提交 → 等结束 → 校验落盘。"""
     job.current_path = item.rel_path
@@ -605,7 +633,12 @@ async def _process_one(
         job.log(f"⏱️ 错开提交，等待 {waited:.0f}s：{item.rel_path}")
 
     # ④ 生成带 token 的 URL 并提交
-    url = build_url(job.params, item.rel_path)
+    #
+    # ⚠️ 路径基准是**源根目录**（files_root），不是 local_root——文件服务
+    # 收到请求后按源根目录解析路径并验 token。local_root 只是「从哪开始
+    # 扫」，URL 必须带从源根目录算起的完整相对路径。
+    url_rel = item.abs_path.relative_to(files_root).as_posix()
+    url = build_url(job.params, url_rel)
     async with sem:
         task_id = await driver.create_offline_task(url, target_dir_id)
     job.in_flight += 1

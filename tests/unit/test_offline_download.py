@@ -392,6 +392,7 @@ async def test_run_offline_download_pipeline_succeeds(tmp_path: Path) -> None:
             submit_interval_sec=0,
             public_base="http://example.test:8092",
             secret=SECRET,
+            files_root=str(tmp_path),
         )
         job = mod.OfflineJob(id="t1", params=params, seq=1)
         await mod.run_offline_download(job)
@@ -425,6 +426,7 @@ async def test_run_offline_download_empty_dir_succeeds(tmp_path: Path) -> None:
             local_root=str(tmp_path),
             public_base="http://example.test:8092",
             secret=SECRET,
+            files_root=str(tmp_path),
         )
         job = mod.OfflineJob(id="t2", params=params, seq=1)
         await mod.run_offline_download(job)
@@ -469,6 +471,7 @@ async def test_run_offline_download_subdirs_use_ensure_dir(tmp_path: Path) -> No
             submit_interval_sec=0,
             public_base="http://example.test:8092",
             secret=SECRET,
+            files_root=str(tmp_path),
         )
         job = mod.OfflineJob(id="t3", params=params, seq=1)
         await mod.run_offline_download(job)
@@ -481,3 +484,88 @@ async def test_run_offline_download_subdirs_use_ensure_dir(tmp_path: Path) -> No
     assert len(driver.submitted) == 2
     # 同一子目录只 ensure 一次（缓存生效）——两个文件共享同一目标目录
     assert driver.ensure_calls == ["电影/动画电影"]
+
+
+@pytest.mark.asyncio
+async def test_run_offline_download_url_base_is_files_root(tmp_path: Path) -> None:
+    """**URL 路径基准是源根目录**，不是 local_root（2026-11-04 prod 事故回归线）。
+
+    事故：local_root 是源根目录的**子目录**时，URL 用了相对 local_root
+    的路径——文件服务按源根目录解析，中间段缺失，光鸭来拉全部 404。
+    根目录开跑时两者恰好相等，问题被掩盖。
+    """
+    from urllib.parse import unquote
+
+    import app.services.offline_download as mod
+
+    files_root = tmp_path
+    sub = files_root / "媒体" / "电影"
+    sub.mkdir(parents=True)
+    (sub / "a.mkv").write_bytes(b"x" * 100)
+
+    driver = _FakeDriver(sizes={"a.mkv": 100})
+
+    async def fake_load(driver_id: int) -> _FakeDriver:
+        return driver
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(mod, "_load_target_driver", fake_load)
+    try:
+        params = OfflineParams(
+            target_driver_id=1,
+            local_root=str(sub),  # 源目录 = 源根目录的**子目录**
+            concurrency=1,
+            submit_interval_sec=0,
+            public_base="http://example.test:8092",
+            secret=SECRET,
+            files_root=str(files_root),
+        )
+        job = mod.OfflineJob(id="t4", params=params, seq=1)
+        await mod.run_offline_download(job)
+    finally:
+        monkeypatch.undo()
+
+    assert job.state == "success", job.logs
+    assert job.success == 1
+    # 提交的 URL 路径必须带**从源根目录算起**的完整相对路径
+    assert len(driver.submitted) == 1
+    url_path = unquote(driver.submitted[0].split("/offline-files/")[1].split("/", 1)[1])
+    assert url_path == "媒体/电影/a.mkv"
+
+
+@pytest.mark.asyncio
+async def test_run_offline_download_rejects_local_root_outside_files_root(
+    tmp_path: Path,
+) -> None:
+    """源目录不在源根目录之下 → 任务直接失败（文件服务物理上暴露不了）。"""
+    import app.services.offline_download as mod
+
+    files_root = tmp_path / "root"
+    files_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "a.mkv").write_bytes(b"x" * 10)
+
+    driver = _FakeDriver(sizes={})
+
+    async def fake_load(driver_id: int) -> _FakeDriver:
+        return driver
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(mod, "_load_target_driver", fake_load)
+    try:
+        params = OfflineParams(
+            target_driver_id=1,
+            local_root=str(outside),
+            public_base="http://example.test:8092",
+            secret=SECRET,
+            files_root=str(files_root),
+        )
+        job = mod.OfflineJob(id="t5", params=params, seq=1)
+        await mod.run_offline_download(job)
+    finally:
+        monkeypatch.undo()
+
+    assert job.state == "failed"
+    assert "不在源根目录" in (job.error or "")
+    assert driver.submitted == []

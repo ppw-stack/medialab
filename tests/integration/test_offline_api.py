@@ -215,3 +215,39 @@ async def test_config_empty_body_rejected(aclient: httpx.AsyncClient) -> None:
     """什么都没传 → 400。"""
     r = await aclient.put("/api/offline-downloads/config", json={})
     assert r.status_code == 400
+
+
+# ---- /run：源目录越界防线（2026-11-04 prod 事故）----
+
+
+async def test_run_rejects_local_root_outside_files_root(
+    aclient: httpx.AsyncClient, tmp_path: Path
+) -> None:
+    """源目录不在源根目录之下 → 400（文件服务物理上暴露不了它）。"""
+    from app.services.offline_config import (
+        KEY_FILES_ROOT,
+        KEY_PUBLIC_BASE,
+        KEY_SECRET,
+    )
+
+    mgr = get_env_settings()
+    mgr.set_memory(KEY_SECRET, "s3cr3t")
+    mgr.set_memory(KEY_PUBLIC_BASE, "http://example.test:8092")
+    mgr.set_memory(KEY_FILES_ROOT, str(tmp_path / "root"))
+    (tmp_path / "root").mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    r = await aclient.post(
+        "/api/offline-downloads/run",
+        json={
+            "target_driver_id": 1,
+            "target_file_id": "",
+            "target_path": "",
+            "local_root": str(outside),
+            "include_subdirs": True,
+            "exts": "",
+        },
+    )
+    assert r.status_code == 400
+    assert "源根目录" in r.json()["detail"]

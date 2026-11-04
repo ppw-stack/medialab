@@ -235,6 +235,19 @@ async def run_offline(payload: OfflineRunIn) -> dict[str, Any]:
             detail="未配置离线下载源根目录，不知道要暴露哪个目录",
         )
 
+    # 源目录必须在源根目录之下——文件服务按源根目录解析 URL 路径并验
+    # token，之外的文件**物理上不可暴露**（2026-11-04 prod 事故的防线：
+    # 不在提交时拦下，任务就会跑起来后每个文件都 404）。
+    from pathlib import Path
+
+    local = Path(payload.local_root).resolve()
+    files_root = Path(root).resolve()
+    if local != files_root and files_root not in local.parents:
+        raise HTTPException(
+            status_code=400,
+            detail=f"源目录必须在源根目录（{files_root}）之下：{payload.local_root}",
+        )
+
     running = await offline_jobs.find_running()
     if running is not None:
         raise HTTPException(
@@ -266,6 +279,7 @@ async def run_offline(payload: OfflineRunIn) -> dict[str, Any]:
         submit_interval_sec=payload.submit_interval_sec,
         public_base=cfg.public_base,
         secret=cfg.secret,
+        files_root=cfg.files_root,
     )
     job = await offline_jobs.start_offline_job(params)
     return {"job_id": job.id, "state": job.state}
