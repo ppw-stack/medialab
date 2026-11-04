@@ -294,3 +294,132 @@ def test_build_url_strips_trailing_slash() -> None:
     )
     url = build_url(params, "a.mkv")
     assert "//offline-files" not in url.replace("http://", "")
+
+
+# ---------------------------------------------------------------- 流式扫描
+
+
+def test_iter_files_matches_collect_files(tmp_path: Path) -> None:
+    """流式版与全量版产出**同一集合**（重构防回归）。"""
+    import app.services.offline_download as mod
+
+    (tmp_path / "a.mkv").write_bytes(b"x" * 10)
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.mp4").write_bytes(b"y" * 20)
+    (tmp_path / "sub" / "c.nfo").write_bytes(b"z" * 5)
+    (tmp_path / "BDMV").mkdir()
+    (tmp_path / "BDMV" / "x.m2ts").write_bytes(b"w" * 30)
+
+    kw = {"include_subdirs": True, "min_bytes": 0, "max_bytes": 0, "exclude_disc": True}
+    from_iter = sorted(f.rel_path for f in mod.iter_files(tmp_path, **kw))  # type: ignore[arg-type]
+    from_collect = [f.rel_path for f in mod.collect_files(tmp_path, **kw)]  # type: ignore[arg-type]
+    # 未传 exts → 全传（nfo 也在内）；BDMV 被排除
+    assert from_iter == from_collect == ["a.mkv", "sub/b.mp4", "sub/c.nfo"]
+
+
+def test_iter_files_is_lazy() -> None:
+    """``iter_files`` 返回**生成器**——没消费就不扫盘（流水线的前提）。"""
+    import inspect
+
+    import app.services.offline_download as mod
+
+    assert inspect.isgeneratorfunction(mod.iter_files)
+
+
+# ---------------------------------------------------------------- 执行流水线
+
+
+class _FakeDriver:
+    """最小光鸭驱动桩：提交后目标目录立刻出现同名同大小文件（模拟下载完成）。"""
+
+    def __init__(self, sizes: dict[str, int]) -> None:
+        self.sizes = sizes  # 文件名 → 字节数（本地文件的真实大小）
+        self.files: dict[str, int] = {}  # 目标目录当前内容
+        self.submitted: list[str] = []
+
+    async def list_files(self, file_id: str) -> dict[str, int]:
+        return dict(self.files)
+
+    async def create_offline_task(self, url: str, file_id: str) -> str:
+        from urllib.parse import unquote
+
+        self.submitted.append(url)
+        # 「任务结束 → 目标目录出现同名同大小文件」
+        name = unquote(url.rsplit("/", 1)[-1])
+        self.files[name] = self.sizes[name]
+        return f"task-{len(self.submitted)}"
+
+    async def list_active_offline_tasks(self) -> list[dict[str, object]]:
+        return []  # 任务立即从活跃列表消失 → watcher 放行
+
+    async def list_failed_offline_tasks(self) -> list[dict[str, object]]:
+        return []
+
+
+@pytest.mark.asyncio
+async def test_run_offline_download_pipeline_succeeds(tmp_path: Path) -> None:
+    """扫描→提交流水线跑通：文件全部提交、校验落盘、计数正确。"""
+    import app.services.offline_download as mod
+
+    (tmp_path / "a.mkv").write_bytes(b"x" * 1000)
+    (tmp_path / "b.mp4").write_bytes(b"y" * 2000)
+    (tmp_path / "c.nfo").write_bytes(b"z" * 5)  # 不在 exts → 不传
+
+    driver = _FakeDriver(sizes={"a.mkv": 1000, "b.mp4": 2000})
+
+    async def fake_load(driver_id: int) -> _FakeDriver:
+        return driver
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(mod, "_load_target_driver", fake_load)
+    try:
+        params = OfflineParams(
+            target_driver_id=1,
+            local_root=str(tmp_path),
+            exts=("mkv", "mp4"),
+            concurrency=2,
+            submit_interval_sec=0,
+            public_base="http://example.test:8092",
+            secret=SECRET,
+        )
+        job = mod.OfflineJob(id="t1", params=params, seq=1)
+        await mod.run_offline_download(job)
+    finally:
+        monkeypatch.undo()
+
+    assert job.state == "success"
+    assert job.discovered == 2
+    assert job.success == 2
+    assert job.failed == 0
+    assert len(driver.submitted) == 2
+    # URL 里的路径经过编码且带 token（两个文件各一个）
+    assert len({u.split("/")[-2] for u in driver.submitted}) == 2
+
+
+@pytest.mark.asyncio
+async def test_run_offline_download_empty_dir_succeeds(tmp_path: Path) -> None:
+    """空目录 → success + 「没有需要传的文件」（流水线零文件路径不挂死）。"""
+    import app.services.offline_download as mod
+
+    driver = _FakeDriver(sizes={})
+
+    async def fake_load(driver_id: int) -> _FakeDriver:
+        return driver
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(mod, "_load_target_driver", fake_load)
+    try:
+        params = OfflineParams(
+            target_driver_id=1,
+            local_root=str(tmp_path),
+            public_base="http://example.test:8092",
+            secret=SECRET,
+        )
+        job = mod.OfflineJob(id="t2", params=params, seq=1)
+        await mod.run_offline_download(job)
+    finally:
+        monkeypatch.undo()
+
+    assert job.state == "success"
+    assert job.discovered == 0
+    assert any("没有需要传的文件" in line for line in job.logs)

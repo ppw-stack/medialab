@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -137,7 +138,7 @@ def build_url(params: OfflineParams, rel_path: str) -> str:
     return build_public_url(params.public_base, params.secret, rel_path)
 
 
-def collect_files(
+def iter_files(
     root: Path,
     *,
     include_subdirs: bool,
@@ -145,8 +146,11 @@ def collect_files(
     max_bytes: int,
     exclude_disc: bool,
     exts: set[str] | None = None,
-) -> list[OfflineFile]:
-    """遍历本地目录，挑出该传的文件。
+) -> Iterator[OfflineFile]:
+    """逐个**产出**待传文件（流式）。
+
+    与全量扫描的区别：调用方拿到**第一个**文件就可以开始处理，不必等
+    整棵树走完——「边扫描边提交」的基础。目录按名字序遍历，顺序确定。
 
     **不跟随符号链接**——避免环，也避免把不该暴露的东西带出去。
 
@@ -154,7 +158,6 @@ def collect_files(
         exts: **只要这些扩展名**（小写，不含点）。``None`` / 空集 = 不限
             （全传）。如 ``{"mkv", "mp4"}`` 只传视频。
     """
-    out: list[OfflineFile] = []
     base = root.resolve()
     wanted = {e.lower().lstrip(".") for e in (exts or set())}
     for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
@@ -167,6 +170,8 @@ def collect_files(
             if parts & DISC_DIRS:
                 dirnames[:] = []
                 continue
+
+        dirnames.sort()  # 确定性顺序（os.walk 本身不保证）
 
         for fname in filenames:
             fpath = current / fname
@@ -190,13 +195,37 @@ def collect_files(
                 continue
 
             rel = f"{rel_dir_s}/{fname}" if rel_dir_s else fname
-            out.append(OfflineFile(rel_path=rel, abs_path=fpath, size=size))
+            yield OfflineFile(rel_path=rel, abs_path=fpath, size=size)
 
         if not include_subdirs:
             dirnames[:] = []
 
-    out.sort(key=lambda f: f.rel_path)
-    return out
+
+def collect_files(
+    root: Path,
+    *,
+    include_subdirs: bool,
+    min_bytes: int,
+    max_bytes: int,
+    exclude_disc: bool,
+    exts: set[str] | None = None,
+) -> list[OfflineFile]:
+    """全量扫描并按路径排序（兼容入口）。
+
+    流式版本见 :func:`iter_files`——任务执行走那边（边扫边提交），
+    本函数留给测试与一次性盘点。
+    """
+    return sorted(
+        iter_files(
+            root,
+            include_subdirs=include_subdirs,
+            min_bytes=min_bytes,
+            max_bytes=max_bytes,
+            exclude_disc=exclude_disc,
+            exts=exts,
+        ),
+        key=lambda f: f.rel_path,
+    )
 
 
 @dataclass
@@ -407,8 +436,18 @@ async def _resolve_target_dir(driver: Any, file_id: str, rel_dir: str) -> str:
     return current
 
 
+#: 队列哨兵：扫描线程用它告诉所有工作协程「没有更多文件了」
+_WALK_DONE = object()
+
+
 async def run_offline_download(job: OfflineJob) -> None:
-    """跑一次离线下载（后台任务的主体）。"""
+    """跑一次离线下载（后台任务的主体）。
+
+    **扫描与提交是流水线**（2026-11-04 起）：扫描在**工作线程**里走目录
+    树（CIFS 的 readdir / stat 是阻塞 IO，不能占事件循环），每找到一个
+    文件就丢进队列，工作协程**立刻**提交——第一个文件的提交在扫描开始后
+    毫秒级就发生，不用等整棵树扫完。「已发现」计数也随扫描实时增长。
+    """
     params = job.params
     driver = await _load_target_driver(params.target_driver_id)
 
@@ -419,40 +458,53 @@ async def run_offline_download(job: OfflineJob) -> None:
         job.finished_at = int(time.time())
         return
 
-    job.log(f"📂 扫描本地目录：{root}")
-    files = collect_files(
-        root,
-        include_subdirs=params.include_subdirs,
-        min_bytes=params.min_size_mb * 1024 * 1024,
-        max_bytes=params.max_size_mb * 1024 * 1024,
-        exclude_disc=params.exclude_disc,
-        exts=set(params.exts),
-    )
-    job.discovered = len(files)
     suffix = f"（仅 {', '.join(params.exts)}）" if params.exts else ""
-    job.log(f"🔍 发现 {len(files)} 个待传文件{suffix}")
-
-    if not files:
-        job.state = "success"
-        job.finished_at = int(time.time())
-        job.log("✅ 没有需要传的文件")
-        return
+    job.log(f"📂 边扫描边提交：{root}{suffix}")
 
     watcher = _TaskWatcher(driver, job)
     gate = _SubmitGate(params.submit_interval_sec)
-    sem = asyncio.Semaphore(max(1, params.concurrency))
-    queue: asyncio.Queue[OfflineFile] = asyncio.Queue()
-    for f in files:
-        queue.put_nowait(f)
+    concurrency = max(1, params.concurrency)
+    sem = asyncio.Semaphore(concurrency)
+    queue: asyncio.Queue[Any] = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+    workers_left = concurrency  # 还有多少工作协程没消费过哨兵
+
+    def _walk() -> None:
+        """扫描线程：走目录树，逐个把文件丢进队列。**必须**以哨兵收尾。"""
+        try:
+            for item in iter_files(
+                root,
+                include_subdirs=params.include_subdirs,
+                min_bytes=params.min_size_mb * 1024 * 1024,
+                max_bytes=params.max_size_mb * 1024 * 1024,
+                exclude_disc=params.exclude_disc,
+                exts=set(params.exts),
+            ):
+                loop.call_soon_threadsafe(queue.put_nowait, item)
+        except Exception as exc:
+            job.log(f"❌ 扫描中断：{type(exc).__name__}: {exc}")
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, _WALK_DONE)
+
+    producer = asyncio.create_task(asyncio.to_thread(_walk))
 
     async def worker() -> None:
+        nonlocal workers_left
         while True:
-            try:
-                item = queue.get_nowait()
-            except asyncio.QueueEmpty:
+            item = await queue.get()
+            if item is _WALK_DONE:
+                queue.task_done()
+                workers_left -= 1
+                if workers_left > 0:
+                    # 把哨兵传给下一个工作协程；最后一个消费它时不再回填，
+                    # 队列的 unfinished 计数才能归零（join() 返回的前提）。
+                    queue.put_nowait(_WALK_DONE)
                 return
+            job.discovered += 1  # 随扫描实时增长（前端轮询可见）
             try:
-                await _process_one(job, item, driver=driver, watcher=watcher, gate=gate, sem=sem)
+                await _process_one(
+                    job, item, driver=driver, watcher=watcher, gate=gate, sem=sem
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -461,20 +513,27 @@ async def run_offline_download(job: OfflineJob) -> None:
             finally:
                 queue.task_done()
 
-    workers = [asyncio.create_task(worker()) for _ in range(max(1, params.concurrency))]
+    workers = [asyncio.create_task(worker()) for _ in range(concurrency)]
     try:
+        await producer
         await queue.join()
-    except asyncio.CancelledError:
+    finally:
+        # 正常结束时工作协程都已返回，cancel() 是 no-op；
+        # 异常 / 取消路径上它负责收掉还挂在 queue.get() 上的协程。
+        watcher.stop()
         for w in workers:
             w.cancel()
-        raise
-    finally:
-        watcher.stop()
+
+    if job.discovered == 0:
+        job.state = "success"
+        job.finished_at = int(time.time())
+        job.log("✅ 没有需要传的文件")
+        return
 
     job.state = "success" if job.failed == 0 else "failed"
     job.finished_at = int(time.time())
     job.log(
-        f"🏁 结束：成功 {job.success}，失败 {job.failed}，"
+        f"🏁 结束：发现 {job.discovered}，成功 {job.success}，失败 {job.failed}，"
         f"跳过已存在 {job.skipped_existing}，冲突 {job.conflicts}"
     )
 
