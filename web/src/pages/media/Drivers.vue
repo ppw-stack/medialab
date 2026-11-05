@@ -91,7 +91,7 @@
                 <a-button
                   size="small"
                   :loading="probingId === record.id"
-                  @click="onProbe(record)"
+                  @click="probeDriver(record.id)"
                 >
                   测连
                 </a-button>
@@ -798,6 +798,24 @@ async function load(): Promise<void> {
   loading.value = true
   try {
     drivers.value = await api.get<Driver[]>("/drivers")
+    // 用后端缓存的测连状态初始化（启动自动测连 / 手动测连的结果）。
+    // 没有缓存（后端刚重启还没测完）时保持空 → 显示「未测连」。
+    const next: Record<number, DriverStatus> = {}
+    for (const d of drivers.value) {
+      if (d.conn) {
+        next[d.id] = {
+          logged_in: d.conn.logged_in,
+          status: d.conn.status,
+          message: d.conn.message,
+          account_id: d.conn.account_id,
+          total_bytes: d.conn.total_bytes,
+          used_bytes: d.conn.used_bytes,
+          remain_bytes: d.conn.remain_bytes,
+          can_get_link: d.conn.can_get_link,
+        }
+      }
+    }
+    statuses.value = next
   } catch (e) {
     message.error(errMsg(e, "加载存储源失败"))
   } finally {
@@ -1053,12 +1071,13 @@ function scanStateColor(state: string): string {
 
 // -- 测连 --
 
-async function onProbe(driver: Driver): Promise<void> {
-  probingId.value = driver.id
+async function probeDriver(id: number, silent = false): Promise<void> {
+  probingId.value = id
   try {
-    const status = await api.get<DriverStatus>(`/drivers/${driver.id}/probe`)
-    statuses.value = { ...statuses.value, [driver.id]: status }
+    const status = await api.get<DriverStatus>(`/drivers/${id}/probe`)
+    statuses.value = { ...statuses.value, [id]: status }
 
+    if (silent) return // 后台自动测连（扫码/短信登录后）不打扰
     switch (status.status) {
       case "ok":
         message.success(status.message)
@@ -1083,7 +1102,7 @@ async function probeAll(): Promise<void> {
   probingAll.value = true
   try {
     for (const driver of drivers.value) {
-      await onProbe(driver)
+      await probeDriver(driver.id)
     }
   } finally {
     probingAll.value = false
@@ -1200,6 +1219,12 @@ async function onVerifySms(): Promise<void> {
     smsOk.value = true
     message.success("登录成功")
     await load()
+    // 登录成功立刻后台测连 + 自动关闭短信弹框和登录选择框
+    void probeDriver(driver.id, true)
+    setTimeout(() => {
+      smsOpen.value = false
+      loginOpen.value = false
+    }, 1200)
   } catch (e) {
     smsError.value = errMsg(e, "验证失败")
   } finally {
@@ -1243,7 +1268,16 @@ function startPolling(): void {
       }
       if (res.confirmed) {
         stopPolling()
+        qrKind.value = "confirmed"
+        message.success("扫码登录成功")
         await load()
+        // 登录成功立刻后台测连（刷新连通/容量/直链状态）
+        const id = qrDriverId.value
+        if (id !== null) void probeDriver(id, true)
+        // 停留 1.2 秒让用户看到成功提示，然后自动关闭
+        setTimeout(() => {
+          qrOpen.value = false
+        }, 1200)
       }
     } catch (e) {
       stopPolling()

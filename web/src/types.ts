@@ -774,6 +774,25 @@ export interface Driver {
   include_subdirs: boolean
   last_scan_at: string | null
   last_synced_count: number
+  /**
+   * 测连状态（启动自动测连 / 手动测连的缓存）。
+   * `null` = 尚未测连。
+   */
+  conn: DriverConnStatus | null
+}
+
+/** 存储源测连缓存（后端进程内缓存，含最近测连时间）。 */
+export interface DriverConnStatus {
+  logged_in: boolean
+  status: string
+  message: string
+  account_id: string
+  total_bytes: number
+  used_bytes: number
+  remain_bytes: number
+  can_get_link: boolean
+  /** 最近测连时间（北京时间字符串） */
+  checked_at: string | null
 }
 
 /** 115 设备类型（后端是单一真源，前端不手写）。 */

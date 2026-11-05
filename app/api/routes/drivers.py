@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -21,6 +23,7 @@ from app.services.driver_service import (
     DriverRow,
     DriverServiceError,
     add_driver,
+    cached_probe,
     diagnose_driver_direct_link,
     list_device_types,
     list_drivers,
@@ -92,6 +95,24 @@ class DriverUpdate(BaseModel):
     device_type: DeviceTypeLiteral | None = None
 
 
+class DriverConnStatusOut(BaseModel):
+    """存储源测连状态（来自进程内缓存，可能为 ``None`` = 尚未测连）。
+
+    字段与 ``DriverStatus``（前端类型）一致，另有 ``checked_at``。
+    """
+
+    logged_in: bool
+    status: str
+    message: str = ""
+    account_id: str = ""
+    total_bytes: int = 0
+    used_bytes: int = 0
+    remain_bytes: int = 0
+    can_get_link: bool = False
+    #: 最近测连时间（北京时间字符串）
+    checked_at: str | None = None
+
+
 class DriverOut(BaseModel):
     id: int
     type: str
@@ -111,6 +132,9 @@ class DriverOut(BaseModel):
     include_subdirs: bool = True
     last_scan_at: str | None = None
     last_synced_count: int = 0
+
+    # -- 测连状态（启动自动测连 / 手动测连的缓存；None = 未测连） --
+    conn: DriverConnStatusOut | None = None
 
 
 class QRStartOut(BaseModel):
@@ -205,8 +229,24 @@ class DirectLinkDiagOut(BaseModel):
     cookie_required: bool = False
 
 
-def _to_out(row: DriverRow) -> DriverOut:
-    """service 层 dataclass → 输出模型。"""
+def _to_out(
+    row: DriverRow, conn: dict[str, Any] | None = None
+) -> DriverOut:
+    """service 层 dataclass → 输出模型。``conn`` = 测连缓存（可缺）。"""
+    conn_out = None
+    if conn:
+        s = conn["status"]
+        conn_out = DriverConnStatusOut(
+            logged_in=s.logged_in,
+            status=s.status,
+            message=s.message,
+            account_id=s.account_id,
+            total_bytes=s.total_bytes,
+            used_bytes=s.used_bytes,
+            remain_bytes=s.remain_bytes,
+            can_get_link=s.can_get_link,
+            checked_at=conn["checked_at"],
+        )
     return DriverOut(
         id=row.id,
         type=row.type,
@@ -224,13 +264,14 @@ def _to_out(row: DriverRow) -> DriverOut:
         include_subdirs=bool(row.include_subdirs),
         last_scan_at=row.last_scan_at,
         last_synced_count=row.last_synced_count or 0,
+        conn=conn_out,
     )
 
 
 @router.get("", response_model=list[DriverOut])
 async def list_drivers_route() -> list[DriverOut]:
-    """列出存储源。"""
-    return [_to_out(r) for r in await list_drivers()]
+    """列出存储源（携带测连缓存——启动自动测连 / 手动测连的结果）。"""
+    return [_to_out(r, cached_probe(r.id)) for r in await list_drivers()]
 
 
 @router.post("", response_model=DriverOut, status_code=201)

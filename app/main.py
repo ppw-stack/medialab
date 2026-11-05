@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -146,6 +147,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from app.services import watch_manager
 
     await watch_manager.start_all()
+
+    # 存储源启动测连（后台并发，不阻塞启动）
+    #
+    # 所有启用且有凭据的 p115 / 光鸭驱动自动测连一次，结果缓存供
+    # ``GET /drivers`` 携带——面板打开即见连通状态，不用逐个手动点。
+    # fire-and-forget：失败只记日志；任务引用挂到 app.state 防 GC。
+    from app.services.driver_service import probe_all_enabled
+
+    app.state.driver_probe_task = asyncio.create_task(probe_all_enabled())
 
     try:
         yield

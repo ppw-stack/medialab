@@ -17,8 +17,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -258,6 +260,8 @@ async def store_credential(
     await db.refresh(row)
     # 凭据变了 → 缓存的 115 客户端实例失效
     reset_clients()
+    # 凭据变了 → 旧的测连状态作废（调用方登录成功后会自动重探）
+    invalidate_probe(driver_id)
     logger.info("已存储凭据 driver_id=%s", driver_id)
     return row
 
@@ -434,6 +438,9 @@ async def probe_driver(driver_id: int) -> AccountStatus:
 
     未配置凭据时返回 ``status=no_credential``（而不是 400）——
     「还没登录」是正常状态，不是错误。
+
+    结果同时写入**进程内缓存**（供 ``GET /drivers`` 携带）并落库
+    ``probe_results`` 表（探测历史）。
     """
     async with session_scope() as db:
         row = await get_driver(db, driver_id)
@@ -445,11 +452,13 @@ async def probe_driver(driver_id: int) -> AccountStatus:
         raise DriverServiceError("该存储源暂不支持探测", status_code=400)
 
     if not credential:
-        return AccountStatus(
+        status = AccountStatus(
             logged_in=False,
             status=STATUS_NO_CREDENTIAL,
             message="尚未配置凭据，请先扫码登录",
         )
+        _cache_probe(driver_id, status)
+        return status
 
     try:
         driver = build_driver(driver_type, credential, device_type)
@@ -458,7 +467,88 @@ async def probe_driver(driver_id: int) -> AccountStatus:
             f"驱动初始化失败：{exc}", status_code=500, kind="config"
         ) from exc
 
-    return await probe_account(driver)
+    status = await probe_account(driver)
+    _cache_probe(driver_id, status)
+    if status.logged_in:
+        # 探测历史落库（no_credential 没有账号信息可记，跳过）
+        try:
+            async with session_scope() as db:
+                await record_probe(
+                    db,
+                    driver_id,
+                    account_id=status.account_id,
+                    used_gb=status.used_bytes / 1024**3,
+                    total_gb=status.total_bytes / 1024**3,
+                    available=status.healthy,
+                )
+        except Exception as exc:  # 落库失败不影响测连结果
+            logger.warning("探测结果落库失败 driver_id=%s: %s", driver_id, exc)
+    return status
+
+
+# ================================================================ 测连缓存
+#
+# 进程内缓存：启动自动测连 / 手动测连的结果放这里，``GET /drivers``
+# 携带给前端——页面打开不用再逐个探测，也不再有「刷新即全变未测连」。
+#
+#: driver_id → {"status": AccountStatus, "checked_at": 北京时间字符串}
+_probe_cache: dict[int, dict[str, Any]] = {}
+
+
+def _cache_probe(driver_id: int, status: AccountStatus) -> None:
+    _probe_cache[driver_id] = {"status": status, "checked_at": bj_now()}
+
+
+def invalidate_probe(driver_id: int) -> None:
+    """清掉某存储源的测连缓存（凭据变更时调用，随后应重探）。"""
+    _probe_cache.pop(driver_id, None)
+
+
+def cached_probe(driver_id: int) -> dict[str, Any] | None:
+    """读某存储源的缓存测连结果（无则 ``None``）。"""
+    return _probe_cache.get(driver_id)
+
+
+async def probe_all_enabled() -> dict[int, dict[str, Any]]:
+    """并发探测**所有启用且有凭据**的存储源（启动时后台跑）。
+
+    - 信号量 2 并发：探测会打云端 API（登录态 + 容量 + 直链三项），
+      全并发容易触发限流
+    - 单个探测 60s 超时：慢站点不能拖死整批
+    - 任何失败都不抛——启动测连是尽力而为，结果供面板展示
+    """
+    async with session_scope() as db:
+        rows = (
+            (
+                await db.execute(
+                    select(Driver).where(
+                        Driver.enabled == True,  # noqa: E712
+                        Driver.type.in_(("p115", "guangya")),
+                        Driver.credential.is_not(None),
+                        Driver.credential != "",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    targets = [r.id for r in rows]
+    if not targets:
+        logger.info("启动测连：没有可探测的存储源")
+        return {}
+    sem = asyncio.Semaphore(2)
+
+    async def _one(driver_id: int) -> None:
+        async with sem:
+            try:
+                await asyncio.wait_for(probe_driver(driver_id), timeout=60)
+                logger.info("启动测连完成 driver_id=%s", driver_id)
+            except Exception as exc:
+                logger.warning("启动测连失败 driver_id=%s: %s", driver_id, exc)
+
+    await asyncio.gather(*(_one(i) for i in targets))
+    logger.info("启动测连完成：%d 个存储源", len(targets))
+    return dict(_probe_cache)
 
 
 async def diagnose_driver_direct_link(
@@ -637,14 +727,17 @@ __all__ = [
     "DriverServiceError",
     "JobRef",
     "add_driver",
+    "cached_probe",
     "create_driver",
     "delete_driver",
     "diagnose_driver_direct_link",
     "get_driver",
+    "invalidate_probe",
     "latest_probe",
     "list_device_types",
     "list_drivers",
     "mask_credential",
+    "probe_all_enabled",
     "probe_driver",
     "record_probe",
     "remove_driver",
