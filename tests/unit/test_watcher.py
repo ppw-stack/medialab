@@ -185,3 +185,51 @@ async def test_全量投递(watcher: Watcher, tmp_path: Path) -> None:
 
     assert count == 2
     assert watcher.stats.dispatched == 2
+
+
+# ---------------------------------------- 依赖导入预热（2026-11-07 prod 事故）
+
+
+def test_预热导入幂等且加载后端() -> None:
+    """``_preflight_watchdeps``：加载 watchfiles 与 anyio 后端，可重复调用。
+
+    awatch 首次调用会在**事件循环线程上**同步 ``import_module("anyio.
+    _backends._asyncio")``——2026-11-07 prod：CIFS 挂死引发 FS 拥塞，
+    这个导入卡 8 分钟把整个循环冻结（面板假死）。预热必须让导入提前
+    在线程里完成，之后循环上的调用是纯内存查找。
+    """
+    import sys
+
+    from app.services import watcher as watcher_mod
+
+    watcher_mod._preflight_watchdeps()
+    watcher_mod._preflight_watchdeps()  # 幂等（导入本就一次性）
+
+    assert "watchfiles.main" in sys.modules
+    assert "anyio._backends._asyncio" in sys.modules
+
+
+async def test_收事件先预热再调awatch(
+    watcher: Watcher, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_watch_events`` 必须先完成线程内预热，再调用 ``awatch``。
+
+    顺序是这次修复的全部意义：预热在 to_thread 里跑（循环保持响应），
+    awatch 首次调用才不会把同步导入带回事件循环。
+    """
+    from app.services import watcher as watcher_mod
+
+    order: list[str] = []
+    monkeypatch.setattr(
+        watcher_mod, "_preflight_watchdeps", lambda: order.append("preflight")
+    )
+
+    async def _fake_changes(*args: object, **kwargs: object):
+        order.append("awatch")
+        yield set()  # 一批空事件后结束，_watch_events 自然返回
+
+    monkeypatch.setattr("watchfiles.awatch", _fake_changes)
+
+    await watcher._watch_events()
+
+    assert order == ["preflight", "awatch"]

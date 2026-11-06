@@ -316,6 +316,7 @@
 - **事件循环里绝不出现同步 CIFS IO**（2026-11-06 prod 事故，规则）
   - 挂载是 `hard` 模式 → IO 卡死时**无限等待**；一次同步 `stat` 就能把整个事件循环卡住 → uvicorn 无法处理请求 → `/healthz` 被 RST → 容器 unhealthy、**面板实际不可用**（实测假死 20 分钟，挂载恢复才自愈）
   - **规则**：任何对「监听根 / 源根目录 / 挂载点」的 `stat` / `is_dir` / `resolve` / `scandir` 都必须 `asyncio.to_thread`（`_check_stable_once` 的 `FileStamp.of`、`start_watcher` 的 `resolve_watch_dir` 已改）
+  - **同步 import 也算**（2026-11-07 prod 事故补）：`watchfiles.awatch` 首次调用会在循环线程上同步导入 anyio 后端（`get_cancelled_exc_class` → `import_module`，真实读源码文件）——CIFS 挂死引发 FS 层拥塞时被卡 8 分钟，loop 冻结、uvicorn 停在 bind 之前、面板假死（守卫 py-spy 自动取证定位）。修复：`watcher._watch_events` 先 `asyncio.to_thread(_preflight_watchdeps)` 预热（⚠️ 不能用 `get_cancelled_exc_class()` 预热——它要求当前线程有运行中的 loop，会 `NoEventLoopError`，直接 `importlib.import_module("anyio._backends._asyncio")`）
   - **运行时守卫**（`app/services/runtime_guard.py`）：① 心跳看门狗——loop 滞后 >10s 自动 py-spy dump 落日志（py-spy 已进镜像）；② 挂载探活线程——`/healthz` 的 `mounts[]` 显示 `ok`/`hang`/`error`，**挂载卡死可见而面板不假死**
   - `snapshot()` 只读缓存（`/healthz` 同步调用，不能被 IO 拖住）
 - **必备命令**

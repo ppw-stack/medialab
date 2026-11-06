@@ -82,6 +82,35 @@ class _Pending:
     changed_at: float
 
 
+def _preflight_watchdeps() -> None:
+    """预热 watcher 依赖的同步导入（**进程级一次性，必须在事件循环之外跑**）。
+
+    **为什么存在（2026-11-07 prod 事故）**：``watchfiles.awatch`` 首次调用
+    会在**事件循环线程上**同步导入 anyio 的 asyncio 后端
+    （``get_cancelled_exc_class()`` → ``get_async_backend()`` →
+    ``import_module``，真实读源码文件）。FS 健康时 1ms 无感；当晚 172
+    CIFS 挂死引发内核 FS 层拥塞，这个导入被卡 8 分钟 → 事件循环整个
+    冻结 → uvicorn 停在 bind 之前 → 面板假死。2026-11-06 事故已把
+    stat/resolve 搬进线程池，这是漏网的最后一个循环上同步 FS 操作
+    （运行时守卫 py-spy 自动取证定位）。
+
+    本函数把「watchfiles + anyio 后端」的首次导入搬进线程：导入是进程级
+    一次性的，预热完成后循环上的 ``awatch`` 调用只剩纯内存查找。预热
+    期间循环保持响应——uvicorn 正常 bind、面板可用，监听在线程完成后
+    自行开始（降级语义：挂载恢复前面板先活，监听后活）。
+
+    ⚠️ 不能用 ``anyio.get_cancelled_exc_class()`` 预热——它要求当前线程
+    有运行中的事件循环（否则 ``NoEventLoopError``），而预热线程没有。
+    故直接导入后端模块——与 prod 取证栈里 ``get_async_backend`` 导入的
+    是同一个模块，``sys.modules`` 命中后循环上的调用不再触盘。
+    """
+    import importlib
+
+    import watchfiles.main  # noqa: F401  awatch 所在模块（提前加载进 sys.modules）
+
+    importlib.import_module("anyio._backends._asyncio")
+
+
 @dataclass
 class Watcher:
     """一个监听器（对应一个上传任务）。
@@ -157,9 +186,13 @@ class Watcher:
 
     async def _watch_events(self) -> None:
         """收事件。"""
-        from watchfiles import awatch
-
         logger.info("开始监听目录：%s（%s）", self.root, "轮询" if self.polling else "inotify")
+        # 依赖导入预热**必须先于 awatch**（见 :func:`_preflight_watchdeps`）：
+        # awatch 首次调用会在事件循环线程上同步导入 anyio 后端，FS 拥塞时
+        # 卡死整个循环（2026-11-07 prod 事故：面板假死，uvicorn 停在 bind 之前）。
+        await asyncio.to_thread(_preflight_watchdeps)
+        from watchfiles import awatch  # 预热后这里是纯内存查找
+
         try:
             async for changes in awatch(
                 self.root,
