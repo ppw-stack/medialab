@@ -202,6 +202,34 @@ def test_hhanclub_parses_business_fields() -> None:
     assert snap.seeding_count > 0
 
 
+# -------------------------------------------------------------------- hdwing
+
+def test_hdwing_parses_business_fields() -> None:
+    """hdwing navbar 是**纯文本**（无 color_uploaded class、无「当前活动」），
+    共享解析器靠文本回退取 upload/download、``title="当前做种"`` 后的数字
+    取做种数。fixture 快照时刻该账号做种 0（真实状态，不是解析失败）。"""
+    html = _read("hdwing")
+    snap = nexus_php.parse_user_snapshot(html)
+    assert snap is not None
+    assert snap.upload == int(526.04 * 1024**3)
+    assert snap.download == int(372.10 * 1024**3)
+    assert snap.seeding_count == 0
+
+
+def test_hdwing_parses_hourly_bonus() -> None:
+    """hdwing 时魔 headline 在 ``div.bonus_bar_box > h3``，无合计表 →
+    headline 口径（同 hdsky）。h3 里的第二段（捐赠 2 倍）不参与——
+    :func:`parse_bonus_headline` 只取第一个匹配。"""
+    html = _read("hdwing")
+    bonus = nexus_php.parse_hourly_bonus(html, unit="魔力值")
+    assert bonus is not None
+    # fixture 快照时刻 A=0（无做种）→ 时魔 0、进度 0%
+    assert bonus.amount == 0.0
+    assert bonus.unit == "魔力值"
+    assert bonus.progress == 0.0
+    assert bonus.capped is False
+
+
 # ------------------------------------------------------------------ 兜底行为
 
 

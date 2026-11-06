@@ -200,6 +200,32 @@ def _audiences_navbar(html: str) -> str:
     return html[start:end + 1]
 
 
+def _hdwing_navbar(html: str) -> str:
+    """hdwing navbar：含「上传量」的 ``<p>``（X2015 主题，纯文本布局）。"""
+    i = html.find("上传量")
+    if i < 0:
+        raise ValueError("找不到 hdwing navbar")
+    start = html.rfind("<p", 0, i)
+    end = html.find("</p>", i)
+    if start < 0 or end < 0:
+        raise ValueError("找不到 hdwing navbar 容器")
+    return html[start:end + 4]
+
+
+def _hdwing_bonus_block(html: str) -> str:
+    """hdwing 时魔区块：``div.bonus_bar_box`` 到「其他获取方式」之前。
+
+    headline 在 ``<h3>``（含捐赠 2 倍第二段），进度条是 ``p.loadbarbg > img``。
+    """
+    i = html.find('<div class="bonus_bar_box"')
+    if i < 0:
+        raise ValueError("找不到 hdwing bonus_bar_box")
+    end = html.find("其他获取方式", i)
+    if end < 0:
+        raise ValueError("找不到 hdwing 时魔区块结束标记")
+    return html[i:end]
+
+
 def _bonus_block(html: str, end_marker: str) -> str:
     """时魔区块：从 headline 所在的 div 到 ``end_marker`` 之前。"""
     i = html.find(_HEADLINE)
@@ -292,6 +318,14 @@ _SPECS: dict[str, dict[str, object]] = {
         "parse": lambda h: (
             nexus_php.parse_user_snapshot(h),
             springsunday_mod._parse_springsunday_hourly_bonus(h),
+        ),
+    },
+    "hdwing": {
+        "nav": _hdwing_navbar,
+        "bonus": _hdwing_bonus_block,
+        "parse": lambda h: (
+            nexus_php.parse_user_snapshot(h),
+            nexus_php.parse_hourly_bonus(h, unit="魔力值"),
         ),
     },
 }

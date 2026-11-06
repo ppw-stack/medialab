@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import pathlib
 from urllib.parse import parse_qs
 
 import httpx
@@ -35,7 +36,7 @@ from app.adapters.sites.base import (
     TorrentDetail,
 )
 
-#: 9 个已注册站点适配器
+#: 10 个已注册站点适配器
 ALL_ADAPTERS = (
     "mteam",
     "hhanclub",
@@ -46,6 +47,7 @@ ALL_ADAPTERS = (
     "hdhome",
     "hddolby",
     "soulvoice",
+    "hdwing",
 )
 
 
@@ -749,6 +751,178 @@ async def test_hdsky_already_on_submit_stops_retrying(fake_reader: None) -> None
             result = await adapter.checkin()
         assert result.status == CheckinStatus.ALREADY
         assert routes["new_code"].call_count == 1, "已签到不该继续重试"
+    finally:
+        await adapter.close()
+
+
+# ------------------------------------------------------------------ hdwing
+
+#: hdwing 列表/优惠 fixture（真实页面脱敏裁剪，见 scripts/capture_mybonus_fixtures.py
+#: 与 docs/merge-strmmanger.md 同款「真实页面固化」方法论）
+_HDWING_TORRENTS = (pathlib.Path(__file__).resolve().parents[1] / "fixtures" / "hdwing_torrents.html").read_text(encoding="utf-8")
+_HDWING_PROMOTION = (pathlib.Path(__file__).resolve().parents[1] / "fixtures" / "hdwing_promotion.json").read_text(encoding="utf-8")
+
+
+def _mock_hdwing_list(
+    router: respx.MockRouter, *, promotion_status: int = 200
+) -> None:
+    """铺 hdwing 列表页 + 优惠接口路由。"""
+    router.get("https://example.com/torrents.php?spstate=2&page=0").mock(
+        return_value=httpx.Response(200, text=_HDWING_TORRENTS)
+    )
+    router.post("https://example.com/ajax_promotion.php").mock(
+        return_value=httpx.Response(promotion_status, text=_HDWING_PROMOTION)
+    )
+
+
+async def test_hdwing_search_parses_list_and_merges_promotion() -> None:
+    """列表行 + AJAX 优惠状态合并成 free_payload。
+
+    hdwing 的优惠标记不在列表 HTML 里（空占位符 + ajax_promotion.php），
+    适配器必须把两路数据拼起来——这是它与其它 NexusPHP 站的核心差异。
+    """
+    adapter = _make("hdwing")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            _mock_hdwing_list(router)
+            items = await adapter.search_torrents({}, page_number=1)
+        assert len(items) == 2
+        first = items[0]
+        assert first.item_id == "836813"
+        assert first.title.startswith("Spider-Man.Brand.New.Day.2026")
+        assert first.size == int(25.26 * 1024**3)
+        assert first.published_at == "2026-10-05 21:59:21"
+        assert first.category == "4K UltraHD"
+        # 优惠状态来自 promotion 接口，不是列表页
+        assert first.free_payload == {
+            "free_classes": ["free"],
+            "remaining_abs": None,
+        }
+        assert items[1].item_id == "837150"
+    finally:
+        await adapter.close()
+
+
+async def test_hdwing_search_raises_when_promotion_fails() -> None:
+    """优惠接口故障必须抛 SiteFetchError。
+
+    spstate=2 列表的价值就在免费标记；没有优惠状态的数据对业务无用——
+    如实报故障让 feed_fetcher 重试，而不是静默丢标记。
+    """
+    adapter = _make("hdwing")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            _mock_hdwing_list(router, promotion_status=500)
+            with pytest.raises(SiteFetchError, match="优惠状态"):
+                await adapter.search_torrents({}, page_number=1)
+    finally:
+        await adapter.close()
+
+
+async def test_hdwing_search_empty_page_skips_promotion() -> None:
+    """空列表 → []，且**不发**优惠请求（页面都没有，查什么都不对）。"""
+    adapter = _make("hdwing")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            router.get("https://example.com/torrents.php?spstate=2&page=0").mock(
+                return_value=httpx.Response(200, text="<html>没有种子</html>")
+            )
+            promo = router.post("https://example.com/ajax_promotion.php").mock(
+                return_value=httpx.Response(200, text="{}")
+            )
+            items = await adapter.search_torrents({}, page_number=1)
+            assert items == []
+            assert not promo.called
+    finally:
+        await adapter.close()
+
+
+async def test_hdwing_search_missing_csrf_raises() -> None:
+    """列表页有数据但没有 x-csrf → SiteFetchError（改版信号，不能静默）。"""
+    adapter = _make("hdwing")
+    try:
+        html = _HDWING_TORRENTS.replace(
+            '<meta name="x-csrf" content="' + "a" * 42 + '"/>', ""
+        )
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            router.get("https://example.com/torrents.php?spstate=2&page=0").mock(
+                return_value=httpx.Response(200, text=html)
+            )
+            with pytest.raises(SiteFetchError, match="x-csrf"):
+                await adapter.search_torrents({}, page_number=1)
+    finally:
+        await adapter.close()
+
+
+async def test_hdwing_get_torrent_url_appends_own_uid() -> None:
+    """下载 URL 必须带 &uid=<自己>——不带会落到「下载提示」确认页。
+
+    自身 uid 从 navbar ``invite.php?id=N`` 提取（hash 签名内嵌 uid 但
+    服务端还要校验 query 参数，实测 2026-11-07）。
+    """
+    adapter = _make("hdwing")
+    try:
+        detail_html = (
+            '<html><head><title>HDWinG :: 种子详情 "TestTorrent"</title></head>'
+            '<body>[<a href="invite.php?id=328600">发送</a>]'
+            '<a title="下载种子" href="download.php?hash=MQozMjg2MDAKMzI4NjAw.ABC-xyz_123">'
+            "</a></body></html>"
+        )
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            router.get("https://example.com/details.php?id=836813").mock(
+                return_value=httpx.Response(200, text=detail_html)
+            )
+            url = await adapter.get_torrent_url("836813")
+        assert url == (
+            "https://example.com/download.php"
+            "?hash=MQozMjg2MDAKMzI4NjAw.ABC-xyz_123&uid=328600"
+        )
+    finally:
+        await adapter.close()
+
+
+async def test_hdwing_download_rejects_html_notice() -> None:
+    """下载 URL 返回 HTML（分享率确认页）→ BreakerTripped，不是假成功。"""
+    adapter = _make("hdwing")
+    try:
+        detail_html = (
+            '<html><body>[<a href="invite.php?id=328600">发送</a>]'
+            '<a href="download.php?hash=MQozMjg2MDAKMzI4NjAw.ABC-xyz_123"></a>'
+            "</body></html>"
+        )
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            router.get("https://example.com/details.php?id=836813").mock(
+                return_value=httpx.Response(200, text=detail_html)
+            )
+            router.get(
+                "https://example.com/download.php"
+                "?hash=MQozMjg2MDAKMzI4NjAw.ABC-xyz_123&uid=328600"
+            ).mock(
+                return_value=httpx.Response(
+                    200, text="<html>下载提示：请先勾选我会提高分享率的</html>"
+                )
+            )
+            with pytest.raises(BreakerTripped, match="bencoded"):
+                await adapter.download_torrent("836813")
+    finally:
+        await adapter.close()
+
+
+async def test_hdwing_check_status_deleted_marker() -> None:
+    """不存在的种：HTTP 200 + 「没有该ID的种子」→ DELETED。
+
+    hdwing 的错误页**不是 404**（实测 200），必须靠文案判定。
+    """
+    adapter = _make("hdwing")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            router.get("https://example.com/details.php?id=99999999").mock(
+                return_value=httpx.Response(
+                    200, text="<html>错误 没有该ID的种子</html>"
+                )
+            )
+            brief = await adapter.check_status("99999999")
+        assert brief == TorrentBrief.DELETED
     finally:
         await adapter.close()
 

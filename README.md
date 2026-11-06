@@ -53,7 +53,7 @@
 ### 辅种域（来自 ptHelper）
 
 - **M1**：项目骨架、配置中心、SQLite WAL + 短事务约定、下载器/站点双适配层、日志与审计
-- **F1 站点拉取**：9 站适配器（mteam / hdsky / hhanclub / audiences / hdhome / hddolby / ourbits / soulvoice / springsunday）拉取免费种 + RSS 清理
+- **F1 站点拉取**：10 站适配器（mteam / hdsky / hhanclub / audiences / hdhome / hddolby / ourbits / soulvoice / springsunday / hdwing）拉取免费种 + RSS 清理
 - **F2 免费种窗口**：推送 + 监测 + 中止（push_free_torrents / monitor_free_window）
 - **FR-1.6 站点用户数据契约**：单方法 `get_user_snapshot` 拉 3 业务字段 + **时魔**，刷新作业 `*/30 * * * *`。数据在**站点列表页**展示（上传/下载、做种、时魔 + 跨站汇总）
 - **辅种快照**：`cross_seed_maintenance` 作业（cron `17 */3 * * *`）**定时抓取 → 落库 `cross_seed_snapshot`**，前端读快照而不打下载器接口（该作业还合并了磁盘空间流转与孤儿文件扫描）

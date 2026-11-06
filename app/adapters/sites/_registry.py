@@ -37,6 +37,7 @@ _BUILTIN: dict[str, str] = {
     "hdhome": "app.adapters.sites.hdhome.HdhomeAdapter",
     "hddolby": "app.adapters.sites.hddolby.HddolbyAdapter",
     "soulvoice": "app.adapters.sites.soulvoice.SoulvoiceAdapter",
+    "hdwing": "app.adapters.sites.hdwing.HdwingAdapter",
 }
 
 #: 展示用元数据（label + 默认域名）。键集合必须与 ``_BUILTIN`` 一致。
@@ -51,6 +52,7 @@ _META: dict[str, AdapterMeta] = {
     "hdhome":       AdapterMeta("HDHome",       "hdhome.org"),
     "hddolby":      AdapterMeta("HDDolby",      "hddolby.com"),
     "soulvoice":    AdapterMeta("聆音Club",      "pt.soulvoice.club"),
+    "hdwing":       AdapterMeta("HDWinG",       "hdwing.org"),
 }
 
 # 启动时检查两个 dict 同步（开发期防御）

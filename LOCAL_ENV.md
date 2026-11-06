@@ -266,11 +266,12 @@ cron 与运行参数**都不再走 env**：
 > `POST /api/v1/scheduler/push_free_torrents/toggle?enabled=false`，
 > 来源 IP 即操作者（本机是 `192.168.0.253`）。
 
-## 7. 站点适配器（9 站）
+## 7. 站点适配器（10 站）
 
-`app/adapters/sites/`：`mteam` / `hdsky` / `hhanclub` / `audiences` / `hdhome` / `hddolby` / `ourbits` / `soulvoice` / `springsunday`
+`app/adapters/sites/`：`mteam` / `hdsky` / `hhanclub` / `audiences` / `hdhome` / `hddolby` / `ourbits` / `soulvoice` / `springsunday` / `hdwing`
 
-其中 7 站共用 `app/adapters/sites/parsers/nexus_php.py` 的 module-level helper。
+其中 7 站共用 `app/adapters/sites/parsers/nexus_php.py` 的 module-level helper
+（hdwing 的 navbar 纯文本形态也在共享解析器的文本回退覆盖内）。
 
 **时区**：`settings.timezone` 默认 `Asia/Shanghai`（`app/core/config.py`），
 必须与站点规则时区一致，否则保种时长 / 免费窗口计算会偏差。
@@ -300,7 +301,7 @@ cron 与运行参数**都不再走 env**：
 ### 7.1 每日签到（FR-3.6，2026-10-22）
 
 `daily_checkin` 作业（cron `37 8 * * *`）逐站调用
-`SiteAdapter.checkin()`。**9 站里 4 站实测可自动签到**：
+`SiteAdapter.checkin()`。**10 站里 4 站实测可自动签到**：
 
 | 站点 | 端点 | 状态 |
 |---|---|---|
@@ -313,6 +314,7 @@ cron 与运行参数**都不再走 env**：
 | springsunday | — | ❌ 无签到功能（只有论坛"签到帖"） |
 | mteam | — | ❌ mTorrent API 无签到端点 |
 | hddolby | — | ❌ 未实现（SSL/DNS 失败，未验证） |
+| hdwing | `/attendance.php` **404**（实测 2026-11-07） | ❌ 站点无签到功能 |
 
 hdsky 的签到不是 NexusPHP 标准的 `/attendance.php`（本站 404），而是自建三段式：
 
@@ -368,6 +370,7 @@ POST showup.php {action:showup, imagehash, imagestring} → 提交
 | springsunday | 茉莉 | 表「每小时茉莉」列（我的数据行，含加成系数） | **无** → 上限未知 |
 | mteam | 魔力值 | API `POST /api/tracker/mybonus` 的 `data.formulaParams.finalBs` | **无** → 上限未知 |
 | hddolby | — | DNS 解析失败（已知间歇故障） | — |
+| hdwing | 魔力值 | headline（`div.bonus_bar_box > h3`，无合计表） | 进度条 `alt="0%"`（fixture 时刻 A=0） |
 
 > ⚠️ **进度百分比只认 `alt="NN%"`**：各站 `style` 的单位不同
 > （hdsky / ourbits / soulvoice 用 px，hhanclub 用 %），且 hhanclub 的
@@ -390,6 +393,33 @@ POST showup.php {action:showup, imagehash, imagestring} → 提交
 > ⚠️ **端点失败必须抛错**（mybonus 端点失败 → 抛 `SiteFetchError`，整个快照作废、
 > 保留上次数据）：降级成 `hourly_bonus=None` 看着无害，但 upsert 会把**上次的
 > 时魔值覆盖成 NULL**——UI 上突然空白，且没有任何错误提示。
+
+### 7.3 hdwing（X2015 主题）的三个特殊机制（2026-11-07 实测，dev 真实 cookie）
+
+hdwing.org 是 NexusPHP（Version 700efff）+ X2015 自定义主题，DOM 与标准模板
+差异大，适配器 `app/adapters/sites/hdwing.py` 有三处与其它 NexusPHP 站不同：
+
+1. **优惠状态是 AJAX 的**：列表/详情页 HTML 里只有空占位
+   `<span class="sp_state_placeholder" id="<tid>">`，真实优惠标记由
+   `POST /ajax_promotion.php`（form：`csrf` + `ids[]`，csrf 取自页面
+   `<meta name="x-csrf">`）返回 JSON（`message.{tid}.sp_state` 内嵌
+   `pro_*` class HTML）。适配器逐页批量查（一页 100 个 id 一次 POST），
+   接口故障抛 `SiteFetchError`（spstate=2 列表的价值就在免费标记）。
+2. **下载 URL 必须带 `&uid=<自己>`**：`download.php?hash=<base64+签名>`
+   不带 uid 会返回「下载提示」确认页（HTML，分享率门槛），带上才返回
+   bencoded 字节。自身 uid 从 navbar `invite.php?id=N` 提取。
+   签名**不可合成**（从页面解析）。
+3. **只拉 `spstate=2`（仅免费）**：站点筛选器 0=全部/2=免费。
+   业务目标是免费种推送，`max_pages=3` 页 × 100 条 = 最新 300 个免费种；
+   拉全量（spstate=0）的话 3 页全是普通种，免费种会被淹没
+   （该站免费种 2 万+，多为官种永久免费）。语义与 soulvoice
+   「默认页 = 仅 free 种」一致。
+
+其它差异：列表是 `table.torrent_list`（每行一个内嵌 `table.tbname`），
+列 class `t_cat/t_time/t_size/t_torrents/t_leech/t_completed`；
+做种数在 navbar `title="当前做种"` 后的数字（共享解析器文本回退覆盖）；
+`/attendance.php` 404（无签到）；时魔 headline 在 `div.bonus_bar_box > h3`
+（无合计表 → headline 口径，同 hdsky）。
 
 #### 时魔也用于 push_free 选种优先级
 

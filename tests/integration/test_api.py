@@ -278,7 +278,7 @@ async def test_list_adapters(client: httpx.AsyncClient) -> None:
     names = {a["name"] for a in resp.json()}
     assert "hdsky" in names
     assert "mteam" in names
-    assert len(names) == 9
+    assert len(names) == 10
 
 
 # ------------------------------------------------------------------ 用户数据
