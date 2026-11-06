@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -220,7 +221,10 @@ async def scan_one_downloader(
     # 汇总所有下载器的顶层名 + 本下载器的（汇总里已含本下载器，重复无害）
     merged = list(owned) if owned is not None else []
     merged.extend(files)
-    result = scan_orphans(merged, scan_dirs)
+    # ⚠️ **扫盘必须放线程池**：``scan_orphans`` 用 ``os.walk`` 遍历 CIFS
+    # 目录——挂载卡死时会**无限等待**，在事件循环里跑会把整个 loop 卡死
+    # （面板假死，2026-11-06 prod 事故）。
+    result = await asyncio.to_thread(scan_orphans, merged, scan_dirs)
     await _upsert(row.id, row.name, result)
     return result.to_dict()
 

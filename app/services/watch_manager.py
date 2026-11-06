@@ -54,6 +54,9 @@ from app.services.watcher import Watcher
 
 logger = get_logger(__name__)
 
+#: 监听目录检查超时（秒）——挂载无响应时的兜底，避免 lifespan 卡死
+WATCH_DIR_RESOLVE_TIMEOUT_SEC = 15.0
+
 #: 活跃的监听器：task_id → Watcher
 _WATCHERS: dict[int, Watcher] = {}
 
@@ -178,10 +181,23 @@ async def start_watcher(
     await stop_watcher(task_id)
 
     settings = get_settings()
-    # ⚠️ **放线程池**：`resolve_watch_dir` 会 ``resolve()`` + ``is_dir()``，
-    # 都是同步 stat——监听根在 CIFS 上时，挂载卡死会让它无限等待。
-    # 在事件循环里跑会把启动路径（乃至整个面板）卡死（2026-11-06 事故）。
-    watch_dir = await asyncio.to_thread(resolve_watch_dir, watch_root)
+    # ⚠️ **放线程池 + 加超时**：
+    # 1) ``resolve_watch_dir`` 会 ``resolve()`` + ``is_dir()``，都是同步
+    #    stat——监听根在 CIFS 上时，挂载卡死会让它**无限等待**；
+    # 2) 在事件循环里跑会把启动路径（乃至整个面板）卡死；
+    # 3) **必须加超时**——否则挂载坏着启动时 lifespan 永远走不完，
+    #    uvicorn 压根不开始服务（2026-11-06 prod 事故：面板假死 8 分钟）。
+    #    超时 = 这个监听器先不启动，记日志；挂载恢复后由探活/手动重试补上。
+    try:
+        watch_dir = await asyncio.wait_for(
+            asyncio.to_thread(resolve_watch_dir, watch_root),
+            timeout=WATCH_DIR_RESOLVE_TIMEOUT_SEC,
+        )
+    except TimeoutError as exc:
+        raise DriverError(
+            f"监听目录检查超时（{WATCH_DIR_RESOLVE_TIMEOUT_SEC}s）：{watch_root}"
+            "——挂载可能无响应（NAS 离线 / CIFS 卡死）"
+        ) from exc
 
     driver, uploader = await _build_clients(driver_id)
 

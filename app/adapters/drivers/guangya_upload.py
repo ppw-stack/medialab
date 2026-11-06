@@ -333,6 +333,14 @@ class GuangyaUploader:
 
         if size < SMALL_FILE_THRESHOLD:
             # 小文件：单 PUT 直传
+            #
+            # ⚠️ **读文件必须放线程池**：本地目录在 CIFS 上，读是**同步阻塞**
+            # 的——挂载卡死时 ``read_bytes()`` 会无限等待，直接在事件循环里
+            # 跑会把整个 loop 卡死（healthz 无响应、面板假死）。
+            # 大文件分片路径本来就有线程 + 背压（见 ``_multipart_upload``），
+            # 小文件这条曾被漏掉（2026-11-06 prod 事故：启动全量同步时
+            # 卡住 8 分钟，面板完全不可用）。
+            content = await asyncio.to_thread(path.read_bytes)
             await self._call_oss(
                 "oss_request",
                 "PUT",
@@ -342,7 +350,7 @@ class GuangyaUploader:
                 access_key,
                 secret_key,
                 session_token,
-                content=path.read_bytes(),
+                content=content,
                 content_type="application/octet-stream",
             )
             if progress is not None:
