@@ -126,6 +126,11 @@ async def test_healthz(client: httpx.AsyncClient) -> None:
     data = resp.json()
     assert data["status"] == "ok"
     assert data["db"] is True
+    # 运行时守卫字段（2026-11-06 prod 事故：挂载卡死曾把面板拖假死）
+    assert "loop" in data
+    assert "loop_stalled_ms" in data["loop"]
+    assert "loop_ok" in data["loop"]
+    assert isinstance(data["mounts"], list)
 
 
 async def test_metrics(client: httpx.AsyncClient) -> None:

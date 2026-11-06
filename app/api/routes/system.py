@@ -34,10 +34,28 @@ async def healthz() -> dict[str, object]:
     """存活探针：进程活着就返回 ok（**不**因 DB 抖动而失败）。
 
     ``db`` 字段报告 DB 当前是否可用——供排障用，不影响 ``status``。
+
+    ``loop`` / ``mounts`` 来自**运行时守卫**（2026-11-06 prod 事故）：
+    CIFS 挂载卡死曾把事件循环里的同步 stat 卡住，导致面板假死、探针
+    被 RST。现在：
+
+    - ``loop.loop_stalled_ms`` —— 事件循环心跳滞后（>10000 即视为卡住）
+    - ``loop.loop_ok`` —— 是否正常
+    - ``mounts[]`` —— 各挂载点的探活结果（``ok`` / ``hang`` / ``error``）
+
+    这些字段**只读缓存**，探针本身不会被 IO 拖住。
     """
+    from app.services.runtime_guard import snapshot
+
+    guard = snapshot()
     return {
         "status": "ok",
         "db": await db_available(),
+        "loop": {
+            "loop_stalled_ms": guard["loop_stalled_ms"],
+            "loop_ok": guard["loop_ok"],
+        },
+        "mounts": guard["mounts"],
     }
 
 

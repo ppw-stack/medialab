@@ -204,7 +204,11 @@ class Watcher:
             return
 
         # 记一次采样，等下一次采样确认稳态
-        stamp = FileStamp.of(path)
+        #
+        # ⚠️ **必须放线程池**：``FileStamp.of`` 是同步 ``stat``，监听根
+        # 在 CIFS 上——挂载卡死时它会**无限等待**（hard 挂载），直接跑在
+        # 事件循环里会把整个 loop 卡死（面板假死，2026-11-06 prod 事故）。
+        stamp = await asyncio.to_thread(FileStamp.of, path)
         if stamp is None:
             self._pending.pop(path, None)
             return
@@ -245,7 +249,9 @@ class Watcher:
             if pending is None:
                 continue
 
-            current = FileStamp.of(path)
+            # ⚠️ **放线程池**：同步 ``stat`` 打在 CIFS 上，挂载卡死时
+            # 会无限等待——在事件循环里跑会卡死整个面板（2026-11-06 事故）。
+            current = await asyncio.to_thread(FileStamp.of, path)
             if current is None:
                 # 文件没了（被删）——移出待确认
                 self._pending.pop(path, None)

@@ -178,7 +178,10 @@ async def start_watcher(
     await stop_watcher(task_id)
 
     settings = get_settings()
-    watch_dir = resolve_watch_dir(watch_root)
+    # ⚠️ **放线程池**：`resolve_watch_dir` 会 ``resolve()`` + ``is_dir()``，
+    # 都是同步 stat——监听根在 CIFS 上时，挂载卡死会让它无限等待。
+    # 在事件循环里跑会把启动路径（乃至整个面板）卡死（2026-11-06 事故）。
+    watch_dir = await asyncio.to_thread(resolve_watch_dir, watch_root)
 
     driver, uploader = await _build_clients(driver_id)
 
