@@ -188,7 +188,10 @@ async def sync_file(
         同步结果。**不抛异常**——失败折叠成 ``status=failed``。
     """
     try:
-        size = local_path.stat().st_size
+        # ⚠️ **放线程池**：本地目录在 CIFS 上，同步 stat 在挂载卡死时会
+        # 无限等待、卡死整个事件循环（2026-11-06 prod 事故，规则见 AGENTS.md）。
+        stat = await asyncio.to_thread(local_path.stat)
+        size = stat.st_size
     except OSError as exc:
         return SyncOutcome(RESULT_FAILED, rel_path, f"读取本地文件失败：{exc}")
 

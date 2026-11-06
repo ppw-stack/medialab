@@ -122,8 +122,9 @@ class Watcher:
         poll_ms: 轮询间隔（毫秒）。
         debounce_ms: 事件防抖窗口（毫秒）。
         stable_check_sec: 稳态判定间隔（秒）。
-        dispatch: 投递回调 ``(Path) -> Awaitable[None]``——把稳态的文件
-            交给上传队列。
+        dispatch: 投递回调 ``(Path, size) -> Awaitable[None]``——把稳态的
+            文件交给上传队列。size 在稳态采样时已经拿到（**不二次
+            stat**），分流与进度显示用；权威大小由上传引擎现场比对。
     """
 
     root: Path
@@ -132,7 +133,9 @@ class Watcher:
     poll_ms: int = 1000
     debounce_ms: int = 1500
     stable_check_sec: float = 1.5
-    dispatch: Callable[[Path], Any] = field(default=lambda _p: asyncio.sleep(0))
+    dispatch: Callable[[Path, int], Any] = field(
+        default=lambda _p, _s: asyncio.sleep(0)
+    )
     #: 时钟（测试可注入 —— 稳态判定依赖时间差）
     clock: Callable[[], float] = field(default=time.monotonic)
 
@@ -304,12 +307,14 @@ class Watcher:
 
             # 稳态 —— 投递
             self._pending.pop(path, None)
-            if is_empty(path):
+            # ⚠️ **放线程池**：``is_empty`` 是同步 stat，监听根在 CIFS 上
+            # ——与上面的采样同一规则（2026-11-06 事故）。
+            if await asyncio.to_thread(is_empty, path):
                 # 稳态了还是 0 字节 → 空壳文件，不值得传
                 self.stats.filtered += 1
                 continue
             try:
-                await self.dispatch(path)
+                await self.dispatch(path, current.size)
                 self.stats.dispatched += 1
             except asyncio.CancelledError:
                 raise
@@ -337,7 +342,11 @@ class Watcher:
             self.root, include_subdirs=self.include_subdirs
         ):
             try:
-                await self.dispatch(path)
+                # 投递要带 size（分流依据）——现场采一次（放线程池，CIFS 规则）
+                stamp = await asyncio.to_thread(FileStamp.of, path)
+                if stamp is None:
+                    continue
+                await self.dispatch(path, stamp.size)
                 count += 1
                 self.stats.dispatched += 1
             except asyncio.CancelledError:

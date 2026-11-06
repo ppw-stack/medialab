@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -66,9 +65,13 @@ class UploadTaskView:
     #: 运行态（监听中？正在传什么？）
     listening: bool = False
     current: str = ""
+    #: 小文件通道正在上传的文件
+    current_small: str = ""
     total_uploaded: int = 0
     total_failed: int = 0
     total_bytes: int = 0
+    #: 真正被丢弃的文件数（队列与溢出暂存都满时）
+    dropped: int = 0
     #: 运行态的最近一次错误（**监听启动失败等**）——面板据此提示
     runtime_error: str | None = None
 
@@ -91,9 +94,11 @@ def to_task_view(row: UploadTaskRow) -> UploadTaskView:
         updated_at=row.updated_at,
         listening=runtime.listening,
         current=runtime.current,
+        current_small=runtime.current_small,
         total_uploaded=runtime.total_uploaded,
         total_failed=runtime.total_failed,
         total_bytes=runtime.total_bytes,
+        dropped=runtime.dropped,
         runtime_error=runtime.error,
     )
 
@@ -107,16 +112,24 @@ class UploadRuntime:
     listening: bool = False
     #: 监听器协程
     watcher: Any = None
-    #: 上传队列
-    queue: asyncio.Queue[Path] | None = None
-    #: 上传 worker 协程
+    #: 大文件队列（≥ 分流阈值，恒串行消费）
+    queue_large: asyncio.Queue[Any] | None = None
+    #: 小文件队列（< 分流阈值，K 个 worker 并发消费）
+    queue_small: asyncio.Queue[Any] | None = None
+    #: 上传 worker 协程（大 1 个 + 小 K 个）
     workers: list[asyncio.Task[None]] = field(default_factory=list)
-    #: 正在上传的文件
+    #: 正在上传的文件（大文件通道——含全量同步）
     current: str = ""
+    #: 正在上传的文件（小文件通道）
+    current_small: str = ""
     #: 累计统计
     total_uploaded: int = 0
     total_failed: int = 0
     total_bytes: int = 0
+    #: 溢出暂存量（watch_manager 维护：队列满时暂存、空闲回灌）
+    overflow: int = 0
+    #: 真正被丢弃的文件数（队列与溢出暂存都满时）
+    dropped: int = 0
     #: 日志（环形）
     logs: list[str] = field(default_factory=list)
     #: 上次错误
@@ -137,9 +150,16 @@ class UploadRuntime:
             "task_id": self.task_id,
             "listening": self.listening,
             "current": self.current,
+            "current_small": self.current_small,
             "total_uploaded": self.total_uploaded,
             "total_failed": self.total_failed,
             "total_bytes": self.total_bytes,
+            # 双通道水位 + 溢出/丢弃（**可观测**——过去队列满只能靠
+            # 刷屏的丢弃日志感知，看不到积压程度）
+            "queue_large": self.queue_large.qsize() if self.queue_large else 0,
+            "queue_small": self.queue_small.qsize() if self.queue_small else 0,
+            "overflow": self.overflow,
+            "dropped": self.dropped,
             "logs": self.logs[-MAX_LOGS:],
             "error": self.error,
             "syncing": self.syncing,

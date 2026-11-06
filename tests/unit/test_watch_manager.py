@@ -25,18 +25,26 @@ def _clean_manager():
 
     watch_manager._WATCHERS.clear()
     watch_manager._WORKERS.clear()
-    watch_manager._QUEUES.clear()
+    watch_manager._QUEUES_LARGE.clear()
+    watch_manager._QUEUES_SMALL.clear()
     watch_manager._CONTEXTS.clear()
     watch_manager._SYNC_LOCKS.clear()
+    watch_manager._INFLIGHT.clear()
+    watch_manager._OVERFLOW.clear()
+    watch_manager._SMALL_GATES.clear()
     # 运行态是**全局**的（``_RUNTIMES``）——不清会跨用例串
     # （统计是累计值，上个用例传了几个，这个用例就带着）
     clear_all()
     yield
     watch_manager._WATCHERS.clear()
     watch_manager._WORKERS.clear()
-    watch_manager._QUEUES.clear()
+    watch_manager._QUEUES_LARGE.clear()
+    watch_manager._QUEUES_SMALL.clear()
     watch_manager._CONTEXTS.clear()
     watch_manager._SYNC_LOCKS.clear()
+    watch_manager._INFLIGHT.clear()
+    watch_manager._OVERFLOW.clear()
+    watch_manager._SMALL_GATES.clear()
     clear_all()
 
 
@@ -52,25 +60,41 @@ def _ctx(driver: FakeDriver, uploader: FakeUploader, root: Path) -> SyncContext:
 
 
 async def test_投递到队列(tmp_path: Path):
-    """dispatcher 把文件塞进队列。"""
-    queue: asyncio.Queue[Path] = asyncio.Queue(maxsize=10)
-    dispatch = watch_manager._make_dispatcher(1, queue)
+    """dispatcher 按大小把文件塞进对应通道的队列。"""
+    large: asyncio.Queue = asyncio.Queue(maxsize=10)
+    small: asyncio.Queue = asyncio.Queue(maxsize=10)
+    dispatch = watch_manager._make_dispatcher(
+        1, tmp_path, large, small, threshold=1024
+    )
 
-    await dispatch(tmp_path / "a.mkv")
+    await dispatch(tmp_path / "a.mkv", 5_000_000)  # ≥ 阈值 → 大文件通道
 
-    assert queue.qsize() == 1
-    assert queue.get_nowait().name == "a.mkv"
+    assert large.qsize() == 1
+    item = large.get_nowait()
+    assert item.path.name == "a.mkv"
+    assert item.size == 5_000_000
+    # 入队成功才登记「处理中」——同文件重复事件被去重
+    assert "a.mkv" in watch_manager._INFLIGHT[1]
 
 
-async def test_队列满时丢弃不阻塞(tmp_path: Path):
-    """队列满 → 丢弃并记日志（不阻塞监听）。"""
-    queue: asyncio.Queue[Path] = asyncio.Queue(maxsize=1)
-    dispatch = watch_manager._make_dispatcher(1, queue)
+async def test_队列满时溢出暂存不阻塞(tmp_path: Path):
+    """队列满 → 进溢出暂存（**不丢**），同文件重复事件不重复记。"""
+    large: asyncio.Queue = asyncio.Queue(maxsize=1)
+    small: asyncio.Queue = asyncio.Queue(maxsize=1)
+    dispatch = watch_manager._make_dispatcher(
+        1, tmp_path, large, small, threshold=1024
+    )
 
-    await dispatch(tmp_path / "a.mkv")
-    await dispatch(tmp_path / "b.mkv")  # 满了 → 丢弃
+    await dispatch(tmp_path / "a.mkv", 5_000_000)
+    await dispatch(tmp_path / "b.mkv", 5_000_000)  # 满 → 溢出暂存
+    await dispatch(tmp_path / "b.mkv", 5_000_000)  # 重复事件 → 暂存去重
 
-    assert queue.qsize() == 1
+    assert large.qsize() == 1
+    assert list(watch_manager._OVERFLOW[1]) == ["b.mkv"]
+    # 面板可见溢出量
+    from app.services.upload_tasks import get_runtime
+
+    assert get_runtime(1).overflow == 1
 
 
 async def test_worker处理文件(tmp_path: Path):
@@ -82,17 +106,17 @@ async def test_worker处理文件(tmp_path: Path):
     path = tmp_path / "a.mkv"
     path.write_bytes(b"x" * 100)
 
-    queue: asyncio.Queue[Path] = asyncio.Queue()
-    await queue.put(path)
+    queue: asyncio.Queue = asyncio.Queue()
+    await queue.put(watch_manager._Item(path=path, size=100))
 
-    worker = asyncio.create_task(
-        watch_manager._worker_loop(1, queue, ctx, 1)
-    )
+    worker = asyncio.create_task(watch_manager._worker_loop(1, queue, ctx))
     await asyncio.sleep(0.1)
     worker.cancel()
     await asyncio.gather(worker, return_exceptions=True)
 
     assert uploader.uploaded == [("a.mkv", 100)]
+    # 处理完移除「处理中」标记
+    assert "a.mkv" not in watch_manager._INFLIGHT.get(1, set())
 
 
 async def test_同步已存在则跳过(tmp_path: Path):
@@ -332,16 +356,17 @@ async def test_启动监听器会登记进_WATCHERS(tmp_path: Path, monkeypatch)
     assert watch_manager.get_watcher(42) is None
 
 
-async def test_只起一个worker(tmp_path: Path, monkeypatch):
-    """**回归测试**：光鸭上传**只能串行**——worker 必须只有 1 个。
+async def test_大文件通道恒单worker_小通道按并发数(tmp_path: Path, monkeypatch):
+    """**回归测试**：大文件通道必须**只有 1 个 worker**；小文件通道 = 任务
+    ``concurrency`` 列。
 
-    实测（prod 真实凭据）：光鸭 OSS 不支持并发上传——同一 uploadId 的
-    分片并发 2 即卡死（200s 无响应）；不同文件并发会
-    ``Server disconnected``，且总吞吐反而更低
-    （30MB x2 并发 2.40 MB/s < 串行 3.31 MB/s）。
+    大文件：光鸭上传**只能串行**——实测（prod 真实凭据）OSS 不支持并发
+    （同一 uploadId 分片并发 2 即卡死；不同文件并发 ``Server disconnected``
+    且总吞吐反而更低，30MB x2 并发 2.40 MB/s < 串行 3.31 MB/s），
+    见 ``docs/upload-bandwidth.md``。
 
-    故 ``concurrency`` 参数保留但不生效（面板可配，恒为 1）——
-    换网盘时改这一处即可。
+    小文件：<1MB 单 PUT 的耗时大头是协议开销（取凭证 + 轮询确认），
+    是实测唯一支持并发的路径——``concurrency`` 列的语义就此落地。
     """
     driver = FakeDriver()
     uploader = FakeUploader()
@@ -361,12 +386,23 @@ async def test_只起一个worker(tmp_path: Path, monkeypatch):
         name="测试并发",
     )
 
-    worker = watch_manager._WORKERS.get(77)
-    assert worker is not None, "没登记 worker"
-    assert not worker.done(), "worker 应在跑"
+    workers = watch_manager._WORKERS.get(77)
+    assert workers is not None, "没登记 worker"
+    # 1 个大文件 worker + 3 个小文件 worker
+    assert len(workers) == 1 + 3
+    assert all(not w.done() for w in workers)
+    # 双通道队列都注册了（面板读水位用）
+    assert 77 in watch_manager._QUEUES_LARGE
+    assert 77 in watch_manager._QUEUES_SMALL
+    assert watch_manager._SMALL_GATES[77].k == 3
 
     await watch_manager.stop_watcher(77)
     assert 77 not in watch_manager._WORKERS
+    assert 77 not in watch_manager._QUEUES_LARGE
+    assert 77 not in watch_manager._QUEUES_SMALL
+    assert 77 not in watch_manager._INFLIGHT
+    assert 77 not in watch_manager._OVERFLOW
+    assert 77 not in watch_manager._SMALL_GATES
 
 
 async def test_同步锁让全量同步与worker串行(tmp_path: Path):

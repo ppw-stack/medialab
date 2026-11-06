@@ -1,21 +1,39 @@
 """监听器管理器：把「监听 → 队列 → 上传」串成一条流水线。
 
-**一个任务一条流水线**：
+**一个任务两条通道**（2026-11-07 改造，原「一条流水线」）::
 
-```
-watchfiles.awatch(目录)
-    → 稳态判定（upload_filter.is_stable）
-    → asyncio.Queue（按路径去重）
-    → N 个 worker
-        → uploader.sync_file（比对 → 决策 → 传/删/跳过）
-```
+    watchfiles.awatch(目录)
+        → 稳态判定（upload_filter）
+        → 按文件大小分流（``upload_small_file_threshold``，默认 1MB）
+            ├─ 大文件队列 → 1 个 worker（**恒串行**）
+            └─ 小文件队列 → K 个 worker（K = 任务 ``concurrency`` 列）
+
+**为什么大文件恒串行**：瓶颈是**本机上行带宽**（~3.2 MB/s），
+并发换不来吞吐——单条 TCP 流已吃满上行，并发只是重新分配带宽，
+反而让服务端不稳（卡死 / ``Server disconnected``）。实测数据见
+``docs/upload-bandwidth.md``。这是**正确实现，不是待优化的遗留**。
+
+**为什么小文件可以并发**：小文件（<1MB 单 PUT，不分片）的耗时大头是
+**协议开销**——取上传凭证 + ``upload_info`` 轮询落盘确认，每个文件
+~2-3 秒，传字节占比 <15%。串行传 1000 个元数据文件要 25-50 分钟，
+带宽全程空闲；并发把轮询等待摊掉（收益 2-3 倍，受全局限速 5 req/s
+约束）。``<1MB 单 PUT`` 是实测**唯一支持并发**的上传路径。并发受
+:class:`_SmallGate` 动态调控：大文件上传中 / 服务端熔断时自动降为 1。
 
 **为什么用队列而不是直接传**：上传是慢 IO（几 MB 到几百 MB），
 多个文件同时变更时要排队，不能让监听协程卡在传输上。
 
-**为什么按路径去重**：同一文件可能连续触发多个事件。队列满了会**丢弃
-并计数**（而不是阻塞监听）——监听的职责是「不漏」，真漏了还有「立即
-全量同步」兜底。
+**为什么全局按路径去重**（:data:`_INFLIGHT`）：同一文件可能连续触发
+多个事件；更重要的是**同一文件绝不能被两个协程同时上传**——两边都
+比对出「云端没有」→ 都传 → 光鸭自动改名 ``xxx(1).bin``（实测行为）
+→ 云端垃圾副本灾难。事件流两条通道之间、事件流与全量同步之间，全靠
+这个集合互斥（原 ``_SYNC_LOCKS`` 只护大文件通道与全量同步，分流后
+小通道不持锁，必须另有闸门）。
+
+**队列满了怎么办**：不丢——进「溢出暂存」（:data:`_OVERFLOW`，按
+路径去重），worker 每处理完一个文件就把暂存回灌队列；只有暂存也满
+（:data:`_OVERFLOW_LIMIT`）才真丢并计数。「立即全量同步」仍是最后
+兜底（手动）。
 
 **生命周期**：进程内常驻协程（不是 APScheduler——本项目已移除调度模块）。
 启动时按 DB 拉起所有启用的任务；任务增删改时动态增删监听器。
@@ -24,6 +42,8 @@ watchfiles.awatch(目录)
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -37,7 +57,7 @@ from app.db.models import Driver
 from app.db.models import UploadTask as UploadTaskRow
 from app.db.session import session_scope
 from app.services.cloud_index import CloudDirIndex
-from app.services.upload_filter import aiter_local_files
+from app.services.upload_filter import aiter_local_files, relative_to_root, should_skip
 from app.services.upload_paths import resolve_watch_dir
 from app.services.upload_tasks import get_runtime
 from app.services.uploader import (
@@ -47,6 +67,7 @@ from app.services.uploader import (
     RESULT_UNCHANGED,
     RESULT_UPLOADED,
     SyncContext,
+    SyncOutcome,
     drain_cleanup_tasks,
     sync_file,
 )
@@ -57,24 +78,158 @@ logger = get_logger(__name__)
 #: 监听目录检查超时（秒）——挂载无响应时的兜底，避免 lifespan 卡死
 WATCH_DIR_RESOLVE_TIMEOUT_SEC = 15.0
 
+#: 小通道熔断：连续失败 N 次 → 降为串行 + 冷却
+#:
+#: ``Server disconnected`` / 卡死是实测的并发症状——连续失败大概率是
+#: 服务端扛不住，立即止损。
+_BREAKER_FAIL_STREAK = 3
+
+#: 熔断冷却（秒）
+_BREAKER_COOLDOWN_SEC = 60.0
+
+#: 熔断恢复：降级期间**连续成功** N 次才重新放开并发
+#: （防止「刚恢复就再次打挂服务端」的振荡）
+_BREAKER_RECOVER_SUCCESS = 10
+
+#: 溢出暂存上限（条）——超过才真丢（并计数）。暂存是内存 dict，
+#: 上限防的是「无限事件风暴」下的内存增长。
+_OVERFLOW_LIMIT = 5000
+
+#: 队列条目：路径 + 入队时的 size。
+#:
+#: size 是**分流依据**（稳态采样时已拿到，不二次 stat），也用于进度
+#: 显示；权威大小由 :func:`sync_file` 现场比对（同名+同大小=已同步）。
+@dataclass(slots=True)
+class _Item:
+    """一条待上传的稳态文件。"""
+
+    path: Path
+    size: int
+
+
+class _SmallGate:
+    """小文件通道的**动态并发闸**。
+
+    K 个 worker 常驻（K = 任务 ``concurrency`` 列），同一时刻最多
+    ``effective_limit()`` 个 worker 在传：
+
+    - **大文件上传中 → 1**：小文件的字节占比极小，但并发请求会与
+      大文件抢限速配额与带宽——保守起见让路（大文件传完立即恢复 K）。
+    - **熔断 → 1 + 冷却**：连续失败 3 次 → 冷却 60s（期间串行）；
+      冷却结束后**仍是串行**，连续成功 10 次才重新放开并发——
+      避免「刚恢复就再次打挂服务端」的振荡。
+
+    实现用 ``asyncio.Condition`` + 定时重查：冷却到期**没有人 notify**
+    （没有定时器），靠 0.5s 的 ``wait_for`` 超时兜底唤醒重查。
+    """
+
+    def __init__(self, k: int) -> None:
+        self._cond = asyncio.Condition()
+        #: 静态并发上限（任务 concurrency 列）
+        self.k = max(1, int(k))
+        #: 大文件正在上传（大文件 worker 置位 / 复位）
+        self.big_active = False
+        #: 熔断降级中（连续成功达标后解除）
+        self.derated = False
+        #: 熔断冷却截止时刻（monotonic 秒）
+        self.resume_at = 0.0
+        #: 连续失败计数（成功清零）
+        self.fail_streak = 0
+        #: 降级期间的连续成功计数
+        self.success_streak = 0
+        #: 当前持闸的 worker 序号
+        self._active: set[int] = set()
+
+    def effective_limit(self) -> int:
+        """当前允许的并发数。"""
+        if time.monotonic() < self.resume_at:
+            return 1  # 冷却中
+        if self.derated:
+            return 1  # 熔断恢复期，先串行观察
+        if self.big_active:
+            return 1  # 大文件上传中，让路
+        return self.k
+
+    async def acquire(self, ordinal: int) -> None:
+        """占一个并发名额（满了就等：被 notify 或 0.5s 超时后重查）。"""
+        async with self._cond:
+            while len(self._active) >= self.effective_limit():
+                # 冷却到期 / 限值变化没人 notify——0.5s 超时兜底唤醒重查
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._cond.wait(), timeout=0.5)
+            self._active.add(ordinal)
+
+    async def release(self, ordinal: int) -> None:
+        """归还并发名额并唤醒等待者。"""
+        async with self._cond:
+            self._active.discard(ordinal)
+            self._cond.notify_all()
+
+    async def set_big_active(self, active: bool) -> None:
+        """大文件上传开始 / 结束（大文件 worker 调）。"""
+        async with self._cond:
+            self.big_active = active
+            self._cond.notify_all()
+
+    def record_failure(self) -> bool:
+        """记录一次失败。返回是否**触发熔断**。"""
+        self.fail_streak += 1
+        if self.fail_streak < _BREAKER_FAIL_STREAK:
+            return False
+        self.fail_streak = 0
+        self.derated = True
+        self.success_streak = 0
+        self.resume_at = time.monotonic() + _BREAKER_COOLDOWN_SEC
+        return True
+
+    def record_success(self) -> None:
+        """记录一次成功（失败计数清零；降级期间攒够连续成功就恢复并发）。"""
+        self.fail_streak = 0
+        if self.derated:
+            self.success_streak += 1
+            if self.success_streak >= _BREAKER_RECOVER_SUCCESS:
+                self.derated = False
+                self.success_streak = 0
+
+
 #: 活跃的监听器：task_id → Watcher
 _WATCHERS: dict[int, Watcher] = {}
 
-#: 活跃的上传 worker：task_id → asyncio.Task
-_WORKERS: dict[int, asyncio.Task[None]] = {}
+#: 活跃的上传 worker：task_id → [大文件 worker ×1, 小文件 worker ×K]
+_WORKERS: dict[int, list[asyncio.Task[None]]] = {}
 
-#: 活跃的队列：task_id → asyncio.Queue
-_QUEUES: dict[int, asyncio.Queue[Path]] = {}
+#: 大文件队列：task_id → asyncio.Queue
+_QUEUES_LARGE: dict[int, asyncio.Queue[_Item]] = {}
+
+#: 小文件队列：task_id → asyncio.Queue
+_QUEUES_SMALL: dict[int, asyncio.Queue[_Item]] = {}
 
 #: 每个任务的上传上下文（``sync_now`` 要用同一个，否则缓存不共享）
 _CONTEXTS: dict[int, SyncContext] = {}
 
-#: 每个任务的**同步锁**：全量同步与事件流 worker 互斥（串行）。
+#: 全局「处理中」集合：task_id → {相对路径}
 #:
-#: **为什么需要**：全量同步与事件流共享同一个 ``CloudDirIndex`` + 队列。
+#: **同一文件同一时刻只允许一个协程处理**——dispatch 入队成功时登记、
+#: worker 处理完移除、全量同步扫到「在队」的文件时跳过。
+_INFLIGHT: dict[int, set[str]] = {}
+
+#: 溢出暂存：task_id → {相对路径: (路径, 大小)}——队列满时先进这里
+_OVERFLOW: dict[int, dict[str, tuple[Path, int]]] = {}
+
+#: 小通道动态并发闸：task_id → _SmallGate
+_SMALL_GATES: dict[int, _SmallGate] = {}
+
+#: 每个任务的**同步锁**：全量同步与大文件通道互斥（串行）。
+#:
+#: **为什么需要**：全量同步与大文件通道共享同一个 ``CloudDirIndex``。
 #: 并行跑虽靠幂等判据不会传重，但 ``runtime.current`` 会互相覆盖、
 #: 日志交错难读、CIFS 删除集中爆发会拖慢响应。串行后：全量同步跑时
-#: worker 等它结束再处理队列里积压的新事件——新文件不会被漏，只是延后。
+#: 大文件 worker 等它结束再处理队列里积压的新事件——新文件不会被漏，
+#: 只是延后。
+#:
+#: **小文件通道不持锁**——小通道与全量同步/大文件通道的「同文件双传」
+#: 防护由 :data:`_INFLIGHT` 承担（更精确：按路径而非按通道互斥），
+#: 不互斥才能在大文件上传的几十分钟里持续泄洪小文件。
 _SYNC_LOCKS: dict[int, asyncio.Lock] = {}
 
 #: 正在跑的全量同步任务：task_id → asyncio.Task
@@ -104,7 +259,7 @@ def get_watcher(task_id: int) -> Watcher | None:
 
 
 def active_task_ids() -> list[int]:
-    """正在监听的��务 id。"""
+    """正在监听的任务 id。"""
     return sorted(_WATCHERS.keys())
 
 
@@ -172,7 +327,7 @@ async def start_watcher(
     name: str = "",
     delete_after_upload: bool = False,
 ) -> Watcher:
-    """为一个任务启动监听器 + 上传 worker。
+    """为一个任务启动监听器 + 上传 worker（大文件 ×1 + 小文件 ×K）。
 
     Raises:
         DriverError: 存储源不可用 / 凭据缺失。
@@ -181,6 +336,7 @@ async def start_watcher(
     await stop_watcher(task_id)
 
     settings = get_settings()
+    threshold = settings.upload_small_file_threshold
     # ⚠️ **放线程池 + 加超时**：
     # 1) ``resolve_watch_dir`` 会 ``resolve()`` + ``is_dir()``，都是同步
     #    stat——监听根在 CIFS 上时，挂载卡死会让它**无限等待**；
@@ -201,11 +357,20 @@ async def start_watcher(
 
     driver, uploader = await _build_clients(driver_id)
 
-    queue: asyncio.Queue[Path] = asyncio.Queue(
+    queue_large: asyncio.Queue[_Item] = asyncio.Queue(
         maxsize=settings.upload_queue_maxsize
     )
-    _QUEUES[task_id] = queue
-    # 同步锁：全量同步与事件流 worker 互斥（串行），见 _SYNC_LOCKS 注释
+    queue_small: asyncio.Queue[_Item] = asyncio.Queue(
+        maxsize=settings.upload_queue_maxsize
+    )
+    _QUEUES_LARGE[task_id] = queue_large
+    _QUEUES_SMALL[task_id] = queue_small
+    _INFLIGHT[task_id] = set()
+    _OVERFLOW[task_id] = {}
+    # 小通道动态并发闸：大文件上传中 / 熔断时自动降为 1
+    gate = _SmallGate(concurrency)
+    _SMALL_GATES[task_id] = gate
+    # 同步锁：全量同步与大文件通道互斥（串行），见 _SYNC_LOCKS 注释
     _SYNC_LOCKS[task_id] = asyncio.Lock()
 
     watcher = Watcher(
@@ -215,7 +380,9 @@ async def start_watcher(
         poll_ms=settings.upload_watch_poll_ms,
         debounce_ms=settings.upload_watch_debounce_ms,
         stable_check_sec=settings.upload_stable_check_sec,
-        dispatch=_make_dispatcher(task_id, queue),
+        dispatch=_make_dispatcher(
+            task_id, watch_dir, queue_large, queue_small, threshold
+        ),
     )
     # **必须登记进 ``_WATCHERS``**——``get_watcher`` / ``sync_now`` /
     # ``stop_all`` 都查它。只放进 ``runtime.watcher`` 的话，
@@ -224,14 +391,18 @@ async def start_watcher(
 
     runtime = get_runtime(task_id)
     runtime.watcher = watcher
-    runtime.queue = queue
+    runtime.queue_large = queue_large
+    runtime.queue_small = queue_small
     runtime.listening = True
     runtime.error = None
-    runtime.log(f"开始监听：{watch_dir}（{name or task_id}）")
+    runtime.log(
+        f"开始监听：{watch_dir}（{name or task_id}）；"
+        f"分流阈值 {threshold} 字节，小通道并发 {max(1, concurrency)}"
+    )
 
     await watcher.start()
 
-    # 上传 worker
+    # 上传上下文
     ctx = SyncContext(
         driver=driver,
         uploader=uploader,
@@ -243,8 +414,26 @@ async def start_watcher(
         delete_local=delete_after_upload,
     )
     _CONTEXTS[task_id] = ctx
-    worker = asyncio.create_task(_worker_loop(task_id, queue, ctx, concurrency))
-    _WORKERS[task_id] = worker
+
+    # 大文件通道：**恒 1 个 worker**——光鸭上传只能串行（实测见
+    # ``docs/upload-bandwidth.md``），不是待优化的遗留。
+    workers: list[asyncio.Task[None]] = [
+        asyncio.create_task(_worker_loop(task_id, queue_large, ctx, gate=gate))
+    ]
+    # 小文件通道：K 个 worker（K = 任务 ``concurrency`` 列）。
+    # K=1 时与大文件同款串行行为；并发受 _SmallGate 动态调控。
+    # ``concurrency`` 列的语义就此落地——面板上的「同时进行的上传数」
+    # 实际控制的是小文件通道。
+    for ordinal in range(max(1, concurrency)):
+        workers.append(
+            asyncio.create_task(
+                _small_worker_loop(
+                    task_id, queue_small, ctx, ordinal=ordinal, gate=gate
+                )
+            )
+        )
+    _WORKERS[task_id] = workers
+    runtime.workers = workers
 
     # **启动时先跑一次全量同步**——把监听目录里**已有的历史文件**同步上去。
     #
@@ -287,7 +476,7 @@ async def _initial_sync(task_id: int) -> None:
 
 
 async def stop_watcher(task_id: int) -> None:
-    """停止某个任务的监听器 + worker + **正在跑的全量同步**。
+    """停止某个任务的监听器 + 全部 worker + **正在跑的全量同步**。
 
     **全量同步也必须停**：``sync_now`` 是独立协程（不由 worker 执行），
     停监听器**不会**停它——曾经「停用任务」后上传还在继续（用户以为停了，
@@ -296,10 +485,11 @@ async def stop_watcher(task_id: int) -> None:
     watcher = _WATCHERS.pop(task_id, None)
     if watcher is not None:
         await watcher.stop()
-    worker = _WORKERS.pop(task_id, None)
-    if worker is not None:
+    workers = _WORKERS.pop(task_id, None)
+    for worker in workers or []:
         worker.cancel()
-        await asyncio.gather(worker, return_exceptions=True)
+    if workers:
+        await asyncio.gather(*workers, return_exceptions=True)
     # 取消正在跑的全量同步（停用任务时必须真的停）
     sync_task = _SYNC_TASKS.pop(task_id, None)
     if sync_task is not None:
@@ -308,27 +498,113 @@ async def stop_watcher(task_id: int) -> None:
     # 等后台删除完成（停机时保证「本地文件状态确定」——不留「以为删了
     # 其实还在」的中间态）。删除是异步的，可能还在跑。
     await drain_cleanup_tasks(wait_sec=20.0)
-    _QUEUES.pop(task_id, None)
+    _QUEUES_LARGE.pop(task_id, None)
+    _QUEUES_SMALL.pop(task_id, None)
     _CONTEXTS.pop(task_id, None)
     _SYNC_LOCKS.pop(task_id, None)
+    _INFLIGHT.pop(task_id, None)
+    _OVERFLOW.pop(task_id, None)
+    _SMALL_GATES.pop(task_id, None)
     runtime = get_runtime(task_id)
     runtime.listening = False
     runtime.watcher = None
-    runtime.queue = None
+    runtime.queue_large = None
+    runtime.queue_small = None
+    runtime.current = ""
+    runtime.current_small = ""
+    runtime.overflow = 0
     runtime.syncing = False
 
 
-def _make_dispatcher(task_id: int, queue: asyncio.Queue[Path]) -> Any:
-    """构造投递回调（把稳态文件塞进队列）。"""
+def _make_dispatcher(
+    task_id: int,
+    root: Path,
+    large_queue: asyncio.Queue[_Item],
+    small_queue: asyncio.Queue[_Item],
+    threshold: int,
+) -> Any:
+    """构造投递回调：把稳态文件**按大小分流**进两条队列。
 
-    async def _dispatch(path: Path) -> None:
+    **去重与登记的顺序不能反**：查 ``_INFLIGHT`` → 入队 → 登记。
+    检查、``put_nowait``、登记之间**没有 await**（全是同步调用）——
+    asyncio 单线程下是原子的，不会出现「两个协程同时通过检查」。
+
+    **队列满不丢**：进溢出暂存（:func:`_stash_overflow`），等 worker
+    空闲回灌（:func:`_drain_overflow`）。
+    """
+
+    async def _dispatch(path: Path, size: int) -> None:
+        rel = relative_to_root(path, root)
+        inflight = _INFLIGHT.setdefault(task_id, set())
+        if rel in inflight:
+            # 同一路径已在队列 / 处理中（重复事件）——静默去重。
+            # 这就是模块文档说的「按路径去重」：过去只在稳态判定层
+            # 有效，队列层面同一文件可能占多个坑。
+            return
+        queue = small_queue if size < threshold else large_queue
         try:
-            queue.put_nowait(path)
+            queue.put_nowait(_Item(path=path, size=size))
         except asyncio.QueueFull:
-            runtime = get_runtime(task_id)
-            runtime.log(f"⚠️ 上传队列已满，丢弃：{path.name}")
+            _stash_overflow(task_id, rel, path, size)
+            return
+        inflight.add(rel)
 
     return _dispatch
+
+
+def _stash_overflow(task_id: int, rel: str, path: Path, size: int) -> None:
+    """队列满 → 溢出暂存（按路径去重，不阻塞监听）。
+
+    同一路径已在暂存里就不重复记日志——事件风暴时**一行日志刷一遍**
+    会把 300 行环形日志冲光（这正是 2026-11-07 生产「一直报错」的观感
+    来源）。
+    """
+    runtime = get_runtime(task_id)
+    box = _OVERFLOW.setdefault(task_id, {})
+    if rel in box:
+        return
+    if len(box) >= _OVERFLOW_LIMIT:
+        runtime.dropped += 1
+        runtime.log(
+            f"⚠️ 溢出暂存已满（{_OVERFLOW_LIMIT}），丢弃：{path.name}"
+            f"（累计丢 {runtime.dropped}；可稍后「立即全量同步」补齐）"
+        )
+        return
+    box[rel] = (path, size)
+    runtime.overflow = len(box)
+    runtime.log(f"⏸ 队列已满，溢出暂存：{rel}（待空闲自动回灌，暂存 {len(box)}）")
+
+
+def _drain_overflow(task_id: int) -> None:
+    """把溢出暂存回灌队列（worker 每处理完一个文件调一次）。
+
+    **纯同步**（无 await）——在 worker 的 finally 里调用，不打断消费
+    节奏。队列仍满就留着下次（``break``）；路径已在处理中（如全量同步
+    接手）的暂存份直接作废——它会被活着的协程传上去，暂存份是重复的。
+    """
+    box = _OVERFLOW.get(task_id)
+    if not box:
+        return
+    threshold = get_settings().upload_small_file_threshold
+    large_queue = _QUEUES_LARGE.get(task_id)
+    small_queue = _QUEUES_SMALL.get(task_id)
+    inflight = _INFLIGHT.setdefault(task_id, set())
+    for rel in list(box):
+        if rel in inflight:
+            del box[rel]
+            continue
+        path, size = box[rel]
+        queue = small_queue if size < threshold else large_queue
+        if queue is None:
+            continue  # 通道已随任务停止——留给 stop_watcher 清理
+        try:
+            queue.put_nowait(_Item(path=path, size=size))
+        except asyncio.QueueFull:
+            break  # 还满——下次再试
+        del box[rel]
+        inflight.add(rel)
+    runtime = get_runtime(task_id)
+    runtime.overflow = len(box)
 
 
 async def _build_clients(driver_id: int) -> tuple[Any, Any]:
@@ -366,30 +642,98 @@ async def _build_clients(driver_id: int) -> tuple[Any, Any]:
 
 async def _worker_loop(
     task_id: int,
-    queue: asyncio.Queue[Path],
+    queue: asyncio.Queue[_Item],
     ctx: SyncContext,
-    concurrency: int,
+    *,
+    gate: _SmallGate | None = None,
 ) -> None:
-    """上传 worker 主循环（一个任务一个协程，内部串行处理）。
+    """大文件 worker 主循环（每任务**恒 1 个**，内部串行）。
 
-    **为什么内部串行**：瓶颈是**本机上行带宽**（~3.2 MB/s），
+    **为什么恒 1 个**：瓶颈是**本机上行带宽**（~3.2 MB/s），
     并发换不来吞吐——单条 TCP 流已吃满上行，并发只是重新分配带宽，
     反而让服务端不稳（卡死 / ``Server disconnected``）。实测数据见
     ``docs/upload-bandwidth.md``。
 
-    **故 ``concurrency`` 参数保留但不生效**（面板上仍可配，但恒为 1）——
-    留着是为了将来换网盘（别的网盘支持并发时改这一处即可）。
+    **降档信号**：大文件开始上传时置位闸的 ``big_active``——小文件通道
+    自动降为 1，给大文件让路；传完复位。
     """
     while True:
-        path = await queue.get()
+        item = await queue.get()
         try:
-            await _process_one(task_id, ctx, path)
+            if gate is not None:
+                await gate.set_big_active(True)
+            try:
+                await _process_one(
+                    task_id, ctx, item.path, size=item.size, lane="large"
+                )
+            finally:
+                if gate is not None:
+                    await gate.set_big_active(False)
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("上传处理异常：%s", path)
+            logger.exception("上传处理异常：%s", item.path)
         finally:
             queue.task_done()
+            _drain_overflow(task_id)
+
+
+async def _small_worker_loop(
+    task_id: int,
+    queue: asyncio.Queue[_Item],
+    ctx: SyncContext,
+    *,
+    ordinal: int,
+    gate: _SmallGate | None = None,
+) -> None:
+    """小文件 worker 主循环（K 个，K = 任务 ``concurrency`` 列）。
+
+    并发受 :class:`_SmallGate` 动态调控（大文件上传中 / 熔断 → 1）。
+    **不持** ``_SYNC_LOCKS``——「同文件双传」防护由 :data:`_INFLIGHT`
+    承担；与全量同步/大文件通道并行正是双通道的意义（大文件一传
+    几十分钟，小文件不能陪绑）。
+    """
+    while True:
+        item = await queue.get()
+        try:
+            if gate is not None:
+                await gate.acquire(ordinal)
+            try:
+                outcome = await _process_one(
+                    task_id,
+                    ctx,
+                    item.path,
+                    size=item.size,
+                    use_lock=False,
+                    lane="small",
+                )
+            finally:
+                if gate is not None:
+                    await gate.release(ordinal)
+            if gate is not None and outcome is not None:
+                _record_breaker(task_id, gate, outcome)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("上传处理异常：%s", item.path)
+        finally:
+            queue.task_done()
+            _drain_overflow(task_id)
+
+
+def _record_breaker(task_id: int, gate: _SmallGate, outcome: SyncOutcome) -> None:
+    """把单文件结果喂给熔断器（小文件 worker 专用）。"""
+    if outcome.status != RESULT_FAILED:
+        gate.record_success()
+        return
+    if gate.record_failure():
+        runtime = get_runtime(task_id)
+        runtime.log(
+            f"⚠️ 小文件通道连续失败 {_BREAKER_FAIL_STREAK} 次，"
+            f"熔断降为串行（冷却 {_BREAKER_COOLDOWN_SEC:.0f}s，"
+            f"之后连续成功 {_BREAKER_RECOVER_SUCCESS} 次才恢复并发）"
+        )
+        runtime.log(f"   触发失败：{outcome.rel_path}（{outcome.reason}）")
 
 
 def _make_progress(runtime: Any, rel_path: str, total_size: int) -> Any:
@@ -412,75 +756,104 @@ def _make_progress(runtime: Any, rel_path: str, total_size: int) -> Any:
     return _on_progress
 
 
-async def _process_one(task_id: int, ctx: SyncContext, path: Path) -> None:
-    """处理一个文件（比对 → 决策 → 传）。"""
-    from app.services.upload_filter import relative_to_root, should_skip
+async def _process_one(
+    task_id: int,
+    ctx: SyncContext,
+    path: Path,
+    *,
+    size: int = -1,
+    use_lock: bool = True,
+    lane: str = "large",
+) -> SyncOutcome | None:
+    """处理一个文件（比对 → 决策 → 传）。
 
+    Args:
+        size: 入队时采到的文件大小。**只用于进度显示**——权威大小由
+            :func:`sync_file` 现场比对。<0 = 现场采（放线程池，CIFS 规则）。
+        use_lock: 是否持 ``_SYNC_LOCKS``——大文件通道与全量同步互斥；
+            小文件通道不持（见 :data:`_INFLIGHT` 注释）。
+        lane: ``large`` / ``small``——决定写哪个「正在上传」字段。
+
+    Returns:
+        同步结果；被过滤等提前返回时为 ``None``。
+    """
     runtime = get_runtime(task_id)
-
-    reason = should_skip(path, root=ctx.root)
-    if reason is not None:
-        runtime.log(f"⏭️ 跳过 {path.name}（{reason}）")
-        return
-
     rel_path = relative_to_root(path, ctx.root)
-    runtime.current = rel_path
+    inflight = _INFLIGHT.setdefault(task_id, set())
     try:
-        file_size = path.stat().st_size
-    except OSError:
-        file_size = 0
+        reason = should_skip(path, root=ctx.root)
+        if reason is not None:
+            runtime.log(f"⏭️ 跳过 {path.name}（{reason}）")
+            return None
 
-    # **与全量同步互斥**：同一时刻只有一个协程调 sync_file。
-    # 全量同步跑时 worker 在此等待——新事件不丢，只是延后处理。
-    # ``lock`` 可能为 None（测试环境直接调本函数，未走 start_watcher）→
-    # 退化为不互斥（测试本就是单协程串行）。
-    lock = _SYNC_LOCKS.get(task_id)
-    if lock is not None:
-        async with lock:
+        if lane == "small":
+            runtime.current_small = rel_path
+        else:
+            runtime.current = rel_path
+        if size < 0:
+            # ⚠️ **放线程池**：监听根在 CIFS 上，挂载卡死时同步 stat
+            # 会无限等待并卡死整个事件循环（2026-11-06 prod 事故）。
+            try:
+                stat = await asyncio.to_thread(path.stat)
+                file_size = stat.st_size
+            except OSError:
+                file_size = 0
+        else:
+            file_size = size
+
+        # **大文件通道与全量同步互斥**：同一时刻只有一个协程调 sync_file。
+        # 全量同步跑时 worker 在此等待——新事件不丢，只是延后处理。
+        # ``lock`` 可能为 None（测试环境直接调本函数，未走 start_watcher）→
+        # 退化为不互斥（测试本就是单协程串行）。
+        lock = _SYNC_LOCKS.get(task_id) if use_lock else None
+        if lock is not None:
+            async with lock:
+                outcome = await sync_file(
+                    ctx,
+                    path,
+                    rel_path,
+                    on_progress=_make_progress(runtime, rel_path, file_size),
+                )
+        else:
             outcome = await sync_file(
                 ctx,
                 path,
                 rel_path,
                 on_progress=_make_progress(runtime, rel_path, file_size),
             )
-    else:
-        outcome = await sync_file(
-            ctx,
-            path,
-            rel_path,
-            on_progress=_make_progress(runtime, rel_path, file_size),
-        )
 
-    if outcome.status == RESULT_UPLOADED:
-        runtime.total_uploaded += 1
-        runtime.total_bytes += outcome.size
-        note = "（本地删除中）" if outcome.local_deleted else ""
-        if outcome.reason:
-            note = f"（{outcome.reason}）"
-        runtime.log(
-            f"✅ 已上传：{rel_path}（{outcome.size / 1024**2:.1f} MB）{note}"
-        )
-    elif outcome.status == RESULT_OVERWRITTEN:
-        runtime.total_uploaded += 1
-        runtime.total_bytes += outcome.size
-        note = "（本地删除中）" if outcome.local_deleted else ""
-        if outcome.reason:
-            note = f"（{outcome.reason}）"
-        runtime.log(
-            f"♻️ 已覆盖：{rel_path}（{outcome.size / 1024**2:.1f} MB）{note}"
-        )
-    elif outcome.status == RESULT_UNCHANGED:
-        note = "（本地删除中）" if outcome.local_deleted else (
-            f"（{outcome.reason}）" if outcome.reason else ""
-        )
-        runtime.log(f"⏭️ 已存在：{rel_path}{note}")
-    elif outcome.status == RESULT_CONFLICT:
-        runtime.total_failed += 1
-        runtime.log(f"⚠️ 冲突：{rel_path}（{outcome.reason}）")
-    elif outcome.status == RESULT_FAILED:
-        runtime.total_failed += 1
-        runtime.log(f"❌ 失败：{rel_path}（{outcome.reason}）")
-    runtime.current = ""
+        if outcome.status == RESULT_UPLOADED:
+            runtime.total_uploaded += 1
+            runtime.total_bytes += outcome.size
+            note = "（本地删除中）" if outcome.local_deleted else ""
+            if outcome.reason:
+                note = f"（{outcome.reason}）"
+            runtime.log(
+                f"✅ 已上传：{rel_path}（{outcome.size / 1024**2:.1f} MB）{note}"
+            )
+        elif outcome.status == RESULT_OVERWRITTEN:
+            runtime.total_uploaded += 1
+            runtime.total_bytes += outcome.size
+            note = "（本地删除中）" if outcome.local_deleted else ""
+            if outcome.reason:
+                note = f"（{outcome.reason}）"
+            runtime.log(
+                f"♻️ 已覆盖：{rel_path}（{outcome.size / 1024**2:.1f} MB）{note}"
+            )
+        elif outcome.status == RESULT_UNCHANGED:
+            note = "（本地删除中）" if outcome.local_deleted else (
+                f"（{outcome.reason}）" if outcome.reason else ""
+            )
+            runtime.log(f"⏭️ 已存在：{rel_path}{note}")
+        elif outcome.status == RESULT_CONFLICT:
+            runtime.total_failed += 1
+            runtime.log(f"⚠️ 冲突：{rel_path}（{outcome.reason}）")
+        elif outcome.status == RESULT_FAILED:
+            runtime.total_failed += 1
+            runtime.log(f"❌ 失败：{rel_path}（{outcome.reason}）")
+        return outcome
+    finally:
+        inflight.discard(rel_path)
 
 
 async def sync_now(task_id: int) -> dict[str, Any]:
@@ -522,6 +895,11 @@ async def _sync_now_inner(task_id: int, runtime: Any, watcher: Any) -> dict[str,
 
     **边扫描边同步**：文件边扫边传，不等扫描全部结束——
     CIFS 上扫描可能要几小时，等扫完再传等于用户几小时看不到动静。
+
+    **与事件流互斥靠 ``_INFLIGHT``**：扫描到「已在队列 / 处理中」的
+    文件直接跳过（它会被对应通道传上去）；反之事件 dispatch 也会因
+    全量同步正在传而跳过。**没有这层互斥，同一文件会被两边同时上传**
+    ——光鸭同名上传自动改名，产出 ``xxx(1).bin`` 垃圾副本（实测行为）。
     """
     runtime.syncing = True
     runtime.log("开始全量同步…")
@@ -533,40 +911,57 @@ async def _sync_now_inner(task_id: int, runtime: Any, watcher: Any) -> dict[str,
         uploaded = overwritten = unchanged = failed = conflicts = 0
         total_bytes = 0
         deleted_local = 0
+        skipped_inflight = 0
         # **与事件流 worker 互斥**：同一时刻只有一个协程调 sync_file。
-        # 全量同步跑时 worker 在 _process_one 里等锁——新事件不丢，只是延后。
+        # 全量同步跑时大文件 worker 在 _process_one 里等锁——新事件不丢，
+        # 只是延后。小文件通道不持锁（靠 _INFLIGHT 防重传）。
         # ``lock`` 可能为 None（测试环境直接调本函数，未走 start_watcher）→
         # 退化为不互斥（测试本就是单协程串行）。
         lock = _SYNC_LOCKS.get(task_id)
+        inflight = _INFLIGHT.setdefault(task_id, set())
+        overflow_box = _OVERFLOW.setdefault(task_id, {})
         index = 0
         async for path in aiter_local_files(
             watcher.root, include_subdirs=watcher.include_subdirs
         ):
             index += 1
             rel = watcher.relative(path)
+            # **在传的文件跳过**——对应的通道正在处理，这里再传一遍就是
+            # 「同文件双传」（见模块 docstring 的 xxx(1).bin 事故）。
+            if rel in inflight:
+                skipped_inflight += 1
+                runtime.log(f"⏭️ [{index}] 跳过（事件队列处理中）：{rel}")
+                continue
+            inflight.add(rel)
+            overflow_box.pop(rel, None)  # 全量同步接手 → 溢出暂存里那份作废
             runtime.current = rel
             # **每个文件都记一行** —— 大文件上传要几分钟，没有进度
             # 用户会以为卡死了。格式与事件驱动的路径一致。
             runtime.log(f"⏳ [{index}] 处理中：{rel}")
             try:
-                file_size = path.stat().st_size
-            except OSError:
-                file_size = 0
-            if lock is not None:
-                async with lock:
+                # ⚠️ **放线程池**：CIFS 规则（挂载卡死时同步 stat 无限等待）。
+                try:
+                    stat = await asyncio.to_thread(path.stat)
+                    file_size = stat.st_size
+                except OSError:
+                    file_size = 0
+                if lock is not None:
+                    async with lock:
+                        outcome = await sync_file(
+                            ctx,
+                            path,
+                            rel,
+                            on_progress=_make_progress(runtime, rel, file_size),
+                        )
+                else:
                     outcome = await sync_file(
                         ctx,
                         path,
                         rel,
                         on_progress=_make_progress(runtime, rel, file_size),
                     )
-            else:
-                outcome = await sync_file(
-                    ctx,
-                    path,
-                    rel,
-                    on_progress=_make_progress(runtime, rel, file_size),
-                )
+            finally:
+                inflight.discard(rel)
             if outcome.local_deleted:
                 deleted_local += 1
             if outcome.status == RESULT_UPLOADED:
@@ -614,6 +1009,7 @@ async def _sync_now_inner(task_id: int, runtime: Any, watcher: Any) -> dict[str,
             f"全量同步完成：共 {index} 个文件，上传 {uploaded}，覆盖 {overwritten}，"
             f"已存在 {unchanged}，失败 {failed}，冲突 {conflicts}"
             + (f"，本地已安排删除 {deleted_local}" if deleted_local else "")
+            + (f"，在传跳过 {skipped_inflight}" if skipped_inflight else "")
         )
         return {
             "uploaded": uploaded,
@@ -623,6 +1019,7 @@ async def _sync_now_inner(task_id: int, runtime: Any, watcher: Any) -> dict[str,
             "conflicts": conflicts,
             "deleted_local": deleted_local,
             "uploaded_bytes": total_bytes,
+            "skipped_inflight": skipped_inflight,
         }
     finally:
         runtime.syncing = False

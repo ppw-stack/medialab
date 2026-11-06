@@ -45,7 +45,8 @@ class UploadTaskIn(BaseModel):
     enabled: bool = True
     #: 同步成功后清理本地文件（**破坏性**，默认关）
     delete_after_upload: bool = False
-    #: 同时进行的上传数
+    #: 小文件通道的并发数（大文件通道**恒串行**——光鸭上传只能串行，
+    #: 实测见 docs/upload-bandwidth.md；<1MB 单 PUT 是唯一支持并发的路径）
     concurrency: int = Field(default=1, ge=1, le=8)
     #: 光鸭目标目录路径（只读展示）
     target_path: str = Field(default="", max_length=1024)
@@ -85,9 +86,13 @@ class UploadTaskOut(BaseModel):
     #: 运行态（监听中？正在传什么？）
     listening: bool = False
     current: str = ""
+    #: 小文件通道正在上传的文件
+    current_small: str = ""
     total_uploaded: int = 0
     total_failed: int = 0
     total_bytes: int = 0
+    #: 真正被丢弃的文件数（队列与溢出暂存都满时；>0 应检查面板日志）
+    dropped: int = 0
     #: 运行态的最近一次错误（**监听启动失败等**）——面板据此提示
     runtime_error: str | None = None
 
@@ -109,9 +114,11 @@ def _to_out(row: UploadTaskView) -> UploadTaskOut:
         updated_at=row.updated_at,
         listening=row.listening,
         current=row.current,
+        current_small=row.current_small,
         total_uploaded=row.total_uploaded,
         total_failed=row.total_failed,
         total_bytes=row.total_bytes,
+        dropped=row.dropped,
         runtime_error=row.runtime_error,
     )
 

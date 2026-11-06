@@ -269,8 +269,20 @@ class AppSettings(BaseSettings):
     upload_delete_verify_retries: int = Field(default=10, ge=1, le=100)
     upload_delete_verify_delay_sec: float = Field(default=0.5, ge=0.05, le=30.0)
 
-    #: 单个上传任务的队列上限（待传文件数）。超出后新事件丢弃并计数
+    #: 单个上传任务的队列上限（待传文件数）。超出后进溢出暂存（不丢），
+    #: 暂存也满才真丢并计数
     upload_queue_maxsize: int = Field(default=1000, ge=1, le=100000)
+
+    #: 小/大文件**通道分流**阈值（字节）：size < 阈值 → 小文件通道
+    #: （可并发，K = 任务 concurrency 列）；≥ 阈值 → 大文件通道（恒串行）。
+    #: 0 = 全部走大文件通道。
+    #:
+    #: ⚠️ 与 ``guangya_upload.SMALL_FILE_THRESHOLD``（单 PUT vs 分片）是
+    #: **两回事**——这里是流水线分流语义，默认值对齐 1MB（实测 <1MB 单 PUT
+    #: 是唯一支持并发的上传路径，见 ``docs/upload-bandwidth.md``）。
+    upload_small_file_threshold: int = Field(
+        default=1024 * 1024, ge=0, le=1024 * 1024 * 1024
+    )
 
     # -- 优雅停机（FR-8.2）--
     shutdown_grace_seconds: int = 60

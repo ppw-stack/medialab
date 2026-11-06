@@ -23,11 +23,11 @@ def watcher(tmp_path: Path):
     **时钟可注入**——稳态判定依赖「距最后一次变化多久」，真实等待会让
     测试变慢且不稳定。故用假时钟手动推进。
     """
-    dispatched: list[Path] = []
+    dispatched: list[tuple[Path, int]] = []
     now = [1000.0]
 
-    async def _dispatch(path: Path) -> None:
-        dispatched.append(path)
+    async def _dispatch(path: Path, size: int) -> None:
+        dispatched.append((path, size))
 
     w = Watcher(
         root=tmp_path,
@@ -108,7 +108,8 @@ async def test_稳态后投递(watcher: Watcher, tmp_path: Path) -> None:
     await watcher._check_stable_once()
 
     assert watcher.stats.dispatched == 1
-    assert path in watcher.dispatched  # type: ignore[attr-defined]
+    # 投递带 size（分流依据）——稳态采样时的值
+    assert any(p == path and s == 10 for p, s in watcher.dispatched)  # type: ignore[attr-defined]
     assert path not in watcher._pending
 
 
