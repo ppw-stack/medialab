@@ -46,8 +46,6 @@ HEARTBEAT_INTERVAL_SEC = 5.0
 STALL_THRESHOLD_SEC = 10.0
 #: 挂载探活间隔（秒）
 PROBE_INTERVAL_SEC = 60.0
-#: 单次挂载探活超时（秒）——超过即判定 hang
-PROBE_TIMEOUT_SEC = 8.0
 #: py-spy 的候选路径（容器里手动装的版本不在 PATH 上）
 PYSPY_CANDIDATES = (
     "py-spy",
@@ -78,8 +76,6 @@ class _GuardState:
     loop: Any = None
     #: 最近一次心跳落地的时间（monotonic）
     last_beat: float = field(default_factory=time.monotonic)
-    #: 最近一次自动取证的 monotonic 时间（防重复 dump）
-    last_dump: float = 0.0
     #: 已对当前这次卡顿取证过（避免每轮都 dump）
     dumped_for_stall: bool = False
     mounts: dict[str, MountProbe] = field(default_factory=dict)
@@ -202,7 +198,6 @@ def _watchdog() -> None:
         if stalled_ms >= STALL_THRESHOLD_SEC * 1000:
             if not _state.dumped_for_stall:
                 _state.dumped_for_stall = True
-                _state.last_dump = time.monotonic()
                 threading.Thread(
                     target=_dump_stack,
                     args=(f"心跳滞后 {stalled_ms}ms",),

@@ -1278,7 +1278,7 @@ async function onVerifySms(): Promise<void> {
       smsError.value = res.message || "验证失败"
       return
     }
-        smsOk.value = true
+    smsOk.value = true
     message.success("登录成功")
     // 凭据换了 → 本地旧状态作废（合并逻辑会保留较新的本地状态，
     // 这里必须显式丢掉，否则旧账号的 uid 会显示到后台重探完成）
