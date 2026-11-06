@@ -20,6 +20,7 @@ from app.core.logging import get_logger
 from app.core.timeutils import bj_now
 from app.db.models import UploadTask as UploadTaskRow
 from app.db.session import session_scope
+from app.domain.upload_types import DEFAULT_UPLOAD_CONCURRENCY
 from app.services.upload_paths import PathGuardError, resolve_watch_dir
 
 logger = get_logger(__name__)
@@ -224,7 +225,7 @@ async def create_task(
     watch_root: str,
     include_subdirs: bool = True,
     enabled: bool = True,
-    concurrency: int = 1,
+    concurrency: int = DEFAULT_UPLOAD_CONCURRENCY,
     target_path: str = "",
     delete_after_upload: bool = False,
 ) -> UploadTaskRow:

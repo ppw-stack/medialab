@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.auth import require_session
+from app.domain.upload_types import DEFAULT_UPLOAD_CONCURRENCY
 from app.services import upload_tasks, watch_manager
 from app.services.upload_tasks import UploadTaskError, UploadTaskView
 
@@ -47,7 +48,9 @@ class UploadTaskIn(BaseModel):
     delete_after_upload: bool = False
     #: 小文件通道的并发数（大文件通道**恒串行**——光鸭上传只能串行，
     #: 实测见 docs/upload-bandwidth.md；<1MB 单 PUT 是唯一支持并发的路径）
-    concurrency: int = Field(default=1, ge=1, le=8)
+    concurrency: int = Field(
+        default=DEFAULT_UPLOAD_CONCURRENCY, ge=1, le=8
+    )
     #: 光鸭目标目录路径（只读展示）
     target_path: str = Field(default="", max_length=1024)
 

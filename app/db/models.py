@@ -45,6 +45,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.domain.enums import FreeType
+from app.domain.upload_types import DEFAULT_UPLOAD_CONCURRENCY
 
 __all__ = [
     "AppEnvSetting",
@@ -768,8 +769,11 @@ class UploadTask(Base):
     delete_after_upload: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False
     )
-    #: 同时进行的上传数
-    concurrency: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    #: 同时进行的上传数（**语义 = 小文件通道并发数**，大文件通道恒串行；
+    #: 默认值单一真源见 :data:`app.domain.upload_types.DEFAULT_UPLOAD_CONCURRENCY`）
+    concurrency: Mapped[int] = mapped_column(
+        Integer, default=DEFAULT_UPLOAD_CONCURRENCY, nullable=False
+    )
     created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
     updated_at: Mapped[str] = mapped_column(
         String(32), default=_bj_now, onupdate=_bj_now

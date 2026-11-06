@@ -269,6 +269,69 @@ async def test_adapter_value_migration_is_idempotent(db: None) -> None:
         assert all(r.adapter != "generic" for r in rows)
 
 
+async def test_backfill_upload_concurrency_is_idempotent(db: None) -> None:
+    """concurrency 占位值 1 → 4 的**一次性**回填。
+
+    - 占位行（1）→ 4；用户显式设过的其它值（8）不动
+    - 标记已写 → 再跑不改任何行（用户改回 1 也不会被覆盖）
+    """
+    from app.db.migrations import backfill_upload_concurrency
+    from app.db.models import Driver, UploadTask
+    from sqlalchemy import text
+
+    async with session_scope() as session:
+        driver = Driver(
+            name="d1", type="guangya", credential="{}", enabled=True,
+            created_at="2026-11-07 00:00:00", updated_at="2026-11-07 00:00:00",
+        )
+        session.add(driver)
+        await session.flush()
+        now = "2026-11-07 00:00:00"
+        session.add(
+            UploadTask(
+                name="占位任务", driver_id=driver.id, watch_root="/tmp/x",
+                concurrency=1, created_at=now, updated_at=now,
+            )
+        )
+        session.add(
+            UploadTask(
+                name="用户设过的任务", driver_id=driver.id, watch_root="/tmp/y",
+                concurrency=8, created_at=now, updated_at=now,
+            )
+        )
+        await session.flush()
+        # **重置 user_version**——fixture 起库时 create_all 已跑过一次回填
+        # （当时表还是空的，白把版本提到了 1）。归零 = 模拟「升级前的旧库」。
+        await session.execute(text("PRAGMA user_version = 0"))
+        await session.flush()
+
+    await backfill_upload_concurrency()
+
+    async with session_scope() as session:
+        rows = (await session.execute(select(UploadTask))).scalars().all()
+        by_name = {r.name: r.concurrency for r in rows}
+        assert by_name["占位任务"] == 4
+        assert by_name["用户设过的任务"] == 8
+
+    # 模拟用户显式改回 1，再跑回填 → **不能被覆盖**（一次性标记）
+    async with session_scope() as session:
+        row = (
+            await session.execute(
+                select(UploadTask).where(UploadTask.name == "占位任务")
+            )
+        ).scalar_one()
+        row.concurrency = 1
+    await backfill_upload_concurrency()
+
+    async with session_scope() as session:
+        row = (
+            await session.execute(
+                select(UploadTask).where(UploadTask.name == "占位任务")
+            )
+        ).scalar_one()
+        assert row.concurrency == 1
+
+
 async def test_backfill_discount_pct_is_idempotent(db: None) -> None:
     """discount_pct 回填跑两次结果一致（不重复覆盖已填值）。"""
     from app.db.migrations import backfill_discount_pct

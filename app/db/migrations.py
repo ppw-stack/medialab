@@ -29,14 +29,24 @@ from app.core.logging import get_logger
 from app.db.models import TorrentIndex
 from app.db.session import get_session_factory
 from app.domain.enums import FreeType
+from app.domain.upload_types import DEFAULT_UPLOAD_CONCURRENCY
 
 logger = get_logger(__name__)
 
 __all__ = [
     "ADAPTER_VALUE_MIGRATIONS",
     "backfill_discount_pct",
+    "backfill_upload_concurrency",
     "migrate_adapter_values",
 ]
+
+#: 「concurrency 占位值回填」完成后的 ``PRAGMA user_version`` 值。
+#:
+#: SQLite 官方的 schema 版本槽——**不占任何业务表**（曾考虑写
+#: ``app_env_settings`` kv 表，被「校验失败时 env 表必须零行」的
+#: 既有契约挡住；user_version 就是为一次性迁移而生的，且随 DB 文件
+#: 持久、对应用完全透明）。迁移按版本号递增：下一个一次性迁移用 2。
+_CONCURRENCY_BACKFILL_VERSION = 1
 
 
 # ---------------------------------------------------------------- 值迁移
@@ -110,6 +120,53 @@ def _extract_discount_pct_from_payload(payload: object) -> int | None:
             if c in ("thirtypercent", "30"):
                 return 30
     return None
+
+
+async def backfill_upload_concurrency() -> None:
+    """把 upload_tasks.concurrency 的旧占位值 1 回填为新默认（**一次性**）。
+
+    ``concurrency`` 列在双通道改造（2026-11-07）之前是「保留但不生效」
+    的占位参数——存量行里的值**从未表达过用户意图**。本回填把占位行
+    提到新默认 4（:data:`DEFAULT_UPLOAD_CONCURRENCY`），让存量任务
+    重启后**立刻**享受小文件并发泄洪。
+
+    **一次性靠 ``PRAGMA user_version``**（不是幂等重跑）：迁移系统是
+    「每次启动跑一遍」，而「1 → 4」不天然幂等——用户回填后**显式**
+    改回 1 是合法选择，不能每次启动又被改回 4。回填完成把 user_version
+    提到 :data:`_CONCURRENCY_BACKFILL_VERSION`，不低于该版本即跳过。
+
+    只动 ``concurrency == 1`` 的行——曾设过其它值（2-8）的行视为
+    已有偏好，保留。
+    """
+    from sqlalchemy import text, update
+
+    from app.db.models import UploadTask
+
+    factory = get_session_factory()
+    async with factory() as session:
+        version = (await session.execute(text("PRAGMA user_version"))).scalar()
+        if version is not None and int(version) >= _CONCURRENCY_BACKFILL_VERSION:
+            return
+        result = cast(
+            CursorResult[object],
+            await session.execute(
+                update(UploadTask)
+                .where(UploadTask.concurrency == 1)
+                .values(concurrency=DEFAULT_UPLOAD_CONCURRENCY)
+            ),
+        )
+        # PRAGMA 不能参数化——值是模块常量（int），无注入面
+        await session.execute(
+            text(f"PRAGMA user_version = {_CONCURRENCY_BACKFILL_VERSION}")
+        )
+        await session.commit()
+        if result.rowcount:
+            logger.info(
+                "upload_tasks.concurrency 占位值回填：1 → %d，影响 %d 行"
+                "（小文件通道并发，大文件通道仍恒串行）",
+                DEFAULT_UPLOAD_CONCURRENCY,
+                result.rowcount,
+            )
 
 
 async def backfill_discount_pct() -> None:

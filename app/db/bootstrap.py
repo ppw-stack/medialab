@@ -203,6 +203,7 @@ class DbBootstrap:
         """建表 + 跑迁移（幂等，每次启动调用）。"""
         from app.db.migrations import (
             backfill_discount_pct,
+            backfill_upload_concurrency,
             migrate_adapter_values,
         )
         from app.db.models import Base
@@ -221,6 +222,7 @@ class DbBootstrap:
                     logger.error("创建索引失败（%s）：%s", stmt, exc)
         logger.info("数据表已就绪")
         await backfill_discount_pct()
+        await backfill_upload_concurrency()
         await migrate_adapter_values()
         # 媒体库域的幂等迁移（补列 / 删废弃列 / 删废弃表）
         await self._run_media_migrations()
