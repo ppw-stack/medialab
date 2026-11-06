@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.core.timeutils import bj_now, bj_now_dt, format_bj
-from app.db.models import JobRun
+from app.db.models import JobRun, ProbeResult
 from app.db.session import session_scope
 from app.services.scheduler import JobStep, JobStepItem, build_items
 from app.services.task_executor import PushItemError, execute_task
@@ -45,6 +45,12 @@ _PURGE_DAYS = 7
 #: 为什么挂在 drain 作业里：它已经承担 ``task_queue`` 的定期清理语义
 #: （每 5 分钟一次），为一个 DELETE 单开第 8 个作业属过度设计。
 _JOB_RUN_PURGE_DAYS = 30
+
+#: ``probe_results``（存储源探测历史）保留天数。
+#:
+#: 启动自动测连 + 手动测连 + 登录后自动测连，一天能写几十行。
+#: 探测历史是**排障用**的（看「昨天还正常，今天突然 401」），30 天够用。
+_PROBE_RESULT_PURGE_DAYS = 30
 
 
 async def drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
@@ -89,6 +95,18 @@ async def drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
             job_runs_purged, _JOB_RUN_PURGE_DAYS,
         )
 
+    # 3.2) 清理超期的存储源探测历史（probe_results）
+    #
+    # 启动自动测连 + 手动测连 + 登录后自动测连，一天能写几十行，
+    # **只增不删会无限增长**。同样挂在 drain 作业里（每 5 分钟一次）。
+    async with session_scope() as session:
+        probes_purged = await _purge_old_probe_results(session)
+    if probes_purged:
+        logger.info(
+            "drain_task_queue: 清理 %d 条超 %d 天的探测历史",
+            probes_purged, _PROBE_RESULT_PURGE_DAYS,
+        )
+
     if not tasks:
         return {
             "requeued": requeued,
@@ -97,6 +115,7 @@ async def drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
             "failed": 0,
             "purged": purged,
             "job_runs_purged": job_runs_purged,
+            "probes_purged": probes_purged,
             "summary": (
                 (f"回收僵死 {requeued}，无到期任务" if requeued else "无到期任务")
                 + (f"，清理历史 {purged}" if purged else "")
@@ -111,6 +130,10 @@ async def drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
                         job_runs_purged,
                         f"{job_runs_purged} 条超 {_JOB_RUN_PURGE_DAYS} 天"
                         if job_runs_purged else "无超期作业历史"),
+                JobStep("清理探测历史", "ok" if probes_purged else "skip",
+                        probes_purged,
+                        f"{probes_purged} 条超 {_PROBE_RESULT_PURGE_DAYS} 天"
+                        if probes_purged else "无超期探测历史"),
             ],
         }
 
@@ -190,6 +213,7 @@ async def drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
         "retried": retried,
         "purged": purged,
         "job_runs_purged": job_runs_purged,
+        "probes_purged": probes_purged,
         "errors": tuple(errors[:10]),
         "summary": summary,
         "steps": [
@@ -210,6 +234,10 @@ async def drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
                     job_runs_purged,
                     f"{job_runs_purged} 条超 {_JOB_RUN_PURGE_DAYS} 天"
                     if job_runs_purged else "无超期作业历史"),
+            JobStep("清理探测历史", "ok" if probes_purged else "skip",
+                    probes_purged,
+                    f"{probes_purged} 条超 {_PROBE_RESULT_PURGE_DAYS} 天"
+                    if probes_purged else "无超期探测历史"),
         ],
     }
 
@@ -226,6 +254,23 @@ async def _purge_old_job_runs(session: AsyncSession) -> int:
         CursorResult[object],
         await session.execute(
             delete(JobRun).where(JobRun.started_at < cutoff)
+        ),
+    )
+    return int(result.rowcount or 0)
+
+
+async def _purge_old_probe_results(session: AsyncSession) -> int:
+    """删除超期的存储源探测历史，返回删除条数。
+
+    ``probed_at`` 是**北京时间字符串**（``yyyy-MM-dd HH:mm:ss``），
+    字典序 == 时间序，故可直接字符串比较（与 ``_purge_old_job_runs``
+    同款口径）。
+    """
+    cutoff = format_bj(bj_now_dt() - timedelta(days=_PROBE_RESULT_PURGE_DAYS))
+    result = cast(
+        CursorResult[object],
+        await session.execute(
+            delete(ProbeResult).where(ProbeResult.probed_at < cutoff)
         ),
     )
     return int(result.rowcount or 0)

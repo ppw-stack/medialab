@@ -35,6 +35,9 @@
             <div v-if="statusText(record.id)" class="status-hint">
               {{ statusText(record.id) }}
             </div>
+            <div v-if="isStale(record.id)" class="status-hint stale">
+              {{ checkedAtText(record.id) }}
+            </div>
           </template>
 
           <!-- 账号 + 容量 -->
@@ -630,7 +633,7 @@ import type {
   SmsSendResult,
   SmsVerifyResult,
 } from "../../types"
-import { formatBytes } from "../../utils/format"
+import { formatBytes, formatTime } from "../../utils/format"
 import DataTable from '../../components/DataTable.vue'
 import PageHeader from '../../components/PageHeader.vue'
 
@@ -769,6 +772,49 @@ function statusText(id: number): string {
   return s.message
 }
 
+/**
+ * 测连状态是否已「陈旧」。
+ *
+ * 后端的测连缓存**只在进程启动时刷新一次**（之后永不自动更新），
+ * 所以面板上的「正常」可能已经是几小时前的快照——token 过期了、
+ * 账号被登出了、容量早就变了，面板却还显示绿的。
+ *
+ * 超过 :data:`STALE_AFTER_MIN` 分钟就提示用户重新测连。
+ */
+const STALE_AFTER_MIN = 30
+
+/**
+ * 丢掉某存储源的本地测连状态（凭据变更后调用）。
+ *
+ * **为什么必须丢**：重新扫码/短信登录换的是**凭据**，旧状态（旧账号的
+ * uid / 容量）对新凭据没有意义。而 ``load()`` 的合并逻辑会保留本地
+ * 较新的状态——若不在这里显式丢掉，旧状态会一直显示到后台重探完成
+ * （几秒），期间用户看到的是**上一个账号**的信息。
+ */
+function dropStatus(id: number): void {
+  if (!(id in statuses.value)) return
+  const { [id]: _dropped, ...rest } = statuses.value
+  statuses.value = rest
+}
+
+function isStale(id: number): boolean {
+  const s = statusOf(id)
+  if (!s?.checked_at) return false
+  // 后端给的是**北京时间字符串**（``yyyy-MM-dd HH:mm:ss``）→ 显式带 +08:00，
+  // 否则会被当成本地时区解析，算出来的「年龄」偏差 8 小时。
+  // （同 Dashboard.vue / TorrentIndex.vue 的口径）
+  const checked = new Date(s.checked_at.replace(' ', 'T') + '+08:00').getTime()
+  if (Number.isNaN(checked)) return false
+  return Date.now() - checked > STALE_AFTER_MIN * 60_000
+}
+
+/** 陈旧提示文案（含测连时间）。 */
+function checkedAtText(id: number): string {
+  const s = statusOf(id)
+  if (!s?.checked_at) return ""
+  return `状态已过期（${formatTime(s.checked_at)} 测连），建议重新测连`
+}
+
 function usedPercent(id: number): number {
   const s = statusOf(id)
   if (!s || !s.total_bytes) return 0
@@ -799,21 +845,37 @@ async function load(): Promise<void> {
   try {
     drivers.value = await api.get<Driver[]>("/drivers")
     // 用后端缓存的测连状态初始化（启动自动测连 / 手动测连的结果）。
-    // 没有缓存（后端刚重启还没测完）时保持空 → 显示「未测连」。
-    const next: Record<number, DriverStatus> = {}
+    //
+    // **合并而非替换**，且按 ``checked_at`` 取**更新**的一份：
+    //
+    // - 后端缓存里没有的 driver（conn == null）不能把本地已有的状态
+    //   抹掉——比如后端刚重启（缓存空）或刚手动测连完就触发一次 load()
+    // - 后端缓存是 load() **发起时刻**的快照，可能比本地旧：手动测连
+    //   在 load() 在途期间完成时，若无条件覆盖，面板会显示**较旧**的
+    //   状态（「倒退」）。故用 ``checked_at`` 比较，谁新用谁
+    //   （北京时间字符串定宽 → 字典序 == 时间序）
+    const next: Record<number, DriverStatus> = { ...statuses.value }
     for (const d of drivers.value) {
-      if (d.conn) {
-        next[d.id] = {
-          logged_in: d.conn.logged_in,
-          status: d.conn.status,
-          message: d.conn.message,
-          account_id: d.conn.account_id,
-          total_bytes: d.conn.total_bytes,
-          used_bytes: d.conn.used_bytes,
-          remain_bytes: d.conn.remain_bytes,
-          can_get_link: d.conn.can_get_link,
-        }
+      if (!d.conn) continue
+      const localAt = next[d.id]?.checked_at ?? null
+      const remoteAt = d.conn.checked_at ?? null
+      if (localAt && (!remoteAt || localAt > remoteAt)) continue
+      next[d.id] = {
+        logged_in: d.conn.logged_in,
+        status: d.conn.status,
+        message: d.conn.message,
+        account_id: d.conn.account_id,
+        total_bytes: d.conn.total_bytes,
+        used_bytes: d.conn.used_bytes,
+        remain_bytes: d.conn.remain_bytes,
+        can_get_link: d.conn.can_get_link,
+        checked_at: remoteAt,
       }
+    }
+    // 已删除的存储源要从状态表里移除（否则 id 复用会串状态）
+    const liveIds = new Set(drivers.value.map((d) => d.id))
+    for (const id of Object.keys(next)) {
+      if (!liveIds.has(Number(id))) delete next[Number(id)]
     }
     statuses.value = next
   } catch (e) {
@@ -1216,15 +1278,18 @@ async function onVerifySms(): Promise<void> {
       smsError.value = res.message || "验证失败"
       return
     }
-    smsOk.value = true
+        smsOk.value = true
     message.success("登录成功")
+    // 凭据换了 → 本地旧状态作废（合并逻辑会保留较新的本地状态，
+    // 这里必须显式丢掉，否则旧账号的 uid 会显示到后台重探完成）
+    dropStatus(driver.id)
     await load()
     // 登录成功立刻后台测连 + 自动关闭短信弹框和登录选择框
     void probeDriver(driver.id, true)
-    setTimeout(() => {
+    closeAfterDelay(() => {
       smsOpen.value = false
       loginOpen.value = false
-    }, 1200)
+    })
   } catch (e) {
     smsError.value = errMsg(e, "验证失败")
   } finally {
@@ -1270,14 +1335,17 @@ function startPolling(): void {
         stopPolling()
         qrKind.value = "confirmed"
         message.success("扫码登录成功")
+        // 凭据换了 → 本地旧状态作废（理由同 onVerifySms）
+        const confirmedId = qrDriverId.value
+        if (confirmedId !== null) dropStatus(confirmedId)
         await load()
         // 登录成功立刻后台测连（刷新连通/容量/直链状态）
         const id = qrDriverId.value
         if (id !== null) void probeDriver(id, true)
         // 停留 1.2 秒让用户看到成功提示，然后自动关闭
-        setTimeout(() => {
+        closeAfterDelay(() => {
           qrOpen.value = false
-        }, 1200)
+        })
       }
     } catch (e) {
       stopPolling()
@@ -1299,7 +1367,29 @@ function stopPolling(): void {
   }
 }
 
-onBeforeUnmount(stopPolling)
+/**
+ * 延时关闭弹框（登录成功后停留一下让用户看到成功提示）。
+ *
+ * **必须走这个而不是裸 setTimeout**：句柄要记下来，组件卸载时清掉——
+ * 否则用户在 1.2 秒内切页，定时器仍会触发 → 写一个已卸载组件的 ref。
+ */
+let closeTimer: number | undefined
+
+function closeAfterDelay(fn: () => void, delay = 1200): void {
+  if (closeTimer !== undefined) window.clearTimeout(closeTimer)
+  closeTimer = window.setTimeout(() => {
+    closeTimer = undefined
+    fn()
+  }, delay)
+}
+
+onBeforeUnmount(() => {
+  stopPolling()
+  if (closeTimer !== undefined) {
+    window.clearTimeout(closeTimer)
+    closeTimer = undefined
+  }
+})
 </script>
 
 <style scoped>
@@ -1314,6 +1404,11 @@ onBeforeUnmount(stopPolling)
   font-size: 12px;
   margin-top: 2px;
   margin-left: 20px;
+}
+
+/* 陈旧的测连状态：缓存只在启动时刷新一次，超过阈值就该提示用户 */
+.status-hint.stale {
+  color: #d48806;
 }
 
 .capacity {

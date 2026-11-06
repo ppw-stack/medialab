@@ -1013,6 +1013,13 @@ export interface DriverStatus {
   remain_bytes: number
   /** 能否换到直链（最关键的一项） */
   can_get_link: boolean
+  /**
+   * 本次测连时间（北京时间字符串）。
+   *
+   * 后端缓存里带的这份是**探测发生的时刻**——面板显示「正常」时，
+   * 用户需要知道这是多久前的状态（缓存只在进程启动时刷新一次）。
+   */
+  checked_at?: string | null
 }
 
 export interface QrStartResult {

@@ -161,6 +161,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         logger.info("停机中…")
+        # 启动测连任务要先取消——它会往 DB 写探测历史。
+        #
+        # **必须在 dispose_db() 之前**：``dispose_db()`` 把 session factory
+        # 置 None 后，任务若正好跑到落库那一步 → ``RuntimeError("数据库未
+        # 初始化")``。而 ``probe_driver`` 的落库 try/except 只记 warning
+        # → 异常被吞掉，不影响退出 → 表现为「探测历史偶尔少一条」的
+        # 静默故障（最难查的那种）。
+        probe_task: asyncio.Task[object] | None = getattr(
+            app.state, "driver_probe_task", None
+        )
+        if probe_task is not None and not probe_task.done():
+            probe_task.cancel()
+            # return_exceptions=True → 子任务的 CancelledError 当作结果
+            # 返回，不会从 await 抛出来（也不会吞掉外层的取消信号）。
+            await asyncio.gather(probe_task, return_exceptions=True)
         scheduler_center.accepting_new_work = False
         pending = scheduler_center.inflight_count()
         logger.info("收到停机信号，等待在途作业 %d 个（上限 %.0fs）", pending, grace)

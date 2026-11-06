@@ -55,7 +55,13 @@ async def _persist_refreshed_credential(driver_id: int, cred: Any) -> None:
     try:
         async with session_scope() as db:
             await store_credential(
-                db, driver_id, cred.to_json(), scheme=GUANGYA_SCHEME
+                db,
+                driver_id,
+                cred.to_json(),
+                scheme=GUANGYA_SCHEME,
+                # Token 刷新是**同一个账号换 token**，登录态没变
+                # → 不能作废测连缓存（否则面板退回「未测连」）。
+                invalidate_cache=False,
             )
         logger.info("已写回刷新的光鸭凭据 driver_id=%s", driver_id)
     except Exception:

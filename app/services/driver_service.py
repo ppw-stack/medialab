@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -43,6 +44,7 @@ from app.domain.device_types import (
     DEFAULT_DEVICE_TYPE,
     DeviceTypeLiteral,
 )
+from app.domain.driver_types import PROBEABLE_DRIVER_TYPES, is_probeable
 from app.services.account_status import (
     STATUS_NO_CREDENTIAL,
     AccountStatus,
@@ -219,6 +221,46 @@ async def create_driver(
     return row
 
 
+def _make_token_refresh_persist(driver_id: int) -> Callable[[Any], Any]:
+    """造一个「驱动 Token 刷新后写回 DB」的回调（给 ``build_driver``）。
+
+    **为什么必须有**：光鸭的 ``access_token`` 只有 1~2 小时有效期。
+    驱动只在内存里更新它——不落库的话，进程重启后又用旧 token，
+    服务端返回 117 / 401，刷新也救不回来（``refresh_token`` 可能已失效）。
+
+    **探测路径同样需要**：``probe_driver`` 构造光鸭驱动时会触发
+    ``_ensure_token()`` 刷新。若不传回调，新 token 只存在于驱动实例内存，
+    探测结束实例即丢弃 → **DB 里仍是旧 token** → 刷新接口一旦轮换
+    ``refresh_token``，账号就彻底掉线，必须重新扫码。
+
+    写回失败**不影响本次探测**（内存里的新 token 仍然有效），只记日志。
+    """
+    from app.adapters.drivers.guangya_credential import (
+        SCHEME as GUANGYA_SCHEME,
+    )
+    from app.adapters.drivers.guangya_credential import GuangyaCredential
+
+    async def _persist(cred: Any) -> None:
+        if not isinstance(cred, GuangyaCredential):
+            return
+        try:
+            async with session_scope() as db:
+                await store_credential(
+                    db,
+                    driver_id,
+                    cred.to_json(),
+                    scheme=GUANGYA_SCHEME,
+                    # Token 刷新是**同一个账号换 token**，登录态没变
+                    # → 不能作废测连缓存（否则面板退回「未测连」）。
+                    invalidate_cache=False,
+                )
+            logger.info("探测中刷新的光鸭凭据已写回 driver_id=%s", driver_id)
+        except Exception:
+            logger.exception("写回刷新的光鸭凭据失败（本次探测不受影响）")
+
+    return _persist
+
+
 async def store_credential(
     db: AsyncSession,
     driver_id: int,
@@ -226,6 +268,7 @@ async def store_credential(
     device_type: str | None = None,
     *,
     scheme: str | None = None,
+    invalidate_cache: bool = True,
 ) -> Driver:
     """加密存储凭据。
 
@@ -236,6 +279,12 @@ async def store_credential(
         device_type: 115 设备类型（可同时写入）。
         scheme: 加密方案前缀。``None`` = 用默认的 115 方案；光鸭传
             ``"gypcipher:v2:"``。
+        invalidate_cache: 凭据变更后是否作废测连缓存。**默认 True**
+            （重新扫码登录 → 旧状态确实过期了）。
+
+            **光鸭 Token 刷新写回必须传 False**——那是同一个账号换了个
+            token，登录态**没变**。清缓存会让面板从「正常」退回
+            「未测连」，而 Token 1~2 小时就刷一次，等于把这个特性废掉。
 
     Raises:
         DriverServiceError: 加密失败 / 存储源不存在。
@@ -261,7 +310,10 @@ async def store_credential(
     # 凭据变了 → 缓存的 115 客户端实例失效
     reset_clients()
     # 凭据变了 → 旧的测连状态作废（调用方登录成功后会自动重探）
-    invalidate_probe(driver_id)
+    #
+    # 但**光鸭 Token 刷新写回要传 invalidate_cache=False**——见参数说明。
+    if invalidate_cache:
+        invalidate_probe(driver_id)
     logger.info("已存储凭据 driver_id=%s", driver_id)
     return row
 
@@ -272,6 +324,14 @@ async def delete_driver(db: AsyncSession, driver_id: int) -> None:
     await db.delete(row)
     await db.commit()
     reset_clients()
+    # 删除存储源 → 测连缓存必须清掉。
+    #
+    # **为什么必须清**：SQLite 的 ``id`` 是普通 ``INTEGER PRIMARY KEY``
+    # （无 AUTOINCREMENT）→ **删掉最大的 id 后会被复用**。不清缓存的话，
+    # 新建的存储源会**继承上一个存储源的测连状态**（账号 id / 容量 /
+    # 「直链正常」）——面板显示的是一个根本没测过的账号，且错误账号 id
+    # 会被写进 ``probe_results`` 历史。
+    invalidate_probe(driver_id)
 
 
 async def record_probe(
@@ -448,7 +508,7 @@ async def probe_driver(driver_id: int) -> AccountStatus:
         credential = row.credential
         device_type = row.device_type
 
-    if driver_type not in ("p115", "guangya"):
+    if not is_probeable(driver_type):
         raise DriverServiceError("该存储源暂不支持探测", status_code=400)
 
     if not credential:
@@ -461,7 +521,12 @@ async def probe_driver(driver_id: int) -> AccountStatus:
         return status
 
     try:
-        driver = build_driver(driver_type, credential, device_type)
+        driver = build_driver(
+            driver_type,
+            credential,
+            device_type,
+            on_token_refresh=_make_token_refresh_persist(driver_id),
+        )
     except DriverError as exc:
         raise DriverServiceError(
             f"驱动初始化失败：{exc}", status_code=500, kind="config"
@@ -491,12 +556,27 @@ async def probe_driver(driver_id: int) -> AccountStatus:
 # 进程内缓存：启动自动测连 / 手动测连的结果放这里，``GET /drivers``
 # 携带给前端——页面打开不用再逐个探测，也不再有「刷新即全变未测连」。
 #
-#: driver_id → {"status": AccountStatus, "checked_at": 北京时间字符串}
-_probe_cache: dict[int, dict[str, Any]] = {}
+@dataclass(frozen=True)
+class CachedProbe:
+    """某存储源的一次测连结果（进程内缓存）。
+
+    Attributes:
+        status: 测连状态（登录态 / 容量 / 能否直链）。
+        checked_at: 测连时间（**北京时间字符串**）。
+    """
+
+    status: AccountStatus
+    checked_at: str
 
 
-def _cache_probe(driver_id: int, status: AccountStatus) -> None:
-    _probe_cache[driver_id] = {"status": status, "checked_at": bj_now()}
+#: driver_id → 测连结果
+_probe_cache: dict[int, CachedProbe] = {}
+
+
+def _cache_probe(driver_id: int, status: AccountStatus) -> CachedProbe:
+    cached = CachedProbe(status=status, checked_at=bj_now())
+    _probe_cache[driver_id] = cached
+    return cached
 
 
 def invalidate_probe(driver_id: int) -> None:
@@ -504,12 +584,12 @@ def invalidate_probe(driver_id: int) -> None:
     _probe_cache.pop(driver_id, None)
 
 
-def cached_probe(driver_id: int) -> dict[str, Any] | None:
+def cached_probe(driver_id: int) -> CachedProbe | None:
     """读某存储源的缓存测连结果（无则 ``None``）。"""
     return _probe_cache.get(driver_id)
 
 
-async def probe_all_enabled() -> dict[int, dict[str, Any]]:
+async def probe_all_enabled() -> dict[int, CachedProbe]:
     """并发探测**所有启用且有凭据**的存储源（启动时后台跑）。
 
     - 信号量 2 并发：探测会打云端 API（登录态 + 容量 + 直链三项），
@@ -523,7 +603,7 @@ async def probe_all_enabled() -> dict[int, dict[str, Any]]:
                 await db.execute(
                     select(Driver).where(
                         Driver.enabled == True,  # noqa: E712
-                        Driver.type.in_(("p115", "guangya")),
+                        Driver.type.in_(PROBEABLE_DRIVER_TYPES),
                         Driver.credential.is_not(None),
                         Driver.credential != "",
                     )
@@ -721,6 +801,7 @@ async def resolve_media_path(row: Driver, media_cid: str) -> str:
 
 __all__ = [
     "DEFAULT_DEVICE_TYPE",
+    "CachedProbe",
     "DeviceTypeInfo",
     "DeviceTypeLiteral",
     "DriverRow",

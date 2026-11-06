@@ -10,8 +10,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -20,6 +18,7 @@ from app.domain.device_types import DeviceTypeLiteral
 from app.services import driver_auth
 from app.services.driver_auth import DriverAuthError
 from app.services.driver_service import (
+    CachedProbe,
     DriverRow,
     DriverServiceError,
     add_driver,
@@ -214,6 +213,8 @@ class ProbeOut(BaseModel):
     remain_bytes: int = 0
     #: 能否换到直链（**最关键的一项**）
     can_get_link: bool = False
+    #: 本次测连时间（北京时间字符串）
+    checked_at: str | None = None
 
 
 class DirectLinkDiagOut(BaseModel):
@@ -229,13 +230,11 @@ class DirectLinkDiagOut(BaseModel):
     cookie_required: bool = False
 
 
-def _to_out(
-    row: DriverRow, conn: dict[str, Any] | None = None
-) -> DriverOut:
+def _to_out(row: DriverRow, conn: CachedProbe | None = None) -> DriverOut:
     """service 层 dataclass → 输出模型。``conn`` = 测连缓存（可缺）。"""
     conn_out = None
     if conn:
-        s = conn["status"]
+        s = conn.status
         conn_out = DriverConnStatusOut(
             logged_in=s.logged_in,
             status=s.status,
@@ -245,7 +244,7 @@ def _to_out(
             used_bytes=s.used_bytes,
             remain_bytes=s.remain_bytes,
             can_get_link=s.can_get_link,
-            checked_at=conn["checked_at"],
+            checked_at=conn.checked_at,
         )
     return DriverOut(
         id=row.id,
@@ -496,6 +495,8 @@ async def probe_driver_route(driver_id: int) -> ProbeOut:
         status = await probe_driver(driver_id)
     except DriverServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    # 探测时间从缓存取（probe_driver 刚写进去的）
+    cached = cached_probe(driver_id)
     return ProbeOut(
         logged_in=status.logged_in,
         status=status.status,
@@ -505,6 +506,7 @@ async def probe_driver_route(driver_id: int) -> ProbeOut:
         used_bytes=status.used_bytes,
         remain_bytes=status.remain_bytes,
         can_get_link=status.can_get_link,
+        checked_at=cached.checked_at if cached else None,
     )
 
 

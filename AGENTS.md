@@ -300,13 +300,25 @@
   - 实测：辅种站扫 1696 个顶层条目（1670 有主 / 63 孤儿，其中 39 空目录 + 24 有内容 612.85 GB），CIFS 全量扫 **约 40 秒**
   - **降级不静默**：目录未挂载 / 不可读 / 下载器拉取失败 → 记 `error` 字段（前端据此显示原因），作业不炸
   - 契约由 `tests/unit/test_orphan_scanner.py` + `test_orphan_deleter.py` + `test_downloader_adapters.py` + `tests/integration/test_cross_seed_orphan.py` + `test_api.py` + `test_db_models.py` 固化
+- **存储源测连缓存**（2026-11-06 加入，`app/services/driver_service.py`）：
+  - **进程内缓存**（`_probe_cache`：`driver_id → CachedProbe`）承载启动自动测连 + 手动测连的结果，`GET /drivers` 通过 `DriverOut.conn` 携带（`null` = 未测连）
+  - **缓存是「快照」，不是实时状态**——只在进程启动时刷新一次。前端**必须显示 `checked_at`**（超 30 分钟标「状态已过期」），否则用户会把几小时前的「正常」当成实时的
+  - **可测连的驱动类型是单一真源**：`app/domain/driver_types.py:PROBEABLE_DRIVER_TYPES`。加新驱动类型只改这一处——`probe_driver` 的校验与 `probe_all_enabled` 的查询都从它取（此前硬编码两处，漏改只会**静默不测连**）
+  - **`store_credential` 的 `invalidate_cache` 参数区分两类语义**：
+    - `True`（默认）= 凭据**真的换了**（重新扫码登录）→ 作废缓存
+    - `False` = **同一个账号换了 token**（光鸭 Token 刷新写回，1~2 小时一次）→ **不能**作废缓存，否则面板退回「未测连」，正好抵消本特性
+  - **光鸭 Token 刷新必须写回 DB**：所有构造光鸭驱动的路径都要传 `on_token_refresh`（`probe_driver` / `redirect` / `scan_runner` / `watch_manager` / `upload_tasks` / `offline_download` / `migration`）。漏传 → 刷新出的新 token 只在驱动实例内存 → 实例丢弃后 DB 仍是旧 token → 刷新接口一旦轮换 `refresh_token`，**账号彻底掉线**
+  - **删除存储源必须清缓存**：SQLite 的 `id` 无 AUTOINCREMENT → **删掉最大的 id 后会被复用**。不清缓存 → 新建的存储源继承上一个的测连状态（账号 id / 容量 / 「直链正常」）
+  - **启动测连任务在停机时必须取消**（`app/main.py` 的 `lifespan` finally，**在 `dispose_db()` 之前**）——否则任务跑到落库那一步时 session factory 已置 None，而 `except Exception` 会把异常吞掉 → 表现为「探测历史偶尔少一条」的静默故障
+  - `probe_results` 表有 **30 天保留期**，清理挂在 `drain_task_queue`（与 `job_runs` 同款语义，勿单开作业）
+  - 契约由 `tests/integration/test_driver_probe_cache.py`（17 例）+ `web/tests/drivers-probe.spec.ts` 固化
 
 ## 必备命令
 ```bash
 uv sync --extra dev         # 装依赖
 uv run ruff check app/ tests/
 uv run mypy app/
-uv run pytest                # 后端测试（642 例）
+uv run pytest                # 后端测试（1673 例）
 cd web && npx vue-tsc -b    # 前端类型检查
 cd web && npx oxlint .      # 前端 lint
 cd web && node scripts/check-types-placement.mjs  # 类型放置约束（API 契约类型集中在 src/types.ts）
