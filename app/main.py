@@ -26,7 +26,7 @@ from app.db.bootstrap import db_bootstrap
 from app.db.session import dispose_db, init_db
 from app.services.dav_audit import dav_auditor
 from app.services.factory import AdapterFactory, init_factory
-from app.services.job_registry import register_jobs
+from app.services.job_registry import preflight_job_imports, register_jobs
 from app.services.scheduler import scheduler_center
 from app.webdav.mount import mount_dav
 
@@ -116,6 +116,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
 
     set_env_settings(await init_env_settings_async())
+
+    # 作业模块预热（**必须在调度启动之前**）：各作业入口是函数内惰性导入，
+    # 第一次触发会在事件循环线程上同步读盘加载整条模块链——QNAP 冷存储上
+    # 一次几分钟，循环冻结、面板假死（2026-11-07 prod 事故，172）。
+    # 在线程里提前预热：预热线程读盘期间循环保持响应，此后作业触发的导入
+    # 全部命中 sys.modules。调度关闭时也执行——手动触发作业走同一批模块。
+    await asyncio.to_thread(preflight_job_imports)
 
     if settings.scheduler_enabled:
         # 作业调度配置（DB 持久化的启停 + cron）同样必须在 register_jobs

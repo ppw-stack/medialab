@@ -197,6 +197,45 @@ def _register(meta: JobMeta, factory: AdapterFactory) -> None:
     logger.info("已注册作业：%s cron=%r%s", meta.title, effective, meta.log_extra)
 
 
+# ============================================================ 作业模块预热
+
+
+def preflight_job_imports() -> None:
+    """预热全部作业模块的导入（**进程级一次性，必须在事件循环之外跑**）。
+
+    **为什么存在（2026-11-07 prod 事故，172 QNAP）**：下方各 ``_run_*``
+    作业入口使用**函数内惰性导入**——模块在进程启动时不加载，等作业第一次
+    触发时才在**事件循环线程上**现场读盘加载整条模块链（push_free /
+    fetch_all_sites / monitor … 各自一条）。FS 健康时每条几毫秒；当晚 QNAP
+    存储池 92% 满冷缓存，第一次 cron 触发在循环线程上爬了几分钟导入 →
+    事件循环反复冻结 → 面板假死 + 未提交写事务挂起 → 连锁
+    ``database is locked``（job_runs 落库失败、drain_task_queue 失败）。
+    与 watchfiles 的同步导入是**同一类问题**（见 ``watcher._preflight_watchdeps``）。
+
+    在 lifespan 的 ``register_jobs()`` **之前**通过 ``asyncio.to_thread``
+    调用：预热线程读盘期间循环保持响应，完成后作业才可能被调度——触发时刻
+    ``sys.modules`` 全部命中，纯内存查找。
+
+    ⚠️ 导入失败会向上抛：部署了坏代码就该在启动时炸，而不是作业触发时。
+    ⚠️ 新增作业若带新的惰性导入，必须同步加进下面的模块清单——
+    ``test_scheduler.py::test_preflight_covers_all_lazy_imports`` 会用 AST
+    校验两者不脱节。
+    """
+    import importlib
+
+    for mod in (
+        "app.services.runtime_params",  # _current_pre_pause_minutes
+        "app.services.jobs",            # _run_fetch_all_sites
+        "app.services.push_free",       # _run_push_free
+        "app.services.monitor",         # _run_monitor_free_window
+        "app.services.user_data",       # _run_refresh_user_data
+        "app.services.task_drain",      # _run_drain_task_queue
+        "app.services.checkin",         # _run_daily_checkin
+        "app.services.cross_seed_maintenance",  # _run_cross_seed_maintenance
+    ):
+        importlib.import_module(mod)
+
+
 # ============================================================ 作业入口
 async def _run_fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
     """执行站点拉取。"""

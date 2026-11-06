@@ -381,3 +381,67 @@ def test_build_items_empty() -> None:
     out, total = build_items([])
     assert out == []
     assert total is None
+
+
+# ---------------------------------- 作业模块预热（2026-11-07 prod 事故）
+
+
+def test_preflight_job_imports_loads_all_lazy_modules() -> None:
+    """``preflight_job_imports`` 后，全部作业模块都已加载（幂等可重复调用）。
+
+    作业入口是**函数内惰性导入**——作业第一次触发才在事件循环线程上读盘
+    加载模块链。QNAP 冷存储上一次几分钟，循环冻结、面板假死
+    （2026-11-07 prod：push_free 首次触发卡死循环，连锁 database is locked）。
+    预热必须在调度启动之前于线程里完成。
+    """
+    import sys
+
+    from app.services.job_registry import preflight_job_imports
+
+    preflight_job_imports()
+    preflight_job_imports()  # 幂等
+
+    for mod in (
+        "app.services.runtime_params",
+        "app.services.jobs",
+        "app.services.push_free",
+        "app.services.monitor",
+        "app.services.user_data",
+        "app.services.task_drain",
+        "app.services.checkin",
+        "app.services.cross_seed_maintenance",
+    ):
+        assert mod in sys.modules, f"预热漏了 {mod}"
+
+
+def test_preflight_covers_all_lazy_imports() -> None:
+    """AST 校验：job_registry 里所有**函数内的** ``from app.*`` 惰性导入
+    必须被 ``preflight_job_imports`` 覆盖。
+
+    这条测试防脱节——新增作业时忘了把新模块加进预热清单会直接红。
+    （顶层 import 不算——它们在进程启动时已加载，不在风险面上。）
+    """
+    import ast
+    import sys
+    from pathlib import Path
+
+    from app.services import job_registry
+
+    src = Path(job_registry.__file__).read_text(encoding="utf-8")
+    lazy_modules: set[str] = set()
+    for node in ast.walk(ast.parse(src)):
+        if getattr(node, "col_offset", 0) == 0:  # 顶层 import 不算惰性
+            continue
+        if isinstance(node, ast.ImportFrom) and node.module:
+            if node.module.startswith("app."):
+                lazy_modules.add(node.module)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith("app."):
+                    lazy_modules.add(alias.name)
+
+    assert lazy_modules, "源码里没解析到任何惰性导入——解析逻辑坏了"
+
+    job_registry.preflight_job_imports()
+    missing = sorted(m for m in lazy_modules if m not in sys.modules)
+    assert not missing, f"preflight_job_imports 漏了这些模块：{missing}"
