@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -329,7 +330,12 @@ async def delete_orphan_files(payload: DeleteOrphansIn) -> dict[str, Any]:
         )
 
     owned, _by_downloader, pull_failed = await collect_owned_names()
-    result = delete_orphans(payload.paths, owned, scan_dirs)
+    # ⚠️ **删除放线程池**：`delete_orphans` 会 ``unlink`` / ``rmtree``
+    # 挂载上的文件——CIFS 卡死时同步删除会**无限等待**，把事件循环卡死
+    # （2026-11-06 prod 事故）。
+    result = await asyncio.to_thread(
+        delete_orphans, payload.paths, owned, scan_dirs
+    )
 
     out = result.to_dict()
     if pull_failed:

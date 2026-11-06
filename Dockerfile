@@ -48,7 +48,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --no-dev --extra p115 --extra guangya --no-editable --reinstall \
     && /opt/venv/bin/python -c "import app, app.main; print('import ok:', app.__version__)" \
     && /opt/venv/bin/python -c "from p115client import P115Client, tool; print('p115client ok')" \
-    && /opt/venv/bin/python -c "from guangyaclient import GuangyaClient; print('guangyaclient ok')"
+    && /opt/venv/bin/python -c "from guangyaclient import GuangyaClient; print('guangyaclient ok')" \
+    && uv pip install --no-cache --python /opt/venv/bin/python py-spy \
+    && /opt/venv/bin/py-spy --version
 
 # ---- Runtime ----
 FROM ${PY_IMAGE} AS runtime

@@ -33,6 +33,28 @@ from app.webdav.mount import mount_dav
 logger = get_logger(__name__)
 
 
+def _probe_targets() -> list[str]:
+    """要探活的外部路径（挂在 CIFS 上的目录）。
+
+    守卫的挂载探活线程会定期列这些目录——挂载卡死时线程卡住、缓存里的
+    时间戳变陈旧，``/healthz`` 的 ``mounts`` 字段据此显示 ``hang``，
+    面板**不会**跟着假死。
+    """
+    from app.services.env_settings import get_env_setting
+
+    targets: list[str] = []
+    for key in ("offline_files_root", "cross_seed_scan_dirs"):
+        try:
+            raw = get_env_setting(key)
+        except Exception:
+            continue
+        for part in raw.split(","):
+            part = part.strip()
+            if part:
+                targets.append(part)
+    return targets
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: AppSettings = get_settings()
@@ -157,6 +179,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     app.state.driver_probe_task = asyncio.create_task(probe_all_enabled())
 
+    # 运行时守卫（心跳看门狗 + 挂载探活）
+    #
+    # 2026-11-06 prod 事故：CIFS 挂载卡死 → 事件循环里的一次同步 stat
+    # 把 loop 卡住 → 面板假死、healthz 被 RST、容器 unhealthy。守卫做两件事：
+    # ① loop 心跳滞后超阈值 → 自动 py-spy dump 留证；② 挂载探活 → 挂载卡死
+    # 在 ``/healthz`` 可见（而不是整个面板不可用）。
+    from app.services import runtime_guard
+
+    runtime_guard.start(asyncio.get_running_loop(), mounts=_probe_targets())
+
     try:
         yield
     finally:
@@ -183,6 +215,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await scheduler_center.drain(timeout=grace)
         await scheduler_center.shutdown(grace_seconds=int(grace))
         await factory.aclose_all()
+        # 运行时守卫收尾
+        from app.services import runtime_guard
+
+        runtime_guard.stop()
         # WebDAV 审计队列里剩余的条目落库
         if settings.dav_enabled:
             await dav_auditor.close()

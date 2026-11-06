@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -534,7 +535,9 @@ async def scan_driver(
                 secret=secret,
             )
             url = build_redirect_url(base_url, media.id, secret)
-            written = write_strm(strm_path, url)
+            # ⚠️ **写文件放线程池**：STRM 输出目录在 CIFS 上——挂载卡死时
+            # 同步写会无限等待，把事件循环卡死（2026-11-06 prod 事故）。
+            written = await asyncio.to_thread(write_strm, strm_path, url)
 
             if written == StrmWriteResult.CREATED:
                 stats.created += 1
@@ -596,7 +599,8 @@ async def _prune_orphans(
         if media.remote_id in seen_remote_ids:
             continue
         if media.strm_path:
-            delete_strm(Path(media.strm_path))
+            # ⚠️ 删文件放线程池（CIFS 卡死时同步 unlink 会卡住事件循环）
+            await asyncio.to_thread(delete_strm, Path(media.strm_path))
         await db.delete(media)
         removed += 1
     if removed:
