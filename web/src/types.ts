@@ -938,11 +938,15 @@ export interface UploadTask {
   updated_at: string
   /** 运行态：监听器是否在跑 */
   listening: boolean
-  /** 当前正在上传的文件 */
+  /** 当前正在上传的文件（大文件通道） */
   current: string
+  /** 当前正在上传的文件（小文件通道） */
+  current_small: string
   total_uploaded: number
   total_failed: number
   total_bytes: number
+  /** 真正被丢弃的文件数（队列与溢出暂存都满时；>0 需关注日志） */
+  dropped: number
   /** 运行态的最近一次错误（监听启动失败等） */
   runtime_error: string | null
 }
@@ -960,10 +964,21 @@ export interface UploadCapabilities {
 export interface UploadRuntime {
   task_id: number
   listening: boolean
+  /** 当前正在上传的文件（大文件通道） */
   current: string
+  /** 当前正在上传的文件（小文件通道） */
+  current_small: string
   total_uploaded: number
   total_failed: number
   total_bytes: number
+  /** 大文件队列待处理数 */
+  queue_large: number
+  /** 小文件队列待处理数 */
+  queue_small: number
+  /** 溢出暂存量（队列满时暂存、空闲自动回灌——不丢） */
+  overflow: number
+  /** 真正被丢弃的文件数（队列与溢出暂存都满时） */
+  dropped: number
   logs: string[]
   error: string | null
   syncing: boolean
@@ -987,6 +1002,8 @@ export interface SyncNowResult {
   /** 本地删除的文件数（delete_after_upload 开启时；删除在后台异步执行） */
   deleted_local: number
   uploaded_bytes: number
+  /** 因「事件队列正在处理」被全量同步跳过的文件数（防同文件双传） */
+  skipped_inflight?: number
 }
 
 /** 存储源账号状态（测连结果）。 */

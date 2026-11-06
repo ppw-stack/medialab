@@ -29,6 +29,9 @@
                       <a-tag :color="item.listening ? 'blue' : 'orange'">
                         {{ item.listening ? "监听中" : "未监听" }}
                       </a-tag>
+                      <a-tag v-if="item.dropped" color="red">
+                        已丢 {{ item.dropped }}
+                      </a-tag>
                     </a-space>
                     <span class="muted mono">
                       {{ item.watch_root }} → {{ item.target_path || item.target_file_id }}
@@ -39,6 +42,9 @@
                       <span>{{ formatBytes(item.total_bytes) }}</span>
                       <span v-if="item.current" class="mono">
                         正在传：{{ item.current }}
+                      </span>
+                      <span v-if="item.current_small" class="mono">
+                        小文件：{{ item.current_small }}
                       </span>
                     </a-space>
                   </a-space>
@@ -91,6 +97,13 @@
               <a-descriptions-item label="统计">
                 上传 {{ current.total_uploaded }} · 失败 {{ current.total_failed }} ·
                 {{ formatBytes(current.total_bytes) }}
+              </a-descriptions-item>
+              <a-descriptions-item v-if="runtime" label="队列">
+                大 {{ runtime.queue_large ?? 0 }} · 小 {{ runtime.queue_small ?? 0 }} ·
+                溢出 {{ runtime.overflow ?? 0 }}
+                <a-tag v-if="runtime.dropped" color="red" style="margin-left: 6px">
+                  已丢 {{ runtime.dropped }}
+                </a-tag>
               </a-descriptions-item>
               <a-descriptions-item v-if="watch" label="监听事件">
                 {{ watch.events ?? 0 }} 次事件 · 投递 {{ watch.dispatched ?? 0 }} ·
@@ -397,7 +410,10 @@ async function syncNow(): Promise<void> {
     message.success(
       `同步完成：上传 ${result.uploaded}，覆盖 ${result.overwritten}，` +
         `已存在 ${result.unchanged}，失败 ${result.failed}` +
-        (result.deleted_local ? `，本地已删除 ${result.deleted_local}` : ""),
+        (result.deleted_local ? `，本地已删除 ${result.deleted_local}` : "") +
+        (result.skipped_inflight
+          ? `，在传跳过 ${result.skipped_inflight}（事件队列处理中，不会重复上传）`
+          : ""),
     )
     await reload()
     await openDetail(current.value)
