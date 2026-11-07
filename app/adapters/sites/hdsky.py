@@ -212,6 +212,13 @@ class HdskyAdapter(SiteAdapter):
                 f"HDSky 拉取 HTTP {resp.status_code}"
                 f"（第 {page_number} 页）"
             )
+        if "login.php" in str(resp.url):
+            # 凭据失效：站点把受保护页面 302 到登录页（跟随后是 200）——
+            # 不抛错的话会解析出 0 条，被当成「站点确实没有种子」而静默停摆
+            # （2026-11-08 prod：ourbits 凭据过期 10 天无人察觉）
+            raise SiteFetchError(
+                "hdsky 凭据已失效（被重定向到登录页），请更新 cookie"
+            )
         items = HdskyAdapter._parse_spstate7_html(resp.text)
         # 单次拉取上限（防止恶意站返回巨大响应撑爆内存）
         return items[:_MAX_ITEMS_PER_PULL]
@@ -665,6 +672,10 @@ class HdskyAdapter(SiteAdapter):
             raise SiteFetchError(f"hdsky {path} 拉取失败：{detail}") from exc
         if resp.status_code >= 400:
             raise SiteFetchError(f"hdsky {path} 返回 HTTP {resp.status_code}")
+        if "login.php" in str(resp.url):
+            raise SiteFetchError(
+                "hdsky 凭据已失效（被重定向到登录页），请更新 cookie"
+            )
         return resp.text
 
     async def get_user_snapshot(self) -> SiteUserSnapshot | None:
@@ -685,7 +696,7 @@ class HdskyAdapter(SiteAdapter):
                 await self._fetch_page("/userdetails.php")
             )
             if snap is None:
-                raise SiteFetchError("hdsky 用户数据解析失败：4 个业务字段均未取到")
+                raise SiteFetchError("hdsky 用户数据解析失败：3 个业务字段均未取到")
         bonus = nexus_php.parse_hourly_bonus(bonus_html, unit="魔力值")
         return SiteUserSnapshot(
             upload=snap.upload,

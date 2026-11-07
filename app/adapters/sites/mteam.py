@@ -291,7 +291,10 @@ class MteamAdapter(SiteAdapter):
         except (TypeError, ValueError):
             return SiteHealth(reachable=False, detail="响应非 JSON")
         if str(data.get("code")) == "0" and data.get("data"):
-            return SiteHealth(reachable=True, detail="ok")
+            # API 站没有「登录态」概念——apikey 有效即已授权。
+            # ⚠️ 必须显式置 True：默认 False 会让前端三态显示成「未登录」
+            # 假警报（前端按 reachable && logged_in 判绿，2026-11-08 改）。
+            return SiteHealth(reachable=True, logged_in=True, detail="ok")
         return SiteHealth(reachable=False, detail=data.get("message", "鉴权已过期或无效"))
 
     # ------------------------------------------------------------ 2. search_torrents

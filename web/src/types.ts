@@ -158,7 +158,8 @@ export interface SiteTestItem {
 /** 全部测连结果（`POST /sites/test-all`）。 */
 export interface SiteTestAllResult {
   results: SiteTestItem[]
-  summary: { total: number; reachable: number; failed: number }
+  /** ``unauthorized`` = 可达但**未登录**（凭据失效 / 没配 cookie）——与「不可达」分开计。 */
+  summary: { total: number; reachable: number; failed: number; unauthorized?: number }
 }
 
 /** 站点用户数据摘要（`GET /sites/{id}/user-data`）。 */

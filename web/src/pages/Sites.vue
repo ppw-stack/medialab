@@ -211,7 +211,7 @@ async function onTestRow(s: Site) {
       `/sites/${s.id}/test`,
     )
     testResults.value[s.id] = {
-      status: r.reachable ? 'ok' : 'error',
+      status: testStatus(r.reachable, r.logged_in),
       detail: r.detail,
     }
   } catch (exc) {
@@ -219,6 +219,23 @@ async function onTestRow(s: Site) {
   } finally {
     testingId.value = null
   }
+}
+
+/**
+ * 测连结果三态。
+ *
+ * ⚠️ **不能只看 reachable**——那是「网络可达」，不是「一切正常」：
+ * 凭据过期时站点仍可达（302 → 登录页，200），但**拉不到任何数据**
+ * （2026-11-08 prod：ourbits 凭据过期 10 天，面板测连一直显示绿点，
+ * 直到用户数据作业报错才暴露）。故：
+ *
+ * - ``ok``    = 可达且已登录
+ * - ``warn``  = 可达但未登录（凭据失效 / 没配 cookie）——**黄色醒目**
+ * - ``error`` = 不可达
+ */
+function testStatus(reachable: boolean, loggedIn: boolean): string {
+  if (!reachable) return 'error'
+  return loggedIn ? 'ok' : 'warn'
 }
 
 async function onTestAll() {
@@ -230,15 +247,21 @@ async function onTestAll() {
     const r = await api.post<SiteTestAllResult>('/sites/test-all')
     for (const item of r.results) {
       testResults.value[item.site_id] = {
-        status: item.reachable ? 'ok' : 'error',
+        status: testStatus(item.reachable, item.logged_in),
         detail: item.detail,
       }
     }
     const { total, reachable, failed } = r.summary
-    if (failed > 0) {
-      message.warning(`共 ${total} 站，可达 ${reachable}，失败 ${failed}`)
+    // ⚠️ summary.unauthorized = 可达但**未登录**（凭据失效）——单独提示，
+    // 别混进「可达」（那会让失效的站看起来一切正常）
+    const unauthorized = r.summary.unauthorized ?? 0
+    if (failed > 0 || unauthorized > 0) {
+      const parts = [`共 ${total} 站`, `可达 ${reachable}`]
+      if (failed > 0) parts.push(`失败 ${failed}`)
+      if (unauthorized > 0) parts.push(`未登录 ${unauthorized}（凭据可能已失效）`)
+      message.warning(parts.join('，'))
     } else {
-      message.success(`共 ${total} 站全部可达`)
+      message.success(`共 ${total} 站全部可达且已登录`)
     }
   } catch (exc) {
     message.error(exc instanceof Error ? exc.message : '全部测连失败')
@@ -541,6 +564,11 @@ const columns = [
 .test-result-dot--ok {
   background: var(--status-green, #22c55e);
   box-shadow: 0 0 6px rgba(34, 197, 94, 0.4);
+}
+/* 可达但未登录（凭据失效）——黄色，醒目但不叫「失败」 */
+.test-result-dot--warn {
+  background: var(--status-amber, #f59e0b);
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.4);
 }
 .test-result-dot--error {
   background: var(--status-red, #ef4444);

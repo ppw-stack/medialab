@@ -1246,6 +1246,41 @@ async def test_push_missing_index_404(client: httpx.AsyncClient) -> None:
     assert resp.status_code == 404
 
 
+async def test_test_all_summary_counts_unauthorized(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """「可达但未登录」的站单独计数——凭据失效不能混进「可达」。
+
+    2026-11-08 prod：ourbits 凭据过期 10 天，面板测连一直显示绿点，
+    「全部测连」也只报「可达」——故障彻底不可见。
+    """
+    from app.api.routes import sites as sites_route
+    from app.services.site_service import SiteTestResult
+
+    async def _fake() -> list[SiteTestResult]:
+        return [
+            SiteTestResult(site_id=1, name="a", reachable=True, logged_in=True, detail="ok"),
+            SiteTestResult(
+                site_id=2,
+                name="b",
+                reachable=True,
+                logged_in=False,
+                detail="cookie 已过期，需重新获取",
+            ),
+            SiteTestResult(site_id=3, name="c", reachable=False, logged_in=False, detail="boom"),
+        ]
+
+    monkeypatch.setattr(sites_route.site_service, "test_all_sites", _fake)
+
+    resp = await client.post("/api/v1/sites/test-all")
+    assert resp.status_code == 200
+    summary = resp.json()["summary"]
+    assert summary["total"] == 3
+    assert summary["reachable"] == 2
+    assert summary["unauthorized"] == 1
+    assert summary["failed"] == 1
+
+
 async def test_push_without_default_downloader_400(
     client: httpx.AsyncClient,
 ) -> None:

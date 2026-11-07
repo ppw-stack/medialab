@@ -74,6 +74,28 @@ _BUCKET_CAPPED = 2
 _ORDER_BY_PROGRESS = 0
 _ORDER_RANDOM = 1
 
+#: 候选**新鲜度下限**（小时）：``torrent_index.last_seen_at`` 早于这个时长的
+#: 条目一律不推送。
+#:
+#: 为什么需要：某站凭据失效期间，库里会攒下大量**陈旧快照**——它们的
+#: 「免费」状态是失效前的旧数据，早就不可信（2026-11-08 prod：ourbits
+#: 凭据过期 10 天，1557 条 10 天前的快照仍在库里，其中永久免费种
+#: ``free_end_at IS NULL`` **永远入选**候选 → 一旦别的站候选不够填满
+#: push_max_per_run，就会把「当前实为收费」的种子推给下载器）。
+#:
+#: 24 小时 = 拉取作业周期（10 分钟）的 144 倍，留足容错；站点真停摆时
+#: 它的候选会在一天内自动退出推送池。
+_FRESHNESS_WINDOW_HOURS = 24
+
+
+def _freshness_cutoff() -> str:
+    """候选新鲜度下限（北京时间字符串，格式与 ``last_seen_at`` 一致）。
+
+    ``last_seen_at`` 是固定格式的北京时间字符串（``YYYY-MM-DD HH:MM:SS``），
+    字典序 == 时间序，可直接用 SQL 字符串比较。
+    """
+    return format_bj(bj_now_dt() - timedelta(hours=_FRESHNESS_WINDOW_HOURS))
+
 
 @dataclass(frozen=True, slots=True)
 class PushResult:
@@ -411,6 +433,8 @@ class PushFreeService:
                     TorrentIndex.push_status.is_(None),
                     TorrentIndex.push_status != PushStatus.PUSHED,
                 ),
+                # 陈旧快照不推（凭据失效期间攒下的条目免费状态不可信）
+                TorrentIndex.last_seen_at >= _freshness_cutoff(),
             )
             .order_by(
                 bucket,

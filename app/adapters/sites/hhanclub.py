@@ -324,6 +324,13 @@ class HhanclubAdapter(SiteAdapter):
                 f"HHanClub 拉取 HTTP {resp.status_code}"
                 f"（第 {page_number} 页）"
             )
+        if "login.php" in str(resp.url):
+            # 凭据失效：站点把受保护页面 302 到登录页（跟随后是 200）——
+            # 不抛错的话会解析出 0 条，被当成「站点确实没有种子」而静默停摆
+            # （2026-11-08 prod：ourbits 凭据过期 10 天无人察觉）
+            raise SiteFetchError(
+                "hhanclub 凭据已失效（被重定向到登录页），请更新 cookie"
+            )
         items = HhanclubAdapter._parse_spstate0_html(resp.text)
         # 同步刷新 download URL cache（供 get_torrent_url 0-HTTP 命中）
         self._download_url_cache = HhanclubAdapter._extract_download_urls(
@@ -693,6 +700,10 @@ class HhanclubAdapter(SiteAdapter):
             raise SiteFetchError(f"hhanclub {path} 拉取失败：{detail}") from exc
         if resp.status_code >= 400:
             raise SiteFetchError(f"hhanclub {path} 返回 HTTP {resp.status_code}")
+        if "login.php" in str(resp.url):
+            raise SiteFetchError(
+                "hhanclub 凭据已失效（被重定向到登录页），请更新 cookie"
+            )
         return resp.text
 
     async def get_user_snapshot(self) -> SiteUserSnapshot | None:
@@ -717,7 +728,7 @@ class HhanclubAdapter(SiteAdapter):
                 await self._fetch_page("/userdetails.php")
             )
             if snap is None:
-                raise SiteFetchError("hhanclub 用户数据解析失败：4 个业务字段均未取到")
+                raise SiteFetchError("hhanclub 用户数据解析失败：3 个业务字段均未取到")
         bonus = _parse_hhanclub_hourly_bonus(bonus_html)
         return SiteUserSnapshot(
             upload=snap.upload,

@@ -927,6 +927,71 @@ async def test_hdwing_check_status_deleted_marker() -> None:
         await adapter.close()
 
 
+# ------------------------------------- 凭据失效检测（2026-11-08 prod 事故）
+
+#: 9 个 HTML 站（mteam 是 API 站，用 apikey 鉴权，无 cookie 概念）
+_HTML_ADAPTERS = (
+    "audiences",
+    "hddolby",
+    "hdsky",
+    "hhanclub",
+    "ourbits",
+    "soulvoice",
+    "springsunday",
+    "hdhome",
+    "hdwing",
+)
+
+
+def _login_redirect_router() -> respx.MockRouter:
+    """模拟「凭据失效」：受保护页面 302 → login.php（跟随后 200 登录页）。
+
+    站点行为：cookie 过期时把页面 302 到 ``/login.php?returnto=...``，
+    跟随后是 **200 的登录页**——所以只查状态码查不出来（不是 4xx）。
+    """
+    router = respx.mock(assert_all_mocked=True, assert_all_called=False)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if "login.php" in str(request.url):
+            return httpx.Response(200, text="<html>登录</html>")
+        return httpx.Response(
+            302, headers={"location": "https://example.com/login.php?returnto=x"}
+        )
+
+    router.route().mock(side_effect=_handler)
+    return router
+
+
+@pytest.mark.parametrize("name", _HTML_ADAPTERS)
+async def test_search_torrents_raises_on_login_redirect(name: str) -> None:
+    """列表页被重定向到登录页 → 抛 SiteFetchError，**不能静默返回 []**。
+
+    2026-11-08 prod：ourbits 凭据过期 10 天，列表页一直 302→登录页 →
+    解析出 0 条 → 被当成「站点确实没有种子」→ 作业从不点名，静默停摆。
+    """
+    adapter = _make(name)
+    try:
+        with _login_redirect_router(), pytest.raises(SiteFetchError, match="凭据已失效"):
+            await adapter.search_torrents({}, page_number=1)
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.parametrize("name", _HTML_ADAPTERS)
+async def test_user_snapshot_raises_on_login_redirect(name: str) -> None:
+    """用户数据页被重定向到登录页 → 报「凭据已失效」而不是「解析失败」。
+
+    拿到的其实是登录页，报「3 个业务字段均未取到」会把排查方向引偏
+    （让人去查解析器/页面结构，而不是查 cookie）。
+    """
+    adapter = _make(name)
+    try:
+        with _login_redirect_router(), pytest.raises(SiteFetchError, match="凭据已失效"):
+            await adapter.get_user_snapshot()
+    finally:
+        await adapter.close()
+
+
 # ------------------------------------------------------------------ 数据类
 
 def test_feed_item_defaults() -> None:

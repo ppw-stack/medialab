@@ -167,6 +167,10 @@ async def test_all_sites() -> SiteTestAllOut:
     """
     results = await site_service.test_all_sites()
     reachable = sum(1 for r in results if r.reachable)
+    # 可达但**未登录**（凭据过期 / 没配 cookie）——与「不可达」是两种故障：
+    # 前者站点活着但拿不到数据（ourbits 2026-11-08：凭据过期 10 天，
+    # 面板测连一直显示绿点）。单独计数，别混进「可达」里。
+    unauthorized = sum(1 for r in results if r.reachable and not r.logged_in)
     return SiteTestAllOut(
         results=[
             SiteTestItemOut(
@@ -182,6 +186,7 @@ async def test_all_sites() -> SiteTestAllOut:
             "total": len(results),
             "reachable": reachable,
             "failed": len(results) - reachable,
+            "unauthorized": unauthorized,
         },
     )
 

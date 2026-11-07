@@ -64,6 +64,7 @@ async def _add_torrent(
     push_status: str | None = None,
     item_id: str = "i1",
     site_id: int = 1,
+    last_seen_at: str | None = None,
 ) -> int:
     async with session_scope() as session:
         t = TorrentIndex(
@@ -73,6 +74,7 @@ async def _add_torrent(
             free_type=free_type,
             free_end_at=free_end_at,
             push_status=push_status,
+            **({"last_seen_at": last_seen_at} if last_seen_at else {}),
         )
         session.add(t)
         await session.flush()
@@ -123,6 +125,26 @@ async def test_permanent_free_is_selected(db: None) -> None:
 
     result = await _service().run()
     assert result.selected == 1
+
+
+async def test_stale_snapshot_is_not_selected(db: None) -> None:
+    """**陈旧快照不进候选**（凭据失效期间攒下的条目）。
+
+    2026-11-08 prod：ourbits 凭据过期 10 天，1557 条 10 天前的快照仍在
+    库里——永久免费种（``free_end_at IS NULL``）**永远入选**旧候选查询，
+    一旦别的站候选不够填满 push_max_per_run，就会把「当前实为收费」的
+    种子推给下载器。新鲜度下限（24h）把这类条目挡在候选池外。
+    """
+    await _add_downloader()
+    site_id = await _add_site()
+    stale = format_bj(bj_now_dt() - timedelta(hours=72))
+    await _add_torrent(
+        free_type=FreeType.PERMANENT, site_id=site_id, last_seen_at=stale
+    )
+
+    result = await _service().run()
+    assert result.selected == 0
+    assert result.pushed == 0
 
 
 async def test_timed_free_with_enough_remaining_is_selected(db: None) -> None:

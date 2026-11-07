@@ -360,7 +360,7 @@ class HdwingAdapter(SiteAdapter):
         return SiteHealth(
             reachable=True,
             logged_in=logged_in,
-            detail=("logged in" if logged_in else "redirected to login"),
+            detail=("已登录" if logged_in else "未登录（被重定向到登录页），请更新 cookie"),
         )
 
     # ------------------------------------------------------------ 2. search_torrents
@@ -390,6 +390,13 @@ class HdwingAdapter(SiteAdapter):
         if resp.status_code >= 400:
             raise SiteFetchError(
                 f"HDWinG 拉取 HTTP {resp.status_code}（第 {page_number} 页）"
+            )
+        if "login.php" in str(resp.url):
+            # 凭据失效：站点把受保护页面 302 到登录页（跟随后是 200）——
+            # 不抛错的话会解析出 0 条，被当成「站点确实没有种子」而静默停摆
+            # （2026-11-08 prod：ourbits 凭据过期 10 天无人察觉）
+            raise SiteFetchError(
+                "hdwing 凭据已失效（被重定向到登录页），请更新 cookie"
             )
 
         html = resp.text
@@ -539,6 +546,10 @@ class HdwingAdapter(SiteAdapter):
             raise SiteFetchError(f"hdwing {path} 拉取失败：{detail}") from exc
         if resp.status_code >= 400:
             raise SiteFetchError(f"hdwing {path} 返回 HTTP {resp.status_code}")
+        if "login.php" in str(resp.url):
+            raise SiteFetchError(
+                "hdwing 凭据已失效（被重定向到登录页），请更新 cookie"
+            )
         return resp.text
 
     async def get_user_snapshot(self) -> SiteUserSnapshot | None:
