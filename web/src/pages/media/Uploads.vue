@@ -20,7 +20,7 @@
             <a-list :data-source="tasks" size="small" :locale="{ emptyText: '暂无上传任务' }">
               <template #renderItem="{ item }">
                 <a-list-item>
-                  <a-space direction="vertical" :size="2" style="width: 100%">
+                  <a-space direction="vertical" :size="2" class="task-main">
                     <a-space>
                       <strong>{{ item.name }}</strong>
                       <a-tag :color="item.enabled ? 'green' : 'default'">
@@ -33,22 +33,24 @@
                         已丢 {{ item.dropped }}
                       </a-tag>
                     </a-space>
-                    <span class="muted mono">
+                    <span class="muted mono break-any">
                       {{ item.watch_root }} → {{ item.target_path || item.target_file_id }}
                     </span>
                     <a-space :size="12" class="muted">
                       <span>已上传 {{ item.total_uploaded }}</span>
                       <span>失败 {{ item.total_failed }}</span>
                       <span>{{ formatBytes(item.total_bytes) }}</span>
-                      <span v-if="item.current" class="mono">
-                        正在传：{{ item.current }}
-                      </span>
-                      <span v-if="item.current_small" class="mono">
-                        小文件：{{ item.current_small }}
-                      </span>
                     </a-space>
+                    <!-- 正在传 / 小文件是**长文件名**，独立成行——
+                         挤在统计行里会把整行撑爆（见 .task-main 注释） -->
+                    <span v-if="item.current" class="muted mono break-any">
+                      正在传：{{ item.current }}
+                    </span>
+                    <span v-if="item.current_small" class="muted mono break-any">
+                      小文件：{{ item.current_small }}
+                    </span>
                   </a-space>
-                  <a-space>
+                  <a-space class="task-actions">
                     <a-button size="small" @click="openDetail(item)">详情</a-button>
                     <a-button size="small" @click="openEdit(item)">编辑</a-button>
                     <a-button size="small" @click="toggleEnabled(item)">
@@ -451,7 +453,6 @@ function openEdit(task: UploadTask): void {
   form.name = task.name
   form.driver_id = task.driver_id
   form.watch_root = task.watch_root
-  form.watch_root = task.watch_root
   localStack.value = [{ id: task.watch_root, name: task.watch_root }]
   localDirs.value = []
   form.include_subdirs = task.include_subdirs
@@ -615,6 +616,47 @@ function logText(line: string): string {
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
+}
+
+/*
+  任务列表项：内容块与按钮组是 `.ant-list-item`（display:flex +
+  justify-content:space-between，antd 4.x **无 flex-wrap**）的两个直接
+  flex 子项。子项默认 `min-width: auto`——监听根 / 云端目标 / 正在传的
+  **长 ASCII 路径**没有断行点，会把内容块撑到超过容器宽，按钮组被
+  space-between 推出卡片右缘（375px 视口实测「详情/编辑/停用/删除」
+  四个按钮悬在卡片外，路径被遮挡）。
+*/
+.task-main {
+  /* flex:1 占满按钮组之外的剩余空间（与 space-between 等效的布局），
+     min-width:0 允许随容器压缩——两者缺一不可 */
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.task-actions {
+  flex-shrink: 0;
+}
+
+/* 长 ASCII 串（路径 / 文件名）无自然断点——anywhere 允许任意字符间断行 */
+.break-any {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 767px) {
+  /* 手机端：内容块独占一行，按钮组换行到下一行（保持右对齐）——
+     4 个按钮 + 标签 + 路径挤一行必爆 */
+  .task-main {
+    flex-basis: 100%;
+  }
+
+  :deep(.ant-list-item) {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+
+  .task-actions {
+    margin-left: auto;
+  }
 }
 
 .hint {

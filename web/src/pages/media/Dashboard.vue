@@ -67,14 +67,17 @@
             <a-list :data-source="drivers" size="small" :locale="{ emptyText: '暂无存储源' }">
               <template #renderItem="{ item }">
                 <a-list-item>
-                  <a-space>
+                  <a-space direction="vertical" :size="2" class="driver-main">
                     <span>{{ item.name }}</span>
-                    <a-tag v-if="item.media_path" color="blue" class="mono">
+                    <!-- 媒体库路径是长路径——不能用 a-tag（antd tag
+                         white-space:nowrap 永不断行），长路径会把整个
+                         列表项撑爆、把右侧时间推出卡片外 -->
+                    <span v-if="item.media_path" class="muted mono break-any">
                       {{ item.media_path }}
-                    </a-tag>
+                    </span>
                     <a-tag v-else color="default">未配置媒体库</a-tag>
                   </a-space>
-                  <span class="muted">
+                  <span class="muted driver-scan">
                     {{ item.last_scan_at ? formatTime(item.last_scan_at) : "未扫描" }}
                   </span>
                 </a-list-item>
@@ -120,4 +123,22 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+/*
+  存储源列表项：内容块与扫描时间是 `.ant-list-item`（flex +
+  space-between）的两个直接子项，默认 min-width:auto——media_path
+  的长路径会把内容块撑爆、把时间推出卡片（与 /uploads 同构的回归）。
+*/
+.driver-main {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.driver-scan {
+  flex-shrink: 0;
+}
+
+/* 长 ASCII 路径无自然断点——允许任意字符间断行 */
+.break-any {
+  overflow-wrap: anywhere;
+}
 </style>

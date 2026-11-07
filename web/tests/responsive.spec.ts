@@ -12,6 +12,7 @@ async function login(page: any) {
 const PAGES = [
   '/', '/sites', '/downloaders', '/torrent-index', '/cross-seed', '/settings',
   '/drivers', '/library', '/migrations', '/uploads', '/health', '/dav-users', '/media-settings',
+  '/offline',
 ]
 
 /**
@@ -48,6 +49,106 @@ test('响应式 - 手机端 375px 无页面级横向溢出', async ({ page }) =>
     }
   }
   console.log(`  ✓ 375px 检查 ${PAGES.length} 个页面`)
+  expect(bad).toEqual([])
+})
+
+/**
+ * 页面级检查抓不住**卡片内部**溢出（回归 2026-11-07，/uploads）：
+ *
+ * `.ant-list-item` 是 flex + space-between（antd 4.x 无 flex-wrap），
+ * 任务列表的「内容块 + 按钮组」两个直接子项默认 min-width:auto——
+ * 长 ASCII 路径（监听根 / 正在传的文件名）没有断行点，把内容块撑到
+ * 超过卡片宽。实测（375px 视口 + 80 字符连续文件名）：
+ *   - 文档被撑到 674px（视口 375px）——整页可左右滑动
+ *   - 按钮组被全局 @media 的 `.ant-space { flex-wrap: wrap }` 压成
+ *     纵列、悬在卡片右缘**外**（right 378 > 卡片 346）
+ * 此时若容器里恰好没有长路径任务，页面级检查全绿——页面实际已经烂了。
+ *
+ * 因此本用例**内置 mock 任务**（不依赖真实数据），永远在最坏情况下验证：
+ *   ① 文档不横向溢出 ② 列表项自身无横向内容溢出
+ *   ③ 所有按钮落在列表矩形内
+ */
+test('响应式 - 手机端 /uploads 长路径任务卡片不溢出', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 667 })
+
+  // mock：一条监听根与正在传文件名都极长的任务（最坏情况）
+  const longTask = {
+    id: 1,
+    name: '小号同步',
+    driver_id: 1,
+    target_file_id: 'root',
+    target_path: '影视',
+    watch_root: '/mnt/remotes/192.168.0.172_Public/home/movietmp',
+    include_subdirs: true,
+    enabled: true,
+    delete_after_upload: false,
+    concurrency: 4,
+    created_at: '2026-11-01 10:00:00',
+    updated_at: '2026-11-07 15:00:00',
+    listening: true,
+    current: `电视剧/日番/航海王（1999）/Season 17/${'a'.repeat(80)}.jpg`,
+    current_small: `电视剧/国产剧/甄嬛传（2011）/Season 1/${'b'.repeat(80)}.nfo`,
+    total_uploaded: 1817,
+    total_failed: 100,
+    total_bytes: 23810000000,
+    dropped: 0,
+    runtime_error: null,
+  }
+  await page.route('**/api/upload-tasks', (r) => r.fulfill({ json: [longTask] }))
+  await page.route('**/api/upload-tasks/1/status', (r) =>
+    r.fulfill({
+      json: {
+        task_id: 1,
+        listening: true,
+        current: longTask.current,
+        current_small: longTask.current_small,
+        total_uploaded: 1817,
+        total_failed: 100,
+        total_bytes: 23810000000,
+        queue_large: 0,
+        queue_small: 0,
+        overflow: 0,
+        dropped: 0,
+        logs: [],
+        error: null,
+        syncing: false,
+        watch: {},
+      },
+    }),
+  )
+  await page.route('**/api/upload-tasks/capabilities', (r) =>
+    r.fulfill({ json: { uploadable_types: [] } }),
+  )
+  await page.route('**/api/drivers', (r) => r.fulfill({ json: [] }))
+
+  await login(page)
+  await page.goto('/uploads')
+  await page.waitForTimeout(1500)
+  await expect(page.locator('.ant-list-item').first()).toBeVisible()
+
+  const bad = await page.evaluate(() => {
+    const out: string[] = []
+    const docW = document.documentElement.scrollWidth
+    const winW = window.innerWidth
+    if (docW > winW + 1) out.push(`文档宽 ${docW} > 视口 ${winW}`)
+    const list = document.querySelector('.ant-list')
+    const listRight = list?.getBoundingClientRect().right ?? 0
+    document.querySelectorAll('.ant-list-item').forEach((item, i) => {
+      if (item.scrollWidth > item.clientWidth + 1) {
+        out.push(`item#${i} 横向内容溢出（${item.scrollWidth} > ${item.clientWidth}）`)
+      }
+      item.querySelectorAll('.ant-btn').forEach((btn) => {
+        const r = btn.getBoundingClientRect()
+        if (r.right > listRight + 1 || r.left < 0) {
+          out.push(
+            `item#${i} 按钮「${btn.textContent?.trim()}」越出列表矩形 ` +
+              `(right ${Math.round(r.right)} > ${Math.round(listRight)})`,
+          )
+        }
+      })
+    })
+    return out
+  })
   expect(bad).toEqual([])
 })
 

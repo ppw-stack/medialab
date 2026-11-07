@@ -5,8 +5,9 @@ export default defineConfig({
   timeout: 30000,
   reporter: [['list']],
   use: {
-    // dev 容器端口是 8092（8080/8081 已被本机其它容器占用）
-    baseURL: 'http://localhost:8092',
+    // dev 容器端口是 8092（8080/8081 已被本机其它容器占用）。
+    // 本地起 vite dev 验证未构建的改动时，用 PLAYWRIGHT_BASE_URL 覆盖。
+    baseURL: process.env.PLAYWRIGHT_BASE_URL ?? 'http://localhost:8092',
     headless: true,
     screenshot: 'only-on-failure',
     video: 'off',
