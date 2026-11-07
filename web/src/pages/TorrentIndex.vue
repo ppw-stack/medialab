@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { api } from '../api'
 import type {
+  BatchPushResponse,
   Downloader as DownloaderOpt,
   PushResponse,
   SiteOption as SiteOpt,
@@ -40,6 +41,12 @@ const pushItem = ref<TorrentIndexItem | null>(null)
 const pushDownloaderId = ref<number | null>(null)
 const pushing = ref(false)
 const pushingId = ref<number | null>(null)
+
+// ---- 批量推送（勾选） ----
+// 选中的是**索引 id**；跨页选择保留（preserveSelectedRowKeys），翻页不丢。
+const selectedIds = ref<number[]>([])
+const batchModalOpen = ref(false)
+const batchPushing = ref(false)
 
 const filterSite = ref<number | null>(null)
 const filterFreeType = ref<string | null>(null)
@@ -119,6 +126,72 @@ async function doPush() {
   } finally {
     pushing.value = false
     pushingId.value = null
+  }
+}
+
+// ------------------------------------------------------------ 批量推送
+
+/**
+ * 勾选变化。
+ *
+ * key 可能是 number 也可能是 string（DataTable 透传），统一转 number。
+ */
+function onSelectionChange(keys: (string | number)[]) {
+  selectedIds.value = keys.map((k) => Number(k)).filter((n) => !Number.isNaN(n))
+}
+
+/** 不可推的行不给勾选（与行内「推送 →」按钮的 disabled 语义一致）。 */
+function rowCheckboxProps(record: TorrentIndexItem) {
+  return { disabled: !record.pushable }
+}
+
+function clearSelection() {
+  selectedIds.value = []
+}
+
+/**
+ * 触发一次队列消化（fire-and-forget）。
+ *
+ * 批量推送**只入队**，真正执行由队列按节流消化（每轮 50 条、条间 2s）。
+ * 这里立刻手动触发一次，免得用户等 cron 的 5 分钟。
+ * 撞上正在运行的 drain 作业（already running）无害——那一轮会接手。
+ */
+async function triggerDrain() {
+  try {
+    await api.post('/scheduler/drain_task_queue/run')
+  } catch {
+    /* 忽略：cron 会接手 */
+  }
+}
+
+async function doBatchPush() {
+  if (selectedIds.value.length === 0) return
+  batchPushing.value = true
+  try {
+    const r = await api.post<BatchPushResponse>('/torrent-index/push-batch', {
+      ids: selectedIds.value,
+      downloader_id: pushDownloaderId.value,
+    })
+    // 已入队 → 立刻触发一次队列消化
+    void triggerDrain()
+    const parts: string[] = [`已入队 ${r.enqueued} 条`]
+    if (r.skipped > 0) parts.push(`跳过 ${r.skipped} 条（已推送/队列中/无链接）`)
+    if (r.failed > 0) parts.push(`失败 ${r.failed} 条`)
+    if (r.failed > 0) {
+      const failed = r.items.filter((i) => i.state === 'failed').slice(0, 3)
+      message.error(
+        `${parts.join('，')}：${failed.map((i) => `#${i.id} ${i.detail}`).join('；')}`,
+      )
+    } else {
+      message.success(`${parts.join('，')}，队列将按节流逐步推送`)
+    }
+    batchModalOpen.value = false
+    selectedIds.value = []
+    await load({ reset: true })
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '批量推送失败')
+  } finally {
+    batchPushing.value = false
   }
 }
 
@@ -395,6 +468,16 @@ const columns = [
           size="middle"
         />
         <a-button size="middle" @click="resetFilters">重置筛选</a-button>
+        <template v-if="selectedIds.length > 0">
+          <a-button
+            type="primary"
+            size="middle"
+            @click="batchModalOpen = true"
+          >
+            推送选中（{{ selectedIds.length }}）
+          </a-button>
+          <a-button size="middle" @click="clearSelection">清除选择</a-button>
+        </template>
         <span class="mono filter-row__meta">
           共 <b style="color: var(--text-primary)">{{ total }}</b> 条
         </span>
@@ -404,6 +487,12 @@ const columns = [
         :data-source="items"
         :columns="columns"
         :loading="loading"
+        :row-selection="{
+          selectedRowKeys: selectedIds,
+          onChange: onSelectionChange,
+          getCheckboxProps: rowCheckboxProps,
+          preserveSelectedRowKeys: true,
+        }"
         :pagination="{
           current: Math.floor(offset / limit) + 1,
           pageSize: limit,
@@ -486,6 +575,42 @@ const columns = [
       </DataTable>
       </div>
     </section>
+
+    <a-modal
+      v-model:open="batchModalOpen"
+      :title="`批量推送 ${selectedIds.length} 个种子`"
+      ok-text="入队推送"
+      cancel-text="取消"
+      :confirm-loading="batchPushing"
+      @ok="doBatchPush"
+    >
+      <p class="push-modal-name">
+        已选 <b>{{ selectedIds.length }}</b> 个种子，将推送到下面的下载器。
+      </p>
+      <a-alert
+        type="info"
+        show-icon
+        message="批量推送只入队，由队列按节流逐步推送（每轮 50 条、条间 2 秒）"
+        description="已推送过 / 已在队列中 / 无可用下载链接的条目会自动跳过；推送完成后列表里的「推送状态」才会更新。"
+        style="margin-bottom: var(--sp-3)"
+      />
+      <a-form layout="vertical">
+        <a-form-item label="目标下载器">
+          <a-select
+            v-model:value="pushDownloaderId"
+            placeholder="选择下载器"
+            style="width: 100%"
+            :options="downloaders.map((d) => ({ value: d.id, label: d.name + (d.is_default ? '（默认）' : '') }))"
+          />
+        </a-form-item>
+      </a-form>
+      <a-alert
+        v-if="downloaders.length === 0"
+        type="warning"
+        show-icon
+        message="暂无可用的下载器，请先在「下载器」页添加"
+      />
+    </a-modal>
 
     <a-modal
       v-model:open="pushModalOpen"

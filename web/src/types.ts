@@ -607,6 +607,34 @@ export interface PushResponse {
   downloader_id: number | null
 }
 
+/**
+ * 批量推送的单条结果（`POST /torrent-index/push-batch`）。
+ *
+ * state：`enqueued`（已入队）/ `skipped_pushed`（已推过）/
+ * `skipped_queued`（队列里已有）/ `skipped_no_link`（无可用链接）/
+ * `skipped_not_found`（索引不存在）/ `skipped_site_missing`（站点不存在）/
+ * `failed`。
+ */
+export interface BatchPushItem {
+  id: number
+  state: string
+  detail: string
+}
+
+/**
+ * 批量推送汇总（`POST /torrent-index/push-batch`）。
+ *
+ * **只入队不同步执行**——执行由队列（drain_task_queue）按节流消化，
+ * 执行后列表里的「推送状态」才会变成已推送/失败。
+ */
+export interface BatchPushResponse {
+  total: number
+  enqueued: number
+  skipped: number
+  failed: number
+  items: BatchPushItem[]
+}
+
 // ==================================================================== 调度
 
 /** 单个作业（`GET /scheduler` 里的 jobs 数组）。 */

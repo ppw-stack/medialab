@@ -26,10 +26,18 @@ from app.db.models import Site, TorrentIndex
 from app.db.session import session_scope
 from app.services.errors import ServiceError
 from app.services.factory import get_factory
-from app.services.push_service import PushError, PushOutcome, push_index_entry
+from app.services.push_service import (
+    PushError,
+    PushOutcome,
+    enqueue_index_entry,
+    push_index_entry,
+    resolve_downloader,
+)
 
 __all__ = [
     "SORTABLE_COLUMNS",
+    "BatchPushItem",
+    "BatchPushResult",
     "IndexEntry",
     "IndexPage",
     "IndexStats",
@@ -38,6 +46,7 @@ __all__ = [
     "list_free_types",
     "list_index",
     "list_index_sites",
+    "push_batch",
     "push_entry",
 ]
 
@@ -236,6 +245,101 @@ async def get_index_entry(index_id: int) -> IndexEntry:
     if row is None:
         raise ServiceError("torrent_index entry not found", status=404)
     return _to_entry(row)
+
+
+@dataclass(frozen=True, slots=True)
+class BatchPushItem:
+    """批量推送的单条结果。
+
+    :param state: ``enqueued``（已入队）/ ``skipped_pushed``（已推过）/
+        ``skipped_queued``（队列里已有）/ ``skipped_no_link``（无可用链接）/
+        ``skipped_missing``（索引不存在）/ ``failed``
+    """
+
+    id: int
+    state: str
+    detail: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class BatchPushResult:
+    """批量推送汇总。"""
+
+    total: int
+    enqueued: int
+    skipped: int
+    failed: int
+    items: list[BatchPushItem]
+
+
+async def push_batch(
+    ids: list[int], downloader_id: int | None = None
+) -> BatchPushResult:
+    """批量推送：把选中的拉取索引**入队**（**不限制数量**）。
+
+    每条走 :func:`push_service.enqueue_index_entry`——与单条手动推送
+    **同一份**校验 / 幂等 / 入队逻辑（不会漂移），但**只入队不执行**。
+
+    **为什么不同步执行**：一次几百条同步执行 = 几百次「下载 .torrent +
+    推给下载器」的网络往返，HTTP 请求会挂十几分钟；入队则立即返回，
+    且天然享受队列的幂等 / 退避 / 崩溃恢复 / 下载器友好节流
+    （``drain_task_queue`` 每轮 50 条、条间 2s）。执行时由
+    :func:`app.services.task_executor.execute_add_torrent` 更新
+    ``push_status``（TOCTOU 防御在执行器里）。
+
+    :raises ServiceError: 下载器不可用（透传 :class:`PushError` 的状态码）
+    """
+    if not ids:
+        raise ServiceError("未选择任何种子", status=400)
+
+    # 下载器先解析一次（不存在/未配默认 → 整批 400，不逐条报）
+    try:
+        dl = await resolve_downloader(downloader_id)
+    except PushError as exc:
+        raise ServiceError(str(exc), status=exc.status) from exc
+    dl_id = dl.id
+
+    items: list[BatchPushItem] = []
+    enqueued = skipped = failed = 0
+    for index_id in ids:
+        try:
+            outcome = await enqueue_index_entry(index_id, dl_id)
+        except PushError as exc:
+            # 「这一条推不了」不算整批失败——分类记录后继续下一条
+            if exc.code in ("not_found", "no_link", "site_missing"):
+                skipped += 1
+                items.append(
+                    BatchPushItem(id=index_id, state=f"skipped_{exc.code}", detail=str(exc))
+                )
+            else:
+                failed += 1
+                items.append(
+                    BatchPushItem(id=index_id, state="failed", detail=str(exc))
+                )
+            continue
+        if outcome.state == "enqueued":
+            enqueued += 1
+            items.append(
+                BatchPushItem(id=index_id, state="enqueued", detail=outcome.detail)
+            )
+        else:
+            skipped += 1
+            state = (
+                "skipped_pushed"
+                if outcome.state == "already_pushed"
+                else "skipped_queued"
+            )
+            items.append(
+                BatchPushItem(id=index_id, state=state, detail=outcome.detail)
+            )
+
+    return BatchPushResult(
+        total=len(ids),
+        enqueued=enqueued,
+        skipped=skipped,
+        failed=failed,
+        items=items,
+    )
 
 
 async def push_entry(

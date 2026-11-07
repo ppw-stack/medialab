@@ -15,7 +15,7 @@ from dataclasses import asdict
 
 from fastapi import APIRouter, Depends
 from fastapi import Query as QueryParam
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.api.auth import require_session
 from app.core.logging import get_logger
@@ -84,6 +84,38 @@ class PushResponse(BaseModel):
     downloader_id: int | None = None
 
 
+class BatchPushRequest(BaseModel):
+    """批量推送请求。
+
+    ``ids`` **不限数量**——一次勾选几百条是常见操作。
+    """
+
+    ids: list[int] = Field(..., min_length=1, description="拉取索引 id 列表")
+    downloader_id: int | None = None
+
+
+class BatchPushItemOut(BaseModel):
+    """批量推送的单条结果。"""
+
+    id: int
+    state: str
+    detail: str = ""
+
+
+class BatchPushResponse(BaseModel):
+    """批量推送汇总。
+
+    **只入队不同步执行**：执行由 ``drain_task_queue`` 按队列节流消化
+    （每轮 50 条、条间 2s），执行时自动更新 ``push_status``。
+    """
+
+    total: int
+    enqueued: int
+    skipped: int
+    failed: int
+    items: list[BatchPushItemOut]
+
+
 @router.get("", response_model=TorrentIndexPage)
 async def list_torrent_index(
     site_id: int | None = QueryParam(default=None, description="按站点过滤"),
@@ -136,6 +168,36 @@ async def get_torrent_index_stats(
     """
     stats = await index_service.index_stats(site_id=site_id)
     return TorrentIndexStats(total=stats.total, by_type=stats.by_type)
+
+
+@router.post("/push-batch", response_model=BatchPushResponse)
+async def push_torrent_index_batch(payload: BatchPushRequest) -> BatchPushResponse:
+    """把**多条**拉取索引推送到下载器（批量手动推送）。
+
+    - 每条走与单推**同一份**校验 / 幂等 / 入队逻辑
+      （:func:`app.services.index_service.push_batch`）
+    - **只入队，不同步执行**：几百条同步执行会把 HTTP 请求挂十几分钟；
+      入队后由 ``drain_task_queue`` 按队列节流消化（每轮 50 条、条间 2s），
+      执行时自动更新 ``push_status``
+    - 单条推不了（已推过 / 队列里已有 / 无可用链接）→ 计入 ``skipped``，
+      **不影响其它条目**
+    """
+    result = await index_service.push_batch(payload.ids, payload.downloader_id)
+
+    logger.info(
+        "批量推送：共 %d 条 → 入队 %d / 跳过 %d / 失败 %d",
+        result.total, result.enqueued, result.skipped, result.failed,
+    )
+    return BatchPushResponse(
+        total=result.total,
+        enqueued=result.enqueued,
+        skipped=result.skipped,
+        failed=result.failed,
+        items=[
+            BatchPushItemOut(id=i.id, state=i.state, detail=i.detail)
+            for i in result.items
+        ],
+    )
 
 
 @router.get("/{index_id}", response_model=TorrentIndexItem)

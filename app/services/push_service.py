@@ -43,11 +43,14 @@ class PushError(RuntimeError):
     """推送失败（面向 API 层，直接转 HTTP 状态码）。
 
     :param status: 建议的 HTTP 状态码（404 / 400 / 502）
+    :param code: 机器可读错误码——**批量推送按它分类**（跳过 vs 失败），
+        不靠 message 文案匹配（文案会改，码不会）。
     """
 
-    def __init__(self, message: str, *, status: int = 400) -> None:
+    def __init__(self, message: str, *, status: int = 400, code: str = "") -> None:
         super().__init__(message)
         self.status = status
+        self.code = code
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +86,97 @@ async def resolve_downloader(
     return dl
 
 
+@dataclass(frozen=True, slots=True)
+class EnqueueOutcome:
+    """入队结果（**不含执行**）。
+
+    :param state: ``enqueued``（新入队）/ ``already_pushed``（已推过）/
+        ``already_queued``（队列里已有等价任务）
+    """
+
+    state: str
+    dl_id: int
+    detail: str
+    task_id: int | None = None
+    payload: dict[str, object] | None = None
+
+
+async def enqueue_index_entry(index_id: int, downloader_id: int | None) -> EnqueueOutcome:
+    """把索引条目**入队**（校验 + 幂等判定 + 入队，**不执行**）。
+
+    与 :func:`push_index_entry` 共享前 3 步——单条与批量走**同一份**校验 /
+    幂等 / 入队逻辑，不会漂移。差别只在于是否同步执行：
+
+    - 单条手动推送：入队后立刻认领并执行 → 用户当场拿到结果
+    - 批量推送：只入队，由 ``drain_task_queue`` 按队列节流消化（一次几百条
+      不能挂住 HTTP 请求）
+
+    :raises PushError: 索引条目不存在（``code=not_found``）/ 缺 item_id
+        （``code=no_link``）/ 站点不存在（``code=site_missing``）/ 下载器
+        不可用（``code=downloader_unavailable``）
+    """
+    # 1) 读索引 + 站点
+    async with session_scope() as session:
+        item = (
+            await session.execute(
+                select(TorrentIndex).where(TorrentIndex.id == index_id)
+            )
+        ).scalar_one_or_none()
+        if item is None:
+            raise PushError("索引条目不存在", status=404, code="not_found")
+        if not item.item_id:
+            raise PushError(
+                "该条目缺少 item_id，无法推送", status=400, code="no_link"
+            )
+        site_id = item.site_id
+        item_id = item.item_id
+        push_status = item.push_status
+        site_exists = (
+            await session.execute(select(Site.id).where(Site.id == site_id))
+        ).scalar_one_or_none()
+        if site_exists is None:
+            raise PushError("站点不存在", status=404, code="site_missing")
+
+    dl = await resolve_downloader(downloader_id)
+    dl_id = dl.id
+
+    # 2) 已推送过 → 幂等（不再入队）
+    if push_status == PushStatus.PUSHED:
+        return EnqueueOutcome(
+            state="already_pushed", dl_id=dl_id, detail="该种已推送过"
+        )
+
+    # 3) 入队（幂等键 = kind|site_id|item_id|dl=downloader_id）
+    idem_key = make_idem_key(
+        TaskKind.ADD_TORRENT,
+        site_id=site_id,
+        info_hash=item_id,
+        extra=f"dl={dl_id}",
+    )
+    payload: dict[str, object] = {
+        "index_id": index_id,
+        "downloader_id": dl_id,
+    }
+    async with session_scope() as session:
+        tq = TaskQueueService(session)
+        enq = await tq.enqueue(TaskKind.ADD_TORRENT, payload, idem_key=idem_key)
+        if not enq.created:
+            # 幂等命中：已有等价任务（已推过 / 在推 / 待重试）
+            return EnqueueOutcome(
+                state="already_queued",
+                dl_id=dl_id,
+                detail=f"该种已在推送队列中（状态：{enq.existing_status}）",
+            )
+        task_id = enq.task_id
+    return EnqueueOutcome(
+        state="enqueued",
+        dl_id=dl_id,
+        detail="已入队",
+        task_id=task_id,
+        payload=payload,
+    )
+
+
 async def push_index_entry(
     index_id: int,
     downloader_id: int | None,
@@ -102,67 +196,30 @@ async def push_index_entry(
 
     步骤 3-4 与自动推送（``push_free``）走**完全相同**的队列与执行器，
     因此崩溃恢复 / 幂等 / 退避 / TOCTOU 防御全部一致。
+
+    前 3 步抽到 :func:`enqueue_index_entry`——批量推送复用同一份逻辑。
     """
-    # 1) 读索引 + 站点
-    async with session_scope() as session:
-        item = (
-            await session.execute(
-                select(TorrentIndex).where(TorrentIndex.id == index_id)
-            )
-        ).scalar_one_or_none()
-        if item is None:
-            raise PushError("索引条目不存在", status=404)
-        if not item.item_id:
-            raise PushError("该条目缺少 item_id，无法推送", status=400)
-        site_id = item.site_id
-        item_id = item.item_id
-        push_status = item.push_status
-        site_exists = (
-            await session.execute(select(Site.id).where(Site.id == site_id))
-        ).scalar_one_or_none()
-        if site_exists is None:
-            raise PushError("站点不存在", status=404)
-
-    dl = await resolve_downloader(downloader_id)
-    dl_id = dl.id
-
-    # 2) 已推送过 → 幂等成功（不重复推送）
-    if push_status == PushStatus.PUSHED:
+    enq = await enqueue_index_entry(index_id, downloader_id)
+    if enq.state in ("already_pushed", "already_queued"):
         return PushOutcome(
             ok=True,
-            downloader_id=dl_id,
-            detail="该种已推送过",
+            downloader_id=enq.dl_id,
+            detail=enq.detail,
             idempotent=True,
         )
+    payload = enq.payload
+    task_id = enq.task_id
+    assert payload is not None and task_id is not None  # enqueued 分支必有
 
-    # 3) 入队（幂等）
-    idem_key = make_idem_key(
-        TaskKind.ADD_TORRENT,
-        site_id=site_id,
-        info_hash=item_id,
-        extra=f"dl={dl_id}",
-    )
-    payload: dict[str, object] = {
-        "index_id": index_id,
-        "downloader_id": dl_id,
-    }
+    # 认领并同步执行
     async with session_scope() as session:
         tq = TaskQueueService(session)
-        enq = await tq.enqueue(TaskKind.ADD_TORRENT, payload, idem_key=idem_key)
-        if not enq.created:
-            # 幂等命中：已有等价任务（已推过 / 在推 / 待重试）
-            return PushOutcome(
-                ok=True,
-                downloader_id=dl_id,
-                detail=f"该种已在推送队列中（状态：{enq.existing_status}）",
-                idempotent=True,
-            )
-        task = await tq.claim_one(enq.task_id)
+        task = await tq.claim_one(task_id)
     if task is None:
         # 极小概率：入队成功但认领不到（并发抢走）——视为幂等成功
         return PushOutcome(
             ok=True,
-            downloader_id=dl_id,
+            downloader_id=enq.dl_id,
             detail="该种正在被其他请求推送",
             idempotent=True,
         )
@@ -178,7 +235,7 @@ async def push_index_entry(
             else:
                 await tq.mark_failed(task.id, str(exc))
         logger.warning("手动推送 index_id=%d 失败：%s", index_id, exc)
-        raise PushError(str(exc), status=502) from exc
+        raise PushError(str(exc), status=502, code="push_failed") from exc
 
     # 5) 成功 → mark_done
     async with session_scope() as session:
@@ -191,7 +248,7 @@ async def push_index_entry(
     return PushOutcome(
         ok=True,
         info_hash=info_hash or None,
-        downloader_id=dl_id,
+        downloader_id=enq.dl_id,
         detail=detail,
         idempotent=idempotent,
     )
