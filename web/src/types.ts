@@ -522,6 +522,12 @@ export interface CrossSeedOrphanDeleteResult {
   /** 删除后重扫失败的原因（null = 重扫成功）。 */
   rescan_error?: string | null
   /**
+   * 删除后的重扫是否**仍在后台进行**（重扫耗时超过 15s 上限）。
+   *
+   * 为 true 时响应里的 `orphans` 是**重扫前**的旧统计——稍后刷新页面即可。
+   */
+  rescan_pending?: boolean
+  /**
    * 删除后**重扫**得到的最新孤儿统计。
    *
    * 孤儿统计表是每天一次的作业快照，不重扫页面会一直显示旧数字

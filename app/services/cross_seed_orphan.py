@@ -29,6 +29,17 @@ from app.services.scheduler import JobStep
 
 logger = get_logger(__name__)
 
+#: 单个下载器「拉顶层名」的**兜底超时**（秒）。
+#:
+#: 适配器自身的超时太长：TR 的 ``BULK_TIMEOUT = 180``（辅种站全量拉取
+#: 实测 20s+，但注释也写明「TR 卡住时握手本身会挂死」）。下载器假死时
+#: （2026-11-08 prod：172 的 TR 进程在、端口在 LISTEN，但 accept 后不响应）
+#: 孤儿扫描/删除端点会挂 3 分钟无响应。
+#:
+#: 这里的兜底把它压到 1 分钟内；超时按「该下载器拉取失败」处理——**点名**
+#: （判定不完整），而不是让整个请求悬着。
+_DOWNLOADER_PULL_TIMEOUT_SEC = 60.0
+
 __all__ = [
     "OrphanRow",
     "collect_owned_names",
@@ -163,7 +174,21 @@ async def collect_owned_names() -> tuple[
     for row in rows:
         adapter = factory.downloader(row)
         try:
-            files = await adapter.list_torrent_file_names()
+            files = await asyncio.wait_for(
+                adapter.list_torrent_file_names(),
+                timeout=_DOWNLOADER_PULL_TIMEOUT_SEC,
+            )
+        except TimeoutError:
+            # 兜底超时：适配器自身的超时（TR 的 BULK_TIMEOUT=180s）太长——
+            # 下载器假死时（2026-11-08 prod：172 的 TR 进程在、端口在 LISTEN、
+            # 但 accept 后不响应）整个孤儿端点会挂 3 分钟无响应。
+            # 这里的兜底把它压到 1 分钟内，且**明确点名**（判定不完整）。
+            logger.warning(
+                "下载器 %s 拉取超时（>%.0fs，孤儿判定不完整）",
+                row.name, _DOWNLOADER_PULL_TIMEOUT_SEC,
+            )
+            failed.append(row.name)
+            continue
         except Exception as exc:
             # 拉取失败 → 该下载器的数据可能被误判成孤儿 → 记名
             logger.warning(

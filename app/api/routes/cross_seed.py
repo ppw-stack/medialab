@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_session
@@ -36,6 +36,15 @@ from app.services.downloader_service import remove_torrents_in_batches
 from app.services.errors import ServiceError
 
 logger = get_logger(__name__)
+
+#: 删除后**自动重扫的等待上限**（秒）。
+#:
+#: 重扫要遍历整个辅种目录——NFS 上动辄几分钟（2026-11-08 prod 实测 175s）。
+#: 同步等下去会让删除请求必然超时：用户看到超时以为删除失败，**其实文件
+#: 已经删掉了**（数据不可逆，用户再去点一次反而重复操作）。
+#:
+#: 超时后重扫转后台继续，响应立即返回并带 ``rescan_pending`` 标记。
+_RESCAN_WAIT_SEC = 15.0
 
 router = APIRouter(
     prefix="/cross-seed-monitor",
@@ -292,7 +301,9 @@ async def scan_orphan_files() -> dict[str, Any]:
 
 
 @router.post("/orphans/delete", summary="删除孤儿文件（不可逆）")
-async def delete_orphan_files(payload: DeleteOrphansIn) -> dict[str, Any]:
+async def delete_orphan_files(
+    payload: DeleteOrphansIn, request: Request
+) -> dict[str, Any]:
     """删除孤儿文件（磁盘上有、下载器里已无对应任务的条目）。
 
     **不可逆**——删的是 NAS 上的实际数据。安全机制在 service 层
@@ -314,6 +325,12 @@ async def delete_orphan_files(payload: DeleteOrphansIn) -> dict[str, Any]:
 
     重扫失败**不影响删除结果**（数据已删，只是统计没更新）——记
     ``rescan_error``，前端提示用户可稍后手动重扫。
+
+    ⚠️ **重扫最多等 :data:`_RESCAN_WAIT_SEC` 秒**（默认 15s）：重扫要遍历
+    整个辅种目录，NFS 上动辄几分钟（2026-11-08 prod 实测 175s）——
+    同步等待会让 HTTP 请求必然超时，用户以为删除失败，**其实文件已删**
+    （实测如此）。超时的重扫转**后台继续**，响应立即返回，并用
+    ``rescan_pending`` 标记「统计正在更新」。
     """
     from app.services.cross_seed_orphan import (
         collect_owned_names,
@@ -344,14 +361,26 @@ async def delete_orphan_files(payload: DeleteOrphansIn) -> dict[str, Any]:
             f"以下下载器拉取失败，判定可能不完整：{'、'.join(pull_failed)}"
         )
 
-    # 删除后重扫：让页面立刻反映最新状态（已删的不再出现、
-    # 新产生的孤儿也能看到）。失败不影响删除结果。
+    # 删除后重扫：最多等 _RESCAN_WAIT_SEC（重扫要遍历整个辅种目录，NFS 上要几分钟）
+    # ——同步等下去会让 HTTP 必然超时，用户以为删除失败而**文件其实已删**。
+    # 超时 → 重扫转后台继续，响应先返回（带 rescan_pending 标记）。
+    rescan_task: asyncio.Task[object] | None = None
     try:
-        await run_scan_orphans()
+        await asyncio.wait_for(run_scan_orphans(), timeout=_RESCAN_WAIT_SEC)
         out["rescan_error"] = None
+        out["rescan_pending"] = False
+    except TimeoutError:
+        rescan_task = asyncio.create_task(run_scan_orphans())
+        out["rescan_error"] = None
+        out["rescan_pending"] = True
     except Exception as exc:  # 重扫失败不该掩盖删除结果（数据已删）
         logger.warning("删除后重扫孤儿统计失败：%s", exc)
         out["rescan_error"] = str(exc) or type(exc).__name__
+        out["rescan_pending"] = False
+    finally:
+        if rescan_task is not None:
+            # 任务引用挂到 app.state 防 GC（fire-and-forget 的通病）
+            request.app.state.orphan_rescan_task = rescan_task
 
     # 带上有孤儿表的新鲜统计（前端直接用，不用再发一次请求）
     out["orphans"] = await _orphan_summary_payload()
