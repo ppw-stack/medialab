@@ -17,6 +17,8 @@ import pytest
 from app.adapters.drivers.base import DriverError
 from app.services.cloud_index import CloudDirIndex
 from app.services.uploader import (
+    CONFLICT_KEEP_LARGER,
+    CONFLICT_LOCAL_FIRST,
     RESULT_CONFLICT,
     RESULT_FAILED,
     RESULT_OVERWRITTEN,
@@ -176,3 +178,115 @@ async def test_驱动失败时记失败(tmp_path: Path, upload_driver: FakeDrive
     outcome = await sync_file(ctx, path, "a.mkv")
     assert outcome.status == RESULT_FAILED
     assert "解析云端目录失败" in outcome.reason
+
+
+# --------------------------------------------------------------------------
+# 冲突策略：同名且大小不同时（默认「保留大的」）
+# --------------------------------------------------------------------------
+
+
+def _ctx_policy(
+    driver: FakeDriver,
+    uploader: FakeUploader,
+    root: Path,
+    policy: int,
+    *,
+    delete_local: bool = False,
+) -> SyncContext:
+    """带冲突策略的上下文。"""
+    return SyncContext(
+        driver=driver,
+        uploader=uploader,
+        index=CloudDirIndex(driver, ROOT_ID),
+        root=root,
+        delete_retries=3,
+        delete_delay=0.01,
+        delete_local=delete_local,
+        conflict_policy=policy,
+    )
+
+
+async def test_保留大的_云端更大则跳过上传(
+    local_file: Path, upload_driver: FakeDriver, upload_uploader: FakeUploader, tmp_path: Path
+):
+    """默认策略「保留大的」：云端同名文件更大 → **跳过上传**，保住云端那份。
+
+    背景：本地重新压制出的版本往往更小，直接覆盖等于用小版本顶掉大版本。
+    """
+    old_id = upload_driver.add_file(ROOT_ID, "movie.mkv", 500)
+    ctx = _ctx_policy(upload_driver, upload_uploader, tmp_path, CONFLICT_KEEP_LARGER)
+
+    outcome = await sync_file(ctx, local_file, "movie.mkv")
+
+    assert outcome.status == RESULT_UNCHANGED
+    assert upload_uploader.uploaded == [], "云端更大时不该上传"
+    assert upload_uploader.deleted == [], "云端更大时不该删云端"
+    assert old_id  # 云端原件还在
+    assert "更大" in outcome.reason
+
+
+async def test_保留大的_本地更大则覆盖(
+    local_file: Path, upload_driver: FakeDriver, upload_uploader: FakeUploader, tmp_path: Path
+):
+    """默认策略「保留大的」：本地更大 → 照旧覆盖（删旧再传）。"""
+    old_id = upload_driver.add_file(ROOT_ID, "movie.mkv", 50)
+    ctx = _ctx_policy(upload_driver, upload_uploader, tmp_path, CONFLICT_KEEP_LARGER)
+
+    original_delete = upload_uploader.delete_file
+
+    async def _delete(file_id: str) -> None:
+        await original_delete(file_id)
+        upload_driver.remove_file(ROOT_ID, "movie.mkv")
+
+    upload_uploader.delete_file = _delete  # type: ignore[method-assign]
+
+    outcome = await sync_file(ctx, local_file, "movie.mkv")
+
+    assert outcome.status == RESULT_OVERWRITTEN
+    assert upload_uploader.deleted == [old_id]
+    assert upload_uploader.uploaded == [("movie.mkv", 100)]
+
+
+async def test_本地优先策略_云端更大也覆盖(
+    local_file: Path, upload_driver: FakeDriver, upload_uploader: FakeUploader, tmp_path: Path
+):
+    """策略 0（本地优先）：无论大小都删旧传新（历史行为）。"""
+    old_id = upload_driver.add_file(ROOT_ID, "movie.mkv", 500)
+    ctx = _ctx_policy(upload_driver, upload_uploader, tmp_path, CONFLICT_LOCAL_FIRST)
+
+    original_delete = upload_uploader.delete_file
+
+    async def _delete(file_id: str) -> None:
+        await original_delete(file_id)
+        upload_driver.remove_file(ROOT_ID, "movie.mkv")
+
+    upload_uploader.delete_file = _delete  # type: ignore[method-assign]
+
+    outcome = await sync_file(ctx, local_file, "movie.mkv")
+
+    assert outcome.status == RESULT_OVERWRITTEN
+    assert upload_uploader.deleted == [old_id]
+    assert upload_uploader.uploaded == [("movie.mkv", 100)]
+
+
+async def test_保留大的_跳过时本地不删(
+    local_file: Path, upload_driver: FakeDriver, upload_uploader: FakeUploader, tmp_path: Path
+):
+    """云端更大被跳过时，**本地原件保留**。
+
+    清理闸要求「云端大小 == 本地大小」，这里必然不等 → 不删本地。
+    """
+    upload_driver.add_file(ROOT_ID, "movie.mkv", 500)
+    ctx = _ctx_policy(
+        upload_driver,
+        upload_uploader,
+        tmp_path,
+        CONFLICT_KEEP_LARGER,
+        delete_local=True,
+    )
+
+    outcome = await sync_file(ctx, local_file, "movie.mkv")
+
+    assert outcome.status == RESULT_UNCHANGED
+    assert outcome.local_deleted is False
+    assert local_file.exists(), "本地原件应保留（云端是不同版本）"

@@ -7,10 +7,25 @@
 =========================  ==========================================================
 无同名文件                 直接上传
 同名 + 同大小               **跳过**（幂等——这就是「已同步」的判据）
-同名 + 不同大小             **先删旧（进回收站）→ 确认消失 → 传新**
+同名 + 不同大小             **按冲突策略**（见下）
 同名，但是个目录            记冲突，**不自动处理**（目录不能被文件覆盖）
 本地文件被删除              **不动云端**（设计取舍：不做删除同步）
 =========================  ==========================================================
+
+**同名 + 不同大小的两种策略**（``upload_tasks.conflict_policy``，任务级）：
+
+=========================  ==========================================================
+取值                        行为
+=========================  ==========================================================
+``0`` 本地优先              删旧（进回收站）→ 确认消失 → 传新（历史行为）
+``1`` **保留大的**（默认）    本地 > 云端 → 同上（覆盖）；本地 < 云端 → **跳过**
+                            上传，保住云端那份更大的（本地原件也保留：大小
+                            不等 → 清理闸拦下）
+=========================  ==========================================================
+
+**为什么默认「保留大的」**：本地重新压制出的版本往往更小（去音轨/换压制
+组），直接覆盖等于用小版本顶掉大版本——这是真实踩过的坑。要「本地永远是
+最新」的工作流可把任务切回 ``0``。
 
 **为什么同名不同大小要「先删再传」**：实测光鸭**同名上传不会覆盖**，
 而是自动改名成 ``xxx(1).bin``。要真正覆盖只能先删掉旧的。
@@ -83,6 +98,11 @@ RESULT_CONFLICT = "conflict"
 RESULT_FAILED = "failed"
 #: 被过滤（临时文件等）
 RESULT_SKIPPED = "skipped"
+
+#: 同名且大小不同时的冲突策略（``upload_tasks.conflict_policy``）。
+CONFLICT_LOCAL_FIRST = 0
+#: **保留大的**：本地比云端小 → 跳过上传，保住云端那份更大的
+CONFLICT_KEEP_LARGER = 1
 
 
 @dataclass
@@ -158,6 +178,8 @@ class SyncContext:
         delete_delay: 删后重列确认的间隔（秒）。
         delete_local: 上传成功后**清理本地文件**（移进回收目录）。
             **默认关**——破坏性操作，需任务级显式开启。
+        conflict_policy: 同名且大小不同时的冲突策略（见
+            :data:`CONFLICT_KEEP_LARGER`）。默认**保留大的**。
     """
 
     driver: Any
@@ -167,6 +189,7 @@ class SyncContext:
     delete_retries: int = 10
     delete_delay: float = 0.5
     delete_local: bool = False
+    conflict_policy: int = CONFLICT_KEEP_LARGER
 
 
 async def sync_file(
@@ -242,8 +265,39 @@ async def sync_file(
             size=size,
         )
 
-    # ③ 同名但大小不同 → 覆盖：先删旧，确认消失，再传新
+    # ③ 同名但大小不同 → 按冲突策略决定「覆盖」还是「保留大的」
     if remote is not None:
+        # 策略「保留大的」：**云端更大 → 跳过上传**，保住云端那份。
+        #
+        # 为什么不能直接覆盖：本地重新压制出的版本往往**更小**（去音轨/
+        # 换压制组），直接覆盖等于用小版本顶掉大版本。
+        #
+        # 本地文件**不会**被清理——``_check_cleanup_allowed`` 要求
+        # 「云端大小 == 本地大小」，这里必然不等 → 本地原件留着。
+        if (
+            ctx.conflict_policy == CONFLICT_KEEP_LARGER
+            and remote.size > size
+        ):
+            outcome = SyncOutcome(
+                RESULT_UNCHANGED,
+                rel_path,
+                size=size,
+                cloud_file_id=remote.file_id,
+                cloud_size=remote.size,
+                reason=(
+                    f"云端同名文件更大（{remote.size} > {size} 字节），"
+                    "按策略保留云端版本"
+                ),
+            )
+            if ctx.delete_local:
+                note = _check_cleanup_allowed(outcome)
+                if note:
+                    outcome.reason = note
+                else:  # pragma: no cover - 大小不等时校验必然拦下
+                    _spawn_cleanup(local_path, ctx.root, outcome)
+                    outcome.local_deleted = True
+            return outcome
+        # 策略「本地优先」（历史行为）或本地更大 → 覆盖：先删旧，确认消失，再传新
         if not remote.file_id:
             return SyncOutcome(
                 RESULT_FAILED,

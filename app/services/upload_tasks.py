@@ -22,6 +22,7 @@ from app.db.models import UploadTask as UploadTaskRow
 from app.db.session import session_scope
 from app.domain.upload_types import DEFAULT_UPLOAD_CONCURRENCY
 from app.services.upload_paths import PathGuardError, resolve_watch_dir
+from app.services.uploader import CONFLICT_KEEP_LARGER
 
 logger = get_logger(__name__)
 
@@ -63,6 +64,8 @@ class UploadTaskView:
     concurrency: int
     created_at: str
     updated_at: str
+    #: 同名且大小不同时的冲突策略（0=本地优先 / 1=保留大的）
+    conflict_policy: int = CONFLICT_KEEP_LARGER
     #: 运行态（监听中？正在传什么？）
     listening: bool = False
     current: str = ""
@@ -91,6 +94,7 @@ def to_task_view(row: UploadTaskRow) -> UploadTaskView:
         enabled=row.enabled,
         delete_after_upload=row.delete_after_upload,
         concurrency=row.concurrency,
+        conflict_policy=row.conflict_policy,
         created_at=row.created_at,
         updated_at=row.updated_at,
         listening=runtime.listening,
@@ -228,6 +232,7 @@ async def create_task(
     concurrency: int = DEFAULT_UPLOAD_CONCURRENCY,
     target_path: str = "",
     delete_after_upload: bool = False,
+    conflict_policy: int = CONFLICT_KEEP_LARGER,
 ) -> UploadTaskRow:
     """创建上传任务。
 
@@ -260,6 +265,7 @@ async def create_task(
         enabled=enabled,
         delete_after_upload=delete_after_upload,
         concurrency=max(1, int(concurrency)),
+        conflict_policy=max(0, min(1, int(conflict_policy))),
         created_at=now,
         updated_at=now,
     )
@@ -298,6 +304,7 @@ async def update_task(db: Any, task_id: int, **fields: Any) -> UploadTaskRow:
         "enabled",
         "delete_after_upload",
         "concurrency",
+        "conflict_policy",
     ):
         if key in fields and fields[key] is not None:
             setattr(row, key, fields[key])

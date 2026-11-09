@@ -274,6 +274,8 @@ class DbBootstrap:
         """给 ``upload_tasks`` 表做列变更（幂等）。
 
         - 新增 ``delete_after_upload``（同步成功后清理本地文件）
+        - 新增 ``conflict_policy``（同名且大小不同时的冲突策略，
+          默认 1 = 保留大的）
         - 删除 ``watch_subdir`` —— 去掉白名单后，监听目录改成**完整路径**
           （``watch_root``），拆成「根 + 子路径」没有意义。
         - 删除 ``last_sync_at`` / ``last_uploaded_count`` / ``last_error``
@@ -282,7 +284,11 @@ class DbBootstrap:
         """
         await self._add_columns(
             "upload_tasks",
-            (("delete_after_upload", "INTEGER", "0"),),
+            (
+                ("delete_after_upload", "INTEGER", "0"),
+                # 默认 1 = 保留大的（见 models.UploadTask.conflict_policy）
+                ("conflict_policy", "INTEGER", "1"),
+            ),
         )
         await self._drop_column("upload_tasks", "watch_subdir")
         await self._drop_column("upload_tasks", "last_sync_at")

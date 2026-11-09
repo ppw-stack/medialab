@@ -759,11 +759,15 @@ class UploadTask(Base):
     #:
     #: **破坏性操作**——故有三重保护：
     #:
-    #: 1. 只对 ``uploaded`` / ``overwritten`` 生效（``unchanged`` 不删：
-    #:    本地文件是唯一原件）
-    #: 2. 云端大小必须与本地一致
+    #: 1. 只在**云端大小与本地一致**时才删（:func:`app.services.uploader.
+    #:    _check_cleanup_allowed`：云端 fileId 非空 + 大小相等）
+    #: 2. 云端大小不一致 → **不删**（本地是不同版本，原件留着）
     #: 3. 移进**回收目录**（``<监听根>/.strmmanger-trash/``）而不是 ``unlink``
     #:    —— 可手动还原
+    #:
+    #: 注：``unchanged``（云端已有同名同大小 = 之前传过）**也会删本地**
+    #: （2026-10-31 修正：云端已是完整副本 → 本地是冗余）。「冲突 /
+    #: 云端更大 / 上传失败」一律保留本地。
     #:
     #: 默认 ``False``：新任务默认不删本地，需要用户显式开启。
     delete_after_upload: Mapped[bool] = mapped_column(
@@ -774,6 +778,15 @@ class UploadTask(Base):
     concurrency: Mapped[int] = mapped_column(
         Integer, default=DEFAULT_UPLOAD_CONCURRENCY, nullable=False
     )
+    #: 同名且**大小不同**时的冲突策略：
+    #:
+    #: - ``0`` = 本地优先：删掉云端旧的，传本地的（**历史行为**）
+    #: - ``1`` = **保留大的**（默认）：本地比云端大才覆盖；本地更小则跳过上传，
+    #:   保留云端那份（本地原件也会因「云端大小 ≠ 本地大小」而不被清理）
+    #:
+    #: 默认 ``1``：小文件误覆盖大文件是真实踩过的坑（本地重新压制出的
+    #: 版本往往更小）。``0`` 保留给「本地永远是最新」的工作流。
+    conflict_policy: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
     updated_at: Mapped[str] = mapped_column(
         String(32), default=_bj_now, onupdate=_bj_now

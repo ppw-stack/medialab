@@ -219,6 +219,19 @@
             <a-checkbox v-model:checked="form.delete_after_upload">
               同步成功后删除本地文件（彻底删除，不可恢复）
             </a-checkbox>
+          </a-space>
+        </a-form-item>
+
+        <a-form-item label="同名冲突处理（云端已有同名文件但大小不同）">
+          <a-radio-group v-model:value="form.conflict_policy">
+            <a-radio :value="1">保留较大文件</a-radio>
+            <a-radio :value="0">始终上传本地</a-radio>
+          </a-radio-group>
+          <div class="muted hint" style="margin-top: 4px">
+            「保留较大文件」：本地比云端小则跳过上传，保住云端那份更大的（本地原件也会保留）；
+            本地更大则正常覆盖。「始终上传本地」：无论大小都删掉云端旧的、传本地的。
+          </div>
+        </a-form-item>
             <a-alert
               v-if="form.delete_after_upload"
               type="warning"
@@ -271,6 +284,7 @@ const form = reactive({
   include_subdirs: true,
   enabled: true,
   delete_after_upload: false,
+  conflict_policy: 1,
   target_file_id: "",
   target_path: "",
 })
@@ -438,6 +452,7 @@ function openCreate(): void {
   form.include_subdirs = true
   form.enabled = true
   form.delete_after_upload = false
+  form.conflict_policy = 1
   form.target_file_id = ""
   form.target_path = ""
   targetStack.value = [{ id: "", name: "网盘根目录" }]
@@ -458,6 +473,7 @@ function openEdit(task: UploadTask): void {
   form.include_subdirs = task.include_subdirs
   form.enabled = task.enabled
   form.delete_after_upload = task.delete_after_upload
+  form.conflict_policy = task.conflict_policy ?? 1
   form.target_file_id = task.target_file_id
   form.target_path = task.target_path ?? ""
   // 目录浏览器从**目标目录本身**开始（部分网盘没有「路径 ↔ id」反查，
@@ -485,6 +501,7 @@ async function save(): Promise<void> {
       include_subdirs: form.include_subdirs,
       enabled: form.enabled,
       delete_after_upload: form.delete_after_upload,
+      conflict_policy: form.conflict_policy,
     }
     if (editing.value) {
       await api.patch(`/upload-tasks/${editing.value.id}`, payload)

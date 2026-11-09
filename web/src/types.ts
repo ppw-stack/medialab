@@ -969,6 +969,12 @@ export interface UploadTask {
   /** 同步成功后清理本地文件（**彻底删除 unlink，不可恢复**；空目录一并删） */
   delete_after_upload: boolean
   concurrency: number
+  /**
+   * 同名且大小不同时的冲突策略：
+   * - `0` 本地优先：删掉云端旧的，传本地的
+   * - `1` **保留大的**（默认）：本地更小则跳过上传，保住云端那份
+   */
+  conflict_policy: number
   created_at: string
   updated_at: string
   /** 运行态：监听器是否在跑 */
@@ -1335,6 +1341,8 @@ export interface OfflineRunInput {
   exts: string
   /** 下载成功后删除本地文件（不可逆；空目录一并删） */
   delete_after_upload?: boolean
+  /** 同名且大小不同时的冲突策略：0=本地优先 / 1=保留大的（默认） */
+  conflict_policy?: number
   concurrency: number
   submit_interval_sec: number
 }

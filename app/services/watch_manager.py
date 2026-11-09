@@ -61,6 +61,7 @@ from app.services.upload_filter import aiter_local_files, relative_to_root, shou
 from app.services.upload_paths import resolve_watch_dir
 from app.services.upload_tasks import get_runtime
 from app.services.uploader import (
+    CONFLICT_KEEP_LARGER,
     RESULT_CONFLICT,
     RESULT_FAILED,
     RESULT_OVERWRITTEN,
@@ -251,6 +252,7 @@ class _StartParams:
     concurrency: int
     name: str
     delete_after_upload: bool
+    conflict_policy: int
 
 
 def get_watcher(task_id: int) -> Watcher | None:
@@ -283,6 +285,7 @@ async def start_all() -> None:
                     concurrency=row.concurrency,
                     name=row.name,
                     delete_after_upload=row.delete_after_upload,
+                    conflict_policy=row.conflict_policy,
                 )
                 for row in rows
             ]
@@ -301,6 +304,7 @@ async def start_all() -> None:
                 concurrency=params.concurrency,
                 name=params.name,
                 delete_after_upload=params.delete_after_upload,
+                conflict_policy=params.conflict_policy,
             )
         except Exception as exc:
             logger.exception("启动上传任务失败：%s（%s）", params.name, exc)
@@ -326,6 +330,7 @@ async def start_watcher(
     concurrency: int,
     name: str = "",
     delete_after_upload: bool = False,
+    conflict_policy: int = CONFLICT_KEEP_LARGER,
 ) -> Watcher:
     """为一个任务启动监听器 + 上传 worker（大文件 ×1 + 小文件 ×K）。
 
@@ -412,6 +417,8 @@ async def start_watcher(
         delete_delay=settings.upload_delete_verify_delay_sec,
         # 上传成功后清理本地文件（任务级开关，默认关）
         delete_local=delete_after_upload,
+        # 同名且大小不同的冲突策略（任务级，默认「保留大的」）
+        conflict_policy=conflict_policy,
     )
     _CONTEXTS[task_id] = ctx
 

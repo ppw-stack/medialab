@@ -44,6 +44,8 @@ class UploadTaskIn(BaseModel):
     include_subdirs: bool = True
     #: 是否启用
     enabled: bool = True
+    #: 同名且大小不同时的冲突策略：0=本地优先（覆盖云端）/ 1=保留大的（默认）
+    conflict_policy: int = Field(default=1, ge=0, le=1)
     #: 同步成功后清理本地文件（**破坏性**，默认关）
     delete_after_upload: bool = False
     #: 小文件通道的并发数（大文件通道**恒串行**——光鸭上传只能串行，
@@ -68,6 +70,8 @@ class UploadTaskPatch(BaseModel):
     enabled: bool | None = None
     delete_after_upload: bool | None = None
     concurrency: int | None = Field(default=None, ge=1, le=8)
+    #: 同名且大小不同时的冲突策略：0=本地优先（覆盖云端）/ 1=保留大的（默认）
+    conflict_policy: int | None = Field(default=None, ge=0, le=1)
     target_path: str | None = Field(default=None, max_length=1024)
 
 
@@ -84,6 +88,8 @@ class UploadTaskOut(BaseModel):
     enabled: bool
     delete_after_upload: bool
     concurrency: int
+    #: 同名且大小不同时的冲突策略：0=本地优先 / 1=保留大的
+    conflict_policy: int = 1
     created_at: str
     updated_at: str
     #: 运行态（监听中？正在传什么？）
@@ -113,6 +119,7 @@ def _to_out(row: UploadTaskView) -> UploadTaskOut:
         enabled=row.enabled,
         delete_after_upload=row.delete_after_upload,
         concurrency=row.concurrency,
+        conflict_policy=row.conflict_policy,
         created_at=row.created_at,
         updated_at=row.updated_at,
         listening=row.listening,
@@ -216,6 +223,7 @@ async def create_upload_task(payload: UploadTaskIn) -> UploadTaskOut:
             enabled=payload.enabled,
             delete_after_upload=payload.delete_after_upload,
             concurrency=payload.concurrency,
+            conflict_policy=payload.conflict_policy,
             target_path=payload.target_path,
         )
     except UploadTaskError as exc:

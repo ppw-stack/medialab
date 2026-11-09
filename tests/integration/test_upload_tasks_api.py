@@ -194,6 +194,70 @@ class TestCrud:
         listing = await client.get("/api/upload-tasks")
         assert listing.json() == []
 
+    async def test_冲突策略默认为保留大的(self, client, db_session, tmp_path) -> None:
+        """新建任务默认 ``conflict_policy=1``（保留大的）。
+
+        2026-11-09：本地重新压制出的版本往往更小，直接覆盖会顶掉云端那份大的。
+        """
+        driver_id = await _add_driver(db_session)
+        watch = tmp_path / "watch"
+        watch.mkdir()
+
+        resp = await client.post(
+            "/api/upload-tasks",
+            json={
+                "name": "策略任务",
+                "driver_id": driver_id,
+                "target_file_id": "1",
+                "watch_root": str(watch),
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["conflict_policy"] == 1
+
+    async def test_可以改成本地优先(self, client, db_session, tmp_path) -> None:
+        """显式传 0 → 覆盖云端（旧行为）；传 1 → 保留大的。"""
+        driver_id = await _add_driver(db_session)
+        watch = tmp_path / "watch"
+        watch.mkdir()
+
+        created = await client.post(
+            "/api/upload-tasks",
+            json={
+                "name": "策略任务",
+                "driver_id": driver_id,
+                "target_file_id": "1",
+                "watch_root": str(watch),
+                "conflict_policy": 0,
+            },
+        )
+        assert created.status_code == 201, created.text
+        assert created.json()["conflict_policy"] == 0
+
+        patched = await client.patch(
+            f"/api/upload-tasks/{created.json()['id']}", json={"conflict_policy": 1}
+        )
+        assert patched.status_code == 200
+        assert patched.json()["conflict_policy"] == 1
+
+    async def test_冲突策略取值非法被拒(self, client, db_session, tmp_path) -> None:
+        """越界取值 → 422（只允许 0 / 1）。"""
+        driver_id = await _add_driver(db_session)
+        watch = tmp_path / "watch"
+        watch.mkdir()
+
+        resp = await client.post(
+            "/api/upload-tasks",
+            json={
+                "name": "非法策略",
+                "driver_id": driver_id,
+                "target_file_id": "1",
+                "watch_root": str(watch),
+                "conflict_policy": 5,
+            },
+        )
+        assert resp.status_code == 422
+
     async def test_修改不存在的任务(self, client) -> None:
         """改不存在的任务 → 404。"""
         resp = await client.patch("/api/upload-tasks/9999", json={"name": "x"})
