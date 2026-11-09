@@ -219,6 +219,14 @@
             <a-checkbox v-model:checked="form.delete_after_upload">
               同步成功后删除本地文件（彻底删除，不可恢复）
             </a-checkbox>
+            <a-alert
+              v-if="form.delete_after_upload"
+              type="warning"
+              show-icon
+              style="max-width: 460px"
+              message="这是破坏性操作"
+              description="上传成功后本地文件会被**彻底删除**（unlink，不进回收站）。只有「云端 fileId 存在且大小与本地一致」才会删；失败 / 冲突 / 云端已有（已存在）一律保留本地文件。**空文件夹会一并删除**（向上递归直到监听根，监听根本身保留）。云端是完整副本，需要时可从网盘重新下载。"
+            />
           </a-space>
         </a-form-item>
 
@@ -231,16 +239,6 @@
             「保留较大文件」：本地比云端小则跳过上传，保住云端那份更大的（本地原件也会保留）；
             本地更大则正常覆盖。「始终上传本地」：无论大小都删掉云端旧的、传本地的。
           </div>
-        </a-form-item>
-            <a-alert
-              v-if="form.delete_after_upload"
-              type="warning"
-              show-icon
-              style="max-width: 460px"
-              message="这是破坏性操作"
-              description="上传成功后本地文件会被**彻底删除**（unlink，不进回收站）。只有「云端 fileId 存在且大小与本地一致」才会删；失败 / 冲突 / 云端已有（已存在）一律保留本地文件。**空文件夹会一并删除**（向上递归直到监听根，监听根本身保留）。云端是完整副本，需要时可从网盘重新下载。"
-            />
-          </a-space>
         </a-form-item>
       </a-form>
     </a-modal>
