@@ -69,28 +69,12 @@
   - **队列满不丢**：溢出暂存（按路径去重，上限 5000）→ worker 空闲回灌；只有暂存也满才真丢并计数。水位（大/小/溢出/丢弃）暴露到面板——过去只能靠刷屏的丢弃日志感知积压
   - **同名冲突策略 `upload_tasks.conflict_policy`**（2026-11-09 加入）：同名但**大小不同**时——`1`=**保留大的**（默认；本地更小则跳过上传、保住云端那份，本地原件也因「云端大小≠本地大小」不被清理）、`0`=本地优先（删旧→传新，历史行为）。**为什么默认保留大的**：本地重新压制出的版本往往更小（去音轨/换压制组），直接覆盖等于用小版本顶掉大版本——真实踩过的坑。「更大」≠「更新」（同大小仍按「已同步」跳过，不比哈希）
   - ⚠️ **方法论**：测上传吞吐必须用**生产规模**文件（≥100MB）且做**串行/并发交替对照**。曾用 50MB/10 片测出「并发快 2 倍」的**假象**，据此写了两版并发实现再逐一证伪
-- **离线下载（本地 → 光鸭走光鸭服务端拉取）**（2026-11-04 加入，见 `docs/offline-download.md`）：
-  - **原理**：光鸭的离线下载是**光鸭服务器主动来拉**——流量方向是**下行**，本机只承担接收，上行需求 ≈ 0。这本该绕开上行瓶颈
-  - **实测结论：功能可行但速率更差**——文件完整落地光鸭、md5 一致，但实际速率 **~0.75 MB/s**（比直传的 3.3 MB/s **慢 4.4 倍**）
-    - 链路不是瓶颈：公网入口单个 100MB 分片实测 **17.2 MB/s**；服务实现不是瓶颈：内网经 HTTP 读 **626 MB/s**
-    - 真正原因：**光鸭把文件切成变长的随机区间并并发拉取，其中 73% 是重复请求**（5MB 文件同一区间被拉 130 次）——光鸭下载器的固有行为，客户端不可控
-  - **它什么时候才划算**：源文件**本来就在大带宽 CDN 上**（如 115 直链）→ 那正是**迁移功能**（115→光鸭）的场景。**「本地 → 光鸭」用离线下载反而更慢**
-  - **代码保留但不推荐使用**（用户明确要求才开）：`app/services/offline_download.py` + `app/api/routes/offline_files.py`
-  - **踩过的坑**（都已在代码里修掉）：
-    - 光鸭会发 **HEAD** 探文件大小 → 不支持则 405、任务可能直接失败
-    - 光鸭有两条路径的 **URL 编码方式不同**：正常是单次编码，**重试路径是双重编码**（`%` → `%25`）→ 那些请求原本全部 403。解法：服务端**再 `unquote` 一次**
-    - **模块级 `APIRouter` 不能复用**——多次 `include_router` 到不同 app 时路由会绑在第一次的 app 上。必须在挂载函数内部新建
-    - **光鸭的 `progress` 字段不是可靠的百分比**（2.3GB 文件下载到 88% 时它只有 4）→ **不用它判定完成**，等任务从活跃列表消失 + 以「目标目录出现同名同大小文件」为准
-  - ⚠️ **迁移功能把 `progress` 当百分比显示**（`migration.py` 的 `_progress_text`）——**那个显示是错的**，大文件时会显示个位数。本次未改（不在任务范围内）
-  - **分层**：纯逻辑（token / 路径安全 / Range 解析）在 `app/services/offline_files.py`（**不 import fastapi**），HTTP handler 在 `app/api/routes/offline_files.py`（services 层不得 import fastapi，见 `tests/unit/test_layering.py`）
-  - **UI**：媒体库域 → **「离线下载」**页（`web/src/pages/media/Offline.vue`）。功能未启用时页面**说明怎么开**（列出三项配置），不给一个点了就报错的入口
-  - **只传指定格式**（任务级 `exts`，逗号分隔，如 `mkv,mp4`）：空 = 全传。用于「只传视频，跳过 nfo / 字幕 / 海报」。扩展名**大小写不敏感**。前端预览**实时跟随过滤**（勾了 mkv 立刻只剩 mkv）
-  - **源目录浏览不限权**（2026-11-04 修订，用户明确要求「所有目录都能选中」）：`/offline-downloads/local-dirs` 能列服务能看到的**任何**目录（含 `/app`）——与「数据同步」的 `/upload-tasks/local-dirs` 一致（面板本身已是管理员权限）。暴露面靠「三项没配齐时文件服务 403、不暴露任何文件」控制，而非目录白名单
-  - **三项配置页面上改、立即生效**（2026-11-04 修订，用户明确要求「配置在页面上做」）：`OFFLINE_HMAC_SECRET` / `OFFLINE_PUBLIC_BASE` / `OFFLINE_FILES_ROOT` 落在 `app_env_settings` 表（**hidden 项**——不进「设置 → 环境变量」通用列表，由「离线下载」页的配置区专用端点 `PUT /api/offline-downloads/config` 写入，源根目录带目录浏览器）。⚠️ FastAPI 不支持运行时增删路由 → `mount_offline_files()` **无条件挂载**，每次请求时读当前配置决定放行：三项没配齐 → **403**（不是 SPA 的 index.html，更诚实）。密钥**永不回显**（API 只返回 `has_secret`）、**不进启动日志**、保存时留空 = 不修改
-  - **下载成功后删除本地文件**（2026-11-04 加入）：`delete_after_upload` 参数（前端开关打开时**二次确认**）。与「数据同步」**同一套** `upload_cleanup` 机制（三重保护 + 空目录 `rmdir` 递归清理），唯一差异是时机——离线下载要等「任务结束 + 校验落盘（同名同大小）」才删。删除失败只记日志，不翻转结果
-  - **鉴权只能做在 URL 里**——光鸭的 `cloud_create_task(url, parent_id)` 只收 URL、不支持自定义 Header → 每文件一个 HMAC token（`HMAC(secret, 相对路径)` 前 32 位十六进制）
-  - **文件服务必须挂在 SPA 兜底之前**（`app/main.py` 的 `_mount_offline_files`）——否则被 `/{full_path:path}` 吞掉
-  - 契约由 `tests/unit/test_offline_download.py` + `tests/unit/test_env_settings.py` + `tests/integration/test_offline_files_http.py` + `tests/integration/test_offline_api.py` 固化；实测脚本 `scripts/verify_offline.py`
+- **「离线下载」（本地 → 光鸭）功能已移除**（2026-11-11 整体删除，含页面与配置）：
+  - **移除依据（实测结论，值得记住）**：功能可行但**速率更差**——文件完整落地光鸭、md5 一致，实际速率 **~0.75 MB/s**（比直传的 3.3 MB/s **慢 4.4 倍**）。链路不是瓶颈（公网入口单个 100MB 分片实测 **17.2 MB/s**），真正原因是**光鸭把文件切成变长的随机区间并并发拉取，其中 73% 是重复请求**（5MB 文件同一区间被拉 130 次）——光鸭下载器的固有行为，客户端不可控
+  - **它什么时候才划算**：源文件**本来就在大带宽 CDN 上**（如 115 直链）→ 那正是**迁移功能**（115→光鸭）的场景。**「本地 → 光鸭」走离线下载反而更慢**
+  - **随之删除**：6 个后端文件（`offline_download` / `offline_files` / `offline_config` / `offline_jobs` + 两个路由）+ 「离线下载」页 + 三项环境变量配置（`OFFLINE_HMAC_SECRET` / `OFFLINE_PUBLIC_BASE` / `OFFLINE_FILES_ROOT`）。存量配置行由幂等迁移 `delete_offline_env_settings` 清掉（连带那个死密钥）
+  - **光鸭的「离线任务」机制仍在用**（迁移功能）：`guangya.py` 的 `create_offline_task` / `list_active_offline_tasks` / `list_failed_offline_tasks` **保留**，别跟着删
+  - **仍然有效的坑**：光鸭的 `progress` 字段**不是可靠的百分比**（2.3GB 文件下载到 88% 时它只有 4）→ 不用它判定完成。⚠️ **迁移功能把 `progress` 当百分比显示**（`migration.py` 的 `_progress_text`）——**那个显示是错的**，大文件时会显示个位数，**待修**
 - **Bearer 长期凭据只用 `WEB_TOKEN`**（2026-10-30 加入）：`verify_bearer` 同时接受 API Token（`WEB_TOKEN`）与 session cookie 值两种口径，但 session cookie 值 24h 过期（`SESSION_MAX_AGE`）。CLI / 脚本长期使用应存 `WEB_TOKEN`，不可把 session cookie 值当长期 token 存储——后者会突然 401。session 值口径仅为面板/CLI 同源便利，非长期凭据。
 - **自动化 / 合规边界**（2026-10-22 修订，原「不引入未文档化的反爬对抗 / 验证码绕过（R2）」）：
   - ✅ **允许**对**自有账号**做站点自动化，含 AI 读图形验证码（`app/core/ai.py`）、真实浏览器交互
@@ -311,7 +295,7 @@
   - **`store_credential` 的 `invalidate_cache` 参数区分两类语义**：
     - `True`（默认）= 凭据**真的换了**（重新扫码登录）→ 作废缓存
     - `False` = **同一个账号换了 token**（光鸭 Token 刷新写回，1~2 小时一次）→ **不能**作废缓存，否则面板退回「未测连」，正好抵消本特性
-  - **光鸭 Token 刷新必须写回 DB**：所有构造光鸭驱动的路径都要传 `on_token_refresh`（`probe_driver` / `redirect` / `scan_runner` / `watch_manager` / `upload_tasks` / `offline_download` / `migration`）。漏传 → 刷新出的新 token 只在驱动实例内存 → 实例丢弃后 DB 仍是旧 token → 刷新接口一旦轮换 `refresh_token`，**账号彻底掉线**
+  - **光鸭 Token 刷新必须写回 DB**：所有构造光鸭驱动的路径都要传 `on_token_refresh`（`probe_driver` / `redirect` / `scan_runner` / `watch_manager` / `upload_tasks` / `migration`）。漏传 → 刷新出的新 token 只在驱动实例内存 → 实例丢弃后 DB 仍是旧 token → 刷新接口一旦轮换 `refresh_token`，**账号彻底掉线**
   - **删除存储源必须清缓存**：SQLite 的 `id` 无 AUTOINCREMENT → **删掉最大的 id 后会被复用**。不清缓存 → 新建的存储源继承上一个的测连状态（账号 id / 容量 / 「直链正常」）
   - **启动测连任务在停机时必须取消**（`app/main.py` 的 `lifespan` finally，**在 `dispose_db()` 之前**）——否则任务跑到落库那一步时 session factory 已置 None，而 `except Exception` 会把异常吞掉 → 表现为「探测历史偶尔少一条」的静默故障
   - `probe_results` 表有 **30 天保留期**，清理挂在 `drain_task_queue`（与 `job_runs` 同款语义，勿单开作业）

@@ -43,7 +43,7 @@ def _probe_targets() -> list[str]:
     from app.services.env_settings import get_env_setting
 
     targets: list[str] = []
-    for key in ("offline_files_root", "cross_seed_scan_dirs"):
+    for key in ("cross_seed_scan_dirs",):
         try:
             raw = get_env_setting(key)
         except Exception:
@@ -280,30 +280,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     # 挂晚了 DAV 就被 SPA 吞掉（返回 index.html），客户端报「网络异常」。
     mount_dav(app, get_settings())
 
-    # 离线下载的只读文件服务 —— **同样必须在 SPA 兜底之前**。
-    #
-    # 光鸭的离线下载器要用**公网 URL**来拉本地文件，而光鸭的
-    # ``cloud_create_task(url, parent_id)`` 只收 URL、不支持自定义
-    # Header → 鉴权做在 URL 的 HMAC token 里。
-    #
-    # **无条件挂载**：配置在页面上改（DB 持久化），路由常驻、请求时读
-    # 配置决定放行与否。三项未配齐时返回 403，不暴露任何文件。
-    _mount_offline_files(app)
-
     _mount_frontend(app, get_settings().frontend_dist)
     return app
-
-
-def _mount_offline_files(app: FastAPI) -> None:
-    """挂载离线下载用的只读文件服务。
-
-    **无条件挂载**——FastAPI 不支持运行时增删路由，而配置现在可以在
-    页面上改（DB 持久化，改完立即生效）。路由常驻，请求时读配置决定
-    放行与否；未启用时返回 403。
-    """
-    from app.api.routes.offline_files import mount_offline_files
-
-    mount_offline_files(app)
 
 
 def _mount_routes(app: FastAPI) -> None:
@@ -319,7 +297,6 @@ def _mount_routes(app: FastAPI) -> None:
         incremental_jobs,
         media,
         migrations,
-        offline_downloads,
         redirect,
         scan_jobs,
         scheduler,
@@ -358,7 +335,6 @@ def _mount_routes(app: FastAPI) -> None:
         migrations.router,
         upload_tasks.router,
         dav_users.router,
-        offline_downloads.router,
         # 中转路由挂根路径：/302/<media_id>/<sig>
         redirect.router,
     ):
