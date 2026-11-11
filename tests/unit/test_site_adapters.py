@@ -304,7 +304,7 @@ async def test_close_is_idempotent(name: None) -> None:
 #: 已实现自动签到的 4 站（实测 2026-10-22 可用）
 #: - hhanclub / soulvoice / hdhome：NexusPHP 标准 /attendance.php，GET 即签到
 #: - hdsky：自建 showup.php 三段式，图形验证码走 AI 读码
-CHECKIN_ADAPTERS = ("hhanclub", "soulvoice", "hdhome", "hdsky")
+CHECKIN_ADAPTERS = ("hhanclub", "soulvoice", "hdhome", "hdsky", "hdwing")
 
 #: 未实现签到的站：无此功能（springSunday / mteam）或需 Cloudflare Turnstile
 #: （audiences / ourbits）。Turnstile 实测服务端环境无法完成
@@ -1110,5 +1110,184 @@ async def test_mteam_mybonus_failure_fails_whole_snapshot() -> None:
             )
             with pytest.raises(SiteFetchError):
                 await adapter.get_user_snapshot()
+    finally:
+        await adapter.close()
+
+
+# ------------------------------------------------- hdwing 签到（plugin_sign-in）
+
+# hdwing 的签到**不是** NexusPHP 标准的 /attendance.php（本站 404），
+# 而是 X2015 主题自带的插件端点：
+#
+#   GET /usercp.php                              → csrf meta + navbar 签到状态
+#   POST /plugin_sign-in.php?cmd=signin {csrf}  → {"state":...}
+#
+# **不需要图形验证码**（实测裸 csrf 即通过，故本段不涉及 AI 读码）。
+
+_HDWING_STATE_SIGNED = (
+    pathlib.Path(__file__).resolve().parents[1] / "fixtures"
+    / "hdwing_signin_state.html"
+).read_text(encoding="utf-8")
+
+_HDWING_STATE_UNSIGNED = (
+    pathlib.Path(__file__).resolve().parents[1] / "fixtures"
+    / "hdwing_signin_state_unsigned.html"
+).read_text(encoding="utf-8")
+
+
+async def test_hdwing_checkin_success() -> None:
+    """未签到 → 取 csrf → POST 签到 → SUCCESS。"""
+    from app.adapters.sites.base import CheckinStatus
+
+    adapter = _make("hdwing")
+    try:
+        with respx.mock(assert_all_mocked=True) as router:
+            router.get("https://example.com/usercp.php").mock(
+                return_value=httpx.Response(200, text=_HDWING_STATE_UNSIGNED)
+            )
+            post_route = router.post(
+                "https://example.com/plugin_sign-in.php?cmd=signin"
+            ).mock(
+                return_value=httpx.Response(
+                    200,
+                    json={"state": "success", "signindays": 0, "integral": "10"},
+                )
+            )
+            result = await adapter.checkin()
+
+        assert post_route.called, "未签到时应该 POST"
+        assert result.status == CheckinStatus.SUCCESS
+        assert result.reward == 10
+    finally:
+        await adapter.close()
+
+
+async def test_hdwing_checkin_already_skips_post() -> None:
+    """navbar 显示「已签到」→ ALREADY，且**不发 POST**。
+
+    不发 POST 有两个好处：省一次请求；不打扰站点（重复签到在部分站点
+    会被记成异常）。
+    """
+    from app.adapters.sites.base import CheckinStatus
+
+    adapter = _make("hdwing")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            router.get("https://example.com/usercp.php").mock(
+                return_value=httpx.Response(200, text=_HDWING_STATE_SIGNED)
+            )
+            post_route = router.post(
+                "https://example.com/plugin_sign-in.php?cmd=signin"
+            ).mock(return_value=httpx.Response(200, json={"state": False}))
+            result = await adapter.checkin()
+
+        assert not post_route.called, "已签到时不该再 POST"
+        assert result.status == CheckinStatus.ALREADY
+    finally:
+        await adapter.close()
+
+
+async def test_hdwing_checkin_rechecks_state_when_unreasoned_failure() -> None:
+    """``{"state":false}``（无 msg）→ 再查一次状态定性。
+
+    该响应与「真失败」同形。若二次查询发现 navbar 已变成「已签到」，
+    说明刚才那次其实签成功了（只是响应没给原因）→ 判 ALREADY，
+    **不能**记成失败（幂等的正常结果不该让作业变红）。
+    """
+    from app.adapters.sites.base import CheckinStatus
+
+    adapter = _make("hdwing")
+    try:
+        with respx.mock(assert_all_mocked=True) as router:
+            router.get("https://example.com/usercp.php").mock(
+                side_effect=[
+                    httpx.Response(200, text=_HDWING_STATE_UNSIGNED),
+                    httpx.Response(200, text=_HDWING_STATE_SIGNED),
+                ]
+            )
+            router.post("https://example.com/plugin_sign-in.php?cmd=signin").mock(
+                return_value=httpx.Response(200, json={"state": False})
+            )
+            result = await adapter.checkin()
+
+        assert result.status == CheckinStatus.ALREADY
+    finally:
+        await adapter.close()
+
+
+async def test_hdwing_checkin_fails_when_state_unrecognized() -> None:
+    """页面结构变了（既无「已签到」也无「签 到」）→ FAILED，**不盲签**。
+
+    把「识别不出」当成「没签到」会对着未知页面乱打 POST。
+    """
+    from app.adapters.sites.base import CheckinStatus
+
+    adapter = _make("hdwing")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            router.get("https://example.com/usercp.php").mock(
+                return_value=httpx.Response(200, text="<html><body>???</body></html>")
+            )
+            post_route = router.post(
+                "https://example.com/plugin_sign-in.php?cmd=signin"
+            ).mock(return_value=httpx.Response(200, json={"state": "success"}))
+            result = await adapter.checkin()
+
+        assert not post_route.called, "状态识别不出时不该盲签"
+        assert result.status == CheckinStatus.FAILED
+    finally:
+        await adapter.close()
+
+
+async def test_hdwing_checkin_fails_when_csrf_missing() -> None:
+    """页面缺少 x-csrf meta → FAILED（站点改版），不发 POST。"""
+    from app.adapters.sites.base import CheckinStatus
+
+    adapter = _make("hdwing")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            router.get("https://example.com/usercp.php").mock(
+                return_value=httpx.Response(200, text="<html><body>???</body></html>")
+            )
+            post_route = router.post(
+                "https://example.com/plugin_sign-in.php?cmd=signin"
+            ).mock(return_value=httpx.Response(200, json={"state": "success"}))
+            result = await adapter.checkin()
+
+        assert not post_route.called
+        assert result.status == CheckinStatus.FAILED
+    finally:
+        await adapter.close()
+
+
+async def test_hdwing_checkin_login_page_is_auth_expired() -> None:
+    """cookie 失效（被重定向到登录页）→ AUTH_EXPIRED。"""
+    from app.adapters.sites.base import CheckinStatus
+
+    adapter = _make("hdwing")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            router.get("https://example.com/usercp.php").mock(
+                return_value=httpx.Response(
+                    200,
+                    text="<html><head><title>HDWinG :: 登录</title></head></html>",
+                    headers={"location": "https://example.com/login.php"},
+                )
+            )
+            result = await adapter.checkin()
+
+        assert result.status == CheckinStatus.AUTH_EXPIRED
+    finally:
+        await adapter.close()
+
+
+async def test_hdwing_checkin_raises_on_network_error() -> None:
+    """网络故障必须抛 SiteFetchError——不能吞掉返回"看起来正常"的结果。"""
+    adapter = _make("hdwing")
+    try:
+        with _mock_all_error(
+            httpx.ConnectError("Name or service not known")
+        ), pytest.raises(SiteFetchError):
+            await adapter.checkin()
     finally:
         await adapter.close()

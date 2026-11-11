@@ -33,6 +33,16 @@ HTML 解析成统一的 :class:`~app.adapters.sites.base.CheckinResult`。
    含 AI 读图形验证码（见 :mod:`app.core.ai`）。Cloudflare Turnstile 等
    **人机验证**本仓库不实现——实测其挑战无法在服务端环境完成
    （``TurnstileError 600010``），这类站返回 ``UNSUPPORTED``（需人工）。
+
+.. note::
+
+   **本模块收录三种协议**（不是所有站都用标准 ``/attendance.php``）：
+
+   - ``parse_checkin_result`` —— NexusPHP 标准 ``/attendance.php``
+     （hhanclub / soulvoice / hdhome）
+   - ``parse_showup_result`` —— hdsky 自建 ``showup.php`` 三段式（AI 读码）
+   - ``parse_plugin_signin_result`` —— hdwing 的 X2015 插件
+     ``plugin_sign-in.php``（AJAX 路径，**无需验证码**）
 """
 
 from __future__ import annotations
@@ -43,10 +53,13 @@ from typing import Any
 from app.adapters.sites.base import CheckinResult, CheckinStatus
 
 __all__ = [
+    "UNREASONED_FAILURE",
     "detect_login_redirect",
     "parse_checkin_result",
+    "parse_plugin_signin_result",
     "parse_showup_result",
     "parse_showup_sign_state",
+    "parse_signin_state",
 ]
 
 
@@ -253,3 +266,102 @@ def parse_showup_sign_state(payload: Any) -> bool | None:
         return None
     sign = payload.get("sign")
     return sign if isinstance(sign, bool) else None
+
+
+# ---------------------------------------------------------------- hdwing 签到
+# hdwing **不用** NexusPHP 标准的 ``/attendance.php``（本站 404），
+# 而是用 X2015 主题自带的插件端点 ``plugin_sign-in.php``
+# （协议来自站点自己的 ``/plugin/js/base.js`` 的 ``do_signin()``，
+# 2026-11-11 生产 cookie 实测）：
+#
+#   1. ``GET /usercp.php``                 —— 取 ``<meta name="x-csrf">``
+#                                            + 看 navbar 是「签 到」还是「已签到」
+#   2. ``POST /plugin_sign-in.php?cmd=signin {csrf}`` —— 执行签到
+#                                            （**不需要图形验证码**）
+#
+# 响应（JSON）实测四种：
+#
+# - ``{"state":"success","signindays":0,"integral":"10"}`` —— 签到成功
+# - ``{"state":false}``                     —— 今日已签（**无 msg**）
+# - ``{"state":false,"msg":"不正确的CSRF ..."}`` —— csrf 不对
+# - （无 cookie 时返回登录页 HTML，不是 JSON）
+#
+# ⚠️ ``{"state":false}`` **同时**表示「今日已签」与「失败但站点没给原因」——
+# 两者同形，无法从响应本身区分。故解析层把它标成
+# :data:`UNREASONED_FAILURE`，由调用方**二次查状态**再定性（宁可多一次
+# 请求，也不要把幂等的「已签」误报成失败，或把真失败静默吞掉）。
+
+#: 「失败但站点没给原因」的固定文案 —— 调用方据此二次判定是否已签到
+UNREASONED_FAILURE = "签到失败：站点未给出原因"
+
+#: navbar 里的「已签到」标记（hdwing 实测形态：
+#: ``<a class="label label-default" href="#">已签到</a>``）。
+#:
+#: 未签到时该位置是 ``<a … onclick="do_signin(this);"><b>签 到</b></a>``
+#: ——「签 到」中间有空格且包在 ``<b>`` 里，**不会**命中本正则。
+_SIGNED_IN_RE = re.compile(r"<a[^>]*>\s*已签到\s*</a>")
+
+#: 未签到时的「签 到」按钮（``onclick="do_signin(this)"``）
+_SIGNIN_BUTTON_RE = re.compile(r"do_signin\s*\(")
+
+
+def parse_signin_state(html: str) -> bool | None:
+    """解析 hdwing navbar 的签到状态。
+
+    :returns: ``True`` = 今日已签；``False`` = 今日未签；
+        ``None`` = 页面里两个特征都没找到（**站点改版**）。
+
+    ``None`` 不能当成 ``False`` —— 那是「页面结构变了」，不是「没签到」。
+    盲目签到会对着未知页面乱打 POST，故调用方必须区别对待。
+    """
+    if _SIGNED_IN_RE.search(html):
+        return True
+    if _SIGNIN_BUTTON_RE.search(html):
+        return False
+    return None
+
+
+def _to_int(value: Any) -> int | None:
+    """宽松转 int（站点的 ``integral`` 是字符串 ``"10"``）。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.lstrip("-").isdigit():
+            return int(text)
+    return None
+
+
+def parse_plugin_signin_result(payload: Any) -> CheckinResult:
+    """解析 hdwing ``plugin_sign-in.php?cmd=signin`` 的 JSON 响应。
+
+    :param payload: 已解析的 JSON（``dict``）或原始文本（未登录时返回
+        登录页 HTML，不是 JSON）。
+    """
+    # 未登录：返回登录页 HTML，压根不是 JSON
+    if not isinstance(payload, dict):
+        return CheckinResult(
+            CheckinStatus.AUTH_EXPIRED, "cookie 已失效，需重新登录"
+        )
+
+    if payload.get("state") == "success":
+        reward = _to_int(payload.get("integral"))
+        streak = _to_int(payload.get("signindays"))
+        message = "签到成功"
+        if reward is not None:
+            message = f"签到成功（获得 {reward} 魔力）"
+        return CheckinResult(
+            CheckinStatus.SUCCESS,
+            message,
+            streak_days=streak,
+            reward=reward,
+        )
+
+    msg = str(payload.get("msg") or "")
+    if msg:
+        return CheckinResult(CheckinStatus.FAILED, f"签到失败：{msg}")
+
+    # ``{"state":false}`` —— 「今日已签」与「失败无原因」同形
+    return CheckinResult(CheckinStatus.FAILED, UNREASONED_FAILURE)

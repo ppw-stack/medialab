@@ -15,10 +15,13 @@ from pathlib import Path
 import pytest
 from app.adapters.sites.base import CheckinStatus
 from app.adapters.sites.parsers.attendance import (
+    UNREASONED_FAILURE,
     detect_login_redirect,
     parse_checkin_result,
+    parse_plugin_signin_result,
     parse_showup_result,
     parse_showup_sign_state,
+    parse_signin_state,
 )
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
@@ -304,3 +307,78 @@ def test_showup_missing_message_is_failure() -> None:
 def test_showup_sign_state(payload: object, expect: bool | None) -> None:
     """``{action:check}`` 的签到状态解析；不可解读时返回 None（含 cookie 失效）。"""
     assert parse_showup_sign_state(payload) is expect
+
+
+# --------------------------------------------- hdwing plugin_sign-in 协议
+
+# hdwing 既不用 NexusPHP 标准的 /attendance.php（本站 404），也不用 hdsky
+# 的 showup 三段式，而是 X2015 主题自带的插件端点 plugin_sign-in.php：
+#
+#   GET /usercp.php                              → csrf meta + navbar 签到状态
+#   POST /plugin_sign-in.php?cmd=signin {csrf}  → {"state":...}
+#
+# **不需要图形验证码**（实测裸 csrf 即通过）。fixture 是 2026-11-11
+# 生产 cookie 实测的页面裁剪（见 scripts/capture_checkin_fixtures.py）。
+
+
+def test_hdwing_signed_page_detected() -> None:
+    """navbar 上是「已签到」→ True。"""
+    assert parse_signin_state(_load("hdwing_signin_state.html")) is True
+
+
+def test_hdwing_unsigned_page_detected() -> None:
+    """navbar 上是「签 到」按钮（``onclick="do_signin(this)"``）→ False。
+
+    ⚠️ 未签到时按钮文本是 ``<b>签 到</b>``（中间有空格）——按「签到」
+    两字匹配会漏判，故判据挂在 ``onclick`` 上。
+    """
+    assert parse_signin_state(_load("hdwing_signin_state_unsigned.html")) is False
+
+
+def test_hdwing_unknown_page_is_none() -> None:
+    """两个特征都不在 → None（**不是** False）。
+
+    那是「页面结构变了」，不是「没签到」——当成 False 会对着未知页面盲签。
+    """
+    assert parse_signin_state("<html><body>???</body></html>") is None
+
+
+def test_hdwing_signin_success() -> None:
+    """签到成功 → SUCCESS，并带出连续天数与本次获得的魔力值。
+
+    ``integral`` 在真实响应里是**字符串** ``"10"``——必须能转成 int。
+    """
+    result = parse_plugin_signin_result(
+        {"state": "success", "signindays": 0, "integral": "10"}
+    )
+    assert result.status == CheckinStatus.SUCCESS
+    assert result.reward == 10
+    assert result.streak_days == 0
+    assert "10" in result.message
+
+
+def test_hdwing_signin_already_is_unreasoned_failure() -> None:
+    """``{"state":false}``（今日已签，**无 msg**）→ 标记为「失败但无原因」。
+
+    它与「真失败」同形，**不能**直接判 ALREADY——那会把真失败静默吞掉。
+    调用方据此二次查状态再定性（见 ``test_site_adapters.py``）。
+    """
+    result = parse_plugin_signin_result({"state": False})
+    assert result.status == CheckinStatus.FAILED
+    assert result.message == UNREASONED_FAILURE
+
+
+def test_hdwing_signin_csrf_error_is_failure_with_reason() -> None:
+    """csrf 不对 → FAILED，且**带上站点的原文**（便于排查）。"""
+    result = parse_plugin_signin_result(
+        {"state": False, "msg": "不正确的CSRF / Incorrect CSRF token"}
+    )
+    assert result.status == CheckinStatus.FAILED
+    assert result.message != UNREASONED_FAILURE
+    assert "CSRF" in result.message
+
+
+def test_hdwing_signin_login_page_is_auth_expired() -> None:
+    """未登录时返回登录页 HTML（不是 JSON）→ AUTH_EXPIRED。"""
+    result = parse_plugin_signin_result("<html><body>登录</body></html>")
+    assert result.status == CheckinStatus.AUTH_EXPIRED
