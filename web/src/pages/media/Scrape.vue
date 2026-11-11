@@ -476,7 +476,7 @@ async function removeAlias(id: number): Promise<void> {
 
 // ---- 刮削记录 ----
 
-// 列配置直接字面量（与 Offline.vue 同款做法——列结构是视图内部细节）
+// 列配置直接字面量（列结构是视图内部细节，非 API 契约）
 const recordColumns = [
   { title: "标题", dataIndex: "title", key: "title" },
   { title: "类型", dataIndex: "kindLabel", key: "kindLabel", width: 90 },
