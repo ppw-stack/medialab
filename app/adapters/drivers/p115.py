@@ -263,7 +263,9 @@ class P115Driver:
         from p115client import tool
 
         try:
-            return await tool.dir_getid(client, path, async_=True)
+            cid = await tool.dir_getid(client, path, async_=True)
+            # ``tool.dir_getid`` 返回 Any——显式收敛成声明类型
+            return cid if isinstance(cid, int) else str(cid)
         except Exception as exc:
             raise DriverError(
                 f"115 目录不存在或无权限：{path}（{exc}）",
