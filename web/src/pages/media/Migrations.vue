@@ -155,14 +155,8 @@
         <div v-for="t in inFlightList" :key="t.id" class="inflight">
           <div class="inflight-head">
             <span class="inflight-name" :title="t.path">{{ t.path }}</span>
-            <span class="muted">{{ progressText(t.progress) }}　{{ formatBytes(t.size) }}</span>
+            <span class="muted">{{ formatBytes(t.size) }}</span>
           </div>
-          <a-progress
-            :percent="t.progress < 0 ? 0 : t.progress"
-            :show-info="false"
-            size="small"
-            :status="t.progress >= 100 ? 'success' : 'active'"
-          />
         </div>
       </template>
 
@@ -266,18 +260,15 @@ const conflictColumns = [
 const currentSource = computed(() => sourceStack.value[sourceStack.value.length - 1])
 const currentTarget = computed(() => targetStack.value[targetStack.value.length - 1])
 
-/** 在途任务（按进度降序） */
+/** 在途任务（提交顺序） */
 const inFlightList = computed(() => {
   const items = job.value?.in_flight_items ?? {}
-  return Object.entries(items)
-    .map(([id, v]) => ({
-      id,
-      path: v.path,
-      name: v.name,
-      progress: v.progress,
-      size: v.size,
-    }))
-    .sort((a, b) => b.progress - a.progress)
+  return Object.entries(items).map(([id, v]) => ({
+    id,
+    path: v.path,
+    name: v.name,
+    size: v.size,
+  }))
 })
 
 const canRun = computed(
@@ -494,11 +485,6 @@ function stateColor(state: string): string {
     default:
       return "default"
   }
-}
-
-/** 进度文案：-1 = 光鸭还没开始下载（排队中）。 */
-function progressText(progress: number): string {
-  return progress < 0 ? "排队中" : `${progress}%`
 }
 
 /** 拆出日志行首的时间戳（``[00:41:37]``），没有就返回空串。 */

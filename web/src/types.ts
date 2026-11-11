@@ -1211,11 +1211,8 @@ export interface MigrationJob {
   dirs_walked: number
   discovered: number
   in_flight: number
-  /** 在途任务实时进度：taskId → { 完整路径, 文件名, 进度%（-1 = 排队中）, 大小 } */
-  in_flight_items: Record<
-    string,
-    { path: string; name: string; progress: number; size: number }
-  >
+  /** 在途任务：taskId → { 完整路径, 文件名, 大小 }（不带进度——光鸭该字段不可靠） */
+  in_flight_items: Record<string, { path: string; name: string; size: number }>
   success: number
   failed: number
   skipped_existing: number
