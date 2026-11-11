@@ -217,8 +217,10 @@ class _TaskWatcher:
 
     只判断「任务还在不在活跃列表里」——不读 progress 判定完成、不设超时。
 
-    但**会把 progress 报给页面**（实时日志 + 在途进度条）——光鸭的
-    ``progress`` 字段是现成的实时进度，不用它展示给用户很浪费。
+    **为什么不在途进度只报文件路径**：光鸭的 ``progress`` 字段语义不可靠
+    （实测它不是百分比，任务项初始甚至没有这个字段，只在真实拉取时出现），
+    展示它只会误导用户——大文件实际下到 88% 时它可能显示个位数。完成判定
+    走「任务从活跃列表消失」+「目标目录出现同名同大小文件」，与该字段无关。
     """
 
     def __init__(
@@ -271,13 +273,6 @@ class _TaskWatcher:
                 if not task_id:
                     continue
                 active.add(task_id)
-                # 报进度（只报**本轮提交**的任务，遗留任务不占日志）
-                if task_id in self._pending:
-                    raw = item.get("progress")
-                    self._job.update_task_progress(
-                        task_id,
-                        None if raw is None else int(raw),
-                    )
 
             for task_id, event in list(self._pending.items()):
                 if task_id in active:
@@ -313,9 +308,7 @@ class _TaskWatcher:
         self._job.log(f"⏱️ 仍在下载（{len(items)} 个）：")
         for item in items.values():
             # 用「│」做缩进标记——不能用空格（前端剥时间戳时会把前导空白吃掉）
-            self._job.log(
-                f"│ {item['path']}　{_progress_text(item['progress'])}"
-            )
+            self._job.log(f"│ {item['path']}")
 
 
 class _SubmitGate:
@@ -713,11 +706,6 @@ def _relative_dir(path: str, base_path: str) -> str:
 
 def _norm_dir(rel: str) -> str:
     return "/".join(p for p in rel.strip("/").split("/") if p)
-
-
-def _progress_text(progress: int) -> str:
-    """进度文案：``-1`` = 光鸭还没开始下载（排队中）。"""
-    return "排队中" if progress < 0 else f"{progress}%"
 
 
 async def _collect_inflight(driver: Any, job: MigrationJob) -> set[str]:

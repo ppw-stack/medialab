@@ -74,7 +74,7 @@
   - **它什么时候才划算**：源文件**本来就在大带宽 CDN 上**（如 115 直链）→ 那正是**迁移功能**（115→光鸭）的场景。**「本地 → 光鸭」走离线下载反而更慢**
   - **随之删除**：6 个后端文件（`offline_download` / `offline_files` / `offline_config` / `offline_jobs` + 两个路由）+ 「离线下载」页 + 三项环境变量配置（`OFFLINE_HMAC_SECRET` / `OFFLINE_PUBLIC_BASE` / `OFFLINE_FILES_ROOT`）。存量配置行由幂等迁移 `delete_offline_env_settings` 清掉（连带那个死密钥）
   - **光鸭的「离线任务」机制仍在用**（迁移功能）：`guangya.py` 的 `create_offline_task` / `list_active_offline_tasks` / `list_failed_offline_tasks` **保留**，别跟着删
-  - **仍然有效的坑**：光鸭的 `progress` 字段**不是可靠的百分比**（2.3GB 文件下载到 88% 时它只有 4）→ 不用它判定完成。⚠️ **迁移功能把 `progress` 当百分比显示**（`migration.py` 的 `_progress_text`）——**那个显示是错的**，大文件时会显示个位数，**待修**
+  - **仍然有效的坑（2026-11-11 实测补充）**：光鸭的 `progress` 字段**不是可靠的百分比**（2.3GB 文件下载到 88% 时它只有 4）→ **不用它判定完成，也不再展示**——迁移在途列表只报「路径 + 大小」（假百分比曾误导用户，已随展示一起移除）。判定走「活跃列表消失 + 目标目录同名同大小校验」。实测还确认：任务项初始结构**没有** `progress` 字段（只有 taskId/fileName/totalSize/status/createTime/res/parentDirType），它只在真实拉取时动态出现；对**非媒体 URL**（TUNA 的 .iso/.gz）云添加会挂 3 分钟后统一 `code=8 云添加失败`——历史成功案例全是媒体文件（.mkv / 115 直链），**疑似云添加只接受媒体类 URL（待证）**；`get_task_status()` 是**上传任务**的接口，查云下载任务返回 145；**中途删目标目录会静默终止或卡住任务**（探测时踩到：一个 15MB 任务卡在活跃列表不结束）
 - **Bearer 长期凭据只用 `WEB_TOKEN`**（2026-10-30 加入）：`verify_bearer` 同时接受 API Token（`WEB_TOKEN`）与 session cookie 值两种口径，但 session cookie 值 24h 过期（`SESSION_MAX_AGE`）。CLI / 脚本长期使用应存 `WEB_TOKEN`，不可把 session cookie 值当长期 token 存储——后者会突然 401。session 值口径仅为面板/CLI 同源便利，非长期凭据。
 - **自动化 / 合规边界**（2026-10-22 修订，原「不引入未文档化的反爬对抗 / 验证码绕过（R2）」）：
   - ✅ **允许**对**自有账号**做站点自动化，含 AI 读图形验证码（`app/core/ai.py`）、真实浏览器交互

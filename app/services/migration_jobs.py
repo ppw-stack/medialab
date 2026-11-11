@@ -33,9 +33,6 @@ MAX_LOGS = 500
 MAX_JOBS = 20
 #: 失败 / 冲突明细上限（迁移可能涉及几万个文件）
 MAX_DETAILS = 100
-#: 进度百分比达到这些值时记一条日志（让长下载有「心跳」）
-PROGRESS_MILESTONES = (25, 50, 75)
-
 STATE_RUNNING = "running"
 STATE_SUCCESS = "success"
 STATE_FAILED = "failed"
@@ -100,7 +97,11 @@ class MigrationJob:
     discovered: int = 0
     #: 已提交、仍在光鸭上跑的任务数
     in_flight: int = 0
-    #: 在途任务明细：``taskId → {名称, 进度%, 大小}``——前端展示实时进度
+    #: 在途任务明细：``taskId → {完整路径, 文件名, 大小}``——前端展示在途列表
+    #:
+    #: **不带进度百分比**：光鸭的 ``progress`` 字段语义不可靠（实测非媒体源
+    #: 甚至拿不到该字段），展示只会误导。完成判定走「活跃列表消失 + 同名
+    #: 同大小校验」，与该字段无关。
     in_flight_items: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     success: int = 0
@@ -168,7 +169,7 @@ class MigrationJob:
                 }
             )
 
-    # -- 在途任务实时进度 --
+    # -- 在途任务 --
 
     def track_task(self, task_id: str, path: str, size: int) -> None:
         """登记一个在途任务。
@@ -180,30 +181,8 @@ class MigrationJob:
             "path": path,
             #: 文件名（从完整路径截取，用于紧凑展示）
             "name": path.rsplit("/", 1)[-1],
-            #: ``-1`` 表示「光鸭还没开始下载」（``progress`` 字段为 null）
-            "progress": -1,
             "size": size,
         }
-
-    def update_task_progress(self, task_id: str, progress: int | None) -> None:
-        """更新在途任务的进度（跨过里程碑时记一条日志）。
-
-        ``progress`` 为 ``None`` 说明光鸭还没开始下载（排队中）——不能当成
-        0%，否则页面会一直显示「0%」像卡死。
-        """
-        item = self.in_flight_items.get(task_id)
-        if item is None:
-            return
-        if progress is None:
-            item["progress"] = -1
-            return
-        progress = max(0, min(100, int(progress)))
-        old = int(item.get("progress") or -1)
-        item["progress"] = progress
-        for milestone in PROGRESS_MILESTONES:
-            if old < milestone <= progress:
-                # 「│」做缩进标记——不能用空格（前端剥时间戳时会连带吃掉前导空白）
-                self.log(f"│ ⏳ {item['path']} 已下载 {milestone}%")
 
     def untrack_task(self, task_id: str) -> None:
         """移除一个已结束的任务。"""
