@@ -361,6 +361,18 @@ POST plugin_sign-in.php?cmd=signin {csrf}     → {"state":"success","signindays
 > 执行签到**。这 3 站实测 GET 即完成签到（说明无图形验证码），
 > POST 仅作兜底。已签到时 POST 返回 200 + "已经签到过"，**不是错误**。
 >
+> ⚠️ **三站「今日已签」的行为不一致**（2026-11-11 生产 cookie 实测）：
+> 已签过时再 GET `/attendance.php`——
+>
+> - **hdhome**：返回「抱歉 您今天已经签到过了，请勿重复刷新。」→ `ALREADY` 可达
+> - **hhanclub**：**仍返回成功页文案**（「这是您的第 217 次签到…」，累计次数
+>   不变）→ `ALREADY` 对它**原理上不可达**，作业会一直显示「签到成功」
+>   而非「今日已签到」——**这是站点语义，不是识别 bug**
+> - **soulvoice**：同 hhanclub（成功页 + 「签到成功」字样）
+>
+> 重复 GET **幂等**（实测连打两次：累计次数 / 连续天数 / 补签卡张数全不变，
+> 不重复发奖励、不消耗补签卡）——手动重复触发作业无害。
+>
 > 结果**不落库**（不建表）——作业返回值进 `job_runs.result_json`
 > （含 `summary` + `steps`），前端「调度 → 历史」直接可见。
 > 解析规则用真实页面固化成 fixture：`tests/fixtures/*_attendance.html`。
