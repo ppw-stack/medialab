@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from typing import Any, cast
+from typing import Any
 
 from app.adapters.drivers.base import CloudFile, DirectLink, DriverError
 from app.core.logging import get_logger
@@ -263,9 +263,9 @@ class P115Driver:
         from p115client import tool
 
         try:
-            # p115client 无类型标注 → 返回 Any，显式 cast 让 mypy 知道
-            # 这里的 cid 是 int | str
-            return cast(int | str, await tool.dir_getid(client, path, async_=True))
+            cid = await tool.dir_getid(client, path, async_=True)
+            # ``tool.dir_getid`` 返回 Any——显式收敛成声明类型
+            return cid if isinstance(cid, int) else str(cid)
         except Exception as exc:
             raise DriverError(
                 f"115 目录不存在或无权限：{path}（{exc}）",

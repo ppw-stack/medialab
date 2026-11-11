@@ -37,6 +37,11 @@ FIXTURES = pathlib.Path(__file__).resolve().parents[1] / "tests" / "fixtures"
 #: 替换后的占位 UID（保持数字形态，避免改动解析上下文）
 _FAKE_UID = "12345"
 
+#: 替换后的占位 csrf —— **必须是合法 hex**（``_CSRF_RE`` 匹配
+#: ``[0-9a-fA-F]+``），否则 fixture 测不了「从页面取 csrf」这一步。
+#: 40 个 0 一眼可辨是占位符，不是真实凭据。
+_FAKE_CSRF = "0" * 40
+
 
 def anonymize(html: str) -> str:
     """把用户名与 UID 替换成占位符。
@@ -81,6 +86,19 @@ def anonymize(html: str) -> str:
         r"\1REDACTED",
         out,
     )
+    # **csrf**（``<meta name="x-csrf">`` / ``logout.php?csrf=``）——同上，
+    # 是能直接用的凭据。meta 里的换成**合法 hex 占位符**（解析器要能
+    # 提取到），URL 里的直接抹掉。
+    out = re.sub(
+        r'(<meta\s+name="x-csrf"\s+content=")[0-9a-fA-F]+(")',
+        rf"\g<1>{_FAKE_CSRF}\g<2>",
+        out,
+    )
+    out = re.sub(
+        r"((?:logout|plugin_sign-in)\.php\?csrf=)[0-9a-fA-F]+",
+        r"\1REDACTED",
+        out,
+    )
     return out
 
 
@@ -102,8 +120,11 @@ def trim(html: str) -> str:
 
 
 def main() -> None:
-    for path in sorted(FIXTURES.glob("*_attendance.html")) + sorted(
-        FIXTURES.glob("*_login.html")
+    for path in (
+        sorted(FIXTURES.glob("*_attendance.html"))
+        + sorted(FIXTURES.glob("*_login.html"))
+        # hdwing 的签到状态页（navbar 片段 + csrf meta）
+        + sorted(FIXTURES.glob("*_signin_state*.html"))
     ):
         original = path.read_text(encoding="utf-8")
         cleaned = trim(anonymize(original))

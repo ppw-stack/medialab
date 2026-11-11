@@ -110,11 +110,17 @@
   - 契约由 `tests/unit/test_site_adapters.py` 固化，9 站全参数化覆盖
 - **FR-3.6 站点每日签到契约**（2026-10-22 加入）：
   - 适配器单方法 `checkin() → CheckinResult`，带状态枚举（success / already / unsupported / auth_expired / failed）——**不用 `None`**：签到必须区分"该站不支持"与"签到失败"，否则作业统计分不清
-  - **只实现实测可用的 4 站**：hhanclub / soulvoice / hdhome（走 NexusPHP `/attendance.php`，GET 即签到）+ **hdsky**（自建 `showup.php` 三段式，图形验证码走 AI 读码）。其余 5 站走基类默认 `UNSUPPORTED`（audiences / ourbits 需 Turnstile、springSunday / mteam 无此功能、hddolby 未验证）
+  - **只实现实测可用的 5 站**：hhanclub / soulvoice / hdhome（走 NexusPHP `/attendance.php`，GET 即签到）+ **hdsky**（自建 `showup.php` 三段式，图形验证码走 AI 读码）+ **hdwing**（X2015 主题插件 `plugin_sign-in.php`，**AJAX 路径无需验证码**）。其余 5 站走基类默认 `UNSUPPORTED`（audiences / ourbits 需 Turnstile、springSunday / mteam 无此功能、hddolby 未验证）
+  - **hdwing 的签到协议**（2026-11-11 实测，生产 cookie）：**不是** NexusPHP 标准的 `/attendance.php`（本站 404），而是 X2015 主题自带的插件端点（协议来自站点自己的 `/plugin/js/base.js` 的 `do_signin()`）
+    - `GET /usercp.php` → 取 `<meta name="x-csrf">` 的 csrf + 看 navbar 是「签 到」还是「已签到」（**两个特征都不在 = 站点改版 → FAILED，不能当成「未签到」盲签**）
+    - `POST /plugin_sign-in.php?cmd=signin {csrf}` → 执行签到，**不需要图形验证码**
+    - 响应：`{"state":"success","signindays":N,"integral":"10"}` / `{"state":false}`（今日已签，**无 msg**）/ `{"state":false,"msg":...}`（csrf 错）
+    - ⚠️ **`{"state":false}` 与「真失败」同形** → 解析层标成 `attendance.UNREASONED_FAILURE`，适配器**再查一次状态**定性（宁可多一次请求，也不把幂等的「已签」误报成失败，或把真失败静默吞掉）
   - 失败必须抛 `SiteFetchError` / `BreakerTripped`，与拉取路径同一契约
   - 签到熔断**不写** `sites.breaker_until` —— 不与 10 分钟一次的拉取作业共享熔断状态
   - **不建表**：结果只进 `job_runs.result_json`（`summary` + `steps`），前端「调度 → 历史」可见
-  - 解析规则用**真实页面**固化成 fixture（`tests/fixtures/*_attendance.html`）——手写最小 HTML 会漏掉真实文案（hhanclub 成功页**不含**"签到成功"四字，只有统计文案）
+  - 解析规则用**真实页面**固化成 fixture（`tests/fixtures/*_attendance.html`；hdwing 是 `hdwing_signin_state*.html` + `hdwing_signin_*.json`）——手写最小 HTML 会漏掉真实文案（hhanclub 成功页**不含**"签到成功"四字，只有统计文案）
+  - fixture 抓取：`scripts/capture_mybonus_fixtures.py`（时魔）/ `scripts/capture_checkin_fixtures.py`（hdwing 签到）/ `scripts/trim_checkin_fixtures.py`（脱敏 + 裁剪，csrf 抹成 40 位 0 占位符——**必须是合法 hex**，否则解析器提取不到）
   - 契约由 `tests/unit/test_checkin_parser.py` + `tests/unit/test_site_adapters.py` + `tests/integration/test_checkin_job.py` 固化
 - **作业步骤带逐项明细**（2026-11-03 加入，`JobStep.items`）：
   - 步骤的 `detail` 是**聚合**描述（如「20 成功，0 失败」）——光看它**回答不了「是哪些出了问题」**。而作业执行时这些数据本来就在内存里（逐站结果、逐种推送结果…），只是没被带出来
