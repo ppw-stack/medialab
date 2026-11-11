@@ -161,6 +161,10 @@ class SyncOutcome:
     cloud_file_id: str = ""
     #: 云端字节数（**清理本地前的校验依据**——必须等于 ``size``）
     cloud_size: int = 0
+    #: 云端那份是按「保留大的」策略**保留**的（不是这份本地文件传上去的
+    #: 副本）。此时清理校验放宽为「云端 ≥ 本地」——云端是更大的完整版本，
+    #: 本地小的没有保留价值（2026-11-12 用户要求：保留大的，移除小的）。
+    cloud_kept: bool = False
     #: 本地文件是否已被删除（``delete_local`` 开启且成功时）
     local_deleted: bool = False
 
@@ -272,8 +276,10 @@ async def sync_file(
         # 为什么不能直接覆盖：本地重新压制出的版本往往**更小**（去音轨/
         # 换压制组），直接覆盖等于用小版本顶掉大版本。
         #
-        # 本地文件**不会**被清理——``_check_cleanup_allowed`` 要求
-        # 「云端大小 == 本地大小」，这里必然不等 → 本地原件留着。
+        # 本地文件的清理（``delete_local`` 开启时）：**小的那份也删**
+        # （2026-11-12 用户要求「保留大的，移除小的」）——云端是更大的
+        # 完整版本，本地原件没有保留价值。``cloud_kept=True`` 让清理
+        # 校验放宽为「云端 ≥ 本地」。
         if (
             ctx.conflict_policy == CONFLICT_KEEP_LARGER
             and remote.size > size
@@ -288,12 +294,17 @@ async def sync_file(
                     f"云端同名文件更大（{remote.size} > {size} 字节），"
                     "按策略保留云端版本"
                 ),
+                cloud_kept=True,
             )
             if ctx.delete_local:
                 note = _check_cleanup_allowed(outcome)
                 if note:
                     outcome.reason = note
-                else:  # pragma: no cover - 大小不等时校验必然拦下
+                else:
+                    outcome.reason = (
+                        f"已删除本地：云端更大（{remote.size} > {size} 字节），"
+                        "按策略保留云端版本"
+                    )
                     _spawn_cleanup(local_path, ctx.root, outcome)
                     outcome.local_deleted = True
             return outcome
@@ -364,7 +375,11 @@ def _check_cleanup_allowed(outcome: SyncOutcome) -> str:
     """删本地前的**云端侧**校验。返回原因（空串 = 可以删）。
 
     1. 云端 fileId 非空
-    2. 云端大小 == 本地大小（不只是「API 返回成功」）
+    2. 云端大小 == 本地大小（不只是「API 返回成功」）；
+       **例外**：``cloud_kept``（云端那份是按「保留大的」策略保留的）时
+       放宽为「云端 ≥ 本地」——云端是更大的完整版本，本地小的没有
+       保留价值（2026-11-12 用户要求「保留大的，移除小的」）。
+       「云端 < 本地」在该分支不可能出现，出现即视为异常、宁可不删。
 
     第 3 道（路径合法 / 普通文件 / 非隐藏）在
     :func:`app.services.upload_cleanup.is_safe_to_delete` 里——它要读文件
@@ -372,9 +387,14 @@ def _check_cleanup_allowed(outcome: SyncOutcome) -> str:
     """
     if not outcome.cloud_file_id:
         return "本地未删除：云端未返回 fileId"
-    if outcome.cloud_size != outcome.size:
+    if outcome.cloud_size != outcome.size and not outcome.cloud_kept:
         return (
             f"本地未删除：云端 {outcome.cloud_size} 字节 / 本地 {outcome.size} 字节不一致"
+        )
+    if outcome.cloud_kept and outcome.cloud_size < outcome.size:
+        return (
+            f"本地未删除：云端 {outcome.cloud_size} 字节竟小于本地 {outcome.size} 字节"
+            "（异常状态，宁可不删）"
         )
     return ""
 
