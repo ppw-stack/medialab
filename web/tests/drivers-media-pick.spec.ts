@@ -132,6 +132,14 @@ test('存储源 - 媒体库目录用目录浏览器选，不手填 id', async ({
     page.locator('.ant-drawer input[placeholder="/app/library"]'),
   ).toHaveCount(1)
 
+  // 图片 / 数据后缀未配置 → 预填默认清单（存量行兜底，真源与后端 domain 同值）
+  for (const ext of ['jpg', 'jpeg', 'png', 'webp']) {
+    await expect(page.locator('.ant-drawer').getByText(ext, { exact: true })).toBeVisible()
+  }
+  for (const ext of ['nfo', 'ass', 'ssa', 'srt']) {
+    await expect(page.locator('.ant-drawer').getByText(ext, { exact: true })).toBeVisible()
+  }
+
   // 点进「电影」→ 即选中它
   await page.getByText('电影', { exact: true }).click()
   await expect(page.getByText(/已选：电影/).first()).toBeVisible()
@@ -146,4 +154,7 @@ test('存储源 - 媒体库目录用目录浏览器选，不手填 id', async ({
   // 保存的 media_cid 是**选出来的 id**，不是手填的
   expect(saved?.media_cid).toBe('d1')
   expect(saved?.output_dir).toBe('/app/library')
+  // 预填的默认后缀清单随保存落库（存量行由此获得默认值）
+  expect(saved?.image_exts).toBe('jpg,jpeg,png,webp')
+  expect(saved?.data_exts).toBe('nfo,ass,ssa,srt')
 })

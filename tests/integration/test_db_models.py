@@ -55,6 +55,32 @@ async def test_create_all_is_idempotent(db: None) -> None:
     await db_bootstrap.create_all()
 
 
+async def test_driver_media_exts_defaults(db: None) -> None:
+    """新建存储源不传后缀时，三列都拿到 domain 层的默认清单。
+
+    ``video_exts`` 一直有默认；``image_exts`` / ``data_exts`` 曾默认空串
+    （附件静默不同步），2026-11-11 起也预填默认清单。
+    """
+    from app.db.models import Driver
+    from app.domain.media_exts import (
+        DEFAULT_DATA_EXTS,
+        DEFAULT_IMAGE_EXTS,
+        DEFAULT_VIDEO_EXTS,
+    )
+
+    async with session_scope() as session:
+        session.add(Driver(name="d1", type="guangya", credential="{}", enabled=True))
+        await session.commit()
+
+    async with session_scope() as session:
+        row = (
+            await session.execute(select(Driver).where(Driver.name == "d1"))
+        ).scalar_one()
+        assert row.video_exts == DEFAULT_VIDEO_EXTS
+        assert row.image_exts == DEFAULT_IMAGE_EXTS
+        assert row.data_exts == DEFAULT_DATA_EXTS
+
+
 async def test_torrent_index_unique_site_item(db: None) -> None:
     """(site_id, item_id) 唯一——upsert 的基础。"""
     async with session_scope() as session:

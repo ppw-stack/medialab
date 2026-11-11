@@ -802,11 +802,11 @@ export interface Driver {
   media_cid_label: string
   /** 本地媒体库目录 */
   output_dir: string | null
-  /** 视频后缀（逗号分隔） */
+  /** 视频后缀（逗号分隔，扫描依据——生成 strm） */
   video_exts: string
-  /** 媒体图片后缀（逗号分隔，当前忽略） */
+  /** 媒体图片后缀（逗号分隔，附件同步到本地；空 = 不同步） */
   image_exts: string
-  /** 媒体数据后缀（逗号分隔，当前忽略） */
+  /** 媒体数据后缀（逗号分隔，附件同步到本地；空 = 不同步） */
   data_exts: string
   /** 最小视频体积（MB），0 = 不过滤 */
   min_size_mb: number

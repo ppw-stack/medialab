@@ -246,10 +246,10 @@
             v-model:value="configForm.image_exts"
             mode="tags"
             :token-separators="[',', ' ']"
-            placeholder="jpg png webp"
+            placeholder="jpg jpeg png webp"
             class="mono"
           />
-          <div class="hint">扫描时**同步到本地**（与 strm 同目录，保持原文件名）。</div>
+          <div class="hint">扫描时**同步到本地**（与 strm 同目录，保持原文件名）。清空 = 不同步图片。</div>
         </a-form-item>
 
         <a-form-item label="媒体数据后缀">
@@ -257,10 +257,10 @@
             v-model:value="configForm.data_exts"
             mode="tags"
             :token-separators="[',', ' ']"
-            placeholder="nfo ass srt"
+            placeholder="nfo ass ssa srt"
             class="mono"
           />
-          <div class="hint">扫描时**同步到本地**（与 strm 同目录，保持原文件名）。</div>
+          <div class="hint">扫描时**同步到本地**（与 strm 同目录，保持原文件名）。清空 = 不同步元数据。</div>
         </a-form-item>
 
         <a-form-item label="最小视频">
@@ -953,6 +953,20 @@ async function onCreate(): Promise<void> {
 // -- 配置 --
 
 /**
+ * 媒体后缀的**默认值**（存量行未配置时的预填值）。
+ *
+ * 真源在 ``app/domain/media_exts.py``（列默认值同源）——前端这份只为
+ * 打开配置抽屉时预填，两边保持一致；不一致的后果只是预填值与新建存储源
+ * 的列默认不同，不会崩。
+ *
+ * 为什么不在后端 ``DriverOut`` 层兜底：清空后保存的行（``image_exts=""``
+ * = 关闭附件同步）如果被 ``or 默认`` 改写，用户清空后重开抽屉会看到默认值，
+ * 以为没存上。预填只发生在**打开抽屉**这一刻，保存后以 DB 为准。
+ */
+const DEFAULT_IMAGE_EXTS = ["jpg", "jpeg", "png", "webp"]
+const DEFAULT_DATA_EXTS = ["nfo", "ass", "ssa", "srt"]
+
+/**
  * 网盘目录浏览的**面包屑栈**（栈底 = 账号根目录）。
  *
  * 栈底的 id 是**空串**——后端按驱动类型把空串解析成真正的根（光鸭是空串，
@@ -990,8 +1004,13 @@ function openConfig(driver: Driver): void {
     media_path: driver.media_path ?? "",
     output_dir: driver.output_dir ?? "",
     video_exts: splitExts(driver.video_exts),
-    image_exts: splitExts(driver.image_exts),
-    data_exts: splitExts(driver.data_exts),
+    // 未配置时预填默认值——用户不用手抄常用清单（真源见 DEFAULT_IMAGE_EXTS 注释）
+    image_exts: splitExts(driver.image_exts).length
+      ? splitExts(driver.image_exts)
+      : [...DEFAULT_IMAGE_EXTS],
+    data_exts: splitExts(driver.data_exts).length
+      ? splitExts(driver.data_exts)
+      : [...DEFAULT_DATA_EXTS],
     min_size_mb: driver.min_size_mb ?? 0,
     include_subdirs: driver.include_subdirs ?? true,
   }

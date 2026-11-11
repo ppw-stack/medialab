@@ -45,6 +45,11 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.domain.enums import FreeType
+from app.domain.media_exts import (
+    DEFAULT_DATA_EXTS,
+    DEFAULT_IMAGE_EXTS,
+    DEFAULT_VIDEO_EXTS,
+)
 from app.domain.upload_types import DEFAULT_UPLOAD_CONCURRENCY
 
 __all__ = [
@@ -67,12 +72,6 @@ __all__ = [
     "TorrentIndex",
     "UploadTask",
 ]
-
-#: 默认视频后缀（逗号分隔）——媒体库域的扫描依据。
-#:
-#: 存在**本模块**而非 :mod:`app.services.naming`——ORM 模型的默认值需要它，
-#: 而 naming 模块反过来依赖模型（会循环导入）。
-DEFAULT_VIDEO_EXTS = "mkv,mp4,avi,mov,wmv,flv,m4v,ts,m2ts,rmvb,rm,webm,iso"
 
 
 class Base(DeclarativeBase):
@@ -559,10 +558,12 @@ class Driver(Base):
     video_exts: Mapped[str] = mapped_column(
         Text, nullable=False, default=DEFAULT_VIDEO_EXTS
     )
-    #: 媒体图片后缀（逗号分隔）——当前**忽略**（不生成 strm）
-    image_exts: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    #: 媒体数据后缀（逗号分隔）——当前**忽略**（不生成 strm）
-    data_exts: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    #: 媒体图片后缀（逗号分隔）——**附件同步**（海报/剧照下载到本地，
+    #: 与 strm 同目录）；清空 = 不同步图片
+    image_exts: Mapped[str] = mapped_column(Text, nullable=False, default=DEFAULT_IMAGE_EXTS)
+    #: 媒体数据后缀（逗号分隔）——**附件同步**（nfo / 字幕下载到本地）；
+    #: 清空 = 不同步元数据
+    data_exts: Mapped[str] = mapped_column(Text, nullable=False, default=DEFAULT_DATA_EXTS)
     #: 最小视频体积（MB）——小于此值的文件跳过（过滤样片）；0 = 不过滤
     min_size_mb: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     #: 是否包含子目录（cid 指向媒体库根时，是否递归其下所有子目录）
