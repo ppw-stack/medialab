@@ -795,6 +795,11 @@ export interface Driver {
   media_cid: string | null
   /** 媒体库路径（只读展示） */
   media_path: string | null
+  /**
+   * 媒体库目录 id 的**展示名**（115 叫 cid、光鸭叫 fileId）。
+   * 后端按驱动类型给出——前端不写 `if type === "guangya"`。
+   */
+  media_cid_label: string
   /** 本地媒体库目录 */
   output_dir: string | null
   /** 视频后缀（逗号分隔） */

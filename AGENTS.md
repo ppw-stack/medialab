@@ -317,6 +317,18 @@
   - `probe_results` 表有 **30 天保留期**，清理挂在 `drain_task_queue`（与 `job_runs` 同款语义，勿单开作业）
   - 契约由 `tests/integration/test_driver_probe_cache.py`（17 例）+ `web/tests/drivers-probe.spec.ts` 固化
 
+- **媒体库目录用目录浏览器选，不手填 id**（2026-11-11 加入，`app/services/driver_service.py:browse_driver_dirs`）：
+  - **起因**：光鸭的 fileId 是 19 位数字（115 的 cid 同理），让用户照着网盘网页手抄——抄错一位扫描就扫不到东西，且无从核对。生产上就出现过「光鸭盘扫描按钮点不动」——**按钮禁用条件是 `!media_cid || !output_dir`，与驱动类型无关**，用户只看到一个灰按钮，不知道缺什么
+  - **禁用原因必须写出来**：扫描按钮禁用时给 tooltip，**点名缺哪一项**（`scanDisabledTip`）。tooltip 内层包 `<span>`——antd 的 disabled 按钮**不派发鼠标事件**，tooltip 直接包按钮完全不触发
+  - **后端新增 `GET /api/drivers/{id}/browse-dirs?parent_id=`**：列出某目录下的**子目录**（逐层懒加载），响应 `{"driver_id","parent_id","dirs":[{id,name}]}`，形状与 `GET /api/upload-tasks/targets` 一致
+    - **不能复用 `/upload-tasks/targets`**——它有 `is_uploadable` 校验，而 `UPLOADABLE_DRIVER_TYPES = {"guangya"}`，**115 会被 400 挡掉**。浏览是 CloudDriver 的**读能力**，不是上传能力
+    - `list_dir_by_cid` **不在 `CloudDriver` 协议里**（115 / 光鸭都有，协议只要求 `list_dir`），故用 `getattr` 取——与 `migration.py` 同一做法
+  - **浏览起点只能是账号根**（此时 `media_cid` 还没配，没有更深的入口）：根 id 按类型解析 —— **光鸭 `""` / 115 `"0"`**，收敛在 `app/domain/driver_types.py:ROOT_DIR_IDS`（domain 层单一真源）。115 的根会列出「手机相册 / 资料 / 密钥」等私人目录，故前端用 alert 明说
+  - **`media_cid` 的叫法也是单一真源**：`app/domain/driver_types.py:MEDIA_CID_LABELS`（115 叫 cid、光鸭叫 fileId）+ `DriverOut.media_cid_label` 随接口下发——**前端不写 `if type === "guangya"`**，后端报错文案也用它
+  - **前端复用现成的 `DirBrowser`**（`web/src/components/DirBrowser.vue`，面包屑 + 逐层懒加载，状态由父组件持有）——与「数据同步 / 迁移 / 离线下载」三处同一交互模式，**项目不用 `a-tree`**
+  - **语义：进入子目录即选中它**（正在看哪个目录 = 要用哪个目录），面包屑回退即改选；回到根 = 取消选择
+  - 契约由 `tests/unit/test_driver_types.py` + `tests/integration/test_driver_browse.py`（11 例）+ `web/tests/drivers-media-pick.spec.ts` 固化
+
 - **事件循环里绝不出现同步 CIFS IO**（2026-11-06 prod 事故，规则）
   - 挂载是 `hard` 模式 → IO 卡死时**无限等待**；一次同步 `stat` 就能把整个事件循环卡住 → uvicorn 无法处理请求 → `/healthz` 被 RST → 容器 unhealthy、**面板实际不可用**（实测假死 20 分钟，挂载恢复才自愈）
   - **规则**：任何对「监听根 / 源根目录 / 挂载点」的 `stat` / `is_dir` / `resolve` / `scandir` 都必须 `asyncio.to_thread`（`_check_stable_once` 的 `FileStamp.of`、`start_watcher` 的 `resolve_watch_dir` 已改）

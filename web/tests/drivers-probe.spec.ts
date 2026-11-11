@@ -54,6 +54,7 @@ function driver(id: number, name: string, connValue: unknown) {
     credential_masked: '****',
     media_cid: null,
     media_path: null,
+    media_cid_label: '115 媒体库 cid',
     output_dir: null,
     video_exts: 'mkv',
     image_exts: '',

@@ -32,6 +32,7 @@ from app.core.config import AppSettings, get_settings
 from app.core.logging import get_logger
 from app.core.timeutils import bj_now, format_bj
 from app.db.models import Driver, MediaFile
+from app.domain.driver_types import media_cid_label
 from app.services import attachments
 from app.services.driver_factory import build_driver
 from app.services.naming import (
@@ -456,7 +457,7 @@ async def scan_driver(
         )
     if not driver.media_cid:
         raise MediaServiceError(
-            "未配置 115 媒体库 cid，无法扫描",
+            f"未配置{media_cid_label(driver.type)}，无法扫描",
             status_code=400,
             kind="config",
         )

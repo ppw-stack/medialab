@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.auth import require_session
 from app.domain.device_types import DeviceTypeLiteral
+from app.domain.driver_types import media_cid_label
 from app.services import driver_auth
 from app.services.driver_auth import DriverAuthError
 from app.services.driver_service import (
@@ -22,6 +23,7 @@ from app.services.driver_service import (
     DriverRow,
     DriverServiceError,
     add_driver,
+    browse_driver_dirs,
     cached_probe,
     diagnose_driver_direct_link,
     list_device_types,
@@ -123,6 +125,9 @@ class DriverOut(BaseModel):
     # -- 媒体库配置 --
     media_cid: str | None = None
     media_path: str | None = None
+    #: 媒体库目录 id 的**展示名**（115 叫 cid、光鸭叫 fileId）。
+    #: 后端按驱动类型给出——前端**不写** ``if type == "guangya"``。
+    media_cid_label: str = ""
     output_dir: str | None = None
     video_exts: str = ""
     image_exts: str = ""
@@ -255,6 +260,7 @@ def _to_out(row: DriverRow, conn: CachedProbe | None = None) -> DriverOut:
         credential_masked=row.credential_masked,
         media_cid=row.media_cid,
         media_path=row.media_path,
+        media_cid_label=media_cid_label(row.type),
         output_dir=row.output_dir,
         video_exts=row.video_exts or "",
         image_exts=row.image_exts or "",
@@ -325,6 +331,28 @@ async def update_config_route(driver_id: int, payload: DriverConfigIn) -> Driver
     except DriverServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return _to_out(row)
+
+
+@router.get("/{driver_id}/browse-dirs")
+async def browse_driver_dirs_route(driver_id: int, parent_id: str = "") -> dict[str, object]:
+    """列出存储源某个目录下的**子目录**（媒体库配置页选目录用）。
+
+    ``parent_id`` **留空 = 账号根目录**（按驱动类型解析：光鸭的根是空串、
+    115 的根是 ``0``）——浏览起点只能是根，此时 ``media_cid`` 还没配。
+
+    返回 ``{"driver_id", "parent_id", "dirs": [{"id", "name"}]}``，形状与
+    ``GET /api/upload-tasks/targets`` 一致（前端同一个 ``DirBrowser`` 组件
+    复用两处）。
+    """
+    try:
+        dirs = await browse_driver_dirs(driver_id, parent_id)
+    except DriverServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return {
+        "driver_id": driver_id,
+        "parent_id": parent_id,
+        "dirs": [{"id": rid, "name": name} for rid, name in dirs],
+    }
 
 
 @router.post("/{driver_id}/incremental")
