@@ -361,6 +361,35 @@ async def test_backfill_discount_pct_is_idempotent(db: None) -> None:
         assert row.discount_pct == 100
 
 
+async def test_delete_offline_env_settings_is_idempotent(db: None) -> None:
+    """「离线下载」废弃后清掉 app_env_settings 里的三项残留行。
+
+    - 三个 offline_* 行被删净（含那个死密钥）
+    - 其它配置行**不动**
+    - 再跑一次仍安全（行不存在 = 删 0 行）
+    """
+    from app.db.migrations import delete_offline_env_settings
+    from app.db.models import AppEnvSetting
+
+    async with session_scope() as session:
+        session.add(AppEnvSetting(key="offline_hmac_secret", value="dead-secret"))
+        session.add(AppEnvSetting(key="offline_public_base", value="http://old"))
+        session.add(AppEnvSetting(key="offline_files_root", value="/mnt/old"))
+        session.add(AppEnvSetting(key="cross_seed_scan_dirs", value="/keep/me"))
+        await session.flush()
+
+    await delete_offline_env_settings()
+    await delete_offline_env_settings()
+
+    async with session_scope() as session:
+        rows = (await session.execute(select(AppEnvSetting))).scalars().all()
+        keys = {r.key for r in rows}
+    assert "offline_hmac_secret" not in keys
+    assert "offline_public_base" not in keys
+    assert "offline_files_root" not in keys
+    assert "cross_seed_scan_dirs" in keys
+
+
 # ------------------------------------------------------------------ 模块拆分
 
 async def test_session_module_has_no_migration_logic(db: None) -> None:

@@ -58,18 +58,14 @@ class EnvSettingsUpdateIn(BaseModel):
     静默丢弃（前端显示「已保存」，实际没存进去）。下面的
     ``_assert_model_covers_specs()`` 在导入时校验两者一致，新增
     ENV_SETTING_SPECS 条目而忘了加字段会立刻报错。
-
-    **隐藏项**（``spec.hidden=True``，如离线下载的三项）不在此模型里
-    ——它们有各自的专用端点（能带目录浏览器、密钥不当明文展示），
-    放进通用 textarea 列表反而不好用。导入时校验只覆盖非隐藏项。
     """
 
     cross_seed_scan_dirs: str | None = None
 
 
 def _assert_model_covers_specs() -> None:
-    """校验更新模型覆盖了全部**非隐藏**的已注册配置（导入时执行）。"""
-    spec_keys = {s.key for s in ENV_SETTING_SPECS if not s.hidden}
+    """校验更新模型覆盖了全部已注册配置（导入时执行）。"""
+    spec_keys = {s.key for s in ENV_SETTING_SPECS}
     model_keys = set(EnvSettingsUpdateIn.model_fields)
     missing = spec_keys - model_keys
     if missing:
@@ -84,16 +80,12 @@ _assert_model_covers_specs()
 
 @router.get("/env-settings", summary="查询环境变量配置")
 async def get_env_settings_view() -> EnvSettingsOut:
-    """返回当前所有**可见**环境变量配置 + 元数据（label/note/placeholder）。
-
-    隐藏项（``spec.hidden``）不在此列表——它们有自己的专用 UI。
-    """
+    """返回当前所有环境变量配置 + 元数据（label/note/placeholder）。"""
     mgr = get_env_settings()
     return EnvSettingsOut(
         items=[
             _spec_to_dict(spec, mgr.get(spec.key))
             for spec in ENV_SETTING_SPECS
-            if not spec.hidden
         ],
     )
 

@@ -37,6 +37,7 @@ __all__ = [
     "ADAPTER_VALUE_MIGRATIONS",
     "backfill_discount_pct",
     "backfill_upload_concurrency",
+    "delete_offline_env_settings",
     "migrate_adapter_values",
 ]
 
@@ -214,4 +215,51 @@ async def backfill_discount_pct() -> None:
             )
         await session.commit()
         logger.info("discount_pct 历史回填：%d 行", len(updates))
+
+
+# ---------------------------------------------------------------- 废弃配置清理
+
+#: 「离线下载」功能废弃后需要从 ``app_env_settings`` 删掉的行。
+#:
+#: 该功能（本地文件 → 光鸭，走光鸭服务端拉取）已整体移除，其三项配置
+#: 的 :data:`app.services.env_settings.ENV_SETTING_SPECS` 注册与
+#: :class:`app.core.config.AppSettings` 字段一并删除 → 残留行**永远不会被
+#: 读到**（加载只按已注册 spec 走），留着只是垃圾数据。
+#:
+#: 顺带清掉一个**死密钥**（``offline_hmac_secret``）——它曾是本地文件服务
+#: 的 HMAC 密钥，功能没了就不该继续躺在 DB 里。
+_OFFLINE_ENV_KEYS: tuple[str, ...] = (
+    "offline_hmac_secret",
+    "offline_public_base",
+    "offline_files_root",
+)
+
+
+async def delete_offline_env_settings() -> None:
+    """删掉「离线下载」遗留的三项环境变量配置行（幂等）。
+
+    **天然幂等**——行不存在时删 0 行，无需 ``PRAGMA user_version`` 一次性
+    标记（那个机制只给「不幂等的回填」用，如
+    :func:`backfill_upload_concurrency`）。每次启动跑一遍：首次删掉存量
+    行，之后恒为 0 行、静默通过。
+    """
+    from sqlalchemy import delete
+
+    from app.db.models import AppEnvSetting
+
+    factory = get_session_factory()
+    async with factory() as session:
+        result = cast(
+            CursorResult[object],
+            await session.execute(
+                delete(AppEnvSetting).where(AppEnvSetting.key.in_(_OFFLINE_ENV_KEYS))
+            ),
+        )
+        await session.commit()
+        if result.rowcount:
+            logger.info(
+                "清理「离线下载」废弃配置：%d 行（%s）",
+                result.rowcount,
+                "、".join(_OFFLINE_ENV_KEYS),
+            )
 

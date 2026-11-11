@@ -17,7 +17,6 @@ import {
   UploadOutlined,
   DatabaseFilled,
   MenuOutlined,
-  CloudDownloadOutlined,
 } from '@ant-design/icons-vue'
 import { useAuthStore } from '../stores/auth'
 import { useResponsive } from '../composables/useResponsive'
@@ -71,7 +70,6 @@ const menuGroups = [
       { key: '/drivers', icon: DatabaseFilled, label: '存储源', sub: '网盘账号', iconColor: 'violet' },
       { key: '/library', icon: FolderOpenOutlined, label: '媒体库', sub: 'STRM 条目', iconColor: 'blue' },
       { key: '/migrations', icon: SwapOutlined, label: '迁移', sub: '115 → 光鸭', iconColor: 'amber' },
-      { key: '/offline', icon: CloudDownloadOutlined, label: '离线下载', sub: '本地 → 光鸭', iconColor: 'gold' },
       { key: '/uploads', icon: UploadOutlined, label: '数据同步', sub: '本地 → 网盘', iconColor: 'green' },
       { key: '/health', icon: HeartOutlined, label: '健康监控', sub: '断链检查', iconColor: 'red' },
       { key: '/dav-users', icon: CloudUploadOutlined, label: 'WebDAV', sub: '账号与审计', iconColor: 'cyan' },

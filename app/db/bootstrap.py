@@ -204,6 +204,7 @@ class DbBootstrap:
         from app.db.migrations import (
             backfill_discount_pct,
             backfill_upload_concurrency,
+            delete_offline_env_settings,
             migrate_adapter_values,
         )
         from app.db.models import Base
@@ -224,6 +225,7 @@ class DbBootstrap:
         await backfill_discount_pct()
         await backfill_upload_concurrency()
         await migrate_adapter_values()
+        await delete_offline_env_settings()
         # 媒体库域的幂等迁移（补列 / 删废弃列 / 删废弃表）
         await self._run_media_migrations()
 
