@@ -55,6 +55,8 @@ services:
       # **读写挂载**：开了任务的「同步成功后删除本地文件」就需要容器能删
       # 本地文件。只读挂载（:ro）时删除会失败（会记日志，不影响上传）。
       - ${WATCH_DIR:-/dev/null}:${WATCH_DIR:-/dev/null}:rw
+      # 整理刮削的测试源目录（宿主机 /Users/pw/临时/测试 → 容器内同名）
+      - /Users/pw/临时/测试:/app/test-media:rw
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
       interval: 30s

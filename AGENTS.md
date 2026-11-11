@@ -386,6 +386,37 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
   - 契约由 `web/tests/responsive.spec.ts` 固化（13 页 × 无横向溢出 /
     侧栏隐藏 + 抽屉可开 / 桌面端不溢出 / 每页都有统一标题）
 
+- **整理 + 刮削（2026-11-11 迁移自 MoviePilot）**：
+  - **输入是「源目录」不是「下载器任务」**——整理与下载器**彻底解耦**：
+    文件从哪来无所谓（BT 下载 / 手动拷贝 / 其它工具），放进源目录就会被
+    扫到。配置 `organize_source_dirs`（逗号分隔多目录），判重键
+    `organize_history.source_path`（UNIQUE）。**不要**改回「轮询下载器 +
+    tag 过滤」——那把媒体库域和辅种域纠缠在一起，还依赖下载器文件系统可达
+  - **产物目录名用 TMDB 权威标题与年份**（电影与剧集**必须一致**）：
+    文件名解析出的标题常是英文原名（`Fight Club`），TMDB 的中文名才是媒体
+    服务器界面里显示的那个（`搏击俱乐部`）。曾因电影路径漏改而把英文名
+    直接写进媒体库目录
+  - **方括号里的中文译名不能当噪声剥掉**（`[把黑夜点燃]`）：它是 TMDB 上
+    的正式名，搜索它能**唯一命中**；只用英文名会搜到同名的**另一部剧**
+    （实测 `Light the Dark` → 命中《黑夜告白》而非《把黑夜点燃》）。故
+    `meta_parser` 提取为 `alt_titles` 候选（**纯 ASCII 的方括号是发布组标记，
+    忽略**），TMDB 客户端 `search_any` **任一候选 exact 命中即采用**
+  - **识别优先级：别名表 > 缓存 > 搜索**。别名（`scrape_alias`）是用户固化
+    的「标题 → TMDB ID」映射，命中时**跳过搜索**；别名键按归一化标题去重，
+    **key 必须是文件名解析出的标题**（不是 TMDB 返回的名字）——「记住此
+    修正」自动写入时连**媒体类型**一起记，否则命中时会按 movie 取 TV 详情
+  - **季目录判定用 `season_number_from_dir()`**，不能用 `parse_meta()`：
+    `Season 01` 是纯季标记无标题，`parse_meta` 返回 None → 整剧产物
+    （`tvshow.nfo` + 海报）会落进**季目录**而不是剧集根
+  - **冲突绝不覆盖**：目标已存在且大小不同 → 记 failed 点名（不误删底线）；
+    大小一致 → skip（幂等）。move 模式**复制→校验→才删源**，且不动下载器任务
+  - 实测脚本 `scripts/selftest_scrape.py`（造假文件跑电影 / 多季 / 字幕 /
+    move / 边界五条路径，自清理）：`docker exec -i medialab-dev
+    /opt/venv/bin/python - < scripts/selftest_scrape.py`
+  - 契约由 `tests/unit/test_meta_parser.py`、`tests/unit/test_tmdb.py`、
+    `tests/integration/test_scrape_service.py`、`test_scrape_api.py`、
+    `test_scrape_alias.py`、`test_organize_service.py` 固化
+
 
 ## 后端测试
 ```bash

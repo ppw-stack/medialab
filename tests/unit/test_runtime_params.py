@@ -85,6 +85,13 @@ def test_enum_specs_are_the_zero_one_ones() -> None:
         "monitor_delete_expired",
         "push_within_bucket_order",
         "disk_rotation_action",
+        "scrape_enabled",
+        "scrape_policy",
+        "organize_enabled",
+        "organize_action",
+        "organize_conflict_policy",
+        "scrape_season_image_to_root",
+        "scrape_original_image",
     }
 
 

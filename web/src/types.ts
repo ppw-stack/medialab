@@ -1407,3 +1407,65 @@ export interface DavRootConfig {
   driver_id: number | null
   drivers: DavRootDriver[]
 }
+
+/** 刮削配置（GET/PUT /api/scrape/config）。 */
+export interface ScrapeConfig {
+  scrape_enabled: number
+  scrape_policy: number
+  /** TMDB API Key 是否已配置（**永不回显明文**） */
+  has_key: boolean
+  media_library_dir: string
+  organize_enabled: number
+  organize_action: number
+  organize_source_dirs: string
+  /** 整理与刮削的开启条件是否齐备（前端据此显示「怎么开」） */
+  ready: boolean
+}
+
+/** 刮削配置更新请求（部分更新；key 留空 = 不修改）。 */
+export interface ScrapeConfigInput {
+  scrape_enabled?: number
+  scrape_policy?: number
+  tmdb_api_key?: string
+  media_library_dir?: string
+  organize_enabled?: number
+  organize_action?: number
+  organize_source_dirs?: string
+}
+
+/** 单条刮削记录（GET /api/scrape/records）。 */
+export interface ScrapeRecord {
+  scope_key: string
+  kind: string
+  status: string
+  media_type: string | null
+  tmdb_id: number | null
+  title: string | null
+  year: number | null
+  season: number | null
+  episode: number | null
+  nfo_path: string | null
+  error: string | null
+  scraped_at: string | null
+}
+
+/** 手动刮削结果（POST /api/scrape/file）。 */
+export interface ScrapeFileResult {
+  status: string
+  detail: string
+  /** 是否已记入识别别名表 */
+  remembered: boolean
+}
+
+/** 识别别名（标题 → TMDB ID 的固定映射）。 */
+export interface ScrapeAlias {
+  id: number
+  /** 原始标题（展示用） */
+  alias_text: string
+  /** 归一化标题（唯一键） */
+  alias_key: string
+  tmdb_id: number
+  media_type: string | null
+  note: string | null
+  updated_at: string
+}

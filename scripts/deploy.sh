@@ -43,7 +43,7 @@ shift || true
 ENV_FILE=".env"
 CONTAINER="medialab-dev"
 PORT=8092
-dev_compose() { echo "docker compose -f docker-compose.yml --env-file .env"; }
+dev_compose() { docker compose -f docker-compose.yml --env-file .env "$@"; }
 
 # -- 前置检查 --
 check_env() {

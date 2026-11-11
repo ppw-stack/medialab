@@ -53,6 +53,12 @@ DEFAULT_CRON: dict[str, str] = {
     # 分钟位 17 避开所有多 5 分钟的作业（fetch_all_sites */10、push/refresh */30、
     # monitor 5,15,…、drain */5）。
     "cross_seed_maintenance": "17 */3 * * *",
+    # 媒体刮削（每天一次足够——策略默认「仅补缺」，重跑不重复下载）：
+    # 分钟位 41 避开所有既有作业（*/10、*/30、5,15,…、*/5、37 8、17 */3）。
+    "scrape_metadata": "41 3 * * *",
+    # 下载整理（每小时——用户在等下载入库，不宜太久）：
+    # 分钟位 23 避开所有既有作业（*/10、*/30、5,15,…、*/5、37 8、17 */3、41 3）。
+    "organize_files": "23 * * * *",
 }
 
 
@@ -159,6 +165,23 @@ JOB_META: tuple[JobMeta, ...] = (
         make_func=lambda f: _job_fn(_run_cross_seed_maintenance),
         log_extra="（巡查 → 磁盘流转 → 孤儿扫描，三段顺序执行）",
     ),
+    JobMeta(
+        name="scrape_metadata",
+        title="媒体刮削",
+        description=(
+            "扫描本地媒体库目录，为未刮削的视频补齐 NFO 与图片（TMDB）"
+        ),
+        make_func=lambda f: _job_fn(_run_scrape_metadata),
+    ),
+    JobMeta(
+        name="organize_files",
+        title="下载整理",
+        description=(
+            "扫描整理源目录里的视频，识别后按标准结构 copy/move 到本地"
+            "媒体库，并触发刮削"
+        ),
+        make_func=lambda f: _job_fn(_run_organize),
+    ),
 )
 
 
@@ -232,6 +255,8 @@ def preflight_job_imports() -> None:
         "app.services.task_drain",      # _run_drain_task_queue
         "app.services.checkin",         # _run_daily_checkin
         "app.services.cross_seed_maintenance",  # _run_cross_seed_maintenance
+        "app.services.scrape_jobs",     # _run_scrape_metadata（整理刮削迁移）
+        "app.services.organize_service",  # _run_organize（整理刮削迁移）
     ):
         importlib.import_module(mod)
 
@@ -295,6 +320,20 @@ async def _run_cross_seed_maintenance() -> dict[str, object]:
     from app.services.cross_seed_maintenance import run_cross_seed_maintenance
 
     return await run_cross_seed_maintenance()
+
+
+async def _run_scrape_metadata() -> dict[str, object]:
+    """执行媒体刮削（本地媒体库 → NFO + 图片）。"""
+    from app.services.scrape_jobs import run_scrape_metadata
+
+    return await run_scrape_metadata()
+
+
+async def _run_organize() -> dict[str, object]:
+    """执行下载整理（源目录 → 本地媒体库标准结构）。"""
+    from app.services.organize_service import run_organize
+
+    return await run_organize()
 
 
 def _job_fn(

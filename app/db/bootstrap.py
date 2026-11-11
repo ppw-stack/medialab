@@ -209,6 +209,7 @@ class DbBootstrap:
         from app.db.models import Base
 
         engine = get_engine()
+        await self._rebuild_organize_history()
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
             # 轻量迁移：create_all 不给已有表加列，补 ALTER（幂等）
@@ -226,6 +227,31 @@ class DbBootstrap:
         await migrate_adapter_values()
         # 媒体库域的幂等迁移（补列 / 删废弃列 / 删废弃表）
         await self._run_media_migrations()
+
+    async def _rebuild_organize_history(self) -> None:
+        """旧结构的 ``organize_history``（绑定下载器）→ DROP 重建。
+
+        该表随「整理与刮削迁移」新增，**上线前就改了判重模型**
+        （下载器任务 → 源文件路径，见 :mod:`app.services.organize_service`）。
+        旧表里只可能有当天测试产生的空数据，直接重建最干净——SQLite 的
+        UNIQUE 约束没法用 ALTER 摘掉，重建是唯一改法。
+
+        只在检测到 ``downloader_id`` 列（旧结构标志）时才动表，幂等。
+        """
+        engine = get_engine()
+        async with engine.begin() as conn:
+            rows = (
+                await conn.execute(text("PRAGMA table_info(organize_history)"))
+            ).all()
+            if not rows:
+                return  # 表不存在 → create_all 会建新结构
+            columns = {row[1] for row in rows}
+            if "downloader_id" not in columns:
+                return  # 已是新结构
+            await conn.execute(text("DROP TABLE organize_history"))
+            logger.info(
+                "已重建旧结构的 organize_history（判重模型改为 source_path）"
+            )
 
     async def _run_media_migrations(self) -> None:
         """媒体库域的幂等迁移（来自 strmmanger）。
@@ -247,6 +273,7 @@ class DbBootstrap:
         """
         await self._migrate_driver_config()
         await self._migrate_upload_tasks()
+        await self._migrate_scrape_tables()
         await self._drop_obsolete_columns()
         await self._drop_obsolete_tables(("scan_rules", "dav_acl"))
 
@@ -294,6 +321,14 @@ class DbBootstrap:
         await self._drop_column("upload_tasks", "last_sync_at")
         await self._drop_column("upload_tasks", "last_uploaded_count")
         await self._drop_column("upload_tasks", "last_error")
+
+    async def _migrate_scrape_tables(self) -> None:
+        """给 ``media_scrape`` 表补列（幂等）。
+
+        新增 ``media_path``——被刮削的**媒体文件**路径。「一键修正」需要
+        从刮削记录回到原媒体文件（否则只能让用户手敲路径）。
+        """
+        await self._add_columns("media_scrape", (("media_path", "TEXT", None),))
 
     async def _drop_obsolete_columns(self) -> None:
         """删除已废弃的列（幂等）。

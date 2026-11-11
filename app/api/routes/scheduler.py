@@ -160,6 +160,13 @@ class RuntimeParamsUpdateIn(BaseModel):
     push_within_bucket_order: int | None = None
     disk_rotation_threshold_pct: int | None = None
     disk_rotation_action: int | None = None
+    scrape_enabled: int | None = None
+    scrape_policy: int | None = None
+    organize_enabled: int | None = None
+    organize_action: int | None = None
+    organize_conflict_policy: int | None = None
+    scrape_season_image_to_root: int | None = None
+    scrape_original_image: int | None = None
 
 
 def _assert_params_model_covers_specs() -> None:

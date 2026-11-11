@@ -59,8 +59,12 @@ __all__ = [
     "JobRun",
     "LinkCacheEntry",
     "MediaFile",
+    "MediaScrape",
+    "OrganizeHistory",
     "ProbeResult",
     "SchedulerJobSetting",
+    "ScrapeAlias",
+    "ScrapeCache",
     "Setting",
     "Site",
     "SiteUserData",
@@ -818,3 +822,185 @@ class ProbeResult(Base):
     probed_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     __table_args__ = (Index("idx_probe_results_driver", "driver_id"),)
+
+
+class MediaScrape(Base):
+    """刮削结果（当前快照，不做历史）。
+
+    **粒度是「刮削单元」而不是「文件」**：电影的单集 NFO、剧集的
+    ``tvshow.nfo``、季目录的 ``season.nfo`` 都不是按视频文件存的，而是按
+    **产物落点**存的。因此用 :attr:`scope_key` 一列表达唯一性：
+
+    ==========================  ==========================================
+    scope_key                   含义
+    ==========================  ==========================================
+    ``movie|<目录>``            电影（目录 = 视频所在目录）
+    ``tvshow|<剧集根目录>``      电视剧整剧
+    ``season|<季目录>|S1``       季
+    ``episode|<目录>|S1E2``     单集
+    ==========================  ==========================================
+
+    **为什么不用外键挂 media_files**：刮削对象是**本地媒体库目录**里的
+    产物，与网盘条目（``media_files``）没有从属关系——整理产物先落在本地，
+    再由数据同步传上网盘。两者的生命周期不同，强行挂 FK 会让「网盘条目
+    删了」误删本地刮削记录。
+
+    **失败必须点名**：:attr:`error` 记录失败原因，:attr:`status` 为
+    ``failed``——不写「空结果兜底」（那会把故障伪装成「没内容」）。
+    """
+
+    __tablename__ = "media_scrape"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: 刮削单元唯一键（见类文档的取值表）
+    scope_key: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 刮削层级：movie / tvshow / season / episode
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    #: 结果状态：scraped / failed / skipped
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    #: 媒体类型：movie / tv
+    media_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    #: TMDB 媒体 ID
+    tmdb_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: 标题（TMDB 原标题）
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 年份
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: 季号（季 / 单集层级有）
+    season: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: 集号（单集层级有）
+    episode: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: NFO 落盘路径（绝对路径）
+    nfo_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 被刮削的**媒体文件**路径（绝对路径）——「一键修正」靠它定位原文件
+    media_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 已写出的图片清单（JSON 数组：``[{type, path}]``）
+    images: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
+    #: 失败原因（status = failed 时有值）
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 刮削时刻（北京时间字符串）
+    scraped_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
+    updated_at: Mapped[str] = mapped_column(
+        String(32), default=_bj_now, onupdate=_bj_now
+    )
+
+    __table_args__ = (
+        UniqueConstraint("scope_key", name="uq_media_scrape_scope"),
+        Index("idx_media_scrape_status", "status"),
+    )
+
+
+class ScrapeCache(Base):
+    """识别缓存（标题 + 年份 → TMDB 命中结果）。
+
+    **为什么落库而不是进程内缓存**：整理作业与刮削作业是**分开跑的**，
+    进程内缓存在两次作业之间就失效了；同一个种子被整理后紧接着刮削，
+    会重复打 TMDB 搜索。
+
+    ``expires_at`` 是**协议侧时刻**（unix 秒 Integer），与
+    :class:`LinkCacheEntry` 同口径——它与 ``time.time()`` 直接比较。
+    """
+
+    __tablename__ = "scrape_cache"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: 缓存键：``<媒体类型>|<标题>|<年份>``
+    cache_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    #: 命中结果（JSON：``{tmdb_id, media_type, title, year, ...}``）
+    payload: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    #: 过期时刻（unix 秒）
+    expires_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: 创建时间（北京时间字符串）
+    created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
+
+    __table_args__ = (
+        UniqueConstraint("cache_key", name="uq_scrape_cache_key"),
+        Index("idx_scrape_cache_expires", "expires_at"),
+    )
+
+
+class ScrapeAlias(Base):
+    """识别别名（标题 → TMDB ID 的固定映射）。
+
+    **为什么需要**：TMDB 的条目名与资源站给的英文名不一定一致，且中文
+    译名有时很机械（《被放逐的作弊赋予魔术师享受随心所欲的第二人生。》）。
+    识别只能靠 popularity 猜——猜错时唯一手段是「每次手动填 tmdb_id 重刮」，
+    治标不治本。别名表把修正**固化**下来：同一个标题下次直接命中。
+
+    ``alias_key`` 是**归一化**后的标题（去空白与标点、小写）——「Fight
+    Club」与「fight club」视为同一条，避免重复条目。
+    """
+
+    __tablename__ = "scrape_alias"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: 归一化标题（唯一键）
+    alias_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    #: 原始标题（展示用——归一化后可能不好读）
+    alias_text: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 目标 TMDB ID
+    tmdb_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: 媒体类型：movie / tv（NULL = 不限）
+    media_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    #: 备注（为什么改）
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
+    updated_at: Mapped[str] = mapped_column(
+        String(32), default=_bj_now, onupdate=_bj_now
+    )
+
+    __table_args__ = (
+        UniqueConstraint("alias_key", name="uq_scrape_alias_key"),
+    )
+
+
+class OrganizeHistory(Base):
+    """整理历史（每个源文件一条，用于判重与审计）。
+
+    **输入是「源目录」不是「下载器任务」**——整理与下载器解耦：文件从哪来
+    无所谓（BT 下载、手动拷贝、其它工具），把视频放进源目录就会被扫到。
+
+    **判重键是 ``source_path``**：同一个源文件只整理一次。重跑作业时靠这个
+    键跳过——比「目标文件是否存在」可靠（目标可能被用户手动删掉，但历史
+    仍在，此时应当**重新整理**而不是静默跳过）。
+
+    ``status`` 为 ``failed`` 时 :attr:`error` 记录原因，**失败必须点名**。
+    """
+
+    __tablename__ = "organize_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: 源文件绝对路径（判重键）
+    source_path: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 目标文件路径（本地媒体库内）
+    target_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 整理动作：copy / move
+    action: Mapped[str] = mapped_column(String(16), nullable=False, default="copy")
+    #: 结果状态：success / failed / skipped
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    #: 媒体类型：movie / tv
+    media_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    #: TMDB 媒体 ID
+    tmdb_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: 标题
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 年份
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: 季号
+    season: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: 集号
+    episode: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: 失败原因
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 整理时刻（北京时间字符串）
+    organized_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
+    updated_at: Mapped[str] = mapped_column(
+        String(32), default=_bj_now, onupdate=_bj_now
+    )
+
+    __table_args__ = (
+        UniqueConstraint("source_path", name="uq_organize_history_source"),
+        Index("idx_organize_history_status", "status"),
+    )

@@ -123,6 +123,88 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         options=((0, "仅删任务"), (1, "删任务+删数据")),
         note="删磁盘数据不可恢复，删除前会记审计日志",
     ),
+    ParamSpec(
+        key="scrape_enabled",
+        label="启用刮削",
+        default=0,
+        min=0,
+        max=1,
+        job="scrape_metadata",
+        options=((0, "关闭"), (1, "开启")),
+        note="还需在「整理与刮削」配置里填 TMDB API Key，否则识别无从谈起",
+    ),
+    ParamSpec(
+        key="scrape_policy",
+        label="产物已存在时",
+        default=0,
+        min=0,
+        max=1,
+        job="scrape_metadata",
+        options=((0, "仅补缺"), (1, "覆盖")),
+        note="仅补缺 = 目标已存在就跳过；覆盖 = 每次重写（手刮默认走覆盖）",
+    ),
+    ParamSpec(
+        key="organize_enabled",
+        label="启用整理",
+        default=0,
+        min=0,
+        max=1,
+        job="organize_torrents",
+        options=((0, "关闭"), (1, "开启")),
+        note=(
+            "还需在「整理与刮削」配置里填本地媒体库目录与下载器清单；"
+            "建议用 tag 过滤圈定参与整理的种子，避免误动辅种库"
+        ),
+    ),
+    ParamSpec(
+        key="organize_action",
+        label="整理动作",
+        default=0,
+        min=0,
+        max=1,
+        job="organize_torrents",
+        options=((0, "复制（源文件保留）"), (1, "移动（删源文件）")),
+        note=(
+            "移动会删掉下载器目录里的源文件——做种中的任务会变成 missingFiles；"
+            "只对非辅种下载器使用移动"
+        ),
+    ),
+    ParamSpec(
+        key="organize_conflict_policy",
+        label="同名不同内容时",
+        default=0,
+        min=0,
+        max=1,
+        job="organize_torrents",
+        options=((0, "记冲突失败"), (1, "自动序号消歧")),
+        note=(
+            "同一目录出现同名但大小不同的文件（如导演剪辑版）时："
+            "「记冲突失败」不产出；「自动消歧」改名为「标题 (年份) - 2」入库"
+        ),
+    ),
+    ParamSpec(
+        key="scrape_season_image_to_root",
+        label="季图写剧集根",
+        default=1,
+        min=0,
+        max=1,
+        job="scrape_metadata",
+        options=((0, "关闭"), (1, "开启")),
+        note=(
+            "开启后季图片额外写一份到剧集根目录（season01-poster.jpg）——"
+            "部分媒体服务器在剧集根找季海报"
+        ),
+    ),
+    ParamSpec(
+        key="scrape_original_image",
+        label="使用原语言图片",
+        default=0,
+        min=0,
+        max=1,
+        job="scrape_metadata",
+        options=((0, "使用当前语言"), (1, "使用原语言")),
+        note="中文海报常缺图或画质差——开启后改用原语言（英文/日文等）的图片",
+    ),
 )
 
 

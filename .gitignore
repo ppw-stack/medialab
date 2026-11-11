@@ -62,3 +62,6 @@ qbt-data/
 .claude/settings.local.json
 
 .playwright-mcp/
+
+# 整理刮削的本地测试产物（library-dev 是 media library 的宿主目录）
+library-dev/

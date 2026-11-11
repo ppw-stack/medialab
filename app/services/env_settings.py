@@ -126,6 +126,45 @@ ENV_SETTING_SPECS: tuple[EnvSettingSpec, ...] = (
         max_length=1024,
         hidden=True,
     ),
+    # -- 整理与刮削 --
+    EnvSettingSpec(
+        key="tmdb_api_key",
+        label="TMDB API Key",
+        note=(
+            "刮削用的 TMDB 官方 API Key（v3 的 api_key 形式）。"
+            "**留空 = 不启用刮削**（识别与图片都无从谈起）。"
+            "密钥不会回显——保存时留空表示不修改。"
+        ),
+        placeholder="TMDB → Settings → API → API Key",
+        max_length=128,
+        hidden=True,
+    ),
+    EnvSettingSpec(
+        key="media_library_dir",
+        label="本地媒体库目录",
+        note=(
+            "整理产物的落点（容器内绝对路径）。整理把下载完成的文件"
+            "按标准结构复制到这里，再由「数据同步」上传网盘、扫描生成 STRM。"
+            "留空 = 不启用整理。"
+        ),
+        placeholder="/media/library",
+        max_length=1024,
+        hidden=True,
+    ),
+    EnvSettingSpec(
+        key="organize_source_dirs",
+        label="整理源目录",
+        note=(
+            "要整理的视频来源目录（容器内绝对路径，**逗号分隔多个**）。"
+            "文件从哪来无所谓（BT 下载、手动拷贝都行）——放进源目录就会被"
+            "扫描、识别、按标准结构整理到媒体库。"
+            "建议与辅种下载目录**物理分开**：移动动作会删源文件，"
+            "混用会弄死做种。"
+        ),
+        placeholder="/downloads/media,/data/incoming",
+        max_length=4096,
+        hidden=True,
+    ),
 )
 
 

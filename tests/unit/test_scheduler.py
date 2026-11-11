@@ -143,6 +143,8 @@ def test_default_cron_covers_all_registered_jobs() -> None:
         "drain_task_queue",
         "daily_checkin",
         "cross_seed_maintenance",
+        "scrape_metadata",
+        "organize_files",
     }
 
 
