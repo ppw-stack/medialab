@@ -37,8 +37,18 @@ cookie 鉴权，简体中文界面（账号语言设定）。
   自身 uid 从 navbar ``invite.php?id=N`` 提取。签名**不可合成**（必须从
   页面解析，不伪造——见 AGENTS.md 合规边界）。
 
-- **签到**：``/attendance.php`` 返回 404（实测 2026-11-07）→ 该站无签到，
-  不 override ``checkin``（基类默认 UNSUPPORTED）。
+- **签到**：**不是** NexusPHP 标准的 ``/attendance.php``（实测 2026-11-07 返回
+  404），而是 X2015 主题自带的插件端点 ``plugin_sign-in.php``
+  （协议来自站点自己的 ``/plugin/js/base.js`` 的 ``do_signin()``，
+  2026-11-11 生产 cookie 实测）：
+
+  1. ``GET /usercp.php`` —— 取 ``<meta name="x-csrf">`` 的 csrf + 看 navbar
+     是「签 到」还是「已签到」（**两个特征都不在 = 站点改版**，不能盲签）
+  2. ``POST /plugin_sign-in.php?cmd=signin {csrf}`` —— 执行签到。
+     **不需要图形验证码**（站点另有一个带验证码的表单页，AJAX 路径不用它）
+
+  响应：``{"state":"success","signindays":N,"integral":"10"}`` /
+  ``{"state":false}``（今日已签，**无 msg**）/ ``{"state":false,"msg":...}``。
 
 - **用户数据**：``/mybonus.php`` navbar（纯文本 ``上传量：X GB``，无
   ``color_uploaded`` font class、无「当前活动」）→ 共享
@@ -58,6 +68,8 @@ from bs4 import BeautifulSoup
 
 from app.adapters.sites.base import (
     BreakerTripped,
+    CheckinResult,
+    CheckinStatus,
     FeedItem,
     SiteAdapter,
     SiteFetchError,
@@ -68,7 +80,7 @@ from app.adapters.sites.base import (
     parse_abs_datetime,
     parse_size_text,
 )
-from app.adapters.sites.parsers import nexus_php
+from app.adapters.sites.parsers import attendance, nexus_php
 from app.adapters.sites.user_data import SiteUserSnapshot
 from app.core.logging import get_logger
 
@@ -130,8 +142,29 @@ _DETAIL_SIZE_RE = re.compile(r"大小[：:]\s*([\d,.]+\s*(?:TB|GB|MB|KB))")
 #: 详情页「种子不存在」标记（实测文案：``错误 没有该ID的种子``）
 _DELETED_MARKER = "没有该ID的种子"
 
+#: 页面 ``<title>``（判登录页用）
+_TITLE_RE = re.compile(r"<title>(.*?)</title>", re.DOTALL | re.IGNORECASE)
+
 #: 每次优惠查询的最大批量（一页 100 条，一次 POST 足够）
 _PROMO_BATCH = 100
+
+
+def _is_login_page(url: str, html: str) -> bool:
+    """是不是登录页（未登录 / cookie 失效）。
+
+    判据有二（任一命中即可）：
+
+    1. 最终 URL 落到 ``login.php``（跟随重定向后）
+    2. ``<title>`` 里含「登录」（实测登录页标题是 ``HDWinG :: 登录``）
+
+    只看 URL 不够——某些路径未登录时**不重定向**，直接回登录页 HTML。
+    """
+    if "login.php" in url.lower():
+        return True
+    m = _TITLE_RE.search(html)
+    if m is None:
+        return False
+    return "登录" in m.group(1)
 
 
 def _parse_cookies(raw: str | None) -> dict[str, str]:
@@ -577,6 +610,120 @@ class HdwingAdapter(SiteAdapter):
             seeding_count=snap.seeding_count,
             hourly_bonus=bonus,
         )
+
+    # ----------------------- FR-3.6 站点每日签到 -----------------------
+
+    async def checkin(self) -> CheckinResult:
+        """hdwing 走 X2015 主题自带的 ``plugin_sign-in.php``。
+
+        **不是** NexusPHP 标准的 ``/attendance.php``（本站 404）。
+
+        流程（协议来自站点自己的 ``/plugin/js/base.js`` 的 ``do_signin()``，
+        2026-11-11 生产 cookie 实测）：
+
+        1. ``GET /usercp.php`` —— 取 ``<meta name="x-csrf">`` 的 csrf
+           + 看 navbar 是「签 到」还是「已签到」
+        2. ``POST /plugin_sign-in.php?cmd=signin {csrf}`` —— 执行签到，
+           **不需要图形验证码**
+
+        「今日已签」时**不发 POST**（省一次请求，也不打扰站点）——
+        navbar 上的状态是权威判据。响应 ``{"state":false}`` 既是「已签」
+        也是「失败无原因」，故失败时再查一次状态定性（宁可多一次请求，
+        也不把幂等的「已签」误报成失败，或把真失败静默吞掉）。
+        """
+        if not self._cookies:
+            return CheckinResult(CheckinStatus.AUTH_EXPIRED, "缺少 cookies")
+
+        html = await self._fetch_signin_page()
+        if html is None:
+            return CheckinResult(
+                CheckinStatus.AUTH_EXPIRED, "cookie 已失效，需重新登录"
+            )
+
+        csrf_m = _CSRF_RE.search(html)
+        if csrf_m is None:
+            return CheckinResult(
+                CheckinStatus.FAILED, "页面缺少 x-csrf（站点改版？）"
+            )
+
+        state = attendance.parse_signin_state(html)
+        if state is True:
+            return CheckinResult(CheckinStatus.ALREADY, "今日已签到")
+        if state is None:
+            # 两个特征都不在 → 页面结构变了。**不能**当成「未签到」盲签
+            return CheckinResult(
+                CheckinStatus.FAILED, "无法识别签到状态（站点改版？）"
+            )
+
+        result = await self._submit_signin(csrf_m.group(1))
+        if result.message != attendance.UNREASONED_FAILURE:
+            return result
+
+        # 「失败但站点没给原因」—— 极可能是今日已签到，再查一次状态定性
+        confirm = await self._fetch_signin_page()
+        if confirm is None:
+            return CheckinResult(
+                CheckinStatus.AUTH_EXPIRED, "cookie 已失效，需重新登录"
+            )
+        if attendance.parse_signin_state(confirm) is True:
+            return CheckinResult(CheckinStatus.ALREADY, "今日已签到")
+        return result
+
+    async def _fetch_signin_page(self) -> str | None:
+        """GET ``/usercp.php``（取 csrf + 签到状态）。
+
+        :returns: 页面 HTML；``None`` = cookie 失效（被重定向到登录页）。
+        网络 / HTTP 故障抛 :class:`SiteFetchError` / :class:`BreakerTripped`
+        ——与拉取路径同一契约，不吞异常。
+        """
+        url = f"{self._base_url()}/usercp.php"
+        try:
+            resp = await self._client.get(url, timeout=self._timeout)
+        except httpx.HTTPError as exc:
+            raise SiteFetchError(f"hdwing 签到页拉取失败：{exc}") from exc
+        if resp.status_code in (403, 429):
+            raise BreakerTripped(f"hdwing 签到返回 {resp.status_code}，需熔断")
+        if resp.status_code >= 400:
+            raise SiteFetchError(f"hdwing 签到页返回 HTTP {resp.status_code}")
+        if _is_login_page(str(resp.url), resp.text):
+            return None
+        return resp.text
+
+    async def _submit_signin(self, csrf: str) -> CheckinResult:
+        """POST ``plugin_sign-in.php?cmd=signin`` 执行签到。"""
+        base = self._base_url()
+        try:
+            resp = await self._client.post(
+                f"{base}/plugin_sign-in.php?cmd=signin",
+                data={"csrf": csrf},
+                headers={
+                    "Content-Type": (
+                        "application/x-www-form-urlencoded; charset=UTF-8"
+                    ),
+                    "Referer": f"{base}/usercp.php",
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise SiteFetchError(f"hdwing 签到提交失败：{exc}") from exc
+        if resp.status_code in (403, 429):
+            raise BreakerTripped(f"hdwing 签到返回 {resp.status_code}，需熔断")
+        if resp.status_code >= 400:
+            raise SiteFetchError(f"hdwing 签到提交返回 HTTP {resp.status_code}")
+
+        try:
+            payload: object = resp.json()
+        except ValueError:
+            # 未登录时返回登录页 HTML，不是 JSON
+            if _is_login_page(str(resp.url), resp.text):
+                return CheckinResult(
+                    CheckinStatus.AUTH_EXPIRED, "cookie 已失效，需重新登录"
+                )
+            return CheckinResult(
+                CheckinStatus.FAILED, "签到响应不是 JSON（站点改版？）"
+            )
+        return attendance.parse_plugin_signin_result(payload)
 
     async def close(self) -> None:
         await self._client.aclose()

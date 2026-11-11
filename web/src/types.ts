@@ -795,13 +795,18 @@ export interface Driver {
   media_cid: string | null
   /** 媒体库路径（只读展示） */
   media_path: string | null
+  /**
+   * 媒体库目录 id 的**展示名**（115 叫 cid、光鸭叫 fileId）。
+   * 后端按驱动类型给出——前端不写 `if type === "guangya"`。
+   */
+  media_cid_label: string
   /** 本地媒体库目录 */
   output_dir: string | null
-  /** 视频后缀（逗号分隔） */
+  /** 视频后缀（逗号分隔，扫描依据——生成 strm） */
   video_exts: string
-  /** 媒体图片后缀（逗号分隔，当前忽略） */
+  /** 媒体图片后缀（逗号分隔，附件同步到本地；空 = 不同步） */
   image_exts: string
-  /** 媒体数据后缀（逗号分隔，当前忽略） */
+  /** 媒体数据后缀（逗号分隔，附件同步到本地；空 = 不同步） */
   data_exts: string
   /** 最小视频体积（MB），0 = 不过滤 */
   min_size_mb: number
@@ -1211,11 +1216,8 @@ export interface MigrationJob {
   dirs_walked: number
   discovered: number
   in_flight: number
-  /** 在途任务实时进度：taskId → { 完整路径, 文件名, 进度%（-1 = 排队中）, 大小 } */
-  in_flight_items: Record<
-    string,
-    { path: string; name: string; progress: number; size: number }
-  >
+  /** 在途任务：taskId → { 完整路径, 文件名, 大小 }（不带进度——光鸭该字段不可靠） */
+  in_flight_items: Record<string, { path: string; name: string; size: number }>
   success: number
   failed: number
   skipped_existing: number
@@ -1245,106 +1247,6 @@ export interface MigrationRunInput {
   concurrency: number
   submit_interval_sec: number
   exclude_disc: boolean
-}
-
-// ---- 离线下载（本地 → 光鸭，走光鸭服务端拉取）----
-
-/**
- * 离线下载的能力与配置。
- *
- * `enabled` = 三项配置齐了（密钥 / 公网入口 / 源根目录）才为 true。
- * 未启用时前端**隐藏整个入口**——功能没配好时不该让用户点进去撞墙。
- */
-export interface OfflineCapabilities {
-  enabled: boolean
-  /** 公网入口（如 http://home.banstack.top:8092） */
-  public_base: string
-  /** 暴露给光鸭的源根目录（容器内绝对路径） */
-  files_root: string
-  /** 源目录浏览的起点（= files_root） */
-  browse_root: string
-  /** 密钥是否已配置（密钥本身**永不**返回给前端） */
-  has_secret: boolean
-  /** 公网入口是否已配置 */
-  has_public_base: boolean
-  /** 源根目录是否已配置 */
-  has_files_root: boolean
-  hint: string
-}
-
-/** 离线下载配置（partial update——只传要改的）。 */
-export interface OfflineConfigInput {
-  /** HMAC 密钥（空/省略 = 不修改；永不回显） */
-  secret?: string
-  public_base?: string
-  files_root?: string
-}
-
-/** 源目录下的一个待传文件。 */
-export interface OfflineLocalFile {
-  name: string
-  size: number
-}
-
-/** 离线下载任务的运行态（轮询用）。 */
-export interface OfflineJob {
-  id: string
-  target_driver_id: number
-  target_file_id: string
-  target_path: string
-  local_root: string
-  state: "running" | "success" | "failed" | "cancelled"
-  started_at: number
-  finished_at: number | null
-  elapsed_sec: number
-  /** 当前处理的文件 */
-  current_path: string
-  /** 已发现的文件数 */
-  discovered: number
-  /** 已提交、仍在光鸭上跑的任务数 */
-  in_flight: number
-  /**
-   * 在途任务明细。
-   *
-   * ⚠️ `progress` 是**光鸭的原始计数**，不是百分比——实测 2.3GB 文件
-   * 下载到 88% 时它只有 4。别当百分比展示。
-   */
-  in_flight_items: Record<
-    string,
-    { name: string; progress: number | null; size: number | null }
-  >
-  success: number
-  failed: number
-  skipped_existing: number
-  conflicts: number
-  downloaded_bytes: number
-  /** 已删除的本地文件数（勾了「下载成功后删除本地文件」时） */
-  local_deleted: number
-  failed_items: { path: string; size: number; reason: string }[]
-  conflict_items: { path: string; local_size: number; remote_size: number }[]
-  logs: string[]
-  error: string | null
-}
-
-/** 开跑参数。 */
-export interface OfflineRunInput {
-  target_driver_id: number
-  target_file_id: string
-  target_path: string
-  /** 源目录（相对 files_root 的路径，或绝对路径） */
-  local_root: string
-  include_subdirs: boolean
-  min_size_mb: number
-  max_size_mb: number
-  exclude_disc: boolean
-  /** 只要这些扩展名（逗号分隔，如 "mkv,mp4"）；空 = 不限 */
-  exts: string
-  /** 下载成功后删除本地文件（不可逆；空目录一并删） */
-  delete_after_upload?: boolean
-  /** 同名且大小不同时的冲突策略：0=本地优先 / 1=保留大的（默认） */
-  conflict_policy?: number
-  concurrency: number
-  submit_interval_sec: number
 }
 
 // ---- WebDAV ----

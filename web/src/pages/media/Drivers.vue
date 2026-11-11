@@ -105,9 +105,20 @@
                 <a-button size="small" @click="onLogin(record)">登录</a-button>
               </a-tooltip>
               <a-button size="small" @click="openConfig(record)">配置</a-button>
+              <!--
+                禁用原因必须写出来——否则用户只看到灰按钮，不知道缺什么。
+
+                tooltip 内层包 <span>：antd 的 disabled 按钮**不派发鼠标事件**，
+                tooltip 直接包按钮会完全不触发（antd 官方同款处理）。
+              -->
+              <a-tooltip v-if="!record.media_cid || !record.output_dir" :title="scanDisabledTip(record)">
+                <span>
+                  <a-button size="small" disabled>扫描</a-button>
+                </span>
+              </a-tooltip>
               <a-button
+                v-else
                 size="small"
-                :disabled="!record.media_cid || !record.output_dir"
                 :loading="scanningId === record.id || isScanning(record.id)"
                 @click="onScan(record)"
               >
@@ -183,23 +194,26 @@
       @ok="onSaveConfig"
     >
       <a-form layout="vertical">
-        <a-form-item
-          :label="configDriver?.type === 'guangya' ? '光鸭媒体库 fileId' : '115 媒体库 cid'"
-          required
-        >
-          <a-input
-            v-model:value="configForm.media_cid"
-            :placeholder="
-              configDriver?.type === 'guangya' ? '1835243138919944265' : '3116168171472551604'
-            "
-            class="mono"
+        <a-form-item label="媒体库目录" required>
+          <a-alert
+            type="warning"
+            show-icon
+            style="margin-bottom: 8px"
+            message="从账号根目录开始浏览"
+            description="根目录下是网盘的**全部**目录（含私人目录）。请只选择真正用于媒体库的那一个。"
           />
+          <DirBrowser
+            title="网盘媒体库目录"
+            :stack="mediaStack"
+            :dirs="mediaDirs"
+            :loading="loadingMediaDirs"
+            @open="openMediaDir"
+            @go="goMediaDir"
+          />
+          <div class="muted hint">已选：{{ mediaSelectedLabel }}</div>
           <div class="hint">
-            {{
-              configDriver?.type === "guangya"
-                ? "光鸭的目录 fileId。用 id 而非路径：接口只接受 id，不接受路径。"
-                : "115 的目录 id（数字）。用 cid 而非路径：目录改名后 id 不变，路径会失效。"
-            }}
+            点进目标目录即选中它（面包屑可回退到上层）。存的是**目录 id**而非路径
+            ——目录改名后 id 不变，路径会失效。
           </div>
         </a-form-item>
 
@@ -232,10 +246,10 @@
             v-model:value="configForm.image_exts"
             mode="tags"
             :token-separators="[',', ' ']"
-            placeholder="jpg png webp"
+            placeholder="jpg jpeg png webp"
             class="mono"
           />
-          <div class="hint">扫描时**同步到本地**（与 strm 同目录，保持原文件名）。</div>
+          <div class="hint">扫描时**同步到本地**（与 strm 同目录，保持原文件名）。清空 = 不同步图片。</div>
         </a-form-item>
 
         <a-form-item label="媒体数据后缀">
@@ -243,10 +257,10 @@
             v-model:value="configForm.data_exts"
             mode="tags"
             :token-separators="[',', ' ']"
-            placeholder="nfo ass srt"
+            placeholder="nfo ass ssa srt"
             class="mono"
           />
-          <div class="hint">扫描时**同步到本地**（与 strm 同目录，保持原文件名）。</div>
+          <div class="hint">扫描时**同步到本地**（与 strm 同目录，保持原文件名）。清空 = 不同步元数据。</div>
         </a-form-item>
 
         <a-form-item label="最小视频">
@@ -620,6 +634,7 @@ import { message } from "ant-design-vue"
 import { ApiError, errMsg, mediaApi as api } from "../../api"
 import type {
   DeviceType,
+  DirEntry,
   Driver,
   DriverConfig,
   DriverInput,
@@ -635,6 +650,7 @@ import type {
 } from "../../types"
 import { formatBytes, formatTime } from "../../utils/format"
 import DataTable from '../../components/DataTable.vue'
+import DirBrowser from '../../components/DirBrowser.vue'
 import PageHeader from '../../components/PageHeader.vue'
 
 const drivers = ref<Driver[]>([])
@@ -936,6 +952,51 @@ async function onCreate(): Promise<void> {
 
 // -- 配置 --
 
+/**
+ * 媒体后缀的**默认值**（存量行未配置时的预填值）。
+ *
+ * 真源在 ``app/domain/media_exts.py``（列默认值同源）——前端这份只为
+ * 打开配置抽屉时预填，两边保持一致；不一致的后果只是预填值与新建存储源
+ * 的列默认不同，不会崩。
+ *
+ * 为什么不在后端 ``DriverOut`` 层兜底：清空后保存的行（``image_exts=""``
+ * = 关闭附件同步）如果被 ``or 默认`` 改写，用户清空后重开抽屉会看到默认值，
+ * 以为没存上。预填只发生在**打开抽屉**这一刻，保存后以 DB 为准。
+ */
+const DEFAULT_IMAGE_EXTS = ["jpg", "jpeg", "png", "webp"]
+const DEFAULT_DATA_EXTS = ["nfo", "ass", "ssa", "srt"]
+
+/**
+ * 网盘目录浏览的**面包屑栈**（栈底 = 账号根目录）。
+ *
+ * 栈底的 id 是**空串**——后端按驱动类型把空串解析成真正的根（光鸭是空串，
+ * 115 是 ``0``），前端不必知道这个差异。
+ */
+const mediaStack = ref<DirEntry[]>([{ id: "", name: "网盘根目录" }])
+const mediaDirs = ref<DirEntry[]>([])
+const loadingMediaDirs = ref(false)
+
+/** 本次浏览选中的目录（已有配置时为空——只有 id，没有路径可拼）。 */
+const mediaPicked = ref<{ id: string; path: string } | null>(null)
+
+/**
+ * 「已选」展示文案。
+ *
+ * 三种来源：本次浏览选的（有路径）/ 已有配置（光鸭没有路径反查，只有 id）/
+ * 什么都没选。
+ */
+const mediaSelectedLabel = computed(() => {
+  if (mediaPicked.value) {
+    return `${mediaPicked.value.path}（id: ${mediaPicked.value.id}）`
+  }
+  if (configForm.value.media_cid) {
+    return configForm.value.media_path
+      ? `${configForm.value.media_path}（id: ${configForm.value.media_cid}）`
+      : `id: ${configForm.value.media_cid}`
+  }
+  return "（未选）"
+})
+
 function openConfig(driver: Driver): void {
   configDriver.value = driver
   configForm.value = {
@@ -943,12 +1004,72 @@ function openConfig(driver: Driver): void {
     media_path: driver.media_path ?? "",
     output_dir: driver.output_dir ?? "",
     video_exts: splitExts(driver.video_exts),
-    image_exts: splitExts(driver.image_exts),
-    data_exts: splitExts(driver.data_exts),
+    // 未配置时预填默认值——用户不用手抄常用清单（真源见 DEFAULT_IMAGE_EXTS 注释）
+    image_exts: splitExts(driver.image_exts).length
+      ? splitExts(driver.image_exts)
+      : [...DEFAULT_IMAGE_EXTS],
+    data_exts: splitExts(driver.data_exts).length
+      ? splitExts(driver.data_exts)
+      : [...DEFAULT_DATA_EXTS],
     min_size_mb: driver.min_size_mb ?? 0,
     include_subdirs: driver.include_subdirs ?? true,
   }
+  // 浏览状态回到账号根——本次浏览的选中记录清空（已有配置仍显示在下方）
+  mediaStack.value = [{ id: "", name: "网盘根目录" }]
+  mediaDirs.value = []
+  mediaPicked.value = null
   configOpen.value = true
+  void loadMediaDirs("")
+}
+
+/** 加载某目录下的**子目录**（逐层懒加载，不一次性拉全树）。 */
+async function loadMediaDirs(parentId: string): Promise<void> {
+  const driver = configDriver.value
+  if (!driver) return
+  loadingMediaDirs.value = true
+  try {
+    const resp = await api.get<{ dirs: DirEntry[] }>(
+      `/drivers/${driver.id}/browse-dirs?parent_id=${encodeURIComponent(parentId)}`,
+    )
+    mediaDirs.value = resp.dirs ?? []
+  } catch (e) {
+    message.error(errMsg(e, "加载网盘目录失败"))
+  } finally {
+    loadingMediaDirs.value = false
+  }
+}
+
+/**
+ * 进入子目录 —— **同时把它设为选中的媒体库目录**。
+ *
+ * 语义与「数据同步」页的云端目标目录一致：正在看哪个目录 = 要用哪个目录。
+ */
+function openMediaDir(entry: DirEntry): void {
+  mediaStack.value = [...mediaStack.value, entry]
+  pickMediaDir(entry)
+  void loadMediaDirs(entry.id)
+}
+
+/** 面包屑回退 —— 选回那一层目录（回到根 = 取消选择）。 */
+function goMediaDir(index: number): void {
+  mediaStack.value = mediaStack.value.slice(0, index + 1)
+  const picked = mediaStack.value[index]
+  if (!picked) return
+  pickMediaDir(picked)
+  void loadMediaDirs(picked.id)
+}
+
+function pickMediaDir(entry: DirEntry): void {
+  mediaPicked.value = { id: entry.id, path: mediaPathOf(mediaStack.value) }
+  configForm.value.media_cid = entry.id
+}
+
+/** 由面包屑栈拼出路径（展示用）——根节点不参与拼接。 */
+function mediaPathOf(stack: DirEntry[]): string {
+  return stack
+    .map((c) => c.name)
+    .filter((n) => n !== "网盘根目录")
+    .join("/")
 }
 
 function splitExts(raw: string | null | undefined): string[] {
@@ -983,6 +1104,21 @@ async function onSaveConfig(): Promise<void> {
 }
 
 // -- 扫描 --
+
+/**
+ * 扫描按钮的**禁用原因**（tooltip 文案）。
+ *
+ * 必须**点名缺哪一项**——否则用户只看到一个灰按钮，不知道该去补什么。
+ * id 的叫法由后端给出（``media_cid_label``），前端不按类型分支。
+ */
+function scanDisabledTip(record: Driver): string {
+  const missing: string[] = []
+  if (!record.media_cid) {
+    missing.push(record.media_cid_label || "媒体库目录")
+  }
+  if (!record.output_dir) missing.push("本地媒体库目录")
+  return `尚未配置${missing.join("、")}，请先点「配置」补齐后再扫描`
+}
 
 /** 扫描进度弹窗 */
 const scanOpen = ref(false)

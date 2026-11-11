@@ -12,7 +12,6 @@ async function login(page: any) {
 const PAGES = [
   '/', '/sites', '/downloaders', '/torrent-index', '/cross-seed', '/settings',
   '/drivers', '/library', '/migrations', '/uploads', '/health', '/dav-users', '/media-settings',
-  '/offline',
 ]
 
 /**

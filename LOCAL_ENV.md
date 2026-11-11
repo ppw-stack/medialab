@@ -301,7 +301,7 @@ cron 与运行参数**都不再走 env**：
 ### 7.1 每日签到（FR-3.6，2026-10-22）
 
 `daily_checkin` 作业（cron `37 8 * * *`）逐站调用
-`SiteAdapter.checkin()`。**10 站里 4 站实测可自动签到**：
+`SiteAdapter.checkin()`。**10 站里 5 站实测可自动签到**：
 
 | 站点 | 端点 | 状态 |
 |---|---|---|
@@ -309,12 +309,12 @@ cron 与运行参数**都不再走 env**：
 | soulvoice | `GET/POST /attendance.php` | ✅ 已实现（签到得魔力值） |
 | hdhome | `GET/POST /attendance.php` | ✅ 已实现（签到得魔力值） |
 | **hdsky** | 自建 `showup.php` 三段式 + 图形验证码 | ✅ **已实现（AI 读码）** |
+| **hdwing** | X2015 插件 `plugin_sign-in.php` | ✅ **已实现（AJAX 路径，无需验证码）** |
 | audiences | `GET /attendance.php` | ❌ Cloudflare Turnstile（`TurnstileError 600010`） |
 | ourbits | `GET /attendance.php` | ❌ Turnstile + `form#attendance` |
 | springsunday | — | ❌ 无签到功能（只有论坛"签到帖"） |
 | mteam | — | ❌ mTorrent API 无签到端点 |
 | hddolby | — | ❌ 未实现（SSL/DNS 失败，未验证） |
-| hdwing | `/attendance.php` **404**（实测 2026-11-07） | ❌ 站点无签到功能 |
 
 hdsky 的签到不是 NexusPHP 标准的 `/attendance.php`（本站 404），而是自建三段式：
 
@@ -334,6 +334,22 @@ POST showup.php {action:showup, imagehash, imagestring} → 提交
 > `AI_MODEL` 三项。**未配置时该站降级为「需人工签到」，作业不会变红。**
 > 端点须 prod 可直连（实测 `llmapi.banstack.top` 与 `api.minimaxi.com` 均可达；
 > OpenAI 直连不可达）。详见 AGENTS.md「FR-3.6 AI 读码」。
+
+hdwing 的签到也不是 NexusPHP 标准的 `/attendance.php`（本站 404），而是
+**X2015 主题自带的插件端点**（协议来自站点自己的 `/plugin/js/base.js` 的
+`do_signin()`，2026-11-11 生产 cookie 实测）：
+
+```
+GET  usercp.php                                → csrf meta + navbar 签到状态
+POST plugin_sign-in.php?cmd=signin {csrf}     → {"state":"success","signindays":N,"integral":"10"}
+```
+
+- **不需要图形验证码**（AJAX 路径裸 csrf 即通过；站点另有一个带验证码的
+  表单页 `GET /plugin_sign-in.php`，本实现不用它）
+- 「今日已签到」时 navbar 显示 `<a …>已签到</a>`；未签到时是
+  `<a … onclick="do_signin(this);"><b>签 到</b></a>`——**「签 到」中间有空格**
+- ⚠️ `{"state":false}`（**无 msg**）既是「今日已签」也是「失败无原因」，
+  两者同形 → 适配器**再查一次状态**定性（`attendance.UNREASONED_FAILURE`）
 
 > ⚠️ **Cloudflare Turnstile 本仓库不实现**：audiences / ourbits 的挑战在
 > 服务端环境**无法完成**（实测 `TurnstileError 600010`：headless / 有头真实

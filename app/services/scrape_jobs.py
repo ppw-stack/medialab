@@ -24,9 +24,9 @@ from sqlalchemy import select
 from app.core.logging import get_logger
 from app.db.models import MediaScrape
 from app.db.session import session_scope
+from app.domain.media_exts import DEFAULT_VIDEO_EXTS
 from app.domain.scrape_types import ScrapeStatus
 from app.services.meta_parser import parse_meta
-from app.services.naming import DEFAULT_VIDEO_EXTS
 from app.services.scheduler import JobStep, JobStepItem, build_items
 from app.services.scrape_service import ScrapeService
 

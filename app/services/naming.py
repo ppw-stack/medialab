@@ -18,15 +18,6 @@ from __future__ import annotations
 
 import re
 
-#: 默认视频后缀（逗号分隔）——新建存储源时的默认填充值
-DEFAULT_VIDEO_EXTS = "mkv,mp4,avi,mov,wmv,flv,m4v,ts,m2ts,rmvb,rm,webm,iso"
-
-#: 默认媒体图片后缀
-DEFAULT_IMAGE_EXTENSIONS: frozenset[str] = frozenset({".jpg", ".jpeg", ".png", ".webp"})
-
-#: 默认媒体数据后缀
-DEFAULT_DATA_EXTENSIONS: frozenset[str] = frozenset({".nfo", ".ass", ".ssa", ".srt"})
-
 #: 文件系统敏感字符
 _UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 

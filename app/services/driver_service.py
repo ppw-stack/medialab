@@ -44,7 +44,11 @@ from app.domain.device_types import (
     DEFAULT_DEVICE_TYPE,
     DeviceTypeLiteral,
 )
-from app.domain.driver_types import PROBEABLE_DRIVER_TYPES, is_probeable
+from app.domain.driver_types import (
+    PROBEABLE_DRIVER_TYPES,
+    is_probeable,
+    root_dir_id,
+)
 from app.services.account_status import (
     STATUS_NO_CREDENTIAL,
     AccountStatus,
@@ -799,6 +803,69 @@ async def resolve_media_path(row: Driver, media_cid: str) -> str:
         raise DriverServiceError(f"cid 无效：{exc}", status_code=400) from exc
 
 
+async def browse_driver_dirs(driver_id: int, parent_id: str = "") -> list[tuple[str, str]]:
+    """列出存储源某个目录下的**子目录**（按 id 逐层浏览）。
+
+    媒体库配置页用它选「媒体库目录」——用户不该手抄 fileId / cid
+    （手抄既容易错，光鸭那种 19 位数字更是无从核对）。
+
+    与 :func:`app.services.upload_tasks.browse_target_dirs` 的**关键差异**：
+    **不做「是否支持上传」的校验**——浏览是 CloudDriver 的**读能力**，
+    而 115 不支持上传（``UPLOADABLE_DRIVER_TYPES`` 只有光鸭），但媒体库
+    扫描用的恰恰就是 115。
+
+    Args:
+        driver_id: 存储源 id。
+        parent_id: 父目录 id；**留空 = 账号根目录**（按驱动类型解析，
+            见 :data:`app.domain.driver_types.ROOT_DIR_IDS`）。浏览起点
+            只能是根——此时 ``media_cid`` 还没配，没有更深的入口。
+
+    Returns:
+        ``[(remote_id, name), ...]``——只含目录（文件不进目录浏览器）。
+
+    Raises:
+        DriverServiceError: 存储源不存在（404）/ 未知驱动类型（400）/
+            驱动不支持按 id 浏览（400）/ 上游调用失败（400）。
+    """
+    async with session_scope() as db:
+        row = await get_driver(db, driver_id)
+        driver_type = row.type
+        credential = row.credential
+        device_type = row.device_type
+
+    root = root_dir_id(driver_type)
+    if root is None:
+        raise DriverServiceError(
+            f"未知的驱动类型：{driver_type}", status_code=400, kind="config"
+        )
+    resolved_parent = parent_id or root
+
+    try:
+        driver = build_driver(
+            driver_type,
+            credential,
+            device_type,
+            on_token_refresh=_make_token_refresh_persist(driver_id),
+        )
+    except DriverError as exc:
+        raise DriverServiceError(
+            f"驱动初始化失败：{exc}", status_code=500, kind="config"
+        ) from exc
+
+    # ``list_dir_by_cid`` 不在 CloudDriver 协议里（115 / 光鸭都有，但协议只
+    # 要求 ``list_dir``），故用 getattr 取——与 migration.py 同一做法。
+    lister = getattr(driver, "list_dir_by_cid", None)
+    if lister is None:
+        raise DriverServiceError(
+            "该驱动不支持按 id 浏览目录", status_code=400, kind="config"
+        )
+    try:
+        entries = await lister(resolved_parent)
+    except DriverError as exc:
+        raise DriverServiceError(str(exc), status_code=400, kind="upstream") from exc
+    return [(e.remote_id, e.name) for e in entries if e.is_dir]
+
+
 __all__ = [
     "DEFAULT_DEVICE_TYPE",
     "CachedProbe",
@@ -808,6 +875,7 @@ __all__ = [
     "DriverServiceError",
     "JobRef",
     "add_driver",
+    "browse_driver_dirs",
     "cached_probe",
     "create_driver",
     "delete_driver",

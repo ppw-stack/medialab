@@ -37,6 +37,7 @@ from sqlalchemy import select
 from app.core.logging import get_logger
 from app.db.models import OrganizeHistory
 from app.db.session import session_scope
+from app.domain.media_exts import DEFAULT_VIDEO_EXTS
 from app.domain.scrape_types import MediaKind, OrganizeAction, OrganizeStatus
 from app.services.env_settings import get_env_setting
 from app.services.errors import ServiceError
@@ -50,9 +51,11 @@ logger = get_logger(__name__)
 __all__ = ["run_organize"]
 
 
-#: 视频后缀（小写，不含点）
+#: 视频后缀（小写，不含点）——单一真源在 :mod:`app.domain.media_exts`
 _VIDEO_EXTS: frozenset[str] = frozenset(
-    {"mkv", "mp4", "avi", "mov", "wmv", "flv", "m4v", "ts", "m2ts", "rmvb", "rm", "webm", "iso"}
+    ext.strip().lower().lstrip(".")
+    for ext in DEFAULT_VIDEO_EXTS.split(",")
+    if ext.strip()
 )
 
 #: 字幕后缀（同 stem 的字幕随视频整理）

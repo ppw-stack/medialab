@@ -69,28 +69,12 @@
   - **队列满不丢**：溢出暂存（按路径去重，上限 5000）→ worker 空闲回灌；只有暂存也满才真丢并计数。水位（大/小/溢出/丢弃）暴露到面板——过去只能靠刷屏的丢弃日志感知积压
   - **同名冲突策略 `upload_tasks.conflict_policy`**（2026-11-09 加入）：同名但**大小不同**时——`1`=**保留大的**（默认；本地更小则跳过上传、保住云端那份，本地原件也因「云端大小≠本地大小」不被清理）、`0`=本地优先（删旧→传新，历史行为）。**为什么默认保留大的**：本地重新压制出的版本往往更小（去音轨/换压制组），直接覆盖等于用小版本顶掉大版本——真实踩过的坑。「更大」≠「更新」（同大小仍按「已同步」跳过，不比哈希）
   - ⚠️ **方法论**：测上传吞吐必须用**生产规模**文件（≥100MB）且做**串行/并发交替对照**。曾用 50MB/10 片测出「并发快 2 倍」的**假象**，据此写了两版并发实现再逐一证伪
-- **离线下载（本地 → 光鸭走光鸭服务端拉取）**（2026-11-04 加入，见 `docs/offline-download.md`）：
-  - **原理**：光鸭的离线下载是**光鸭服务器主动来拉**——流量方向是**下行**，本机只承担接收，上行需求 ≈ 0。这本该绕开上行瓶颈
-  - **实测结论：功能可行但速率更差**——文件完整落地光鸭、md5 一致，但实际速率 **~0.75 MB/s**（比直传的 3.3 MB/s **慢 4.4 倍**）
-    - 链路不是瓶颈：公网入口单个 100MB 分片实测 **17.2 MB/s**；服务实现不是瓶颈：内网经 HTTP 读 **626 MB/s**
-    - 真正原因：**光鸭把文件切成变长的随机区间并并发拉取，其中 73% 是重复请求**（5MB 文件同一区间被拉 130 次）——光鸭下载器的固有行为，客户端不可控
-  - **它什么时候才划算**：源文件**本来就在大带宽 CDN 上**（如 115 直链）→ 那正是**迁移功能**（115→光鸭）的场景。**「本地 → 光鸭」用离线下载反而更慢**
-  - **代码保留但不推荐使用**（用户明确要求才开）：`app/services/offline_download.py` + `app/api/routes/offline_files.py`
-  - **踩过的坑**（都已在代码里修掉）：
-    - 光鸭会发 **HEAD** 探文件大小 → 不支持则 405、任务可能直接失败
-    - 光鸭有两条路径的 **URL 编码方式不同**：正常是单次编码，**重试路径是双重编码**（`%` → `%25`）→ 那些请求原本全部 403。解法：服务端**再 `unquote` 一次**
-    - **模块级 `APIRouter` 不能复用**——多次 `include_router` 到不同 app 时路由会绑在第一次的 app 上。必须在挂载函数内部新建
-    - **光鸭的 `progress` 字段不是可靠的百分比**（2.3GB 文件下载到 88% 时它只有 4）→ **不用它判定完成**，等任务从活跃列表消失 + 以「目标目录出现同名同大小文件」为准
-  - ⚠️ **迁移功能把 `progress` 当百分比显示**（`migration.py` 的 `_progress_text`）——**那个显示是错的**，大文件时会显示个位数。本次未改（不在任务范围内）
-  - **分层**：纯逻辑（token / 路径安全 / Range 解析）在 `app/services/offline_files.py`（**不 import fastapi**），HTTP handler 在 `app/api/routes/offline_files.py`（services 层不得 import fastapi，见 `tests/unit/test_layering.py`）
-  - **UI**：媒体库域 → **「离线下载」**页（`web/src/pages/media/Offline.vue`）。功能未启用时页面**说明怎么开**（列出三项配置），不给一个点了就报错的入口
-  - **只传指定格式**（任务级 `exts`，逗号分隔，如 `mkv,mp4`）：空 = 全传。用于「只传视频，跳过 nfo / 字幕 / 海报」。扩展名**大小写不敏感**。前端预览**实时跟随过滤**（勾了 mkv 立刻只剩 mkv）
-  - **源目录浏览不限权**（2026-11-04 修订，用户明确要求「所有目录都能选中」）：`/offline-downloads/local-dirs` 能列服务能看到的**任何**目录（含 `/app`）——与「数据同步」的 `/upload-tasks/local-dirs` 一致（面板本身已是管理员权限）。暴露面靠「三项没配齐时文件服务 403、不暴露任何文件」控制，而非目录白名单
-  - **三项配置页面上改、立即生效**（2026-11-04 修订，用户明确要求「配置在页面上做」）：`OFFLINE_HMAC_SECRET` / `OFFLINE_PUBLIC_BASE` / `OFFLINE_FILES_ROOT` 落在 `app_env_settings` 表（**hidden 项**——不进「设置 → 环境变量」通用列表，由「离线下载」页的配置区专用端点 `PUT /api/offline-downloads/config` 写入，源根目录带目录浏览器）。⚠️ FastAPI 不支持运行时增删路由 → `mount_offline_files()` **无条件挂载**，每次请求时读当前配置决定放行：三项没配齐 → **403**（不是 SPA 的 index.html，更诚实）。密钥**永不回显**（API 只返回 `has_secret`）、**不进启动日志**、保存时留空 = 不修改
-  - **下载成功后删除本地文件**（2026-11-04 加入）：`delete_after_upload` 参数（前端开关打开时**二次确认**）。与「数据同步」**同一套** `upload_cleanup` 机制（三重保护 + 空目录 `rmdir` 递归清理），唯一差异是时机——离线下载要等「任务结束 + 校验落盘（同名同大小）」才删。删除失败只记日志，不翻转结果
-  - **鉴权只能做在 URL 里**——光鸭的 `cloud_create_task(url, parent_id)` 只收 URL、不支持自定义 Header → 每文件一个 HMAC token（`HMAC(secret, 相对路径)` 前 32 位十六进制）
-  - **文件服务必须挂在 SPA 兜底之前**（`app/main.py` 的 `_mount_offline_files`）——否则被 `/{full_path:path}` 吞掉
-  - 契约由 `tests/unit/test_offline_download.py` + `tests/unit/test_env_settings.py` + `tests/integration/test_offline_files_http.py` + `tests/integration/test_offline_api.py` 固化；实测脚本 `scripts/verify_offline.py`
+- **「离线下载」（本地 → 光鸭）功能已移除**（2026-11-11 整体删除，含页面与配置）：
+  - **移除依据（实测结论，值得记住）**：功能可行但**速率更差**——文件完整落地光鸭、md5 一致，实际速率 **~0.75 MB/s**（比直传的 3.3 MB/s **慢 4.4 倍**）。链路不是瓶颈（公网入口单个 100MB 分片实测 **17.2 MB/s**），真正原因是**光鸭把文件切成变长的随机区间并并发拉取，其中 73% 是重复请求**（5MB 文件同一区间被拉 130 次）——光鸭下载器的固有行为，客户端不可控
+  - **它什么时候才划算**：源文件**本来就在大带宽 CDN 上**（如 115 直链）→ 那正是**迁移功能**（115→光鸭）的场景。**「本地 → 光鸭」走离线下载反而更慢**
+  - **随之删除**：6 个后端文件（`offline_download` / `offline_files` / `offline_config` / `offline_jobs` + 两个路由）+ 「离线下载」页 + 三项环境变量配置（`OFFLINE_HMAC_SECRET` / `OFFLINE_PUBLIC_BASE` / `OFFLINE_FILES_ROOT`）。存量配置行由幂等迁移 `delete_offline_env_settings` 清掉（连带那个死密钥）
+  - **光鸭的「离线任务」机制仍在用**（迁移功能）：`guangya.py` 的 `create_offline_task` / `list_active_offline_tasks` / `list_failed_offline_tasks` **保留**，别跟着删
+  - **仍然有效的坑（2026-11-11 实测补充）**：光鸭的 `progress` 字段**不是可靠的百分比**（2.3GB 文件下载到 88% 时它只有 4）→ **不用它判定完成，也不再展示**——迁移在途列表只报「路径 + 大小」（假百分比曾误导用户，已随展示一起移除）。判定走「活跃列表消失 + 目标目录同名同大小校验」。实测还确认：任务项初始结构**没有** `progress` 字段（只有 taskId/fileName/totalSize/status/createTime/res/parentDirType），它只在真实拉取时动态出现；对**非媒体 URL**（TUNA 的 .iso/.gz）云添加会挂 3 分钟后统一 `code=8 云添加失败`——历史成功案例全是媒体文件（.mkv / 115 直链），**疑似云添加只接受媒体类 URL（待证）**；`get_task_status()` 是**上传任务**的接口，查云下载任务返回 145；**中途删目标目录会静默终止或卡住任务**（探测时踩到：一个 15MB 任务卡在活跃列表不结束）
 - **Bearer 长期凭据只用 `WEB_TOKEN`**（2026-10-30 加入）：`verify_bearer` 同时接受 API Token（`WEB_TOKEN`）与 session cookie 值两种口径，但 session cookie 值 24h 过期（`SESSION_MAX_AGE`）。CLI / 脚本长期使用应存 `WEB_TOKEN`，不可把 session cookie 值当长期 token 存储——后者会突然 401。session 值口径仅为面板/CLI 同源便利，非长期凭据。
 - **自动化 / 合规边界**（2026-10-22 修订，原「不引入未文档化的反爬对抗 / 验证码绕过（R2）」）：
   - ✅ **允许**对**自有账号**做站点自动化，含 AI 读图形验证码（`app/core/ai.py`）、真实浏览器交互
@@ -126,11 +110,17 @@
   - 契约由 `tests/unit/test_site_adapters.py` 固化，9 站全参数化覆盖
 - **FR-3.6 站点每日签到契约**（2026-10-22 加入）：
   - 适配器单方法 `checkin() → CheckinResult`，带状态枚举（success / already / unsupported / auth_expired / failed）——**不用 `None`**：签到必须区分"该站不支持"与"签到失败"，否则作业统计分不清
-  - **只实现实测可用的 4 站**：hhanclub / soulvoice / hdhome（走 NexusPHP `/attendance.php`，GET 即签到）+ **hdsky**（自建 `showup.php` 三段式，图形验证码走 AI 读码）。其余 5 站走基类默认 `UNSUPPORTED`（audiences / ourbits 需 Turnstile、springSunday / mteam 无此功能、hddolby 未验证）
+  - **只实现实测可用的 5 站**：hhanclub / soulvoice / hdhome（走 NexusPHP `/attendance.php`，GET 即签到）+ **hdsky**（自建 `showup.php` 三段式，图形验证码走 AI 读码）+ **hdwing**（X2015 主题插件 `plugin_sign-in.php`，**AJAX 路径无需验证码**）。其余 5 站走基类默认 `UNSUPPORTED`（audiences / ourbits 需 Turnstile、springSunday / mteam 无此功能、hddolby 未验证）
+  - **hdwing 的签到协议**（2026-11-11 实测，生产 cookie）：**不是** NexusPHP 标准的 `/attendance.php`（本站 404），而是 X2015 主题自带的插件端点（协议来自站点自己的 `/plugin/js/base.js` 的 `do_signin()`）
+    - `GET /usercp.php` → 取 `<meta name="x-csrf">` 的 csrf + 看 navbar 是「签 到」还是「已签到」（**两个特征都不在 = 站点改版 → FAILED，不能当成「未签到」盲签**）
+    - `POST /plugin_sign-in.php?cmd=signin {csrf}` → 执行签到，**不需要图形验证码**
+    - 响应：`{"state":"success","signindays":N,"integral":"10"}` / `{"state":false}`（今日已签，**无 msg**）/ `{"state":false,"msg":...}`（csrf 错）
+    - ⚠️ **`{"state":false}` 与「真失败」同形** → 解析层标成 `attendance.UNREASONED_FAILURE`，适配器**再查一次状态**定性（宁可多一次请求，也不把幂等的「已签」误报成失败，或把真失败静默吞掉）
   - 失败必须抛 `SiteFetchError` / `BreakerTripped`，与拉取路径同一契约
   - 签到熔断**不写** `sites.breaker_until` —— 不与 10 分钟一次的拉取作业共享熔断状态
   - **不建表**：结果只进 `job_runs.result_json`（`summary` + `steps`），前端「调度 → 历史」可见
-  - 解析规则用**真实页面**固化成 fixture（`tests/fixtures/*_attendance.html`）——手写最小 HTML 会漏掉真实文案（hhanclub 成功页**不含**"签到成功"四字，只有统计文案）
+  - 解析规则用**真实页面**固化成 fixture（`tests/fixtures/*_attendance.html`；hdwing 是 `hdwing_signin_state*.html` + `hdwing_signin_*.json`）——手写最小 HTML 会漏掉真实文案（hhanclub 成功页**不含**"签到成功"四字，只有统计文案）
+  - fixture 抓取：`scripts/capture_mybonus_fixtures.py`（时魔）/ `scripts/capture_checkin_fixtures.py`（hdwing 签到）/ `scripts/trim_checkin_fixtures.py`（脱敏 + 裁剪，csrf 抹成 40 位 0 占位符——**必须是合法 hex**，否则解析器提取不到）
   - 契约由 `tests/unit/test_checkin_parser.py` + `tests/unit/test_site_adapters.py` + `tests/integration/test_checkin_job.py` 固化
 - **作业步骤带逐项明细**（2026-11-03 加入，`JobStep.items`）：
   - 步骤的 `detail` 是**聚合**描述（如「20 成功，0 失败」）——光看它**回答不了「是哪些出了问题」**。而作业执行时这些数据本来就在内存里（逐站结果、逐种推送结果…），只是没被带出来
@@ -311,11 +301,32 @@
   - **`store_credential` 的 `invalidate_cache` 参数区分两类语义**：
     - `True`（默认）= 凭据**真的换了**（重新扫码登录）→ 作废缓存
     - `False` = **同一个账号换了 token**（光鸭 Token 刷新写回，1~2 小时一次）→ **不能**作废缓存，否则面板退回「未测连」，正好抵消本特性
-  - **光鸭 Token 刷新必须写回 DB**：所有构造光鸭驱动的路径都要传 `on_token_refresh`（`probe_driver` / `redirect` / `scan_runner` / `watch_manager` / `upload_tasks` / `offline_download` / `migration`）。漏传 → 刷新出的新 token 只在驱动实例内存 → 实例丢弃后 DB 仍是旧 token → 刷新接口一旦轮换 `refresh_token`，**账号彻底掉线**
+  - **光鸭 Token 刷新必须写回 DB**：所有构造光鸭驱动的路径都要传 `on_token_refresh`（`probe_driver` / `redirect` / `scan_runner` / `watch_manager` / `upload_tasks` / `migration`）。漏传 → 刷新出的新 token 只在驱动实例内存 → 实例丢弃后 DB 仍是旧 token → 刷新接口一旦轮换 `refresh_token`，**账号彻底掉线**
   - **删除存储源必须清缓存**：SQLite 的 `id` 无 AUTOINCREMENT → **删掉最大的 id 后会被复用**。不清缓存 → 新建的存储源继承上一个的测连状态（账号 id / 容量 / 「直链正常」）
   - **启动测连任务在停机时必须取消**（`app/main.py` 的 `lifespan` finally，**在 `dispose_db()` 之前**）——否则任务跑到落库那一步时 session factory 已置 None，而 `except Exception` 会把异常吞掉 → 表现为「探测历史偶尔少一条」的静默故障
   - `probe_results` 表有 **30 天保留期**，清理挂在 `drain_task_queue`（与 `job_runs` 同款语义，勿单开作业）
   - 契约由 `tests/integration/test_driver_probe_cache.py`（17 例）+ `web/tests/drivers-probe.spec.ts` 固化
+
+- **媒体库目录用目录浏览器选，不手填 id**（2026-11-11 加入，`app/services/driver_service.py:browse_driver_dirs`）：
+  - **起因**：光鸭的 fileId 是 19 位数字（115 的 cid 同理），让用户照着网盘网页手抄——抄错一位扫描就扫不到东西，且无从核对。生产上就出现过「光鸭盘扫描按钮点不动」——**按钮禁用条件是 `!media_cid || !output_dir`，与驱动类型无关**，用户只看到一个灰按钮，不知道缺什么
+  - **禁用原因必须写出来**：扫描按钮禁用时给 tooltip，**点名缺哪一项**（`scanDisabledTip`）。tooltip 内层包 `<span>`——antd 的 disabled 按钮**不派发鼠标事件**，tooltip 直接包按钮完全不触发
+  - **后端新增 `GET /api/drivers/{id}/browse-dirs?parent_id=`**：列出某目录下的**子目录**（逐层懒加载），响应 `{"driver_id","parent_id","dirs":[{id,name}]}`，形状与 `GET /api/upload-tasks/targets` 一致
+    - **不能复用 `/upload-tasks/targets`**——它有 `is_uploadable` 校验，而 `UPLOADABLE_DRIVER_TYPES = {"guangya"}`，**115 会被 400 挡掉**。浏览是 CloudDriver 的**读能力**，不是上传能力
+    - `list_dir_by_cid` **不在 `CloudDriver` 协议里**（115 / 光鸭都有，协议只要求 `list_dir`），故用 `getattr` 取——与 `migration.py` 同一做法
+  - **浏览起点只能是账号根**（此时 `media_cid` 还没配，没有更深的入口）：根 id 按类型解析 —— **光鸭 `""` / 115 `"0"`**，收敛在 `app/domain/driver_types.py:ROOT_DIR_IDS`（domain 层单一真源）。115 的根会列出「手机相册 / 资料 / 密钥」等私人目录，故前端用 alert 明说
+  - **`media_cid` 的叫法也是单一真源**：`app/domain/driver_types.py:MEDIA_CID_LABELS`（115 叫 cid、光鸭叫 fileId）+ `DriverOut.media_cid_label` 随接口下发——**前端不写 `if type === "guangya"`**，后端报错文案也用它
+  - **前端复用现成的 `DirBrowser`**（`web/src/components/DirBrowser.vue`，面包屑 + 逐层懒加载，状态由父组件持有）——与「数据同步 / 迁移 / 离线下载」三处同一交互模式，**项目不用 `a-tree`**
+  - **语义：进入子目录即选中它**（正在看哪个目录 = 要用哪个目录），面包屑回退即改选；回到根 = 取消选择
+  - 契约由 `tests/unit/test_driver_types.py` + `tests/integration/test_driver_browse.py`（11 例）+ `web/tests/drivers-media-pick.spec.ts` 固化
+
+- **媒体后缀默认清单收敛到 domain 层单一真源**（2026-11-11 加入，`app/domain/media_exts.py`）：
+  - **起因**：「媒体图片后缀 / 媒体数据后缀」此前默认**空串**（placeholder 是唯一提示）——用户不知道该填什么，附件（海报 / nfo / 字幕）静默不同步。用户要求补默认值
+  - **三份清单曾散落三处**：`models.py` 的 `DEFAULT_VIDEO_EXTS`（本地定义）、`naming.py` 的 `DEFAULT_IMAGE_EXTENSIONS` / `DEFAULT_DATA_EXTENSIONS`（frozenset 形态、**零引用的摆设**）、前端 placeholder 手写字符串——互不一致，改一处漏两处。现全部收敛到 `app/domain/media_exts.py`（`DEFAULT_VIDEO_EXTS` / `DEFAULT_IMAGE_EXTS` / `DEFAULT_DATA_EXTS`），naming.py 的死常量已删
+  - **默认值生效的两条路径**：① **新建存储源** → ORM 列默认值（`models.py` 引 domain）；② **存量行** → 前端打开配置抽屉时空值预填，保存后落库
+  - ⚠️ **不在 `DriverOut` 层兜底**（`or 默认`）——清空保存的行（`image_exts=""` = 关闭附件同步，合法配置）会被改写回默认，用户清空后重开抽屉会以为没存上。预填只发生在**打开抽屉**这一刻，保存后以 DB 为准
+  - ⚠️ **bootstrap 的老库加列默认仍用 `''`**（`bootstrap.py:("image_exts","TEXT","''")`）——改它等于对全部存量库静默变更数据；存量行由用户下一次保存配置时自然获得默认值（必然重配 `media_cid`，一定会走一次保存）
+  - **「当前忽略」的注释是过时的**：图片 / 数据后缀**实际生效**——扫描时**附件同步**（`attachment_*`，下载到本地与 strm 同目录），`models.py` / `types.ts` 注释已修正
+  - 契约由 `tests/unit/test_media_exts.py`（格式规范 + `parse_ext_list` 往返 + 单一真源断言）+ `test_db_models.py` 列默认值 + `drivers-media-pick.spec.ts`（预填 + 随保存落库）固化
 
 - **事件循环里绝不出现同步 CIFS IO**（2026-11-06 prod 事故，规则）
   - 挂载是 `hard` 模式 → IO 卡死时**无限等待**；一次同步 `stat` 就能把整个事件循环卡住 → uvicorn 无法处理请求 → `/healthz` 被 RST → 容器 unhealthy、**面板实际不可用**（实测假死 20 分钟，挂载恢复才自愈）

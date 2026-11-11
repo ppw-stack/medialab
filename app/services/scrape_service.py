@@ -1000,7 +1000,7 @@ class ScrapeService:
         nfo = Path(nfo_path)
         directory = nfo.parent
         stem = nfo.stem
-        from app.services.naming import DEFAULT_VIDEO_EXTS
+        from app.domain.media_exts import DEFAULT_VIDEO_EXTS
 
         exts = {
             ext.strip().lower().lstrip(".")

@@ -27,8 +27,12 @@ from __future__ import annotations
 from typing import Final
 
 __all__ = [
+    "MEDIA_CID_LABELS",
     "PROBEABLE_DRIVER_TYPES",
+    "ROOT_DIR_IDS",
     "is_probeable",
+    "media_cid_label",
+    "root_dir_id",
 ]
 
 
@@ -43,3 +47,38 @@ PROBEABLE_DRIVER_TYPES: Final = frozenset({"p115", "guangya"})
 def is_probeable(driver_type: str) -> bool:
     """该驱动类型是否支持测连。"""
     return driver_type in PROBEABLE_DRIVER_TYPES
+
+
+#: 各驱动类型的**账号根目录 id**（目录浏览的起点）。
+#:
+#: - 光鸭：根目录的 fileId 就是**空串**（``list_dir_by_cid("")`` 列的就是根）
+#: - 115：根目录 cid 是数字 ``0``（会列出手机相册/资料/密钥等私人目录）
+#:
+#: 为什么需要它：浏览「媒体库目录」时 ``media_cid`` **还没配**，起点必须是
+#: 账号根。两个网盘的根 id 写法不同（空串 vs 数字 0），传错列不出东西——
+#: 故收敛到这里，前端不必知道差异，``parent_id`` 留空即由后端解析。
+ROOT_DIR_IDS: Final[dict[str, str]] = {
+    "guangya": "",
+    "p115": "0",
+}
+
+
+def root_dir_id(driver_type: str) -> str | None:
+    """该驱动类型的账号根目录 id；``None`` = 未知类型（调用方决定兜底）。"""
+    return ROOT_DIR_IDS.get(driver_type)
+
+
+#: 各驱动类型的**媒体库目录 id**的展示名（配置项 label 与报错文案共用）。
+#:
+#: 为什么放 domain：同一个 id 在 115 叫「cid」、在光鸭叫「fileId」——文案
+#: 写死「115 媒体库 cid」会让光鸭用户以为存错了东西（实际存的就是
+#: fileId）。业务代码只管取 label，不写 ``if type == "guangya"``。
+MEDIA_CID_LABELS: Final[dict[str, str]] = {
+    "guangya": "光鸭媒体库 fileId",
+    "p115": "115 媒体库 cid",
+}
+
+
+def media_cid_label(driver_type: str) -> str:
+    """该驱动类型的媒体库目录 id 叫什么（用于界面文案）。"""
+    return MEDIA_CID_LABELS.get(driver_type, "媒体库目录 id")

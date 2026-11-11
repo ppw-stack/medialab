@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 from app.adapters.sites.base import (
     BreakerTripped,
@@ -465,3 +467,66 @@ async def test_hdsky_is_unsupported_without_ai(
     assert result["failed"] == 0
     assert result["success"] == 0
     assert "hdsky_site" in str(result["steps"])
+
+
+# --------------------------------------- hdwing：真实适配器 + plugin_sign-in
+
+
+async def _hdwing_job(
+    monkeypatch: pytest.MonkeyPatch, *, signed: bool
+) -> dict[str, object]:
+    """跑一次只有 hdwing 的签到作业，返回作业结果。
+
+    :param signed: navbar 是否已显示「已签到」。
+    """
+    import httpx
+    import respx
+    from app.adapters.sites.hdwing import HdwingAdapter
+
+    await _add_sites("hdwing_site")
+
+    factory = AdapterFactory()
+
+    def _site(row: Site, *, cookies: str | None = None) -> SiteAdapter:
+        return HdwingAdapter(
+            SiteProfile(name=row.name, domain=row.domain), cookies="uid=1"
+        )
+
+    monkeypatch.setattr(factory, "site", _site)
+
+    fixtures = pathlib.Path(__file__).resolve().parents[1] / "fixtures"
+    state = (
+        fixtures / ("hdwing_signin_state.html" if signed
+                    else "hdwing_signin_state_unsigned.html")
+    ).read_text(encoding="utf-8")
+
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+        router.get("https://hdwing_site.test/usercp.php").mock(
+            return_value=httpx.Response(200, text=state)
+        )
+        router.post("https://hdwing_site.test/plugin_sign-in.php?cmd=signin").mock(
+            return_value=httpx.Response(
+                200, json={"state": "success", "signindays": 1, "integral": "10"}
+            )
+        )
+        return await refresh_all_sites(factory)
+
+
+async def test_hdwing_counts_as_success(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未签到 → 走完 plugin_sign-in 流程，计入 success。"""
+    result = await _hdwing_job(monkeypatch, signed=False)
+    assert result["success"] == 1
+    assert result["failed"] == 0
+    assert result["already"] == 0
+
+
+async def test_hdwing_counts_as_already(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """navbar 已显示「已签到」→ 计入 already（幂等，**不算失败**）。"""
+    result = await _hdwing_job(monkeypatch, signed=True)
+    assert result["already"] == 1
+    assert result["success"] == 0
+    assert result["failed"] == 0

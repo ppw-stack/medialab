@@ -14,7 +14,8 @@
   辅种站巡查（落快照 + 暂停异常种子）→ 磁盘空间流转 → 孤儿文件扫描，
   三段顺序执行、每 3 小时一次
 - ``drain_task_queue`` — 排空任务队列：崩溃恢复（僵死 running 回收）+ 退避重试
-- ``daily_checkin`` — 对支持签到的站点执行每日签到（hhanclub / soulvoice / hdhome）
+- ``daily_checkin`` — 对支持签到的站点执行每日签到
+  （hhanclub / soulvoice / hdhome / hdsky / hdwing）
 """
 from __future__ import annotations
 

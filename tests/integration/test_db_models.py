@@ -55,6 +55,32 @@ async def test_create_all_is_idempotent(db: None) -> None:
     await db_bootstrap.create_all()
 
 
+async def test_driver_media_exts_defaults(db: None) -> None:
+    """新建存储源不传后缀时，三列都拿到 domain 层的默认清单。
+
+    ``video_exts`` 一直有默认；``image_exts`` / ``data_exts`` 曾默认空串
+    （附件静默不同步），2026-11-11 起也预填默认清单。
+    """
+    from app.db.models import Driver
+    from app.domain.media_exts import (
+        DEFAULT_DATA_EXTS,
+        DEFAULT_IMAGE_EXTS,
+        DEFAULT_VIDEO_EXTS,
+    )
+
+    async with session_scope() as session:
+        session.add(Driver(name="d1", type="guangya", credential="{}", enabled=True))
+        await session.commit()
+
+    async with session_scope() as session:
+        row = (
+            await session.execute(select(Driver).where(Driver.name == "d1"))
+        ).scalar_one()
+        assert row.video_exts == DEFAULT_VIDEO_EXTS
+        assert row.image_exts == DEFAULT_IMAGE_EXTS
+        assert row.data_exts == DEFAULT_DATA_EXTS
+
+
 async def test_torrent_index_unique_site_item(db: None) -> None:
     """(site_id, item_id) 唯一——upsert 的基础。"""
     async with session_scope() as session:
@@ -359,6 +385,35 @@ async def test_backfill_discount_pct_is_idempotent(db: None) -> None:
             await session.execute(select(TorrentIndex).where(TorrentIndex.item_id == "1"))
         ).scalar_one()
         assert row.discount_pct == 100
+
+
+async def test_delete_offline_env_settings_is_idempotent(db: None) -> None:
+    """「离线下载」废弃后清掉 app_env_settings 里的三项残留行。
+
+    - 三个 offline_* 行被删净（含那个死密钥）
+    - 其它配置行**不动**
+    - 再跑一次仍安全（行不存在 = 删 0 行）
+    """
+    from app.db.migrations import delete_offline_env_settings
+    from app.db.models import AppEnvSetting
+
+    async with session_scope() as session:
+        session.add(AppEnvSetting(key="offline_hmac_secret", value="dead-secret"))
+        session.add(AppEnvSetting(key="offline_public_base", value="http://old"))
+        session.add(AppEnvSetting(key="offline_files_root", value="/mnt/old"))
+        session.add(AppEnvSetting(key="cross_seed_scan_dirs", value="/keep/me"))
+        await session.flush()
+
+    await delete_offline_env_settings()
+    await delete_offline_env_settings()
+
+    async with session_scope() as session:
+        rows = (await session.execute(select(AppEnvSetting))).scalars().all()
+        keys = {r.key for r in rows}
+    assert "offline_hmac_secret" not in keys
+    assert "offline_public_base" not in keys
+    assert "offline_files_root" not in keys
+    assert "cross_seed_scan_dirs" in keys
 
 
 # ------------------------------------------------------------------ 模块拆分
