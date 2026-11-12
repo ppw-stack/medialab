@@ -36,7 +36,6 @@ import base64
 import json
 import time
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -124,64 +123,6 @@ TASK_ACTIVE_STATUS = (0, 1)
 
 #: 离线下载任务的**失败**状态（3 = 失败）。
 TASK_FAILED_STATUS = (3,)
-
-#: 分享「已失效」的业务码（2026-11-12 生产实测）。
-#:
-#: **可重试**：成因是「同一账号短时间内连续建分享」被限流——等一会儿
-#: 再建就好了。故映射成 ``rate_limit``，调用方按可重试处理。
-CODE_SHARE_EXPIRED = 201
-
-#: 「参数错误」的业务码（2026-11-12 生产实测）。
-#:
-#: **不可重试**：几乎总是调用方拼错了参数（如 ``shareId`` 少了账号 id
-#: 后缀）。映射成 ``config``，调用方不该重试。
-CODE_PARAM_ERROR = 112
-
-#: 单次「保存分享」的文件数上限（2026-11-12 生产实测：500）。
-#:
-#: 超了服务端会拒。引擎按这个数切批。
-SHARE_SAVE_FILE_LIMIT = 500
-
-#: 光鸭**网页端**的 User-Agent（公开接口用）。
-#:
-#: 公开接口（分享页那套）不走登录态，但服务端会看 UA / Origin /
-#: Referer——与官方网页端保持一致才不会被当成爬虫（实测）。
-GUANGYA_WEB_UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
-)
-
-#: 公开接口的请求头——**刻意不带 Authorization**。
-#:
-#: 分享链路（取访问令牌 / 列分享内容）**必须匿名**：带 Bearer 一律返回
-#: ``201 分享已失效``（2026-11-12 生产实测）。而 :meth:`_call` 走的是
-#: ``guangyaclient`` 的客户端，其默认头**带** ``authorization``——所以
-#: 公开接口必须另开一条 httpx 通道。
-_PUBLIC_HEADERS: dict[str, str] = {
-    "accept": "application/json, text/plain, */*",
-    "content-type": "application/json",
-    "origin": "https://www.guangyapan.com",
-    "referer": "https://www.guangyapan.com/",
-    "user-agent": GUANGYA_WEB_UA,
-}
-
-
-@dataclass(frozen=True)
-class ShareInfo:
-    """一次分享的信息。
-
-    Attributes:
-        share_id: 分享 id（**不含账号 id 后缀**）。
-            调用 :meth:`GuangyaDriver.share_access_token` 时由驱动自己拼
-            ——因为后缀是**源账号**的 id，跨账号时只有源账号知道。
-        code: 提取码（公开分享为空串）。
-        share_url: 分享链接（``https://www.guangyapan.com/s/{id}_{uid}?code=xx``）。
-    """
-
-    share_id: str
-    code: str
-    share_url: str
-
 
 
 def _client_id() -> str:
@@ -572,26 +513,6 @@ class GuangyaDriver:
             )
         return file_id, code in (None, 0)
 
-    async def delete_file(self, file_id: str) -> None:
-        """删除一个文件（**进回收站**，非永久删除）。
-
-        实测：接口立即返回 ``taskId``，目录里 < 0.5 秒就看不到该文件了。
-        但仍建议删后**重列确认**——「接口返回了」不等于「云端真的没了」。
-
-        用于「转存后清理源端」——那个开关默认关闭，且只删**已校验成功**
-        的文件。
-
-        Raises:
-            DriverError: 删除失败。
-        """
-        payload = await self._call("fs_delete", [str(file_id)])
-        code = payload.get("code")
-        if code not in (None, 0):
-            raise DriverError(
-                f"光鸭删除文件失败：{payload.get('msg') or payload}",
-                kind=_map_code(code),
-            )
-
     async def ensure_dir(self, rel_path: str, root_id: str = "") -> str:
         """逐层确保 ``rel_path``（相对 ``root_id``）存在，返回最终 fileId。"""
         parent = str(root_id or "")
@@ -687,223 +608,6 @@ class GuangyaDriver:
                 kind=_map_code(code),
             )
         return list((payload.get("data") or {}).get("list") or [])
-
-    # -- 分享与转存（跨账号搬运）--
-
-    async def create_share(self, file_ids: list[str], title: str) -> ShareInfo:
-        """创建分享，返回分享 id / 提取码 / 分享链接。
-
-        **参数是实测定下的**（2026-11-12 生产实测）：
-
-        - ``share_type=0`` —— 公开分享（官方网页端也是这个值）
-        - ``download_type=1`` —— 允许下载（``0`` 的分享实测拿不到令牌）
-        - ``validate_duration=0`` —— 永久有效
-        - ``code=""`` + ``auto_fill_code=False`` —— 无提取码
-
-        带提取码的私密分享（``share_type=1``）实测**也能**转存，但公开
-        分享更贴近「A 分享 → B 保存」的用法。
-
-        ⚠️ **分享内容不能为空**——空目录的分享会被判「分享已失效」。
-
-        Args:
-            file_ids: 要分享的条目 id（文件或目录均可）。
-            title: 分享标题（展示用）。
-
-        Raises:
-            DriverError: 接口报错（``112 参数错误`` 等）。
-        """
-        payload = await self._call(
-            "share_create",
-            [str(fid) for fid in file_ids],
-            title=title,
-            validate_duration=0,
-            share_type=0,
-            download_type=1,
-            max_restore_count=0,
-            code="",
-            auto_fill_code=False,
-        )
-        code = payload.get("code")
-        if code not in (None, 0):
-            raise DriverError(
-                f"光鸭创建分享失败：{payload.get('msg') or payload}",
-                kind=_map_code(code),
-            )
-        data = payload.get("data") or {}
-        share_id = str(data.get("shareId") or "")
-        if not share_id:
-            raise DriverError(f"光鸭创建分享未返回 shareId：{payload}")
-        return ShareInfo(
-            share_id=share_id,
-            code=str(data.get("code") or ""),
-            share_url=str(data.get("shareUrl") or ""),
-        )
-
-    async def share_access_token(self, share_id: str, code: str = "") -> str:
-        """取分享的访问令牌（**匿名**调用）。
-
-        ⚠️ **必须匿名**——带 Bearer 一律返回 ``201 分享已失效``（实测）。
-        这正是分享页给未登录访客走的那条路径。
-
-        ⚠️ ``share_id`` 必须是 ``{shareId}_{账号id}``——缺后缀服务端报
-        ``112 参数错误``。账号 id 从 access_token 的 JWT ``sub`` 取，
-        故**必须用源账号的驱动调用**（跨账号时只有源账号知道自己的 id）。
-
-        Args:
-            share_id: 分享 id（:attr:`ShareInfo.share_id`，不带账号后缀）。
-            code: 提取码（公开分享为空串）。
-
-        Returns:
-            访问令牌（后续列分享内容 / 保存都用它）。
-
-        Raises:
-            DriverError: 分享无效（``201``）或参数错误（``112``）。
-        """
-        key = f"{share_id}_{self._account_id()}"
-        payload = await self._call_public(
-            "get_share_access_token", {"shareId": key, "code": code}
-        )
-        token = str((payload.get("data") or {}).get("accessToken") or "")
-        if not token:
-            raise DriverError(f"光鸭分享未返回 accessToken：{payload}")
-        return token
-
-    async def share_files_list(self, token: str) -> list[dict[str, Any]]:
-        """列分享里的条目（**匿名**调用）。
-
-        返回的 ``fileId`` **与源账号的 fileId 是同一个 id 空间**——分享里
-        的条目 id 可以直接拿去保存，不用再换算（2026-11-12 实测）。
-
-        Args:
-            token: :meth:`share_access_token` 给的访问令牌。
-
-        Returns:
-            分享里的条目列表（原始 dict，含 ``fileId`` / ``fileName`` /
-            ``fileSize`` / ``resType`` 等）。
-
-        Raises:
-            DriverError: 令牌无效 / 分享已失效。
-        """
-        items: list[dict[str, Any]] = []
-        page = 1
-        while True:
-            payload = await self._call_public(
-                "get_share_page_files_list",
-                {
-                    "accessToken": token,
-                    "parentId": "",
-                    "page": page,
-                    "pageSize": PAGE_SIZE,
-                    "orderBy": 0,
-                    "sortType": 0,
-                },
-            )
-            data = payload.get("data") or {}
-            batch = list(data.get("list") or [])
-            items.extend(batch)
-            total = int(data.get("total") or 0)
-            if not batch or (total and len(items) >= total):
-                break
-            page += 1
-            if page > MAX_LIST_PAGES:
-                raise DriverError("光鸭列分享内容翻页超限（分享条目过多？）")
-        return items
-
-    async def restore_share(
-        self, token: str, file_ids: list[str], parent_id: str = ""
-    ) -> str:
-        """把分享里的条目**保存**到 ``parent_id`` 目录，返回 taskId。
-
-        **必须带 Bearer**（匿名 → ``117 无效token``）——保存到自己的网盘
-        本来就需要登录态。
-
-        ⚠️ **服务端不覆盖同名文件**，而是自动改名 ``xxx(1)``（实测）。
-        故调用方**必须先预检**目标目录，否则重跑会堆出一堆垃圾副本。
-
-        Args:
-            token: 访问令牌。
-            file_ids: 要保存的条目 id（分享空间 id，与源账号同一 id 空间）。
-            parent_id: 目标目录 id（空串 = 账号根目录）。
-
-        Returns:
-            保存任务的 id。
-
-        Raises:
-            DriverError: 令牌无效 / 分享已失效 / 参数错误。
-        """
-        payload = await self._call(
-            "share_restore",
-            token,
-            [str(fid) for fid in file_ids],
-            str(parent_id or ""),
-        )
-        code = payload.get("code")
-        if code not in (None, 0):
-            raise DriverError(
-                f"光鸭保存分享失败：{payload.get('msg') or payload}",
-                kind=_map_code(code),
-            )
-        data = payload.get("data") or {}
-        task_id = str(data.get("taskId") or "")
-        if not task_id:
-            raise DriverError(f"光鸭保存分享未返回 taskId：{payload}")
-        return task_id
-
-    async def delete_share(self, share_id: str) -> None:
-        """删除分享（收尾清理——别在源账号的「我的分享」里留记录）。
-
-        Raises:
-            DriverError: 删除失败。
-        """
-        payload = await self._call("share_delete", [str(share_id)])
-        code = payload.get("code")
-        if code not in (None, 0):
-            raise DriverError(
-                f"光鸭删除分享失败：{payload.get('msg') or payload}",
-                kind=_map_code(code),
-            )
-
-    async def _call_public(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """调**公开**接口（不带 Authorization）。
-
-        分享链路必须匿名——带 Bearer 一律「分享已失效」（实测）。
-        故不能走 :meth:`_call`（那个走 ``guangyaclient`` 的客户端，其
-        默认头**带** ``authorization``），必须另开一条 httpx 通道。
-
-        Args:
-            path: 端点名（``get_share_access_token`` 等）。
-            payload: 请求体。
-
-        Returns:
-            解析后的响应体（成功时**没有** ``code`` 字段）。
-
-        Raises:
-            DriverError: 网络失败 / 返回非 JSON / 业务错误码。
-        """
-        await rate_limiter.acquire(PROVIDER)
-        url = f"{_api_base_url()}/nd.bizuserres.s/v1/{path}"
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as http:
-                response = await http.post(url, json=payload, headers=_PUBLIC_HEADERS)
-        except httpx.HTTPError as exc:
-            raise DriverError(
-                f"光鸭公开接口 {path} 调用失败：{exc}", kind="network"
-            ) from exc
-        try:
-            data = response.json()
-        except ValueError as exc:
-            raise DriverError(
-                f"光鸭公开接口 {path} 返回非 JSON（HTTP {response.status_code}）"
-            ) from exc
-        if not isinstance(data, dict):
-            raise DriverError(f"光鸭公开接口 {path} 返回格式异常")
-        code = data.get("code")
-        if code not in (None, 0):
-            raise DriverError(
-                f"光鸭 {path} 失败：{data.get('msg') or data}",
-                kind=_map_code(code),
-            )
-        return data
 
     async def get_direct_link(self, remote_id: str, user_agent: str) -> DirectLink:
         """换取直链。
@@ -1098,21 +802,11 @@ def _map_code(code: Any) -> str:
     - ``123`` —— 应用未开通该能力
     - ``146`` —— 文件不存在
     - ``430`` —— 用户不是会员
-
-    分享链路（2026-11-12 实测）：
-
-    - ``201`` —— 分享已失效 → ``rate_limit``（**可重试**：同账号连续建
-      分享会被限流，等一会儿再试就好）
-    - ``112`` —— 参数错误 → ``config``（**不可重试**：调用方拼错了）
     """
     try:
         value = int(code)
     except (TypeError, ValueError):
         return "unknown"
-    if value == CODE_SHARE_EXPIRED:
-        return "rate_limit"
-    if value == CODE_PARAM_ERROR:
-        return "config"
     if value == 117:
         return "auth"
     if value == 111:

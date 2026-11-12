@@ -76,18 +76,6 @@
   - **随之删除**：6 个后端文件（`offline_download` / `offline_files` / `offline_config` / `offline_jobs` + 两个路由）+ 「离线下载」页 + 三项环境变量配置（`OFFLINE_HMAC_SECRET` / `OFFLINE_PUBLIC_BASE` / `OFFLINE_FILES_ROOT`）。存量配置行由幂等迁移 `delete_offline_env_settings` 清掉（连带那个死密钥）
   - **光鸭的「离线任务」机制仍在用**（迁移功能）：`guangya.py` 的 `create_offline_task` / `list_active_offline_tasks` / `list_failed_offline_tasks` **保留**，别跟着删
   - **仍然有效的坑（2026-11-11 实测补充）**：光鸭的 `progress` 字段**不是可靠的百分比**（2.3GB 文件下载到 88% 时它只有 4）→ **不用它判定完成，也不再展示**——迁移在途列表只报「路径 + 大小」（假百分比曾误导用户，已随展示一起移除）。判定走「活跃列表消失 + 目标目录同名同大小校验」。实测还确认：任务项初始结构**没有** `progress` 字段（只有 taskId/fileName/totalSize/status/createTime/res/parentDirType），它只在真实拉取时动态出现；对**非媒体 URL**（TUNA 的 .iso/.gz）云添加会挂 3 分钟后统一 `code=8 云添加失败`——历史成功案例全是媒体文件（.mkv / 115 直链），**疑似云添加只接受媒体类 URL（待证）**；`get_task_status()` 是**上传任务**的接口，查云下载任务返回 145；**中途删目标目录会静默终止或卡住任务**（探测时踩到：一个 15MB 任务卡在活跃列表不结束）
-- **光鸭跨账号转存（A 分享 → B 保存）**（2026-11-12 加入，`app/services/cloud_relay.py` + `app/api/routes/relays.py`）：
-  - **机制**：源账号建分享 → 目标账号 `restore_share` 保存。**服务端内部复制**——实测 100MB 文件 **7 秒落盘**（≈14 MB/s），不占本机带宽与磁盘，**也不吃云添加额度**
-  - **别用云添加做批量搬运**：云添加每天只有 **3 次/账号**（实测三个账号全部撞到「云添加次数超限，下个自然日刷新」），且**失败的也扣额度**；光鸭直链的云添加还会**丢文件名**（按 URL 末段取名 → 光鸭 CDN 直链末段是 `/download/` → 文件全叫 `download`，只能事后 `fs_rename` 补救）
-  - **分享链路必须匿名**（取令牌 / 列内容）：带 Bearer 一律返回 `201 分享已失效`——那正是分享页给未登录访客走的那条路。故驱动另开一条**不带 Authorization** 的 httpx 通道（`_call_public`），不能走 `guangyaclient` 的客户端（它默认头带 authorization）
-  - **保存必须带 Bearer**（匿名 → `117 无效token`）——存进自己的网盘本来就要登录态
-  - **`shareId` 必须拼账号 id 后缀**（`{shareId}_{uid}`，uid = access_token 的 JWT `sub`）：缺后缀是 `112 参数错误`；**成功响应没有 `code` 字段**——别用 `code == 0` 判断成功
-  - **建分享有频率限制**：同账号连建会被判 `201 分享已失效`（等 90s 以上稳定）→ 引擎有节流闸门（`_ShareGate`，默认 30s）+ `201` 自动退避重试（`112` **不可重试**，那是调用方拼错参数）
-  - **提交单元 = 同一源目录下的文件批次**（≤500/批，实测服务端上限），**冲突判定逐文件**：同名同大小 → 跳过；同名不同大小 → 记冲突，**不覆盖、不改名**
-  - ⚠️ **预检是必须的**：服务端保存同名文件时**不报错也不覆盖**，而是自动改名 `xxx(1)`——不预检的话重跑一次就多一份垃圾副本
-  - **「搬完清理源」是显式开关**（默认关）：只删**已校验成功**的文件，走 `fs_delete`（进回收站，非永久删）+ **记审计日志**
-  - **真实验证脚本** `scripts/probe_guangya_relay.py`（生产容器跑，造临时目录 → 真转存 → 校验 → 自删）。⚠️ **光鸭适配层改动必须用它真跑一遍**——mock 单测只是回归网，不算验证（`tests/unit/test_guangya_share.py` + `tests/unit/test_cloud_relay.py` + `tests/integration/test_relay_api.py`）
-  - 协议细节与实测数据留档在 `docs/guangya-relay.md`
 - **Bearer 长期凭据只用 `WEB_TOKEN`**（2026-10-30 加入）：`verify_bearer` 同时接受 API Token（`WEB_TOKEN`）与 session cookie 值两种口径，但 session cookie 值 24h 过期（`SESSION_MAX_AGE`）。CLI / 脚本长期使用应存 `WEB_TOKEN`，不可把 session cookie 值当长期 token 存储——后者会突然 401。session 值口径仅为面板/CLI 同源便利，非长期凭据。
 - **自动化 / 合规边界**（2026-10-22 修订，原「不引入未文档化的反爬对抗 / 验证码绕过（R2）」）：
   - ✅ **允许**对**自有账号**做站点自动化，含 AI 读图形验证码（`app/core/ai.py`）、真实浏览器交互
@@ -383,7 +371,7 @@
   - `fs_files` 支持 `parent_id="*"`（全账号）+ `res_type` 过滤，条目带 **`fullParentIds`**（从账号根到父目录的完整 fileId 链，`/` 分隔）——一次目录翻页（`res_type=2`，生产 726 目录 = 1 请求）建 fileId→目录名映射 + 一次文件翻页（`res_type=1`）按链首过滤 `media_cid` 子树，`relative_dir` 由链上 fileId 换算目录名拼出
   - **收益**：生产 970 目录 ≈ 1100+ 请求（0.2s 限速下 5-9 分钟）→ ≈16 请求（≈10 秒）；`page_size` 实测支持 1000+（200/500/1000 全生效，无 code=112）
   - **附件下载并发 3 路**（同日生产实测，`media.py` 的 `_sync_attachment_counted`）：串行时首次全量附件 ~18s/个（CDN 掐连接 → 3 次重试 × 60s 超时的长尾），几千个附件 = 十几小时。换直链走全局限速器天然安全，并发只摊掉 CDN 等待；`ATTACHMENT_CONCURRENCY` 从 4 调到 **3**（并发 4 失败率 17%：`peer closed connection without sending complete message body`；并发 2 对比实测成功率 91%、41 个/分钟），`ATTACHMENT_WINDOW=64` 做背压；扫描取消时终止剩余附件任务，正常结束等全部收尾（统计才完整）
-  - **附件失败的三种模式与对策**（同日实测）：① 光鸭直链在**附件下载场景**下不可复用——同一个 URL 第二次访问会失败（故每次重试都换新链 ✅）。⚠️ **但「直链一次性」不是普适结论**：2026-11-12 用 `Range: bytes=0-99` 连续 GET 同一个直链**两次都返回 206**（可重复访问）——附件那次更可能是别的因素（完整 GET / 特定 header / CDN 缓存策略），**别把「一次性」当公理** ② **网络抖动**：128 容器 DNS 偶发 `Temporary failure in name resolution`、CDN `ConnectTimeout` → 退避从 1s 提到 **5s**（5/10/15s，跨过抖动窗口）+ 重试次数 3→**4** ③ **附件超时是敏感参数**：共享 client 的 60s 会让卡死连接占住 worker 60s（长尾毒瘤），但**压到 15s 更糟**——实测失败率从 0.24%（60s）飙到 12~17%（光鸭部分 CDN 节点首次 GET 无缓存，15s 不够）。折中 **45s**：给慢节点留够时间，又短一截
+  - **附件失败的三种模式与对策**（同日实测）：① 光鸭直链是**一次性**的——同一个 URL 第二次访问必然失败（故每次重试都换新链 ✅）② **网络抖动**：128 容器 DNS 偶发 `Temporary failure in name resolution`、CDN `ConnectTimeout` → 退避从 1s 提到 **5s**（5/10/15s，跨过抖动窗口）+ 重试次数 3→**4** ③ **附件超时是敏感参数**：共享 client 的 60s 会让卡死连接占住 worker 60s（长尾毒瘤），但**压到 15s 更糟**——实测失败率从 0.24%（60s）飙到 12~17%（光鸭部分 CDN 节点首次 GET 无缓存，15s 不够）。折中 **45s**：给慢节点留够时间，又短一截
   - **换直链要对齐官方限频**（同日实测）：官方是 5 次/秒（列目录）/ **2 次/秒（换直链）**，但限速器只有一个光鸭桶（0.2s = 5/s）→ 并发 4 时换直链超限 2.5 倍 → 光鸭软限频 → 扫描速率从 45 掉到 21 个/分钟、30 分钟 96 次重试。修法：`get_direct_link` 走独立桶 `guangya_link`（`guangya_link_rate_limit_interval_sec`，默认 0.5s）；播放换直链同样受益（账号级配额本就该共享）
   - **条目缺 `fullParentIds` / 目录映射缺失 >10 → 报错不静默**——静默跳过会把故障伪装成「媒体库为空」，且 prune 会把「源端还在」的文件当孤儿删掉；少量缺失用 fileId 占位（路径可复现，不产出错路径）
   - **目录 `utime` 不可靠，别想做剪枝**（实测）：建子目录会变，**改名/删除都不变**——用它跳过子树必漏文件
