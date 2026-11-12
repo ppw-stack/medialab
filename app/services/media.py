@@ -423,7 +423,12 @@ COMMIT_EVERY = 50
 #:
 #: 别调太大：光鸭 CDN 对并发不友好（上传接口实测并发会断连），
 #: 4 路是保守起点。
-ATTACHMENT_CONCURRENCY = 4
+#:
+#: 2026-11-12 生产实测调到 3 路：并发 4 时失败率 17%（CDN 掐连接
+#: ``peer closed connection without sending complete message body``），
+#: 并发 2 的对比实测成功率 91%、41 个/分钟——3 路是速率与成功率的
+#: 折中。
+ATTACHMENT_CONCURRENCY = 3
 
 #: 附件任务的**在途窗口**：挂起任务达到此数就等任意一个完成再继续
 #: 遍历（背压）。没有它，遍历会瞬间把几千个附件协程全部压进事件循环。

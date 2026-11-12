@@ -51,7 +51,11 @@ CHUNK_SIZE = 64 * 1024
 #: 不同网盘的 CDN 稳定性差别很大——实测光鸭的 CDN 会中途掐断连接
 #: （``peer closed connection without sending complete message body``），
 #: 115 就没这问题。重试时**重新换直链**（旧的 URL 可能已失效）。
-DEFAULT_MAX_RETRIES = 3
+#:
+#: 2026-11-12 生产实测把次数提到 4：光鸭直链是**一次性**的（同一个
+#: URL 第二次访问必然失败），且失败主因是网络抖动（DNS 解析失败 /
+#: ConnectTimeout / 服务端掐连接），多一次换链机会能显著降低残留失败。
+DEFAULT_MAX_RETRIES = 4
 
 #: 单次附件下载的超时（秒）
 #:
@@ -62,7 +66,11 @@ DEFAULT_MAX_RETRIES = 3
 ATTACHMENT_TIMEOUT = httpx.Timeout(15.0)
 
 #: 重试退避基数（秒）——第 n 次失败后等 ``n * RETRY_BACKOFF_SEC``
-RETRY_BACKOFF_SEC = 1.0
+#:
+#: 2026-11-12 生产实测从 1.0 提到 5.0：失败主因是**网络抖动**（128
+#: 容器 DNS 偶发解析失败、CDN ConnectTimeout、服务端掐连接），1~2 秒
+#: 的退避跨不过抖动窗口，退避 5/10/15 秒后重试大多能成。
+RETRY_BACKOFF_SEC = 5.0
 
 #: 结果状态
 SYNCED = "synced"
