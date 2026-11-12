@@ -6,10 +6,13 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import time
+from contextlib import asynccontextmanager
 
 import pytest
 from app.services.link_cache import LinkCache, parse_expires_at
+from sqlalchemy.exc import OperationalError
 
 
 @pytest.fixture
@@ -162,6 +165,66 @@ class TestGetOrFetch:
         await cache.get_or_fetch(1, "ua-a", fetch)
         await cache.get_or_fetch(1, "ua-b", fetch)
         assert calls == 2
+
+
+class TestDbLockDegradation:
+    """**缓存读写失败不得让播放失败**（2026-11-12 prod 事故）。
+
+    扫描作业大批量写库时，中转请求撞上 SQLite 写锁
+    （``DB_JOURNAL_MODE=DELETE`` 是**全库排他**锁），
+    ``database is locked`` 冒泡出去 → **播放 500**。
+    直链缓存是优化，不是播放的前提——读写失败一律降级。
+    """
+
+    @staticmethod
+    def _locked() -> OperationalError:
+        return OperationalError(
+            "UPDATE link_cache", {}, sqlite3.OperationalError("database is locked")
+        )
+
+    @staticmethod
+    def _patch_session_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+        """让缓存的 DB 访问整体抛「database is locked」。"""
+
+        @asynccontextmanager
+        async def boom():  # type: ignore[no-untyped-def]
+            raise OperationalError(
+                "SELECT link_cache", {}, sqlite3.OperationalError("database is locked")
+            )
+            yield  # pragma: no cover - 不可达
+
+        monkeypatch.setattr("app.services.link_cache.session_scope", boom)
+
+    async def test_l2_write_failure_does_not_raise(
+        self, cache: LinkCache, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """L2 写失败 → 静默降级（只进 L1），不抛异常。"""
+        self._patch_session_scope(monkeypatch)
+
+        async def fetch() -> tuple[str, int]:
+            return "https://cdn/f", int(time.time()) + 3600
+
+        link = await cache.get_or_fetch(1, "ua", fetch)
+        # 直链照常返回（L1 仍可命中）
+        assert link.url == "https://cdn/f"
+        # L1 内存缓存仍然生效
+        assert (await cache.get(1, "ua")).url == "https://cdn/f"
+
+    async def test_l2_read_failure_falls_back_to_fetch(
+        self, cache: LinkCache, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """L2 读失败 → 当作未命中，继续换取直链（不抛）。"""
+        self._patch_session_scope(monkeypatch)
+        calls = 0
+
+        async def fetch() -> tuple[str, int]:
+            nonlocal calls
+            calls += 1
+            return "https://cdn/f", int(time.time()) + 3600
+
+        link = await cache.get_or_fetch(1, "ua", fetch)
+        assert link.url == "https://cdn/f"
+        assert calls == 1
 
 
 class TestStats:

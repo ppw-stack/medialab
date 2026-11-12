@@ -7,7 +7,9 @@
 
 - 列目录**翻页**（一次拉不完时要继续翻）
 - 字段映射（fileId / fileName / fileSize / resType / utime）
-- 递归遍历（流式产出、目录不产出）
+- **全量列表遍历**（2026-11-12 生产实测后重写：``parent_id="*"`` 一次
+  目录翻页 + 一次文件翻页替代逐目录递归；子树过滤、``relative_dir``
+  目录名映射、缺字段 / 缺映射的防御报错）
 - 换直链（``signedURL`` + ``urlDuration`` → ``expires_at``、**不绑 UA**）
 - 错误码映射（117 → auth、146 → not_found …）
 - Token 过期自动刷新 + 刷新回调（写回 DB 的钩子）
@@ -238,48 +240,208 @@ class TestListDir:
 
 
 class TestIterTree:
-    async def test_recurses_and_streams(self) -> None:
-        driver = gyp_module.GuangyaDriver(_credential_json())
+    """全量列表模式（2026-11-12 生产探针实测后重写）。
 
-        tree = {
-            "": [
-                {"fileId": "d1", "fileName": "电影", "resType": 2},
-                {"fileId": "f0", "fileName": "top.mkv", "fileSize": 5, "resType": 1},
-            ],
-            "d1": [
-                {"fileId": "f1", "fileName": "a.mkv", "fileSize": 6, "resType": 1},
-            ],
+    ``fs_files`` 支持 ``parent_id="*"``（全账号）+ ``res_type`` 过滤，
+    条目带 ``fullParentIds``（从账号根到父目录的完整 fileId 链）——
+    约 16 个只读请求替代旧逐目录递归的成百上千次。
+    """
+
+    #: 媒体库根 fileId（探针实测的生产值形状：19 位数字）
+    ROOT = "1962124234139361322"
+
+    @staticmethod
+    def _dir(file_id: str, name: str, parent_ids: str) -> dict[str, Any]:
+        return {
+            "fileId": file_id,
+            "fileName": name,
+            "fileSize": 0,
+            "resType": 2,
+            "fullParentIds": parent_ids,
+            "utime": 111,
         }
 
-        def _fs_files(self: Any, **kwargs: Any) -> dict[str, Any]:
-            items = tree.get(str(kwargs.get("parent_id") or ""), [])
-            return {"code": 0, "data": {"total": len(items), "list": items}}
+    @staticmethod
+    def _file(
+        file_id: str,
+        name: str,
+        parent_ids: str,
+        *,
+        size: int = 1024,
+        utime: int = 1700000000,
+        res_type: int = 1,
+    ) -> dict[str, Any]:
+        return {
+            "fileId": file_id,
+            "fileName": name,
+            "fileSize": size,
+            "resType": res_type,
+            "fullParentIds": parent_ids,
+            "utime": utime,
+            "ctime": utime,
+        }
 
-        FakeGuangyaClient.fs_files_impl = _fs_files
-        names = []
-        async for f in driver.iter_tree_by_cid("", parent_path="/影视"):
-            names.append(f.name)
+    @staticmethod
+    def _paged_fs_files(
+        dirs: list[dict[str, Any]], files: list[dict[str, Any]]
+    ) -> Callable[..., dict[str, Any]]:
+        """按 res_type 分开、按 page 切页的 fs_files 假实现。"""
 
-        assert sorted(names) == ["a.mkv", "top.mkv"]
-        # 目录不产出
-        assert "电影" not in names
+        def _impl(_self: Any, **kwargs: Any) -> dict[str, Any]:
+            items = dirs if kwargs.get("res_type") == 2 else files
+            page = int(kwargs.get("page") or 0)
+            size = int(kwargs.get("page_size") or gyp_module.LIST_PAGE_SIZE)
+            chunk = items[page * size : (page + 1) * size]
+            return {
+                "code": 0,
+                "msg": "success",
+                "data": {"list": chunk, "total": len(items)},
+            }
+
+        return _impl
+
+    async def _collect(self, driver: Any, cid: str, **kwargs: Any) -> list[Any]:
+        return [f async for f in driver.iter_tree_by_cid(cid, **kwargs)]
+
+    async def test_subtree_filter_and_relative_dir_mapping(self) -> None:
+        """子树外条目跳过；链上 fileId 用目录名映射成 relative_dir。"""
+        driver = gyp_module.GuangyaDriver(_credential_json())
+        root = self.ROOT
+        dirs = [
+            self._dir("D1", "电影", f"{root}/"),
+            self._dir("D2", "剧集", f"{root}/D1/"),
+            self._dir("DX", "其它内容", "OTHER/"),
+        ]
+        files = [
+            self._file("F1", "顶层.mkv", f"{root}/"),
+            self._file("F2", "电影A.mkv", f"{root}/D1/"),
+            self._file("F3", "剧集B.mkv", f"{root}/D1/D2/"),
+            self._file("F4", "子树外.mkv", "OTHER/DX/"),
+        ]
+        FakeGuangyaClient.fs_files_impl = self._paged_fs_files(dirs, files)
+
+        found = await self._collect(driver, root, parent_path="/影视")
+
+        by_id = {f.remote_id: f for f in found}
+        assert set(by_id) == {"F1", "F2", "F3"}
+        assert by_id["F1"].relative_dir == ""
+        assert by_id["F2"].relative_dir == "电影"
+        assert by_id["F3"].relative_dir == "电影/剧集"
+        # path = parent_path + relative_dir + 文件名
+        assert by_id["F1"].path == "/影视/顶层.mkv"
+        assert by_id["F3"].path == "/影视/电影/剧集/剧集B.mkv"
+        # 字段透传
+        assert by_id["F3"].size == 1024
+        assert by_id["F3"].mtime == 1700000000
+        assert by_id["F3"].is_dir is False
 
     async def test_include_subdirs_false(self) -> None:
+        """False 时只产出媒体库根的直接子文件（链长 1）。"""
         driver = gyp_module.GuangyaDriver(_credential_json())
+        root = self.ROOT
+        dirs = [self._dir("D1", "电影", f"{root}/")]
+        files = [
+            self._file("F1", "顶层.mkv", f"{root}/"),
+            self._file("F2", "深层.mkv", f"{root}/D1/"),
+        ]
+        FakeGuangyaClient.fs_files_impl = self._paged_fs_files(dirs, files)
+
+        found = await self._collect(driver, root, include_subdirs=False)
+
+        assert [f.remote_id for f in found] == ["F1"]
+
+    async def test_missing_full_parent_ids_raises(self) -> None:
+        """条目缺 fullParentIds = 接口改版——必须报错。
+
+        静默跳过会把故障伪装成「媒体库为空」，prune 还会把源端还在
+        的文件当孤儿删掉。
+        """
+        driver = gyp_module.GuangyaDriver(_credential_json())
+        root = self.ROOT
+        dirs = [self._dir("D1", "电影", f"{root}/")]
+        bad = self._file("F1", "怪条目.mkv", f"{root}/")
+        del bad["fullParentIds"]
+        FakeGuangyaClient.fs_files_impl = self._paged_fs_files(dirs, [bad])
+
+        with pytest.raises(DriverError, match="fullParentIds"):
+            await self._collect(driver, root)
+
+    async def test_dir_name_missing_uses_placeholder(self) -> None:
+        """目录映射缺少量 id：用 fileId 占位继续（跳过会让 prune 误删）。"""
+        driver = gyp_module.GuangyaDriver(_credential_json())
+        root = self.ROOT
+        dirs = [self._dir("D1", "电影", f"{root}/")]  # 故意不含 D2
+        files = [self._file("F2", "剧集B.mkv", f"{root}/D1/D2/")]
+        FakeGuangyaClient.fs_files_impl = self._paged_fs_files(dirs, files)
+
+        found = await self._collect(driver, root)
+
+        assert len(found) == 1
+        assert found[0].relative_dir == "电影/D2"
+        assert found[0].path == "/电影/D2/剧集B.mkv"
+
+    async def test_dir_name_missing_over_limit_raises(self) -> None:
+        """目录映射缺失超过上限：接口可能已改版——宁可扫描失败可见。"""
+        driver = gyp_module.GuangyaDriver(_credential_json())
+        root = self.ROOT
+        files = [
+            self._file(f"F{i}", f"{i}.mkv", f"{root}/M{i}/")
+            for i in range(gyp_module.MISSING_DIR_NAME_LIMIT + 1)
+        ]
+        FakeGuangyaClient.fs_files_impl = self._paged_fs_files([], files)
+
+        with pytest.raises(DriverError, match="缺失过多"):
+            await self._collect(driver, root)
+
+    async def test_pagination_terminates_and_uses_large_page(self) -> None:
+        """翻页在不足一页后停止；page_size 用 LIST_PAGE_SIZE（1000）。"""
+        driver = gyp_module.GuangyaDriver(_credential_json())
+        root = self.ROOT
+        dirs = [self._dir("D1", "电影", f"{root}/")]
+        files = [
+            self._file("F1", "a.mkv", f"{root}/D1/"),
+            self._file("F2", "b.mkv", f"{root}/D1/"),
+        ]
+        FakeGuangyaClient.fs_files_impl = self._paged_fs_files(dirs, files)
+
+        found = await self._collect(driver, root)
+
+        assert {f.remote_id for f in found} == {"F1", "F2"}
+
+    async def test_res_type_ignored_defense_skips_dirs(self) -> None:
+        """服务端忽略 res_type 把目录混进文件列表时——跳过目录条目。"""
+        driver = gyp_module.GuangyaDriver(_credential_json())
+        root = self.ROOT
+        dirs = [self._dir("D1", "电影", f"{root}/")]
+        files = [
+            self._file("F1", "a.mkv", f"{root}/D1/"),
+            self._dir("DX", "混进来的目录", f"{root}/"),
+        ]
+        FakeGuangyaClient.fs_files_impl = self._paged_fs_files(dirs, files)
+
+        found = await self._collect(driver, root)
+
+        assert [f.remote_id for f in found] == ["F1"]
+
+    async def test_empty_cid_raises(self) -> None:
+        """空根 fileId 无法与 fullParentIds 匹配——明确报错。"""
+        driver = gyp_module.GuangyaDriver(_credential_json())
+        with pytest.raises(DriverError, match="非空"):
+            await self._collect(driver, "")
+
+    async def test_nonzero_code_raises(self) -> None:
+        """业务错误码必须抛 DriverError（不写 0 兜底的契约）。"""
+        driver = gyp_module.GuangyaDriver(_credential_json())
+        root = self.ROOT
 
         def _fs_files(self: Any, **kwargs: Any) -> dict[str, Any]:
-            items = [
-                {"fileId": "d1", "fileName": "电影", "resType": 2},
-                {"fileId": "f0", "fileName": "top.mkv", "fileSize": 5, "resType": 1},
-            ]
-            return {"code": 0, "data": {"total": len(items), "list": items}}
+            if kwargs.get("res_type") == 2:
+                return {"code": 111, "msg": "访问拒绝", "data": {}}
+            return {"code": 0, "data": {"total": 0, "list": []}}
 
         FakeGuangyaClient.fs_files_impl = _fs_files
-        names = []
-        async for f in driver.iter_tree_by_cid("", include_subdirs=False):
-            names.append(f.name)
-
-        assert names == ["top.mkv"]
+        with pytest.raises(DriverError, match="访问拒绝"):
+            await self._collect(driver, root)
 
 
 class TestDirectLink:
@@ -476,3 +638,27 @@ class TestListOfflineTasks:
 
         assert len(tasks) == 1
         assert tasks[0]["errCode"] == 8
+
+
+class TestDirectLinkBucket:
+    """换直链走独立限速桶（官方限频 2 次/秒，比列目录的 5 次/秒严）。"""
+
+    async def test_uses_link_bucket(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.core import rate_limit as rate_limit_module
+
+        seen: list[str] = []
+
+        async def _fake_acquire(provider: str = "default") -> None:
+            seen.append(provider)
+
+        monkeypatch.setattr(rate_limit_module.rate_limiter, "acquire", _fake_acquire)
+        driver = gyp_module.GuangyaDriver(_credential_json())
+
+        await driver.get_direct_link("123", "Player/1.0")
+
+        assert gyp_module.PROVIDER_LINK in seen
+        # 列目录用的桶不能混进来（两者官方限频不同）
+        assert gyp_module.PROVIDER not in seen
+        assert gyp_module.PROVIDER_LINK != gyp_module.PROVIDER

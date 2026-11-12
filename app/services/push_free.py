@@ -4,6 +4,9 @@
 freeleech_timed}``，且限时种 ``free_end_at - now > push_min_remaining_hours``）。
 去重：``torrent_index.push_status`` 列（``pushed`` = 已推过）。
 
+站点范围：**只推启用站点**（``sites.enabled = 1``）。站点停用只停止拉取，
+**不删** ``torrent_index`` 里的快照——不过滤就会出现「站点已停用却还在推」。
+
 推送流程：``SiteAdapter.download_torrent(item_id)`` → bytes →
 ``infohash_from_torrent(bytes)`` 解析真 hash →
 ``DownloaderAdapter.add_torrent(torrent_bytes=bytes)`` →
@@ -417,10 +420,20 @@ class PushFreeService:
                 TorrentIndex.free_end_at,
                 bucket.label("bonus_bucket"),
             )
+            # INNER JOIN sites：只推**启用**站点的种子。
+            #
+            # 为什么必须：站点停用（sites.enabled=0）只停止拉取，**不删**
+            # torrent_index 里的快照——若不过滤，停用后旧快照仍会被选中
+            # （在 24h 新鲜度窗口内），出现「站点已停用却还在推」的故障。
+            # INNER JOIN 顺带兜住站点已删的孤儿行（正常路径下不会存在：
+            # 删站点会级联删 torrent_index）。
+            .join(Site, Site.id == TorrentIndex.site_id)
             # LEFT JOIN：站点没有 site_user_data 行（没抓过 / 抓失败）时
             # hourly_bonus_capped 为 NULL → 落「无信号」档，行为与改动前一致。
             .outerjoin(SiteUserData, SiteUserData.site_id == TorrentIndex.site_id)
             .where(
+                # 只推启用站点（停用站点的种子一律不推）
+                Site.enabled.is_(True),
                 # 显式白名单：永久免费 + 限时免费 + 2X 限时
                 # 退还（REFUND）/折扣（NEUTRAL）/未知（UNKNOWN）均不自动推送
                 or_(

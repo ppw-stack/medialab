@@ -413,6 +413,63 @@ def _build_driver(driver: Driver) -> Any:
 #: 分批提交让「已扫到的部分」保住——重跑时只需补剩下的。
 COMMIT_EVERY = 50
 
+#: 附件**同时下载**的路数（2026-11-12 生产实测后加入）。
+#:
+#: 换直链走全局限速器（光鸭 0.2s/请求）天然安全，并发只摊掉 CDN
+#: 下载与超时重试的等待——实测光鸭 CDN 会掐连接（3 次重试 +
+#: 60s 超时的附件在串行下是 3 分钟的长尾毒瘤），生产首次全量
+#: 附件约 18s/个、几千个附件要十几小时；4 路并发摊掉等待后
+#: 瓶颈回到换直链限速（5 个/秒上限）。
+#:
+#: 别调太大：光鸭 CDN 对并发不友好（上传接口实测并发会断连），
+#: 4 路是保守起点。
+#:
+#: 2026-11-12 生产实测调到 3 路：并发 4 时失败率 17%（CDN 掐连接
+#: ``peer closed connection without sending complete message body``），
+#: 并发 2 的对比实测成功率 91%、41 个/分钟——3 路是速率与成功率的
+#: 折中。
+ATTACHMENT_CONCURRENCY = 3
+
+#: 附件任务的**在途窗口**：挂起任务达到此数就等任意一个完成再继续
+#: 遍历（背压）。没有它，遍历会瞬间把几千个附件协程全部压进事件循环。
+ATTACHMENT_WINDOW = 64
+
+
+async def _sync_attachment_counted(
+    driver_impl: Any,
+    cloud_file: CloudFile,
+    target: Path,
+    *,
+    http: httpx.AsyncClient,
+    stats: ScanStats,
+    semaphore: asyncio.Semaphore,
+) -> None:
+    """下载单个附件并更新扫描统计（并发 worker）。
+
+    **不抛异常**——失败折叠进 ``stats``，与单附件失败隔离语义一致；
+    信号量限制同时下载的路数（换直链已走全局限速器，这里只限
+    CDN 下载本身）。
+    """
+    async with semaphore:
+        try:
+            result = await attachments.sync_attachment(
+                driver_impl, cloud_file, target, http=http
+            )
+        except Exception as exc:
+            logger.exception("附件同步异常 %s", cloud_file.path)
+            result = attachments.AttachmentResult(
+                attachments.FAILED, f"{type(exc).__name__}: {exc}"
+            )
+    if result.status == attachments.SYNCED:
+        stats.attachment_synced += 1
+    elif result.status == attachments.UNCHANGED:
+        stats.attachment_unchanged += 1
+    else:
+        stats.attachment_failed += 1
+        if result.error and len(stats.errors) < 20:
+            stats.errors.append(f"{cloud_file.path}: {result.error}")
+        logger.warning("附件同步失败 %s：%s", cloud_file.path, result.error)
+
 
 async def scan_driver(
     db: AsyncSession,
@@ -479,6 +536,10 @@ async def scan_driver(
     seen_remote_ids: set[str] = set()
     processed = 0
 
+    attachment_sem = asyncio.Semaphore(ATTACHMENT_CONCURRENCY)
+    attachment_tasks: set[asyncio.Task[None]] = set()
+    cancelled = False
+
     owns_client = http_client is None
     if http_client is None:
         # follow_redirects：网盘直链可能再跳一次 CDN
@@ -500,21 +561,26 @@ async def scan_driver(
                 cloud_file.name, video_exts, image_exts, data_exts
             )
             if category in ("image", "data"):
-                # 图片 / nfo / 字幕 → 下载到与 strm 同目录，保持原文件名
+                # 图片 / nfo / 字幕 → 并发下载到与 strm 同目录，保持原文件名。
+                # 遍历不再被附件下载拖住（2026-11-12 生产实测：串行时
+                # 首次全量附件 ~18s/个，几千个附件 = 十几小时）。
                 target = output_dir / target_attachment_path(driver, cloud_file)
-                result = await attachments.sync_attachment(
-                    driver_impl, cloud_file, target, http=http_client
+                task = asyncio.create_task(
+                    _sync_attachment_counted(
+                        driver_impl,
+                        cloud_file,
+                        target,
+                        http=http_client,
+                        stats=stats,
+                        semaphore=attachment_sem,
+                    )
                 )
-                if result.status == attachments.SYNCED:
-                    stats.attachment_synced += 1
-                elif result.status == attachments.UNCHANGED:
-                    stats.attachment_unchanged += 1
-                else:
-                    stats.attachment_failed += 1
-                    if result.error and len(stats.errors) < 20:
-                        stats.errors.append(f"{cloud_file.path}: {result.error}")
-                    logger.warning(
-                        "附件同步失败 %s：%s", cloud_file.path, result.error
+                attachment_tasks.add(task)
+                task.add_done_callback(attachment_tasks.discard)
+                if len(attachment_tasks) >= ATTACHMENT_WINDOW:
+                    # 背压：等任意一个完成再继续遍历（内存有界）
+                    await asyncio.wait(
+                        attachment_tasks, return_when=asyncio.FIRST_COMPLETED
                     )
                 continue
             if category != "video":
@@ -550,11 +616,22 @@ async def scan_driver(
             # 分批提交——中途失败不至于全丢
             if processed % COMMIT_EVERY == 0:
                 await db.commit()
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
     except DriverError as exc:
         raise MediaServiceError(
             f"扫描失败：{exc}", status_code=502, kind="upstream"
         ) from exc
     finally:
+        # 收尾在途附件：正常结束等它们完成（统计才完整）；被取消时
+        # 终止剩余任务（.part 由附件内部清理，已下载完整的靠下次扫描
+        # 的判重兜底）。附件不用 db，与这里的 commit 不冲突。
+        if attachment_tasks:
+            if cancelled:
+                for task in attachment_tasks:
+                    task.cancel()
+            await asyncio.gather(*attachment_tasks, return_exceptions=True)
         if owns_client:
             await http_client.aclose()
 

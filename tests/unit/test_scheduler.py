@@ -16,7 +16,9 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from app.services import scheduler
 from app.services.scheduler import JobSpec, RunResult, SchedulerCenter
+from sqlalchemy.exc import OperationalError
 
 
 async def _ok_job() -> dict[str, object]:
@@ -447,3 +449,100 @@ def test_preflight_covers_all_lazy_imports() -> None:
     job_registry.preflight_job_imports()
     missing = sorted(m for m in lazy_modules if m not in sys.modules)
     assert not missing, f"preflight_job_imports 漏了这些模块：{missing}"
+
+
+# ------------------------------------------------- 作业历史落库（_record_run）
+
+class _FakeSession:
+    """假 session：commit 按次数抛 OperationalError（模拟 SQLite 锁竞争）。"""
+
+    def __init__(self, fail_times: int) -> None:
+        self._fail_times = fail_times
+        self.commits = 0
+
+    async def __aenter__(self) -> _FakeSession:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+    def add(self, obj: object) -> None:
+        return None
+
+    async def commit(self) -> None:
+        self.commits += 1
+        if self._fail_times > 0:
+            self._fail_times -= 1
+            raise OperationalError(
+                "INSERT INTO job_runs", {}, Exception("database is locked")
+            )
+
+
+class _FakeFactory:
+    def __init__(self, session: _FakeSession) -> None:
+        self._session = session
+
+    def __call__(self) -> _FakeSession:
+        return self._session
+
+
+def _call_record_run() -> None:
+    scheduler._record_run(
+        job_name="j1",
+        trigger="cron",
+        started_at="2026-11-12 15:00:00",
+        finished_at="2026-11-12 15:00:05",
+        duration_ms=5000,
+        ok=True,
+        error=None,
+        result={"ok": 1},
+    )
+
+
+@pytest.mark.usefixtures()
+class TestRecordRun:
+    """job_runs 落库的 SQLite 锁竞争降级（2026-11-12 生产撞锁后固化）。
+
+    扫描/调度批量写库期间，``_persist`` 的 commit 会撞锁——退避重试
+    一次，仍失败降级 warning。任务必须**干净完成**：任何异常逃逸都会
+    刷「Task exception was never retrieved」ERROR 日志。
+    """
+
+    async def test_lock_conflict_retries_then_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.db import session as db_session
+
+        fake = _FakeSession(fail_times=1)
+        monkeypatch.setattr(
+            db_session, "get_session_factory", lambda: _FakeFactory(fake)
+        )
+        _call_record_run()
+        # 退避 0.5s + 重试落库
+        await asyncio.sleep(0.65)
+
+        assert fake.commits == 2
+        assert scheduler._record_tasks == set()
+
+    async def test_lock_conflict_twice_degrades_without_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+
+        from app.db import session as db_session
+
+        fake = _FakeSession(fail_times=2)
+        monkeypatch.setattr(
+            db_session, "get_session_factory", lambda: _FakeFactory(fake)
+        )
+        with caplog.at_level(logging.WARNING):
+            _call_record_run()
+        await asyncio.sleep(0.65)
+
+        assert fake.commits == 2
+        # 任务干净完成（不被 asyncio 异常处理器记账）
+        assert scheduler._record_tasks == set()
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert any("锁竞争" in r.message for r in caplog.records)

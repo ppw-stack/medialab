@@ -20,6 +20,14 @@ False，中转层不必按 UA 分桶（但保留分桶也无害）。
 请求前检查，过期就刷新；刷新成功后**必须把新 token 写回 DB**——否则
 重启后又用旧 token → 401 → 刷新失败。写回通过 ``on_token_refresh``
 回调注入。
+
+**全量列表**（2026-11-12 生产实测，改写扫描遍历）：``fs_files`` 支持
+``parent_id="*"``（全账号）+ ``res_type`` 过滤，条目带
+``fullParentIds``（从账号根到父目录的完整 fileId 链）与 ``parentId``。
+``iter_tree_by_cid`` 据此用约 16 个只读请求替代逐目录递归（生产
+970 目录 ≈ 1100+ 请求、限速下 5-9 分钟）。同日实测还确认：
+``page_size`` 支持到 1000+；**目录 ``utime`` 不可靠**（建子目录会变，
+改名/删除都不变）——不能做「目录 mtime 剪枝」。
 """
 
 from __future__ import annotations
@@ -45,14 +53,49 @@ logger = get_logger(__name__)
 #: 限速器里光鸭的桶名
 PROVIDER = "guangya"
 
+#: 限速器里光鸭**换直链**的桶名
+#:
+#: 官方限频是 5 次/秒（列目录）/ **2 次/秒（换直链）**——后者更严，
+#: 单独一个桶。共用列目录的桶（0.2 秒 = 5/s）会超官方限频：实测附件
+#: 并发 4 路后换直链峰值 5/s → 光鸭软限频 → 扫描速率从 45 掉到 21
+#: 个/分钟、30 分钟内 96 次下载重试（2026-11-12 生产实测）。
+PROVIDER_LINK = "guangya_link"
+
 #: 光鸭 Web 端的 client_id（官方固定值，不是用户申请的）
 DEFAULT_CLIENT_ID = "aMe-8VSlkrbQXpUR"
 
 #: 业务域名
 DEFAULT_API_BASE_URL = "https://api.guangyapan.com"
 
-#: 每页拉多少条（光鸭列目录上限 5 次/秒/页）
+#: 每页拉多少条（``list_dir_by_cid`` 用——浏览目录树时单目录条目少，
+#: 100 足够；实测 2026-11-12 ``fs_files`` 的 ``page_size`` 服务端支持
+#: 1000+，全量列表走 :data:`LIST_PAGE_SIZE`）。
 PAGE_SIZE = 100
+
+#: **全量列表**模式的每页条数（2026-11-12 生产实测：``page_size``
+#: 100/200/500/1000 全部生效，``total=15573`` 无截断）。
+#:
+#: ``fs_files`` 支持 ``parent_id="*"``（全账号）+ ``res_type`` 过滤，
+#: 条目带 ``fullParentIds``（从账号根到父目录的完整 fileId 链）——
+#: 两个只读调用（目录 + 文件各一次翻页）即可替代逐目录递归：
+#: 生产 726 目录 + ~1.5 万文件，旧递归 ≈ 1100+ 请求（限速 0.2s/请求
+#: ≈ 5-9 分钟），全量列表 ≈ 16 请求（≈ 10 秒）。
+LIST_PAGE_SIZE = 1000
+
+#: 全量列表的翻页防御上限。
+#:
+#: ``cloud_task_list`` 实测会**完全忽略** ``page`` 参数（返回相同列表，
+#: 终止条件永远不满足 → 无限循环，1.5 秒打出 2 万+ 请求）。``fs_files``
+#: 的翻页在生产扫描中一直正常，但防御同一类故障：超过上限按接口异常
+#: 报错，而不是把光鸭打到风控。
+MAX_LIST_PAGES = 1000
+
+#: 目录名映射允许缺失的上限。
+#:
+#: 文件条目的 ``fullParentIds`` 需要用目录列表换算成目录名；正常情况
+#: 缺失为 0（目录列表覆盖全账号）。少量缺失（两次调用间的竞态删除）
+#: 用 fileId 占位继续；缺失过多说明接口行为变了——宁可扫描失败可见。
+MISSING_DIR_NAME_LIMIT = 10
 
 #: Token 过期前多少秒就刷新
 TOKEN_REFRESH_MARGIN_SEC = 300
@@ -196,10 +239,21 @@ class GuangyaDriver:
             except Exception:
                 logger.exception("光鸭 Token 写回失败（不影响本次使用）")
 
-    async def _call(self, method: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        """调一次业务接口（自动限速 + Token 刷新 + 错误码映射）。"""
+    async def _call(
+        self,
+        method: str,
+        *args: Any,
+        bucket: str | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """调一次业务接口（自动限速 + Token 刷新 + 错误码映射）。
+
+        Args:
+            bucket: 限速桶名。默认光鸭业务接口桶；换直链走
+                :data:`PROVIDER_LINK`（官方限频更严，2 次/秒）。
+        """
         await self._ensure_token()
-        await rate_limiter.acquire(PROVIDER)
+        await rate_limiter.acquire(bucket or PROVIDER)
         try:
             result = await asyncio_to_thread(
                 getattr(self.client, method), *args, **kwargs
@@ -274,43 +328,162 @@ class GuangyaDriver:
         parent_path: str = "",
         include_subdirs: bool = True,
     ) -> AsyncIterator[CloudFile]:
-        """按 fileId 递归遍历目录树，**流式**产出文件。
+        """按 fileId 遍历媒体库子树，**流式**产出文件（目录不产出）。
 
-        递归时用子项**自己的 fileId** 作为下一层 parentId——不需要再解析
-        路径。``parent_path`` 往下传，只为让日志里的路径可读（光鸭接口
-        不返回路径字符串）。
+        **全量列表模式**（2026-11-12 生产实测后重写）：``fs_files``
+        支持 ``parent_id="*"`` 且条目带 ``fullParentIds``——先用一次
+        ``res_type=2`` 拉全账号目录建「fileId → 目录名」映射，再翻页拉
+        ``res_type=1`` 文件，按 ``fullParentIds`` 过滤出 ``cid`` 子树并
+        把链上的 fileId 换成目录名拼 ``relative_dir``。约 16 个请求替代
+        旧逐目录递归的成百上千次（见 :data:`LIST_PAGE_SIZE`）。
 
-        **同时维护 ``relative_dir``**（相对媒体库根的目录）——光鸭没有
-        「路径 ↔ id」反查接口，拿不到根路径字符串，只能在递归时自己
-        累加相对深度。没有它，附件会全部平铺在输出根目录下（目录结构丢）。
+        ``relative_dir`` 语义与旧实现一致：**相对媒体库根（``cid``）的
+        父目录**，顶层文件为空串——消费端
+        :func:`app.services.media.target_relative_dir` 靠它算 STRM 落盘
+        目录，目录结构不能丢。
+
+        ``parent_path`` 只用于拼 ``path``（日志与展示可读），光鸭接口
+        不返回路径字符串。
+
+        Args:
+            cid: 媒体库根 fileId。**必须非空**（扫描入口已校验
+                ``media_cid``；空串无法与 ``fullParentIds`` 匹配）。
+            include_subdirs: False 时只产出 ``cid`` 直接子文件（链长 1）。
 
         Yields:
-            每个文件（目录不产出）。
+            子树内每个文件。
         """
-        stack: list[tuple[str, str, str]] = [
-            (str(cid or ""), parent_path or "/", "")
-        ]
-
-        while stack:
-            current_id, current_path, current_rel = stack.pop()
-            children = await self.list_dir_by_cid(
-                current_id,
-                parent_path=current_path,
-                relative_dir=current_rel,
+        root = str(cid or "")
+        if not root:
+            raise DriverError(
+                "光鸭遍历需要非空的媒体库根 fileId（media_cid）", kind="config"
             )
-            for child in children:
-                if child.is_dir:
-                    if include_subdirs:
-                        # 用子项 id 继续递归——目录改名不影响
-                        stack.append(
-                            (
-                                child.remote_id,
-                                child.path,
-                                child.relative_dir or "",
-                            )
-                        )
-                else:
-                    yield child
+
+        dir_names = await self._fetch_dir_name_map()
+        missing_ids: set[str] = set()
+
+        async for item in self._iter_all_items(res_type=1):
+            # 防御：服务端忽略 res_type 时把目录也混进来——跳过
+            if int(item.get("resType") or 1) == 2:
+                continue
+            file_id = str(item.get("fileId") or "")
+            name = str(item.get("fileName") or "")
+            if not file_id or not name:
+                continue
+
+            raw_chain = str(item.get("fullParentIds") or "")
+            chain = [seg for seg in raw_chain.split("/") if seg]
+            # 条目缺 fullParentIds = 接口改版——**必须报错**，静默跳过
+            # 会把故障伪装成「媒体库为空」（拉取失败必须抛错的契约）
+            if not chain:
+                raise DriverError(
+                    f"光鸭全量列表条目缺 fullParentIds（fileId={file_id}），"
+                    "接口可能已改版",
+                    kind="unknown",
+                )
+            if chain[0] != root:
+                continue  # 不在媒体库子树（全账号列表里有其它内容）
+            if not include_subdirs and len(chain) > 1:
+                continue  # 仅顶层
+
+            rel_parts: list[str] = []
+            for ancestor in chain[1:]:
+                dir_name = dir_names.get(ancestor)
+                if dir_name is None:
+                    # 目录映射缺 id（两次调用间的竞态删除/接口异常）。
+                    # 用 fileId 占位——路径确定可复现，不静默跳过（跳过
+                    # 会让 prune 把「源端还在」的文件当成孤儿删掉）。
+                    missing_ids.add(ancestor)
+                    dir_name = ancestor
+                rel_parts.append(dir_name)
+
+            if len(missing_ids) > MISSING_DIR_NAME_LIMIT:
+                raise DriverError(
+                    f"光鸭目录映射缺失过多（{len(missing_ids)} 个 fileId 无名），"
+                    "接口可能已改版",
+                    kind="unknown",
+                )
+
+            rel = "/".join(rel_parts)
+            parent = (parent_path or "/").rstrip("/")
+            path = f"{parent}/{rel}/{name}" if rel else f"{parent}/{name}"
+
+            yield CloudFile(
+                remote_id=file_id,
+                path=path,
+                name=name,
+                size=int(item.get("fileSize") or 0),
+                is_dir=False,
+                mtime=int(item.get("utime") or item.get("ctime") or 0),
+                relative_dir=rel,
+            )
+
+        if missing_ids:
+            logger.warning(
+                "光鸭目录映射缺失 %d 个 fileId（已用 fileId 占位路径）：%s",
+                len(missing_ids),
+                ", ".join(sorted(missing_ids)[:10]),
+            )
+
+    async def _fetch_dir_name_map(self) -> dict[str, str]:
+        """拉全账号目录（``res_type=2``），返回 ``{fileId: 目录名}``。
+
+        生产实测 726 个目录 = 1 个请求（:data:`LIST_PAGE_SIZE`=1000）。
+        """
+        names: dict[str, str] = {}
+        async for item in self._iter_all_items(res_type=2):
+            file_id = str(item.get("fileId") or "")
+            name = str(item.get("fileName") or "")
+            if file_id and name:
+                names[file_id] = name
+        return names
+
+    async def _iter_all_items(self, res_type: int) -> AsyncIterator[dict[str, Any]]:
+        """全账号列表翻页（``parent_id="*"``），逐条 yield 原始 item。
+
+        **翻页防御**：超过 :data:`MAX_LIST_PAGES` 按接口异常报错——
+        ``cloud_task_list`` 实测会忽略 ``page`` 参数导致无限循环，
+        ``fs_files`` 一旦出现同款故障必须可见地失败，而不是把光鸭
+        打到风控。
+        """
+        page = 0
+        total: int | None = None
+        seen = 0
+        while True:
+            payload = await self._call(
+                "fs_files",
+                parent_id="*",
+                page=page,
+                page_size=LIST_PAGE_SIZE,
+                order_by=0,
+                sort_type=0,
+                file_types=[],
+                res_type=res_type,
+            )
+            code = payload.get("code")
+            if code not in (None, 0):
+                raise DriverError(
+                    f"光鸭全量列表失败：{payload.get('msg') or payload}",
+                    kind=_map_code(code),
+                )
+            data = payload.get("data") or {}
+            items = data.get("list") or []
+            if not items:
+                return
+            if total is None:
+                total = int(data.get("total") or 0)
+            for item in items:
+                seen += 1
+                yield item
+            if len(items) < LIST_PAGE_SIZE or (total and seen >= total):
+                return
+            page += 1
+            if page >= MAX_LIST_PAGES:
+                raise DriverError(
+                    f"光鸭全量列表翻页超过 {MAX_LIST_PAGES} 页仍未取完，"
+                    "疑似服务端忽略了 page 参数",
+                    kind="unknown",
+                )
 
     # -- 写能力（迁移用） --
 
@@ -445,7 +618,9 @@ class GuangyaDriver:
         **过期时间用 ``urlDuration``**——``signedURL`` 里没有可解析的
         过期参数，故由驱动直接给出 ``expires_at``。
         """
-        payload = await self._call("download_url", str(remote_id))
+        payload = await self._call(
+            "download_url", str(remote_id), bucket=PROVIDER_LINK
+        )
         code = payload.get("code")
         if code not in (None, 0):
             raise DriverError(

@@ -17,6 +17,7 @@ fallback TTL（默认 600s）。
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
@@ -24,6 +25,7 @@ from dataclasses import dataclass
 from urllib.parse import parse_qsl, urlsplit
 
 from sqlalchemy import delete, select
+from sqlalchemy.exc import OperationalError
 
 from app.core.config import AppSettings
 from app.core.logging import get_logger
@@ -33,6 +35,12 @@ from app.db.models import LinkCacheEntry
 from app.db.session import session_scope
 
 logger = get_logger(__name__)
+
+#: 缓存写失败后的重试间隔（秒）。
+#:
+#: ``database is locked`` 通常是**瞬时**的——别的连接正持写锁，几百毫秒后
+#: 就释放。重试一次比直接放弃命中率更高。
+_LOCK_RETRY_DELAY = 0.3
 
 
 @dataclass(frozen=True)
@@ -119,15 +127,24 @@ class LinkCache:
     # -- L2 --
 
     async def _l2_get(self, media_id: int, ua_hash: str) -> CachedLink | None:
-        async with session_scope() as db:
-            row = (
-                await db.execute(
-                    select(LinkCacheEntry).where(
-                        LinkCacheEntry.media_id == media_id,
-                        LinkCacheEntry.ua_hash == ua_hash,
+        try:
+            async with session_scope() as db:
+                row = (
+                    await db.execute(
+                        select(LinkCacheEntry).where(
+                            LinkCacheEntry.media_id == media_id,
+                            LinkCacheEntry.ua_hash == ua_hash,
+                        )
                     )
-                )
-            ).scalar_one_or_none()
+                ).scalar_one_or_none()
+        except OperationalError as exc:
+            # **读缓存失败 ≠ 不能播放**——当作「未命中」继续换取直链。
+            #
+            # 2026-11-12 prod 事故：扫描作业大批量写库时，中转请求读缓存
+            # 撞上 SQLite 写锁（DELETE 模式是**全库排他**锁），异常冒泡 →
+            # **播放 500**。直链缓存是优化，不是播放的前提。
+            logger.warning("读取直链缓存失败（按未命中处理）：%s", exc)
+            return None
         if row is None:
             return None
         link = CachedLink(url=row.url, expires_at=row.expires_at)
@@ -139,28 +156,41 @@ class LinkCache:
         self, media_id: int, ua_hash: str, url: str, expires_at: int
     ) -> None:
         now = bj_now()
-        async with session_scope() as db:
-            existing = (
-                await db.execute(
-                    select(LinkCacheEntry).where(
-                        LinkCacheEntry.media_id == media_id,
-                        LinkCacheEntry.ua_hash == ua_hash,
-                    )
-                )
-            ).scalar_one_or_none()
-            if existing is None:
-                db.add(
-                    LinkCacheEntry(
-                        media_id=media_id,
-                        ua_hash=ua_hash,
-                        url=url,
-                        expires_at=expires_at,
-                        created_at=now,
-                    )
-                )
-            else:
-                existing.url = url
-                existing.expires_at = expires_at
+        for attempt in (1, 2):
+            try:
+                async with session_scope() as db:
+                    existing = (
+                        await db.execute(
+                            select(LinkCacheEntry).where(
+                                LinkCacheEntry.media_id == media_id,
+                                LinkCacheEntry.ua_hash == ua_hash,
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if existing is None:
+                        db.add(
+                            LinkCacheEntry(
+                                media_id=media_id,
+                                ua_hash=ua_hash,
+                                url=url,
+                                expires_at=expires_at,
+                                created_at=now,
+                            )
+                        )
+                    else:
+                        existing.url = url
+                        existing.expires_at = expires_at
+                return
+            except OperationalError as exc:
+                # 写锁冲突是**瞬时**的（别的连接正持写锁）——退避重试一次。
+                if attempt == 1:
+                    await asyncio.sleep(_LOCK_RETRY_DELAY)
+                    continue
+                # 仍失败就**放弃写缓存**：直链已经换到手，播放不能因为
+                # 「缓存写不进去」而失败（2026-11-12 prod 事故：这里抛出去
+                # 直接变成播放 500）。
+                logger.warning("写入直链缓存失败（忽略，不影响播放）：%s", exc)
+                return
 
     # -- 对外 --
 
@@ -179,7 +209,11 @@ class LinkCache:
         return None
 
     async def put(self, media_id: int, ua_hash: str, url: str, expires_at: int) -> None:
-        """写入缓存（L1 + L2）。"""
+        """写入缓存（L1 + L2）。
+
+        **L2 写失败不影响调用方**（降级成「只有 L1 内存缓存」）——缓存是
+        优化，直链已经换到手，不能因为「缓存写不进去」让播放失败。
+        """
         link = CachedLink(url=url, expires_at=expires_at)
         self._l1_put(media_id, ua_hash, link)
         await self._l2_put(media_id, ua_hash, url, expires_at)

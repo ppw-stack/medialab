@@ -10,8 +10,8 @@
 
 错误分类（``PushItemError.category``）：
 - ``download`` / ``parse`` / ``add`` —— 瞬态失败，mark_failed 退避重试
-- ``fatal`` —— 站点/下载器/索引行已不存在等契约错误，mark_failed_forever
-  不重试（重试只会反复失败）
+- ``fatal`` —— 站点**已停用**/不存在、下载器已禁用/不存在、索引行已不存在
+  等契约错误，mark_failed_forever 不重试（重试只会反复失败）
 """
 
 from __future__ import annotations
@@ -103,12 +103,20 @@ async def execute_add_torrent(
         # expire_on_commit=False，但显式提取更清晰且防未来变更）
         if site is not None:
             site_row = site  # 保留引用给 factory.site()
+            site_enabled = site.enabled
         if dl is not None:
             dl_enabled = dl.enabled
             dl_save_path = dl.save_path
             dl_row = dl  # 保留引用给 factory.downloader()
     if site is None:
         raise PushItemError("fatal", f"站点 id={site_id} 已不存在")
+    if not site_enabled:
+        # 站点被停用 → 不推（fatal：重试也不可能成功，直接死信）。
+        #
+        # 为什么执行层也要拦：候选查询（push_free）已经过滤 enabled 站点，
+        # 但**停用前已入队**的 pending/failed 任务会被 drain_task_queue 重试
+        # ——那正是「站点已停用却还在推」的第二条路径。
+        raise PushItemError("fatal", f"站点 id={site_id} 已停用")
     if dl is None:
         raise PushItemError("fatal", f"下载器 id={downloader_id} 已不存在")
     if not dl_enabled:

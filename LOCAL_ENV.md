@@ -50,7 +50,7 @@
 | Compose | `docker-compose.yml` | `docker-compose.prod.128.yml` |
 | 用途 | 开发调试 | 生产运行 |
 
-**SSH 访问 prod**：`ssh mp`（`~/.ssh/config` 中的别名 → `root@192.168.0.128`）
+**SSH 访问 prod**：`ssh unraid`（`~/.ssh/config` 中的别名 → `root@192.168.0.128`；旧别名 `mp` 已失效）
 
 > ✅ **只有两个 compose 文件**（2026-10-21 起删掉了重复的本机 prod）：
 >
@@ -510,8 +510,8 @@ cd web && npx playwright test
 ./scripts/deploy.sh logs            # 跟日志
 
 # 远端操作
-ssh mp "docker ps --filter name=medialab"
-ssh mp "docker logs -f medialab --tail 100"
+ssh unraid "docker ps --filter name=medialab"
+ssh unraid "docker logs -f medialab --tail 100"
 ```
 
 ### 本机构建镜像给 prod 用
@@ -533,10 +533,10 @@ CI **只构建推送镜像，不部署**（无 ssh/deploy job）。实际链路�
 git push origin main
 
 # 2) 128 上拉新镜像
-ssh mp "docker pull ppw111/medialab:latest"
+ssh unraid "docker pull ppw111/medialab:latest"
 
 # 3) 128 上重建容器（注意用 .128.yml 那个文件 + TAG=latest）
-ssh mp "cd /mnt/user/appdata/medialab/app && TAG=latest docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d"
+ssh unraid "cd /mnt/user/appdata/medialab/app && TAG=latest docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d"
 ```
 
 > ⚠️ **第 3 步必须带 `TAG=latest`**（2026-10-22 实测确认）。
@@ -546,9 +546,21 @@ ssh mp "cd /mnt/user/appdata/medialab/app && TAG=latest docker compose -f docker
 > 容器却会显示"重建成功"，**极易误判成部署成功**。
 > 现网跑的容器用的是 `latest`，所以显式传 `TAG=latest` 才与现状一致。
 >
+> ⚠️ **改容器端口必须同步改 `PUBLIC_BASE_URL`**（2026-11-12 prod 事故）。
+> `PUBLIC_BASE_URL` 是写进 STRM 的中转 URL 前缀，必须与 `HOST_PORT` 一致
+> （compose 里还有 `ports: "${HOST_PORT}:8080"`）。prod 曾在合并迁移时
+> 容器端口从 8099 改为 8092，但 `.env.prod` 的
+> `PUBLIC_BASE_URL=http://192.168.0.128:8099` 没跟着改 → **1176 个 STRM
+> 全部指向死端口 8099，播放全挂**，且「容器重建成功」的表象完全掩盖了它。
+> 排查入口：`cat 一个 .strm 看 URL 端口` → `ss -tln | grep <端口>`；
+> 修复 = 改 `.env.prod` → 重建容器 → **批量修正存量 STRM**
+> （`find "$LIB" -name "*.strm" -exec sed -i 's|旧|新|g' {} +`——签名只含
+> media_id，换 host:port 无需重签，与应用重写等价）。
+> 现网跑的容器用的是 `latest`，所以显式传 `TAG=latest` 才与现状一致。
+>
 > ⚠️ **部署前先备份 DB**（手工，见 DEPLOY.md §8）：
 > ```bash
-> ssh mp "cd /mnt/user/appdata/medialab/data && sqlite3 medialab.db \".backup './medialab.db.bak.\$(date +%Y%m%d_%H%M%S)'\""
+> ssh unraid "cd /mnt/user/appdata/medialab/data && sqlite3 medialab.db \".backup './medialab.db.bak.\$(date +%Y%m%d_%H%M%S)'\""
 > ```
 > 备份后用 `PRAGMA integrity_check;` 确认（损坏的副本没有抢救价值）。
 >

@@ -218,3 +218,36 @@ class TestRetry:
 
         assert result.status == attachments.UNCHANGED
         assert "pc1" not in fake_driver.call_counts
+
+
+class TestAttachmentTimeout:
+    """附件下载的独立超时（2026-11-12 生产实测后固化）。
+
+    附件是 KB~MB 级小文件，共享 client 的 60s 超时会让一个卡死的连接
+    占住下载 worker 60s（3 次重试 = 3 分钟长尾）——实测把扫描速率拖到
+    21 个/分钟。故附件按请求覆盖成 15s。
+    """
+
+    async def test_uses_short_timeout(
+        self, fake_driver: FakeDriver, tmp_path
+    ):
+        cloud_file = _add(fake_driver, size=4)
+        target = tmp_path / "x" / "poster.jpg"
+        seen: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["timeout"] = request.extensions.get("timeout")
+            return httpx.Response(200, content=b"JPEG")
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), follow_redirects=True
+        ) as http:
+            result = await sync_attachment(fake_driver, cloud_file, target, http=http)
+
+        assert result.status == attachments.SYNCED
+        timeout = seen.get("timeout")
+        assert isinstance(timeout, dict)
+        assert timeout["read"] == attachments.ATTACHMENT_TIMEOUT.read
+        assert timeout["connect"] == attachments.ATTACHMENT_TIMEOUT.connect
+        # 比共享 client 的 60s 短，但够慢 CDN 节点（15s 实测失败率 17%）
+        assert timeout["read"] == 45.0

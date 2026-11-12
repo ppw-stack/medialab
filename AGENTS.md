@@ -67,7 +67,8 @@
   - **动态并发闸 `_SmallGate`**：大文件上传中自动降为 1 让路；连续失败 3 次熔断（冷却 60s + 串行观察，连续成功 10 次才恢复并发）——「并发卡死」的保险丝
   - **全局「处理中」去重 `_INFLIGHT`**：同文件绝不被两个协程同时传——光鸭同名上传自动改名 `xxx(1).bin`，双传 = 云端垃圾副本。事件流双通道之间、事件流与全量同步之间全靠它互斥（小通道**不持** `_SYNC_LOCKS`）
   - **队列满不丢**：溢出暂存（按路径去重，上限 5000）→ worker 空闲回灌；只有暂存也满才真丢并计数。水位（大/小/溢出/丢弃）暴露到面板——过去只能靠刷屏的丢弃日志感知积压
-  - **同名冲突策略 `upload_tasks.conflict_policy`**（2026-11-09 加入）：同名但**大小不同**时——`1`=**保留大的**（默认；本地更小则跳过上传、保住云端那份，本地原件也因「云端大小≠本地大小」不被清理）、`0`=本地优先（删旧→传新，历史行为）。**为什么默认保留大的**：本地重新压制出的版本往往更小（去音轨/换压制组），直接覆盖等于用小版本顶掉大版本——真实踩过的坑。「更大」≠「更新」（同大小仍按「已同步」跳过，不比哈希）
+  - **同名冲突策略 `upload_tasks.conflict_policy`**（2026-11-09 加入，2026-11-12 修订清理语义）：同名但**大小不同**时——`1`=**保留大的**（默认；本地更小则跳过上传、保住云端那份）、`0`=本地优先（删旧→传新，历史行为）。**为什么默认保留大的**：本地重新压制出的版本往往更小（去音轨/换压制组），直接覆盖等于用小版本顶掉大版本——真实踩过的坑。「更大」≠「更新」（同大小仍按「已同步」跳过，不比哈希）
+  - **「保留大的」时本地小的也删**（2026-11-12 用户要求「保留大的，移除小的」）：策略 1 + 云端更大 + `delete_local` 开 → **本地原件一并删除**。实现是 `SyncOutcome.cloud_kept=True` 让清理闸从「云端 == 本地」放宽为「云端 ≥ 本地」——云端那份是按策略保留的完整版本，本地小的没有保留价值。注意：**只有策略 1 的「云端更大」分支走放宽**；上传后路径（==）与「云端 < 本地」的防御分支仍按原语义拦下。生产实例：`伟大的长征 S01E43`（云端 1550731096 / 本地 1532422131 字节）
   - ⚠️ **方法论**：测上传吞吐必须用**生产规模**文件（≥100MB）且做**串行/并发交替对照**。曾用 50MB/10 片测出「并发快 2 倍」的**假象**，据此写了两版并发实现再逐一证伪
 - **「离线下载」（本地 → 光鸭）功能已移除**（2026-11-11 整体删除，含页面与配置）：
   - **移除依据（实测结论，值得记住）**：功能可行但**速率更差**——文件完整落地光鸭、md5 一致，实际速率 **~0.75 MB/s**（比直传的 3.3 MB/s **慢 4.4 倍**）。链路不是瓶颈（公网入口单个 100MB 分片实测 **17.2 MB/s**），真正原因是**光鸭把文件切成变长的随机区间并并发拉取，其中 73% 是重复请求**（5MB 文件同一区间被拉 130 次）——光鸭下载器的固有行为，客户端不可控
@@ -103,7 +104,8 @@
   - 随机在 **Python 侧**做（不用 SQL `RANDOM()`——既不可 seed 也不可测）；生产不传 seed = 真随机，测试传 `random.Random(seed)` = 确定性
   - 打乱在**过滤循环之前**做：循环仍在凑满 `push_max_per_run` 时 break，「已推过」检查的 DB 查询次数不变（**不引入 N+1**）
   - 站点没有 `site_user_data` 行（没抓过 / 抓失败）→ 落「无信号」档，行为与加此特性前**完全一致**（优雅降级）
-  - 契约由 `tests/integration/test_push_free.py` 固化
+  - **只推启用站点**（2026-11-12 修复 prod 故障「站点已停用却还在推对应站点的种子」）：站点停用（`sites.enabled=0`）只停止**拉取**、**不删** `torrent_index` 快照 → 旧快照仍落在 24h 新鲜度窗口内被选中。故两道闸：① 候选查询 **INNER JOIN `sites` + `enabled=1`**（`push_free._select_candidates`）② 执行层兜底 `execute_add_torrent` 查 `site.enabled`，停用 → `PushItemError("fatal")`（拦停用前已入队、被 `drain_task_queue` 重试的遗留任务；fatal = 不重试，站点停用时重试也不会成功）。手动推送走同一执行函数，故**停用站也不能手动推**——想推先重新启用站点
+  - 契约由 `tests/integration/test_push_free.py`（候选过滤）+ `tests/integration/test_task_drain.py`（执行层死信）固化
 - **站点拉取失败必须抛错**（2026-10-21 prod 事故后确立）：
   - `search_torrents` 返回 `[]` = 站点确实没种子；抛 `SiteFetchError` = 故障（DNS / 连接 / HTTP）
   - 两者混用会让作业统计报"全部成功"而实际漏掉故障站（prod 的 hddolby DNS 失败就是这样被掩盖的）
@@ -328,10 +330,30 @@
   - **「当前忽略」的注释是过时的**：图片 / 数据后缀**实际生效**——扫描时**附件同步**（`attachment_*`，下载到本地与 strm 同目录），`models.py` / `types.ts` 注释已修正
   - 契约由 `tests/unit/test_media_exts.py`（格式规范 + `parse_ext_list` 往返 + 单一真源断言）+ `test_db_models.py` 列默认值 + `drivers-media-pick.spec.ts`（预填 + 随保存落库）固化
 
+- **直链缓存读写失败必须降级，不能让播放 500**（2026-11-12 prod 事故，`app/services/link_cache.py`）：
+  - **现象**：播放中转 `GET /302/...` 首次请求 **500**、重试才 302——播放器通常不重试，等于随机播放失败
+  - **根因**：扫描/调度作业大批量写库时，中转请求写 `link_cache` 撞上 SQLite 写锁。`DB_JOURNAL_MODE=DELETE` 的写锁是**全库排他**的；且 `busy_timeout=10s` 对**死锁升级**无效——读事务持共享锁 + 写事务要升级时 SQLite **直接报** `database is locked` 而非等待，加超时兜不住
+  - **修法（业务语义优先）**：直链缓存是**优化**，不是播放的前提——直链已经换到手，缓存读写失败一律降级：读失败按「未命中」继续换取；写失败退避 0.3s 重试一次后**静默放弃**（只留 L1 内存缓存）。只 catch `OperationalError`，其它异常（真 bug）照常抛
+  - 契约由 `tests/unit/test_link_cache.py::TestDbLockDegradation` 固化（patch `session_scope` 让 DB 整体抛锁，验证两条路径都不抛）
+  - **同款场景第三处：作业历史落库**（2026-11-12 生产撞锁后修，`scheduler.py` 的 `_record_run._persist`）：扫描批量写库期间调度作业的 `job_runs` 落库 commit 撞锁，`OperationalError` 逃逸成「Task exception was never retrieved」ERROR 且历史丢失——修法同款：退避 0.5s 重试一次，仍失败 warning 降级（作业历史是统计性副产品，保留期 30 天）；其它异常同样降级记 warning 不吞真 bug。契约由 `tests/unit/test_scheduler.py::TestRecordRun` 固化
+
+- **光鸭扫描走全量列表，~16 请求替代逐目录递归**（2026-11-12 生产探针实测，`app/adapters/drivers/guangya.py`）：
+  - `fs_files` 支持 `parent_id="*"`（全账号）+ `res_type` 过滤，条目带 **`fullParentIds`**（从账号根到父目录的完整 fileId 链，`/` 分隔）——一次目录翻页（`res_type=2`，生产 726 目录 = 1 请求）建 fileId→目录名映射 + 一次文件翻页（`res_type=1`）按链首过滤 `media_cid` 子树，`relative_dir` 由链上 fileId 换算目录名拼出
+  - **收益**：生产 970 目录 ≈ 1100+ 请求（0.2s 限速下 5-9 分钟）→ ≈16 请求（≈10 秒）；`page_size` 实测支持 1000+（200/500/1000 全生效，无 code=112）
+  - **附件下载并发 3 路**（同日生产实测，`media.py` 的 `_sync_attachment_counted`）：串行时首次全量附件 ~18s/个（CDN 掐连接 → 3 次重试 × 60s 超时的长尾），几千个附件 = 十几小时。换直链走全局限速器天然安全，并发只摊掉 CDN 等待；`ATTACHMENT_CONCURRENCY` 从 4 调到 **3**（并发 4 失败率 17%：`peer closed connection without sending complete message body`；并发 2 对比实测成功率 91%、41 个/分钟），`ATTACHMENT_WINDOW=64` 做背压；扫描取消时终止剩余附件任务，正常结束等全部收尾（统计才完整）
+  - **附件失败的三种模式与对策**（同日实测）：① 光鸭直链是**一次性**的——同一个 URL 第二次访问必然失败（故每次重试都换新链 ✅）② **网络抖动**：128 容器 DNS 偶发 `Temporary failure in name resolution`、CDN `ConnectTimeout` → 退避从 1s 提到 **5s**（5/10/15s，跨过抖动窗口）+ 重试次数 3→**4** ③ **附件超时是敏感参数**：共享 client 的 60s 会让卡死连接占住 worker 60s（长尾毒瘤），但**压到 15s 更糟**——实测失败率从 0.24%（60s）飙到 12~17%（光鸭部分 CDN 节点首次 GET 无缓存，15s 不够）。折中 **45s**：给慢节点留够时间，又短一截
+  - **换直链要对齐官方限频**（同日实测）：官方是 5 次/秒（列目录）/ **2 次/秒（换直链）**，但限速器只有一个光鸭桶（0.2s = 5/s）→ 并发 4 时换直链超限 2.5 倍 → 光鸭软限频 → 扫描速率从 45 掉到 21 个/分钟、30 分钟 96 次重试。修法：`get_direct_link` 走独立桶 `guangya_link`（`guangya_link_rate_limit_interval_sec`，默认 0.5s）；播放换直链同样受益（账号级配额本就该共享）
+  - **条目缺 `fullParentIds` / 目录映射缺失 >10 → 报错不静默**——静默跳过会把故障伪装成「媒体库为空」，且 prune 会把「源端还在」的文件当孤儿删掉；少量缺失用 fileId 占位（路径可复现，不产出错路径）
+  - **目录 `utime` 不可靠，别想做剪枝**（实测）：建子目录会变，**改名/删除都不变**——用它跳过子树必漏文件
+  - **翻页防御上限**（`MAX_LIST_PAGES=1000`）：`cloud_task_list` 实测会忽略 `page` 参数无限返回同一页（1.5s 打出 2 万+ 请求）；`fs_files` 一旦同款故障必须可见失败
+  - 混合列表（`file_types=[]`）里 nfo/jpg/iso 全在——本地按后缀分类不变，**绕开**光鸭自有类型分类（视频=2/图片=1/文档=4/压缩包=5，与我们的后缀清单对不上）
+  - 契约由 `tests/unit/test_guangya_driver.py::TestIterTree` 固化；探针脚本 `scripts/probe_guangya_scan.py` / `probe_guangya_verify.py`（生产容器 `docker exec -i medialab /opt/venv/bin/python -` 跑，探针目录自建自删、绝不碰 `fs_clear_recycle_bin`）
+
 - **事件循环里绝不出现同步 CIFS IO**（2026-11-06 prod 事故，规则）
   - 挂载是 `hard` 模式 → IO 卡死时**无限等待**；一次同步 `stat` 就能把整个事件循环卡住 → uvicorn 无法处理请求 → `/healthz` 被 RST → 容器 unhealthy、**面板实际不可用**（实测假死 20 分钟，挂载恢复才自愈）
   - **规则**：任何对「监听根 / 源根目录 / 挂载点」的 `stat` / `is_dir` / `resolve` / `scandir` 都必须 `asyncio.to_thread`（`_check_stable_once` 的 `FileStamp.of`、`start_watcher` 的 `resolve_watch_dir` 已改）
   - **同步 import 也算**（2026-11-07 prod 事故补）：`watchfiles.awatch` 首次调用会在循环线程上同步导入 anyio 后端（`get_cancelled_exc_class` → `import_module`，真实读源码文件）——CIFS 挂死引发 FS 层拥塞时被卡 8 分钟，loop 冻结、uvicorn 停在 bind 之前、面板假死（守卫 py-spy 自动取证定位）。修复：`watcher._watch_events` 先 `asyncio.to_thread(_preflight_watchdeps)` 预热（⚠️ 不能用 `get_cancelled_exc_class()` 预热——它要求当前线程有运行中的 loop，会 `NoEventLoopError`，直接 `importlib.import_module("anyio._backends._asyncio")`）
+  - **附件下载路径也算**（2026-11-12 补漏）：`attachments.py` 的判重 `stat` / `mkdir` / 每个 chunk 的 `fh.write` / `part.replace` / `.part` 清理曾全部裸跑在事件循环里——当年 `write_strm` / `delete_strm` 改了线程池，这条路径漏了。现在 `_drain_to_file` 逐块丢 `to_thread`（读响应流是异步的，留在事件循环）
   - **运行时守卫**（`app/services/runtime_guard.py`）：① 心跳看门狗——loop 滞后 >10s 自动 py-spy dump 落日志（py-spy 已进镜像）；② 挂载探活线程——`/healthz` 的 `mounts[]` 显示 `ok`/`hang`/`error`，**挂载卡死可见而面板不假死**
   - `snapshot()` 只读缓存（`/healthz` 同步调用，不能被 IO 拖住）
 - **必备命令**

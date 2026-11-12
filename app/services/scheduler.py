@@ -642,19 +642,49 @@ def _record_run(
 
     try:
         factory = get_session_factory()
+
         async def _persist() -> None:
-            async with factory() as session:
-                session.add(JobRun(
-                    job_name=job_name,
-                    trigger=trigger,
-                    started_at=started_at,
-                    finished_at=finished_at,
-                    duration_ms=duration_ms,
-                    ok=ok,
-                    error=error,
-                    result_json=result_json,
-                ))
-                await session.commit()
+            """落库单条作业历史。
+
+            **SQLite 锁竞争降级**（2026-11-12 补，与直链缓存同款场景）：
+            扫描/调度批量写库期间，这里的 ``commit`` 会撞上写锁
+            （``database is locked``）——退避重试一次，仍失败记 warning
+            放弃。作业历史是统计性副产品（保留期 30 天），丢一条比
+            刷「Task exception was never retrieved」好；其它异常同样
+            降级记 warning（带类型，不静默吞真 bug）。
+            """
+            from sqlalchemy.exc import OperationalError
+
+            for attempt in (1, 2):
+                try:
+                    async with factory() as session:
+                        session.add(JobRun(
+                            job_name=job_name,
+                            trigger=trigger,
+                            started_at=started_at,
+                            finished_at=finished_at,
+                            duration_ms=duration_ms,
+                            ok=ok,
+                            error=error,
+                            result_json=result_json,
+                        ))
+                        await session.commit()
+                    return
+                except OperationalError as exc:
+                    if attempt == 2:
+                        logger.warning(
+                            "记录作业 %s 执行历史失败（DB 锁竞争，已重试）：%s",
+                            job_name, exc,
+                        )
+                        return
+                    await asyncio.sleep(0.5)
+                except Exception as exc:
+                    logger.warning(
+                        "记录作业 %s 执行历史失败：%s: %s",
+                        job_name, type(exc).__name__, exc,
+                    )
+                    return
+
         # 在当前 loop 调度一次性 task
         try:
             loop = asyncio.get_running_loop()

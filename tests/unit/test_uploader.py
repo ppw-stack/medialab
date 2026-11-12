@@ -5,12 +5,14 @@
 - 无同名 → 上传
 - 同名 + 同大小 → 跳过
 - 同名 + 不同大小 → 删旧再传（覆盖）
+- 同名 + 云端更大 + 保留大的策略 → 跳过；``delete_local`` 开时**删本地小的**
 - 同名但云端是目录 → 冲突
 - 上传失败 → 记失败，不抛异常
 """
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -269,12 +271,13 @@ async def test_本地优先策略_云端更大也覆盖(
     assert upload_uploader.uploaded == [("movie.mkv", 100)]
 
 
-async def test_保留大的_跳过时本地不删(
+async def test_保留大的_跳过时本地小的也删(
     local_file: Path, upload_driver: FakeDriver, upload_uploader: FakeUploader, tmp_path: Path
 ):
-    """云端更大被跳过时，**本地原件保留**。
+    """云端更大被跳过 + ``delete_local`` 开 → **本地小的那份也删**。
 
-    清理闸要求「云端大小 == 本地大小」，这里必然不等 → 不删本地。
+    2026-11-12 用户要求「保留大的，移除小的」：云端是更大的完整版本，
+    本地原件没有保留价值。``cloud_kept=True`` 放宽清理校验为「云端 ≥ 本地」。
     """
     upload_driver.add_file(ROOT_ID, "movie.mkv", 500)
     ctx = _ctx_policy(
@@ -288,5 +291,26 @@ async def test_保留大的_跳过时本地不删(
     outcome = await sync_file(ctx, local_file, "movie.mkv")
 
     assert outcome.status == RESULT_UNCHANGED
+    assert outcome.local_deleted is True
+    assert outcome.cloud_kept is True
+    assert "已删除本地" in outcome.reason
+    # 删除是后台任务——等它真正落盘（CIFS 慢，轮询）
+    for _ in range(50):
+        if not local_file.exists():
+            break
+        await asyncio.sleep(0.02)
+    assert not local_file.exists(), "本地小的那份应被删除"
+
+
+async def test_保留大的_跳过时开关关闭则本地保留(
+    local_file: Path, upload_driver: FakeDriver, upload_uploader: FakeUploader, tmp_path: Path
+):
+    """云端更大被跳过 + ``delete_local`` **关** → 本地原件保留（不变）。"""
+    upload_driver.add_file(ROOT_ID, "movie.mkv", 500)
+    ctx = _ctx_policy(upload_driver, upload_uploader, tmp_path, CONFLICT_KEEP_LARGER)
+
+    outcome = await sync_file(ctx, local_file, "movie.mkv")
+
+    assert outcome.status == RESULT_UNCHANGED
     assert outcome.local_deleted is False
-    assert local_file.exists(), "本地原件应保留（云端是不同版本）"
+    assert local_file.exists(), "清理开关没开，本地必须保留"
