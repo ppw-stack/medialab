@@ -46,7 +46,7 @@ class RelayRunIn(BaseModel):
     #: **搬完清理源端**——删数据不可逆，默认关
     delete_source: bool = False
     #: 建分享的最小间隔（秒）——防「同账号连续建分享」被限流
-    submit_interval_sec: float = Field(default=30.0, ge=0.0, le=600.0)
+    submit_interval_sec: float = Field(default=15.0, ge=0.0, le=600.0)
 
 
 @router.get("/dirs")
