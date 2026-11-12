@@ -620,7 +620,7 @@ export interface PushResponse {
  * state：`enqueued`（已入队）/ `skipped_pushed`（已推过）/
  * `skipped_queued`（队列里已有）/ `skipped_no_link`（无可用链接）/
  * `skipped_not_found`（索引不存在）/ `skipped_site_missing`（站点不存在）/
- * `failed`。
+ * `skipped_site_disabled`（站点已停用）/ `failed`。
  */
 export interface BatchPushItem {
   id: number

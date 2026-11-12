@@ -81,11 +81,13 @@ async def _add_torrent(
         return t.id
 
 
-async def _add_site() -> int:
+async def _add_site(*, enabled: bool = True) -> int:
     from app.db.models import Site
 
     async with session_scope() as session:
-        s = Site(name="s1", domain="s1.test", adapter="hdsky")
+        s = Site(
+            name="s1", domain="s1.test", adapter="hdsky", enabled=enabled
+        )
         session.add(s)
         await session.flush()
         return s.id
@@ -114,6 +116,35 @@ async def test_disabled_default_downloader_is_graceful(db: None) -> None:
     result = await _service().run()
     assert result.pushed == 0
     assert "未配置默认下载器" in result.summary
+
+
+# ------------------------------------------------------------- 停用站点
+
+async def test_disabled_site_is_not_selected(db: None) -> None:
+    """**停用站点的免费种不推**。
+
+    2026-11-12 prod：站点停用（``sites.enabled=0``）只停止拉取，**不删**
+    ``torrent_index`` 里的快照 → 停用后旧快照仍在 24h 新鲜度窗口内被选中，
+    出现「站点已停用却还在推对应站点的种子」。候选查询必须 INNER JOIN
+    ``sites`` 并过滤 ``enabled``。
+    """
+    await _add_downloader()
+    site_id = await _add_site(enabled=False)
+    await _add_torrent(free_type=FreeType.PERMANENT, site_id=site_id)
+
+    result = await _service().run()
+    assert result.selected == 0
+    assert result.pushed == 0
+
+
+async def test_enabled_site_is_still_selected(db: None) -> None:
+    """对照组：启用站点的免费种照常入选（别把过滤做过头）。"""
+    await _add_downloader()
+    site_id = await _add_site(enabled=True)
+    await _add_torrent(free_type=FreeType.PERMANENT, site_id=site_id)
+
+    result = await _service().run()
+    assert result.selected == 1
 
 
 # ------------------------------------------------------------- 选种白名单

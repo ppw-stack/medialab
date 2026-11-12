@@ -131,11 +131,22 @@ async def enqueue_index_entry(index_id: int, downloader_id: int | None) -> Enque
         site_id = item.site_id
         item_id = item.item_id
         push_status = item.push_status
-        site_exists = (
-            await session.execute(select(Site.id).where(Site.id == site_id))
+        site_row = (
+            await session.execute(select(Site).where(Site.id == site_id))
         ).scalar_one_or_none()
-        if site_exists is None:
+        if site_row is None:
             raise PushError("站点不存在", status=404, code="site_missing")
+        if not site_row.enabled:
+            # 站点停用 → 不推（与自动推送的候选过滤、执行层兜底同语义）。
+            #
+            # 为什么在**入队前**拦：批量推送只入队不执行，停了站点还入队
+            # 的话，任务会被 drain 执行成 fatal 死信——既没推成，又占住
+            # 幂等键（重新启用站点后该种子要等队列清理才能重推）。
+            raise PushError(
+                f"站点「{site_row.name}」已停用，无法推送",
+                status=400,
+                code="site_disabled",
+            )
 
     dl = await resolve_downloader(downloader_id)
     dl_id = dl.id

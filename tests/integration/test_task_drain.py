@@ -11,8 +11,15 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from app.core.timeutils import bj_now_dt, format_bj
-from app.db.models import JobRun
+import respx
+from app.core.timeutils import bj_now, bj_now_dt, format_bj
+from app.db.models import (
+    DownloaderInstance,
+    JobRun,
+    Site,
+    TaskQueue,
+    TorrentIndex,
+)
 from app.db.session import session_scope
 from app.services.factory import AdapterFactory
 from app.services.task_drain import _JOB_RUN_PURGE_DAYS, drain_task_queue
@@ -93,3 +100,80 @@ async def test_无历史时清理步骤为skip(db: None) -> None:
     assert step.status == "skip"
     assert step.count == 0
     assert result["job_runs_purged"] == 0
+
+
+# --------------------------------------------------- 停用站点的遗留任务
+
+async def _seed_disabled_site_task() -> int:
+    """建「站点已停用 + 停用前入队的遗留任务」，返回 task id。
+
+    场景：推送作业入队后、站点被停用前，任务还在队列里（pending）。
+    drain 排空时会重试它——那正是「站点已停用却还在推」的第二条路径。
+    """
+    async with session_scope() as session:
+        site = Site(
+            name="s1", domain="s1.test", adapter="hdsky", enabled=False
+        )
+        session.add(site)
+        dl = DownloaderInstance(
+            name="dl1",
+            type="qbittorrent",
+            url="http://dl.test:8080",
+            is_default=True,
+            enabled=True,
+        )
+        session.add(dl)
+        await session.flush()
+        item = TorrentIndex(
+            site_id=site.id,
+            item_id="i1",
+            name="t1",
+            free_type="freeleech_permanent",
+        )
+        session.add(item)
+        await session.flush()
+        task = TaskQueue(
+            idem_key=f"add_torrent|{site.id}|i1|dl={dl.id}",
+            kind="add_torrent",
+            payload={"index_id": item.id, "downloader_id": dl.id},
+            status="pending",
+            run_at=bj_now(),
+        )
+        session.add(task)
+        await session.flush()
+        return task.id
+
+
+async def test_停用站点的遗留任务不再推送(
+    db: None, no_network: respx.MockRouter
+) -> None:
+    """站点停用后，遗留队列任务**不再推送**（fatal 死信，不退避重试）。
+
+    候选查询已过滤停用站点，但**停用前已入队**的任务会被 drain 重试——
+    执行层必须再拦一道（``execute_add_torrent`` 检查 ``site.enabled``）。
+    """
+    task_id = await _seed_disabled_site_task()
+
+    result = await drain_task_queue(AdapterFactory())
+
+    assert result["claimed"] == 1
+    assert result["failed"] == 1
+    assert result["done"] == 0
+    assert result["retried"] == 0
+
+    async with session_scope() as session:
+        task = (
+            await session.execute(
+                select(TaskQueue).where(TaskQueue.id == task_id)
+            )
+        ).scalar_one()
+        # 死信：终态 failed（不是 pending → 不会无限重试）
+        assert task.status == "failed"
+        assert "已停用" in (task.last_error or "")
+        # 种子没被推：push_status 未变
+        item = (await session.execute(select(TorrentIndex))).scalar_one()
+        assert item.push_status is None
+
+    # 连 .torrent 都没下载（检查发生在下载之前）
+    assert not no_network.calls
+

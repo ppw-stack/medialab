@@ -53,14 +53,23 @@ async def _seed(
     count: int = 3,
     pushed: int = 0,
     no_link: int = 0,
+    site_enabled: bool = True,
 ) -> list[int]:
     """建站点 + 若干拉取索引，返回索引 id 列表。
 
     :param pushed: 其中多少条标记为已推送（``push_status='pushed'``）
     :param no_link: 其中多少条缺 ``item_id``（无可用下载链接）
+    :param site_enabled: 站点是否启用（``False`` = 已停用）
     """
     async with session_scope() as session:
-        session.add(Site(name="site1", domain="s1.test", adapter="hdsky"))
+        session.add(
+            Site(
+                name="site1",
+                domain="s1.test",
+                adapter="hdsky",
+                enabled=site_enabled,
+            )
+        )
         session.add(
             DownloaderInstance(
                 name="dl1",
@@ -230,3 +239,49 @@ async def test_batch_push_does_not_mark_pushed(client: httpx.AsyncClient) -> Non
         ).scalar_one()
         assert item.push_status is None
         assert item.pushed_at is None
+
+
+async def test_batch_push_skips_disabled_site(client: httpx.AsyncClient) -> None:
+    """**站点已停用 → 跳过，不入队**（2026-11-12）。
+
+    站点停用的语义是「这个站不再推种子」。若还入队，任务会被 drain
+    执行成 fatal 死信——既没推成，又占住幂等键（重新启用站点后该种子
+    要等队列清理才能重推）。故在**入队前**就拦掉。
+    """
+    ids = await _seed(count=2, site_enabled=False)
+
+    resp = await client.post(
+        "/api/v1/torrent-index/push-batch", json={"ids": ids}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 2
+    assert body["enqueued"] == 0
+    assert body["skipped"] == 2
+    assert body["failed"] == 0
+    assert all(i["state"] == "skipped_site_disabled" for i in body["items"])
+    # 文案带站点名，用户知道是谁停了
+    assert "已停用" in body["items"][0]["detail"]
+
+    # 队列里一个任务都没有
+    async with session_scope() as session:
+        tasks = (
+            await session.execute(select(TaskQueue).where(TaskQueue.kind == "add_torrent"))
+        ).scalars().all()
+        assert tasks == []
+
+
+async def test_single_push_of_disabled_site_is_rejected(
+    client: httpx.AsyncClient,
+) -> None:
+    """单条手动推送停用站点的种子 → **400**（不是 502 推送失败）。
+
+    400 = 请求本身不该发（站点已停用）；502 是「尝试推送但失败了」——
+    两者对用户的含义不同，故在入队校验层就拦。
+    """
+    ids = await _seed(count=1, site_enabled=False)
+
+    resp = await client.post(f"/api/v1/torrent-index/{ids[0]}/push", json={})
+
+    assert resp.status_code == 400
+    assert "已停用" in resp.json()["detail"]

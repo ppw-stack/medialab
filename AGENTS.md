@@ -104,7 +104,8 @@
   - 随机在 **Python 侧**做（不用 SQL `RANDOM()`——既不可 seed 也不可测）；生产不传 seed = 真随机，测试传 `random.Random(seed)` = 确定性
   - 打乱在**过滤循环之前**做：循环仍在凑满 `push_max_per_run` 时 break，「已推过」检查的 DB 查询次数不变（**不引入 N+1**）
   - 站点没有 `site_user_data` 行（没抓过 / 抓失败）→ 落「无信号」档，行为与加此特性前**完全一致**（优雅降级）
-  - 契约由 `tests/integration/test_push_free.py` 固化
+  - **只推启用站点**（2026-11-12 修复 prod 故障「站点已停用却还在推对应站点的种子」）：站点停用（`sites.enabled=0`）只停止**拉取**、**不删** `torrent_index` 快照 → 旧快照仍落在 24h 新鲜度窗口内被选中。故两道闸：① 候选查询 **INNER JOIN `sites` + `enabled=1`**（`push_free._select_candidates`）② 执行层兜底 `execute_add_torrent` 查 `site.enabled`，停用 → `PushItemError("fatal")`（拦停用前已入队、被 `drain_task_queue` 重试的遗留任务；fatal = 不重试，站点停用时重试也不会成功）。手动推送走同一执行函数，故**停用站也不能手动推**——想推先重新启用站点
+  - 契约由 `tests/integration/test_push_free.py`（候选过滤）+ `tests/integration/test_task_drain.py`（执行层死信）固化
 - **站点拉取失败必须抛错**（2026-10-21 prod 事故后确立）：
   - `search_torrents` 返回 `[]` = 站点确实没种子；抛 `SiteFetchError` = 故障（DNS / 连接 / HTTP）
   - 两者混用会让作业统计报"全部成功"而实际漏掉故障站（prod 的 hddolby DNS 失败就是这样被掩盖的）

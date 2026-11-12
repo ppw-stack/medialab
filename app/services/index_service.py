@@ -253,7 +253,8 @@ class BatchPushItem:
 
     :param state: ``enqueued``（已入队）/ ``skipped_pushed``（已推过）/
         ``skipped_queued``（队列里已有）/ ``skipped_no_link``（无可用链接）/
-        ``skipped_missing``（索引不存在）/ ``failed``
+        ``skipped_missing``（索引不存在）/ ``skipped_site_disabled``
+        （站点已停用）/ ``failed``
     """
 
     id: int
@@ -306,7 +307,7 @@ async def push_batch(
             outcome = await enqueue_index_entry(index_id, dl_id)
         except PushError as exc:
             # 「这一条推不了」不算整批失败——分类记录后继续下一条
-            if exc.code in ("not_found", "no_link", "site_missing"):
+            if exc.code in ("not_found", "no_link", "site_missing", "site_disabled"):
                 skipped += 1
                 items.append(
                     BatchPushItem(id=index_id, state=f"skipped_{exc.code}", detail=str(exc))
