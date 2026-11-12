@@ -1249,6 +1249,70 @@ export interface MigrationRunInput {
   exclude_disc: boolean
 }
 
+/** 转存失败 / 冲突明细（光鸭 → 光鸭）。 */
+export interface RelayJobItem {
+  name: string
+  path: string
+  size_gb?: number
+  reason?: string
+  source_gb?: number
+  target_gb?: number
+}
+
+/** 一次转存任务的进度快照（光鸭 A 分享 → 光鸭 B 保存）。 */
+export interface RelayJob {
+  id: string
+  state: "running" | "success" | "failed" | "cancelled"
+  started_at: number
+  finished_at: number | null
+  elapsed_sec: number
+  params: {
+    source_driver_id: number
+    source_file_id: string
+    target_driver_id: number
+    target_file_id: string
+    min_size_mb: number
+    max_size_mb: number
+    exclude_disc: boolean
+    /** 搬完清理源端（删数据不可逆，默认关） */
+    delete_source: boolean
+    /** 建分享的最小间隔（秒）——防「同账号连续建分享」被限流 */
+    submit_interval_sec: number
+  }
+  source_name: string
+  target_name: string
+  current_path: string
+  dirs_walked: number
+  discovered: number
+  success: number
+  failed: number
+  /** 目标已有同名同大小 → 跳过 */
+  skipped_existing: number
+  /** 同名但大小不同 → 冲突（不覆盖、不改名） */
+  conflicts: number
+  filtered_small: number
+  filtered_large: number
+  filtered_ext: number
+  transferred_bytes: number
+  failed_items: RelayJobItem[]
+  conflict_items: RelayJobItem[]
+  logs: string[]
+  error: string | null
+}
+
+/** 转存开跑参数。 */
+export interface RelayRunInput {
+  source_driver_id: number
+  source_file_id: string
+  target_driver_id: number
+  target_file_id: string
+  min_size_mb: number
+  max_size_mb: number
+  exclude_disc: boolean
+  delete_source: boolean
+  submit_interval_sec: number
+}
+
 // ---- WebDAV ----
 
 /** WebDAV 账号。 */
