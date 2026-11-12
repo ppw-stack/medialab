@@ -53,6 +53,14 @@ logger = get_logger(__name__)
 #: 限速器里光鸭的桶名
 PROVIDER = "guangya"
 
+#: 限速器里光鸭**换直链**的桶名
+#:
+#: 官方限频是 5 次/秒（列目录）/ **2 次/秒（换直链）**——后者更严，
+#: 单独一个桶。共用列目录的桶（0.2 秒 = 5/s）会超官方限频：实测附件
+#: 并发 4 路后换直链峰值 5/s → 光鸭软限频 → 扫描速率从 45 掉到 21
+#: 个/分钟、30 分钟内 96 次下载重试（2026-11-12 生产实测）。
+PROVIDER_LINK = "guangya_link"
+
 #: 光鸭 Web 端的 client_id（官方固定值，不是用户申请的）
 DEFAULT_CLIENT_ID = "aMe-8VSlkrbQXpUR"
 
@@ -231,10 +239,21 @@ class GuangyaDriver:
             except Exception:
                 logger.exception("光鸭 Token 写回失败（不影响本次使用）")
 
-    async def _call(self, method: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        """调一次业务接口（自动限速 + Token 刷新 + 错误码映射）。"""
+    async def _call(
+        self,
+        method: str,
+        *args: Any,
+        bucket: str | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """调一次业务接口（自动限速 + Token 刷新 + 错误码映射）。
+
+        Args:
+            bucket: 限速桶名。默认光鸭业务接口桶；换直链走
+                :data:`PROVIDER_LINK`（官方限频更严，2 次/秒）。
+        """
         await self._ensure_token()
-        await rate_limiter.acquire(PROVIDER)
+        await rate_limiter.acquire(bucket or PROVIDER)
         try:
             result = await asyncio_to_thread(
                 getattr(self.client, method), *args, **kwargs
@@ -599,7 +618,9 @@ class GuangyaDriver:
         **过期时间用 ``urlDuration``**——``signedURL`` 里没有可解析的
         过期参数，故由驱动直接给出 ``expires_at``。
         """
-        payload = await self._call("download_url", str(remote_id))
+        payload = await self._call(
+            "download_url", str(remote_id), bucket=PROVIDER_LINK
+        )
         code = payload.get("code")
         if code not in (None, 0):
             raise DriverError(

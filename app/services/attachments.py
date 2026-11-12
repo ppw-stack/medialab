@@ -53,6 +53,14 @@ CHUNK_SIZE = 64 * 1024
 #: 115 就没这问题。重试时**重新换直链**（旧的 URL 可能已失效）。
 DEFAULT_MAX_RETRIES = 3
 
+#: 单次附件下载的超时（秒）
+#:
+#: 附件是 KB~MB 级小文件，**不能**沿用共享 client 的 60s——一个卡死的
+#: 连接会占住一个下载 worker 整整 60s（3 次重试 = 3 分钟长尾毒瘤）。
+#: 2026-11-12 生产实测：30 分钟内 96 次下载重试，扫描速率被长尾拖到
+#: 21 个/分钟。15s 对小文件足够（真超时也该早点重试换直链）。
+ATTACHMENT_TIMEOUT = httpx.Timeout(15.0)
+
 #: 重试退避基数（秒）——第 n 次失败后等 ``n * RETRY_BACKOFF_SEC``
 RETRY_BACKOFF_SEC = 1.0
 
@@ -151,7 +159,9 @@ async def _download_once(
     try:
         await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
         headers = {"User-Agent": ATTACHMENT_USER_AGENT, **link.extra_headers}
-        async with http.stream("GET", link.url, headers=headers) as response:
+        async with http.stream(
+            "GET", link.url, headers=headers, timeout=ATTACHMENT_TIMEOUT
+        ) as response:
             if response.status_code >= 400:
                 return AttachmentResult(FAILED, f"HTTP {response.status_code}")
             written = await _drain_to_file(response, part)

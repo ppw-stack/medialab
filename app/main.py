@@ -164,6 +164,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     configure_rate_limit(settings.rate_limit_interval_sec)
     configure_provider_rate_limit("guangya", settings.guangya_rate_limit_interval_sec)
+    # 换直链单独一个桶：官方限频 2 次/秒，比列目录的 5 次/秒严
+    configure_provider_rate_limit(
+        "guangya_link", settings.guangya_link_rate_limit_interval_sec
+    )
 
     # WebDAV 审计后台协程（批量落库）
     if settings.dav_enabled:

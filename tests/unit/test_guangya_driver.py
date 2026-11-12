@@ -638,3 +638,27 @@ class TestListOfflineTasks:
 
         assert len(tasks) == 1
         assert tasks[0]["errCode"] == 8
+
+
+class TestDirectLinkBucket:
+    """换直链走独立限速桶（官方限频 2 次/秒，比列目录的 5 次/秒严）。"""
+
+    async def test_uses_link_bucket(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.core import rate_limit as rate_limit_module
+
+        seen: list[str] = []
+
+        async def _fake_acquire(provider: str = "default") -> None:
+            seen.append(provider)
+
+        monkeypatch.setattr(rate_limit_module.rate_limiter, "acquire", _fake_acquire)
+        driver = gyp_module.GuangyaDriver(_credential_json())
+
+        await driver.get_direct_link("123", "Player/1.0")
+
+        assert gyp_module.PROVIDER_LINK in seen
+        # 列目录用的桶不能混进来（两者官方限频不同）
+        assert gyp_module.PROVIDER not in seen
+        assert gyp_module.PROVIDER_LINK != gyp_module.PROVIDER
