@@ -17,7 +17,7 @@ from datetime import timedelta
 
 import pytest
 from app.core.timeutils import bj_now_dt, format_bj
-from app.db.models import DownloaderInstance, TorrentIndex
+from app.db.models import DownloaderInstance, TaskQueue, TorrentIndex
 from app.db.session import session_scope
 from app.domain.enums import FreeType, PushStatus
 from app.services.factory import AdapterFactory
@@ -27,7 +27,9 @@ from app.services.runtime_params import (
     get_runtime_params,
     set_runtime_params,
 )
+from app.services.task_queue import TaskQueueService
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 
 @pytest.fixture(autouse=True)
@@ -625,4 +627,156 @@ async def test_bucket_items_show_progress_as_percent(db: None) -> None:
     assert "11040" not in by_name["s_capped"]
     # 无信号站没有进度字段
     assert "进度" not in by_name["s_none"]
+
+
+# ------------------------------------------- DB 写锁竞争（2026-11-12 prod 回归）
+
+
+def _make_locked_error() -> OperationalError:
+    """构造一个「撞 SQLite 写锁」的异常（与生产报错同形态）。"""
+    return OperationalError(
+        "INSERT INTO task_queue (...)",
+        None,
+        Exception("database is locked"),
+    )
+
+
+class TestEnqueueLockContention:
+    """入队撞 SQLite 写锁时的行为（2026-11-12 prod 事故回归）。
+
+    事故：扫描作业批量写库期间持有写锁 → ``INSERT INTO task_queue``
+    等满 ``busy_timeout``(10s) 仍失败 → **整轮推送炸掉**（手动触发
+    直接报 ``database is locked``）。
+
+    契约：入队/认领是**核心业务**，不能静默放弃 → 退避重试；重试耗尽
+    则该候选记失败明细、**整轮不炸**（下轮 cron 按幂等键自动补推）。
+    """
+
+    async def test_transient_lock_on_enqueue_is_retried(
+        self, db: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """入队撞一次写锁 → 退避重试后成功（推送不丢）。"""
+        await _add_downloader()
+        site_id = await _add_site()
+        await _add_torrent(free_type=FreeType.PERMANENT, site_id=site_id)
+
+        async def _fake_execute(payload, factory, *, category="auto-push"):
+            return {"info_hash": "a" * 40, "name": "t-i1", "idempotent": False}
+
+        monkeypatch.setattr(
+            "app.services.task_executor.execute_add_torrent", _fake_execute
+        )
+
+        calls = {"n": 0}
+        real_enqueue = TaskQueueService.enqueue
+
+        async def _flaky_enqueue(self, *args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _make_locked_error()
+            return await real_enqueue(self, *args, **kwargs)
+
+        monkeypatch.setattr(TaskQueueService, "enqueue", _flaky_enqueue)
+
+        result = await _service().run()
+
+        assert calls["n"] == 2, "撞锁后没重试"
+        assert result.pushed == 1, "推送被锁竞争吞掉"
+        assert result.failed == 0
+        async with session_scope() as session:
+            rows = (await session.execute(select(TaskQueue))).scalars().all()
+            assert len(rows) == 1, "重试造成重复入队"
+
+    async def test_transient_lock_on_claim_is_retried(
+        self, db: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """认领撞一次写锁 → 退避重试后成功。"""
+        await _add_downloader()
+        site_id = await _add_site()
+        await _add_torrent(free_type=FreeType.PERMANENT, site_id=site_id)
+
+        async def _fake_execute(payload, factory, *, category="auto-push"):
+            return {"info_hash": "a" * 40, "name": "t-i1", "idempotent": False}
+
+        monkeypatch.setattr(
+            "app.services.task_executor.execute_add_torrent", _fake_execute
+        )
+
+        calls = {"n": 0}
+        real_claim = TaskQueueService.claim_one
+
+        async def _flaky_claim(self, task_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _make_locked_error()
+            return await real_claim(self, task_id)
+
+        monkeypatch.setattr(TaskQueueService, "claim_one", _flaky_claim)
+
+        result = await _service().run()
+
+        assert calls["n"] == 2, "撞锁后没重试"
+        assert result.pushed == 1
+        assert result.failed == 0
+
+    async def test_persistent_lock_fails_one_item_and_keeps_going(
+        self, db: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """重试耗尽 → 该候选记失败明细，**整轮不炸**，其它候选照常推。"""
+        await _add_downloader()
+        site_id = await _add_site()
+        await _add_torrent(
+            free_type=FreeType.PERMANENT, item_id="locked", site_id=site_id
+        )
+        await _add_torrent(
+            free_type=FreeType.PERMANENT, item_id="ok", site_id=site_id
+        )
+
+        async def _fake_execute(payload, factory, *, category="auto-push"):
+            return {"info_hash": "a" * 40, "name": "t", "idempotent": False}
+
+        monkeypatch.setattr(
+            "app.services.task_executor.execute_add_torrent", _fake_execute
+        )
+
+        real_enqueue = TaskQueueService.enqueue
+
+        async def _locked_for_one(
+            self, kind, payload, *, idem_key, run_at=None
+        ):
+            if "locked" in idem_key:
+                raise _make_locked_error()
+            return await real_enqueue(
+                self, kind, payload, idem_key=idem_key, run_at=run_at
+            )
+
+        monkeypatch.setattr(TaskQueueService, "enqueue", _locked_for_one)
+
+        result = await _service().run()
+
+        assert result.failed == 1, "撞锁候选应记失败"
+        assert result.pushed == 1, "其它候选应照常推送（单点不炸整轮）"
+        push_step = next(s for s in result.steps if s.name == "推送到下载器")
+        assert push_step.items is not None
+        details = [i.detail or "" for i in push_step.items]
+        assert any("数据库忙" in d for d in details), "明细没记撞锁原因"
+        # 失败的候选**不写** push_status（也不写 failed）→ 下轮 cron
+        # 仍会选中并补推
+        async with session_scope() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(TorrentIndex).where(
+                            TorrentIndex.item_id.in_(("locked", "ok"))
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            by_item = {r.item_id: r.push_status for r in rows}
+            assert by_item["locked"] is None
+            # 只有成功的候选入了队（撞锁候选没进队列）
+            qrows = (await session.execute(select(TaskQueue))).scalars().all()
+            assert len(qrows) == 1
 

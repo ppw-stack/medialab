@@ -5,12 +5,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 import time
 
 import pytest
-from app.db.models import Driver, MediaFile
+from app.db.models import Driver, MediaFile, TaskQueue
+from app.services import media as media_mod
 from app.services.media import scan_driver
-from sqlalchemy import select
+from app.services.strm_writer import StrmWriteResult
+from sqlalchemy import select, text
 
 #: 假的 cid —— 不打真实网盘
 FAKE_CID = "3116168171472551604"
@@ -258,6 +262,98 @@ class TestPrune:
         assert len(list(tmp_path.rglob("*.strm"))) == 0
         rows = (await db_session.execute(select(MediaFile))).scalars().all()
         assert len(rows) == 0
+
+
+class TestScanLockWindow:
+    """扫描**不得**长时间持有 SQLite 写锁（2026-11-12 prod 事故回归）。
+
+    事故机制：扫描的事务横跨「写 strm（CIFS）+ 等附件下载」→ 写锁被
+    持有几十秒 → ``drain_task_queue`` / ``push_free_torrents`` /
+    ``refresh_user_data`` 的写事务撞 ``database is locked``。
+
+    这里用「第二个连接写库」复现同一机制：写 strm 慢（模拟 CIFS
+    卡顿）时，第二个连接必须能立刻写进去。
+    """
+
+    async def test_other_writes_not_starved_while_writing_strm(
+        self,
+        db_session,
+        settings,
+        driver_row,
+        fake_driver,
+        tmp_path,
+        db_engine,
+        monkeypatch,
+    ):
+        driver_row.output_dir = str(tmp_path)
+        await db_session.commit()
+        fake_driver.add_file("pc1", "movie.mkv", path="/影视/movie.mkv")
+
+        started = threading.Event()
+
+        def _slow_write(path, url):
+            """模拟 CIFS 卡顿的 strm 写入（同步函数，跑在线程池里）。"""
+            started.set()
+            # 卡顿时长必须**明显大于**探针连接的 busy_timeout——
+            # 否则探针恰好等到扫描提交，测试会侥幸通过（测不出回归）。
+            time.sleep(1.0)
+            return StrmWriteResult.CREATED
+
+        monkeypatch.setattr("app.services.media.write_strm", _slow_write)
+
+        scan_task = asyncio.create_task(
+            scan_driver(db_session, settings, driver_row)
+        )
+        # 等扫描进入「写 strm」阶段
+        await asyncio.to_thread(started.wait, 5.0)
+        assert started.is_set(), "扫描未进入写 strm 阶段"
+
+        # 第二个连接此刻写库——改造前会被扫描的写锁挡住（busy_timeout
+        # 到期抛 database is locked），改造后必须立刻写进去
+        factory = db_engine[1]
+        async with factory() as probe:
+            # busy_timeout 必须**短于**扫描的卡顿时长——
+            # 改造前探针会等不到锁而抛 database is locked（测出回归）。
+            await probe.execute(text("PRAGMA busy_timeout=300"))
+            await probe.commit()
+            probe.add(
+                TaskQueue(
+                    idem_key="lock-window-probe",
+                    kind="add_torrent",
+                    payload={"probe": True},
+                )
+            )
+            await probe.commit()  # 改造前这里抛 OperationalError
+
+        await scan_task
+
+    async def test_strm_written_after_commit(
+        self, db_session, settings, driver_row, fake_driver, tmp_path, monkeypatch
+    ):
+        """写 strm 发生在**提交之后**——不在持锁事务里。
+
+        判据：写 strm 的时刻，该 session 上**没有未提交的写事务**
+        （``in_transaction()`` 为假或只含读事务）。
+        """
+        driver_row.output_dir = str(tmp_path)
+        await db_session.commit()
+        fake_driver.add_file("pc1", "movie.mkv", path="/影视/movie.mkv")
+
+        observed: list[bool] = []
+        real_write = media_mod.write_strm
+
+        def _spy_write(path, url):
+            # in_transaction() 只说明「有事务」，不说明「持写锁」——
+            # 这里的判据是**没有待提交的写**：new/dirty 对象为空
+            observed.append(not db_session.new and not db_session.dirty)
+            return real_write(path, url)
+
+        monkeypatch.setattr("app.services.media.write_strm", _spy_write)
+
+        await scan_driver(db_session, settings, driver_row)
+
+        assert observed == [True], "写 strm 时仍有未提交的写（持着 SQLite 写锁）"
+        assert len(list(tmp_path.rglob("*.strm"))) == 1
 
 
 class TestConfigValidation:

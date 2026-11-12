@@ -210,7 +210,10 @@ class PushFreeService:
         from app.services.task_executor import PushItemError, execute_add_torrent
         from app.services.task_queue import (
             TaskKind,
+            TaskQueueBusyError,
             TaskQueueService,
+            claim_with_retry,
+            enqueue_with_retry,
             make_idem_key,
         )
 
@@ -240,34 +243,55 @@ class PushFreeService:
                 "index_id": c.index_id,
                 "downloader_id": downloader_id,
             }
-            async with session_scope() as session:
-                tq = TaskQueueService(session)
-                enq = await tq.enqueue(TaskKind.ADD_TORRENT, payload, idem_key=idem_key)
+            label = c.name or c.item_id or f"#{c.index_id}"
+            # 3.1) 入队（幂等）+ 认领——撞 SQLite 写锁时退避重试。
+            #
+            # 2026-11-12 prod 事故：扫描作业批量写库期间持有写锁，这里的
+            # INSERT 等满 busy_timeout(10s) 仍失败 → **整轮推送炸掉**。
+            # 入队是核心业务（不能像直链缓存那样静默放弃）→ 退避重试；
+            # 重试耗尽则该候选记失败明细并 **continue 下一个候选**，
+            # 幂等键保证下轮 cron 自动补推、不重复入队。
+            try:
+                enq = await enqueue_with_retry(
+                    TaskKind.ADD_TORRENT, payload, idem_key=idem_key
+                )
                 if not enq.created:
                     skipped_dup += 1
                     push_items.append(
                         JobStepItem(
-                            c.name or c.item_id or f"#{c.index_id}",
+                            label,
                             "skip",
                             None,
                             "幂等跳过（队列中已有等价任务）",
                         )
                     )
                     continue
-                task = await tq.claim_one(enq.task_id)
-            if task is None:
+                claimed = await claim_with_retry(enq.task_id)
+            except TaskQueueBusyError as exc:
+                failed += 1
+                errors.append(f"site={c.site_id} item={c.item_id}: {exc}")
+                push_items.append(
+                    JobStepItem(
+                        label,
+                        "fail",
+                        None,
+                        "入队失败：数据库忙，下轮自动补推",
+                    )
+                )
+                continue
+            if not claimed:
                 skipped_dup += 1
                 push_items.append(
                     JobStepItem(
-                        c.name or c.item_id or f"#{c.index_id}",
+                        label,
                         "skip",
                         None,
                         "幂等跳过（被其他执行者认领）",
                     )
                 )
                 continue
+            task_id = enq.task_id
 
-            label = c.name or c.item_id or f"#{c.index_id}"
             # 3.2) 执行（claim 已落库——此后崩溃，任务停在 running，
             #      超 STALE_RUNNING_MINUTES 后被 drain 作业回收重试）
             try:
@@ -276,10 +300,10 @@ class PushFreeService:
                 async with session_scope() as session:
                     tq = TaskQueueService(session)
                     if exc.category == "fatal":
-                        await tq.mark_failed_forever(task.id, str(exc))
+                        await tq.mark_failed_forever(task_id, str(exc))
                         final_state = "failed"
                     else:
-                        final_state = await tq.mark_failed(task.id, str(exc))
+                        final_state = await tq.mark_failed(task_id, str(exc))
                 errors.append(f"site={c.site_id} item={c.item_id}: {exc}")
                 await self._mark_push_failed(c.index_id)
                 if exc.category == "download":
@@ -307,7 +331,7 @@ class PushFreeService:
                 async with session_scope() as session:
                     tq = TaskQueueService(session)
                     final_state = await tq.mark_failed(
-                        task.id, f"{type(exc).__name__}: {exc}"
+                        task_id, f"{type(exc).__name__}: {exc}"
                     )
                 failed += 1
                 errors.append(f"site={c.site_id} item={c.item_id}: {exc}")
@@ -321,7 +345,7 @@ class PushFreeService:
 
             async with session_scope() as session:
                 tq = TaskQueueService(session)
-                await tq.mark_done(task.id)
+                await tq.mark_done(task_id)
             pushed += 1
             push_items.append(JobStepItem(label, "ok", None, "推送成功"))
 

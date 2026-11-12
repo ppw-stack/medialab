@@ -471,6 +471,36 @@ async def _sync_attachment_counted(
         logger.warning("附件同步失败 %s：%s", cloud_file.path, result.error)
 
 
+async def _write_strm_batch(
+    pending: list[tuple[Path, str]], stats: ScanStats
+) -> None:
+    """写一批 strm 文件（**必须在写锁之外**执行）。
+
+    为什么不能写在事务里：``_upsert_media`` 的 ``flush`` 已经拿到
+    SQLite **写锁**，而 STRM 输出目录在 CIFS 上——写文件卡秒级（挂载
+    抖动）就等于写锁被占住那么久，别人的写事务全被挡住。
+
+    2026-11-12 prod 事故：扫描的事务横跨「写 strm + 等附件下载」，
+    写锁被持有几十秒 → ``drain_task_queue`` / ``push_free_torrents``
+    / ``refresh_user_data`` 连续撞 ``database is locked``。WAL 只解决
+    **读写**互斥，写-写互斥依旧 → 根治只能缩短写锁窗口。
+
+    铁律：**flush 之后、commit 之前，不做任何非 DB 的 await**
+    （CIFS 写文件、附件下载等待都不行）。
+    """
+    if not pending:
+        return
+    for strm_path, url in pending:
+        written = await asyncio.to_thread(write_strm, strm_path, url)
+        if written == StrmWriteResult.CREATED:
+            stats.created += 1
+        elif written == StrmWriteResult.UPDATED:
+            stats.updated += 1
+        else:
+            stats.unchanged += 1
+    pending.clear()
+
+
 async def scan_driver(
     db: AsyncSession,
     settings: AppSettings,
@@ -539,6 +569,8 @@ async def scan_driver(
     attachment_sem = asyncio.Semaphore(ATTACHMENT_CONCURRENCY)
     attachment_tasks: set[asyncio.Task[None]] = set()
     cancelled = False
+    #: 待写 strm 清单：(路径, URL)——**提交之后**才落文件
+    pending_strms: list[tuple[Path, str]] = []
 
     owns_client = http_client is None
     if http_client is None:
@@ -578,6 +610,10 @@ async def scan_driver(
                 attachment_tasks.add(task)
                 task.add_done_callback(attachment_tasks.discard)
                 if len(attachment_tasks) >= ATTACHMENT_WINDOW:
+                    # ⚠ **先提交再等**：附件下载单个最坏 60s 超时 × 3 次
+                    # 重试（几分钟），绝不能让它发生在持有写锁的事务里
+                    # （2026-11-12 prod 事故根因之一）。
+                    await db.commit()
                     # 背压：等任意一个完成再继续遍历（内存有界）
                     await asyncio.wait(
                         attachment_tasks, return_when=asyncio.FIRST_COMPLETED
@@ -602,20 +638,18 @@ async def scan_driver(
                 secret=secret,
             )
             url = build_redirect_url(base_url, media.id, secret)
-            # ⚠️ **写文件放线程池**：STRM 输出目录在 CIFS 上——挂载卡死时
-            # 同步写会无限等待，把事件循环卡死（2026-11-06 prod 事故）。
-            written = await asyncio.to_thread(write_strm, strm_path, url)
-
-            if written == StrmWriteResult.CREATED:
-                stats.created += 1
-            elif written == StrmWriteResult.UPDATED:
-                stats.updated += 1
-            else:
-                stats.unchanged += 1
+            # ⚠️ **写文件推迟到提交之后**：上面的 flush 已经拿到 SQLite
+            # 写锁，此时做 CIFS IO 会把写锁拉长（2026-11-12 prod 事故）。
+            # 签名在 flush 后已定（media.id 已有），URL 可提前算好。
+            # 写文件本身仍在线程池里跑——挂载卡死不能堵死事件循环
+            # （2026-11-06 prod 事故）。
+            pending_strms.append((strm_path, url))
 
             # 分批提交——中途失败不至于全丢
             if processed % COMMIT_EVERY == 0:
                 await db.commit()
+                # 提交后再写文件：此刻不持写锁
+                await _write_strm_batch(pending_strms, stats)
     except asyncio.CancelledError:
         cancelled = True
         raise
@@ -634,6 +668,11 @@ async def scan_driver(
             await asyncio.gather(*attachment_tasks, return_exceptions=True)
         if owns_client:
             await http_client.aclose()
+
+    # 最后不足一批的 strm：**先提交**（释放写锁）再写文件——
+    # CIFS IO 绝不能发生在持写锁的事务里（2026-11-12 prod 事故）。
+    await db.commit()
+    await _write_strm_batch(pending_strms, stats)
 
     if prune:
         stats.skipped_unknown += await _prune_orphans(

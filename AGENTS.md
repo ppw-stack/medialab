@@ -353,6 +353,20 @@
   - **实测数据**：`job_runs` 稳态 ~1,300 行/天（drain 自身 518 + fetch_all_sites 313 + monitor 306…），单条 ~19KB → 30 天保留期 ≈ 4 万行 / ~750MB（占库 89%，全是派生数据，SQLite 无压力但值得留意）
   - 契约由 `tests/integration/test_task_drain.py::TestPurgeBatching` 固化（超量分批 + 上限 + 不足批一次删完 + `probe_results` 清理——后者此前零覆盖）
 
+- **扫描不得长时间持有 SQLite 写锁**（2026-11-12 prod 事故，`app/services/media.py` 的 `scan_driver`）：
+  - **现象**：面板手动触发存储源扫描（光鸭，航海王 800+ 集附件同步）后，40 分钟内 61 次 `database is locked`——`drain_task_queue`（每 5 分钟必炸）、`refresh_user_data`、手动触发的 `push_free_torrents` 全中；`job_runs` 历史从 15:55 起**全部丢失**
+  - **根因**：扫描的**一个事务**横跨「写 strm（CIFS）+ 等附件下载」——`_upsert_media` 的 `flush` 已拿到写锁，之后却在事务里做 CIFS 写文件与 `asyncio.wait` 等附件（单附件最坏 60s 超时 × 3 次重试）→ **写锁被持有几十秒**
+  - **为什么 WAL 救不了**：WAL 只解决**读写**互斥，**写-写仍是单写者**；`busy_timeout=10s` 等不到 → 别人的写事务全被挡住。WAL 切换后事故照旧发生
+  - **修法（铁律）**：**flush 之后、commit 之前，不做任何非 DB 的 await**。strm 写入推迟到 commit 之后（`pending_strms` 清单 + `_write_strm_batch`）；附件背压等待前先 `db.commit()`
+  - **统计时点后移**：strm 的 created/updated/unchanged 改为批次提交后统计（数字不变，`on_progress` 读到的进度最多滞后一批）
+  - **契约**：`tests/integration/test_scan.py::TestScanLockWindow`（第二个连接写库**不被饿死** + 写 strm 时无未提交写）
+
+- **入队撞写锁要退避重试，不能炸整轮**（2026-11-12，`app/services/task_queue.py`）：
+  - `enqueue_with_retry` / `claim_with_retry`：撞 `OperationalError` 退避重试 3 次（0.5 / 1 / 2s），每次**新开 session**——锁冲突后旧事务已回滚，session 的事务状态不可复用
+  - 重试耗尽 → 抛 `TaskQueueBusyError`：自动推送**记失败明细并 continue 下一个候选**（整轮不炸；幂等键保证下轮 cron 自动补推、不重复）；手动推送返 503 `db_busy`
+  - **入队是核心业务**，不能像直链缓存那样静默放弃——降级语义与 `link_cache` / `_record_run`（可丢的优化/统计）**刻意不同**
+  - 契约由 `tests/integration/test_push_free.py::TestEnqueueLockContention` 固化（入队撞锁重试 / 认领撞锁重试 / 重试耗尽只挂一个候选且其它照常推）
+
 - **光鸭扫描走全量列表，~16 请求替代逐目录递归**（2026-11-12 生产探针实测，`app/adapters/drivers/guangya.py`）：
   - `fs_files` 支持 `parent_id="*"`（全账号）+ `res_type` 过滤，条目带 **`fullParentIds`**（从账号根到父目录的完整 fileId 链，`/` 分隔）——一次目录翻页（`res_type=2`，生产 726 目录 = 1 请求）建 fileId→目录名映射 + 一次文件翻页（`res_type=1`）按链首过滤 `media_cid` 子树，`relative_dir` 由链上 fileId 换算目录名拼出
   - **收益**：生产 970 目录 ≈ 1100+ 请求（0.2s 限速下 5-9 分钟）→ ≈16 请求（≈10 秒）；`page_size` 实测支持 1000+（200/500/1000 全生效，无 code=112）

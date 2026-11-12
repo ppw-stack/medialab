@@ -31,7 +31,14 @@ from app.db.session import session_scope
 from app.domain.enums import PushStatus
 from app.services.downloader_query import get_default_downloader, get_downloader_by_id
 from app.services.task_executor import PushItemError, execute_add_torrent
-from app.services.task_queue import TaskKind, TaskQueueService, make_idem_key
+from app.services.task_queue import (
+    TaskKind,
+    TaskQueueBusyError,
+    TaskQueueService,
+    claim_with_retry,
+    enqueue_with_retry,
+    make_idem_key,
+)
 
 if TYPE_CHECKING:
     from app.services.factory import AdapterFactory
@@ -168,17 +175,26 @@ async def enqueue_index_entry(index_id: int, downloader_id: int | None) -> Enque
         "index_id": index_id,
         "downloader_id": dl_id,
     }
-    async with session_scope() as session:
-        tq = TaskQueueService(session)
-        enq = await tq.enqueue(TaskKind.ADD_TORRENT, payload, idem_key=idem_key)
-        if not enq.created:
-            # 幂等命中：已有等价任务（已推过 / 在推 / 待重试）
-            return EnqueueOutcome(
-                state="already_queued",
-                dl_id=dl_id,
-                detail=f"该种已在推送队列中（状态：{enq.existing_status}）",
-            )
-        task_id = enq.task_id
+    # 入队撞 SQLite 写锁时退避重试（2026-11-12 prod 事故：扫描批量写库
+    # 期间手动推送的 INSERT 等满 10s 仍失败 → 用户点按钮直接报错）。
+    try:
+        enq = await enqueue_with_retry(
+            TaskKind.ADD_TORRENT, payload, idem_key=idem_key
+        )
+    except TaskQueueBusyError as exc:
+        raise PushError(
+            f"推送队列繁忙（数据库忙），请稍后重试：{exc}",
+            status=503,
+            code="db_busy",
+        ) from exc
+    if not enq.created:
+        # 幂等命中：已有等价任务（已推过 / 在推 / 待重试）
+        return EnqueueOutcome(
+            state="already_queued",
+            dl_id=dl_id,
+            detail=f"该种已在推送队列中（状态：{enq.existing_status}）",
+        )
+    task_id = enq.task_id
     return EnqueueOutcome(
         state="enqueued",
         dl_id=dl_id,
@@ -186,7 +202,6 @@ async def enqueue_index_entry(index_id: int, downloader_id: int | None) -> Enque
         task_id=task_id,
         payload=payload,
     )
-
 
 async def push_index_entry(
     index_id: int,
@@ -222,11 +237,16 @@ async def push_index_entry(
     task_id = enq.task_id
     assert payload is not None and task_id is not None  # enqueued 分支必有
 
-    # 认领并同步执行
-    async with session_scope() as session:
-        tq = TaskQueueService(session)
-        task = await tq.claim_one(task_id)
-    if task is None:
+    # 认领并同步执行（认领同样撞锁时退避重试）
+    try:
+        claimed = await claim_with_retry(task_id)
+    except TaskQueueBusyError as exc:
+        raise PushError(
+            f"推送队列繁忙（数据库忙），请稍后重试：{exc}",
+            status=503,
+            code="db_busy",
+        ) from exc
+    if not claimed:
         # 极小概率：入队成功但认领不到（并发抢走）——视为幂等成功
         return PushOutcome(
             ok=True,
@@ -242,16 +262,16 @@ async def push_index_entry(
         async with session_scope() as session:
             tq = TaskQueueService(session)
             if exc.category == "fatal":
-                await tq.mark_failed_forever(task.id, str(exc))
+                await tq.mark_failed_forever(task_id, str(exc))
             else:
-                await tq.mark_failed(task.id, str(exc))
+                await tq.mark_failed(task_id, str(exc))
         logger.warning("手动推送 index_id=%d 失败：%s", index_id, exc)
         raise PushError(str(exc), status=502, code="push_failed") from exc
 
     # 5) 成功 → mark_done
     async with session_scope() as session:
         tq = TaskQueueService(session)
-        await tq.mark_done(task.id)
+        await tq.mark_done(task_id)
 
     info_hash = str(result.get("info_hash") or "")
     idempotent = bool(result.get("idempotent"))

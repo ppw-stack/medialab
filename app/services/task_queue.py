@@ -13,16 +13,18 @@ running，超过 :data:`STALE_RUNNING_MINUTES` 后被回收为 pending 重试。
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import StrEnum
 
 from sqlalchemy import select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.timeutils import bj_now, bj_now_dt, format_bj
 from app.db.models import TaskQueue
+from app.db.session import session_scope
 
 
 class TaskKind(StrEnum):
@@ -60,6 +62,19 @@ STALE_RUNNING_MINUTES = 30
 #: 1→2→4→8 分钟）。此上限是为提高 MAX_ATTEMPTS 预留的安全阀，
 #: 不是当前行为的一部分。
 _BACKOFF_CAP_MINUTES = 30
+
+#: 入队 / 认领撞 SQLite 写锁时的重试次数（含首次）
+LOCK_RETRY_ATTEMPTS = 3
+#: 重试退避基数（秒）——第 n 次失败后等 ``n * BASE``（0.5 / 1.0 / 2.0）
+LOCK_RETRY_BASE_DELAY = 0.5
+
+
+class TaskQueueBusyError(RuntimeError):
+    """入队 / 认领重试耗尽——SQLite 写锁被别的连接长期占用。
+
+    与「入队失败」（数据错误）区分开：这是**瞬时资源竞争**，调用方
+    通常可以稍后重试（幂等键保证不重复入队）。
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,12 +319,86 @@ class TaskQueueService:
 MAX_ATTEMPTS = 5
 
 
+async def enqueue_with_retry(
+    kind: str,
+    payload: dict[str, object],
+    *,
+    idem_key: str,
+    run_at: str | None = None,
+    attempts: int = LOCK_RETRY_ATTEMPTS,
+    base_delay: float = LOCK_RETRY_BASE_DELAY,
+) -> EnqueueResult:
+    """入队；撞 SQLite 写锁时退避重试。
+
+    **每次尝试都新开 session**：锁冲突后旧事务已被回滚，session 的
+    事务状态不可复用（与 :mod:`app.services.link_cache` /
+    :mod:`app.services.scheduler` 的锁降级同款处理）。
+
+    2026-11-12 prod 事故：扫描作业批量写库期间持有写锁 → 自动推送的
+    ``INSERT INTO task_queue`` 等满 ``busy_timeout``(10s) 仍失败 →
+    **整轮推送炸掉**。入队是**核心业务**（不能像直链缓存那样静默
+    放弃）→ 退避重试；重试耗尽抛 :class:`TaskQueueBusyError`，由调用方
+    决定降级（自动推送记明细继续；手动推送返回 503）。
+
+    :raises TaskQueueBusyError: 重试耗尽（写锁长期被占）
+    """
+    last: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            async with session_scope() as session:
+                tq = TaskQueueService(session)
+                return await tq.enqueue(
+                    kind, payload, idem_key=idem_key, run_at=run_at
+                )
+        except OperationalError as exc:
+            last = exc
+            if attempt >= attempts:
+                break
+            await asyncio.sleep(base_delay * attempt)
+    raise TaskQueueBusyError(
+        f"任务入队失败（数据库忙，重试 {attempts} 次仍失败）：{last}"
+    ) from last
+
+
+async def claim_with_retry(
+    task_id: int,
+    *,
+    attempts: int = LOCK_RETRY_ATTEMPTS,
+    base_delay: float = LOCK_RETRY_BASE_DELAY,
+) -> bool:
+    """认领任务（pending → running）；撞 SQLite 写锁时退避重试。
+
+    :return: True = 认领成功；False = 任务不在 pending 态（已被他人认领）
+    :raises TaskQueueBusyError: 重试耗尽（写锁长期被占）
+    """
+    last: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            async with session_scope() as session:
+                tq = TaskQueueService(session)
+                task = await tq.claim_one(task_id)
+            return task is not None
+        except OperationalError as exc:
+            last = exc
+            if attempt >= attempts:
+                break
+            await asyncio.sleep(base_delay * attempt)
+    raise TaskQueueBusyError(
+        f"任务认领失败（数据库忙，重试 {attempts} 次仍失败）：{last}"
+    ) from last
+
+
 __all__ = [
+    "LOCK_RETRY_ATTEMPTS",
+    "LOCK_RETRY_BASE_DELAY",
     "MAX_ATTEMPTS",
     "STALE_RUNNING_MINUTES",
     "EnqueueResult",
     "TaskKind",
+    "TaskQueueBusyError",
     "TaskQueueService",
     "TaskStatus",
+    "claim_with_retry",
+    "enqueue_with_retry",
     "make_idem_key",
 ]
