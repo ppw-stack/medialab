@@ -1284,6 +1284,10 @@ export interface RelayJob {
   current_path: string
   dirs_walked: number
   discovered: number
+  /** 待转存的目录总数（遍历完成后才知道） */
+  total_dirs: number
+  /** 已处理的目录数 */
+  processed_dirs: number
   success: number
   failed: number
   /** 目标已有同名同大小 → 跳过 */

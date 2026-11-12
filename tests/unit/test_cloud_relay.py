@@ -54,6 +54,15 @@ class FakeRelayDriver:
         self.share_error_times = 0
         #: 分享内容里缺哪些 id（模拟服务端没收录）
         self.share_missing: set[str] = set()
+        #: 批大小 > 该值时，建分享抛「数量超限」（220）
+        self.share_limit_above: int | None = None
+        #: 批大小 > 该值时，建分享抛**其它**错（不可重试的那类）
+        self.share_error_above: int | None = None
+        #: 第 N 次建分享抛错（1 起）——用来只让**第一个目录**失败
+        self.share_error_on_call: int | None = None
+        self.share_calls = 0
+        #: 预检（列目标目录）抛网络错的次数——模拟生产 DNS 抖动
+        self.list_entries_error_times = 0
         #: 文件目录 ``{fileId: 文件}``——目标驱动靠它知道落盘的文件名
         self.catalog: dict[str, CloudFile] = {}
 
@@ -66,12 +75,24 @@ class FakeRelayDriver:
         return f"dir::{rel_path}"
 
     async def list_entries(self, dir_id: str) -> dict[str, tuple[int, str]]:
+        if self.list_entries_error_times > 0:
+            self.list_entries_error_times -= 1
+            raise DriverError(
+                "Temporary failure in name resolution", kind="network"
+            )
         return dict(self.existing)
 
     async def create_share(self, file_ids: list[str], title: str) -> ShareInfo:
+        self.share_calls += 1
+        if self.share_error_on_call == self.share_calls:
+            raise DriverError("参数错误", kind="config")
         if self.share_error is not None and self.share_error_times > 0:
             self.share_error_times -= 1
             raise self.share_error
+        if self.share_limit_above is not None and len(file_ids) > self.share_limit_above:
+            raise DriverError("分享目录文件数量超过限制", kind="limit")
+        if self.share_error_above is not None and len(file_ids) > self.share_error_above:
+            raise DriverError("参数错误", kind="config")
         self.shares.append(list(file_ids))
         return ShareInfo(
             share_id=f"share-{len(self.shares)}",
@@ -231,20 +252,64 @@ class TestTransfer:
 
 
 class TestBatching:
-    async def test_splits_at_500(self, driver_rows, monkeypatch) -> None:
-        """单批上限 500——超了要拆批（服务端会拒超限的批次）。"""
+    async def test_splits_at_share_limit(self, driver_rows, monkeypatch) -> None:
+        """单批上限 = **建分享**的上限（20）——不是保存的 500。
+
+        2026-11-12 生产踩过：按 500 切批 → 一遇到多文件的目录就报
+        「分享目录文件数量超过限制」整轮失败。
+        """
         src = FakeRelayDriver()
-        src.files = [_file(f"f{i}.mkv", 10) for i in range(600)]
+        src.files = [_file(f"f{i}.mkv", 10) for i in range(45)]
         tgt = FakeRelayDriver()
         _patch_drivers(monkeypatch, src, tgt)
 
         job = _job()
         await cloud_relay.run_relay(job)
 
-        assert len(tgt.restores) == 2
-        assert len(tgt.restores[0][0]) == 500
-        assert len(tgt.restores[1][0]) == 100
-        assert job.success == 600
+        assert len(tgt.restores) == 3
+        assert [len(c) for c, _ in tgt.restores] == [20, 20, 5]
+        assert job.success == 45
+
+    async def test_halves_batch_when_limit_hit(self, driver_rows, monkeypatch) -> None:
+        """服务端说「数量超限」（220）→ **批次减半重试**，不整轮失败。"""
+        src = FakeRelayDriver()
+        src.files = [_file(f"f{i}.mkv", 10) for i in range(30)]
+        # 假装服务端的真实上限是 8（比常量 20 小）
+        src.share_limit_above = 8
+        tgt = FakeRelayDriver()
+        _patch_drivers(monkeypatch, src, tgt)
+
+        job = _job()
+        await cloud_relay.run_relay(job)
+
+        assert job.success == 30
+        assert job.failed == 0
+        assert all(len(c) <= 8 for c, _ in tgt.restores)
+
+    async def test_directory_failure_does_not_stop_others(
+        self, driver_rows, monkeypatch
+    ) -> None:
+        """单个目录失败 → 记失败明细，**继续下一个目录**（不炸整轮）。
+
+        2026-11-12 生产事故：建分享报「数量超过限制」时异常直接冒到
+        顶层 → 整个转存任务挂掉，后面的目录一个都没转。
+        """
+        src = FakeRelayDriver()
+        src.files = [
+            _file("bad.mkv", 10, "A"),
+            _file("good.mkv", 10, "B"),
+        ]
+        # 只让**第一个**建分享失败（目录按 A、B 顺序处理）
+        src.share_error_on_call = 1
+        tgt = FakeRelayDriver()
+        _patch_drivers(monkeypatch, src, tgt)
+
+        job = _job()
+        await cloud_relay.run_relay(job)
+
+        assert job.failed == 1, "第一个目录的文件应记为失败"
+        assert job.success == 1, "第二个目录应照常转存"
+        assert job.processed_dirs == 2
 
 
 class TestDeleteSource:
@@ -312,7 +377,11 @@ class TestShareRetry:
         assert len(src.shares) == 1
 
     async def test_does_not_retry_on_param_error(self, driver_rows, monkeypatch) -> None:
-        """``112`` 参数错误是调用方拼错了——重试没有意义。"""
+        """``112`` 参数错误是调用方拼错了——重试没有意义。
+
+        ⚠️ 它**不会**冒到顶层 anymore：目录级失败隔离会把它记成该目录的
+        失败明细并继续下一个目录（2026-11-12 生产事故的修复）。
+        """
         src = FakeRelayDriver()
         src.files = [_file("a.mkv", 100)]
         src.share_error = DriverError("参数错误", kind="config")
@@ -323,9 +392,11 @@ class TestShareRetry:
         monkeypatch.setattr(cloud_relay, "_sleep", _no_sleep)
 
         job = _job(submit_interval_sec=1)
-        with pytest.raises(DriverError):
-            await cloud_relay.run_relay(job)
-        assert src.shares == []
+        await cloud_relay.run_relay(job)
+
+        assert src.shares == [], "参数错误不该重试"
+        assert job.failed == 1, "该目录的文件应记为失败"
+        assert job.success == 0
 
 
 class TestShareContent:
@@ -349,6 +420,28 @@ class TestShareContent:
 
         assert job.failed == 1
         assert tgt.restores == [], "内容不全时不该提交保存"
+
+
+class TestTransientRetry:
+    async def test_retries_network_error_in_precheck(
+        self, driver_rows, monkeypatch
+    ) -> None:
+        """网络抖动（DNS 解析失败）→ **重试**该目录，不算失败。
+
+        2026-11-12 生产实测：预检阶段一次 DNS 抖动就让整轮转存挂掉。
+        """
+        src = FakeRelayDriver()
+        src.files = [_file("a.mkv", 100)]
+        tgt = FakeRelayDriver()
+        tgt.list_entries_error_times = 1
+        _patch_drivers(monkeypatch, src, tgt)
+        monkeypatch.setattr(cloud_relay, "_sleep", _no_sleep)
+
+        job = _job()
+        await cloud_relay.run_relay(job)
+
+        assert job.failed == 0, "网络抖动不该记为失败"
+        assert job.success == 1
 
 
 class TestValidation:

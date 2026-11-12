@@ -183,8 +183,47 @@ async def main() -> None:
             f"源账号分享列表 {len(share_list)} 条",
         )
 
-        # ---------- 第二轮：验证「搬完清理源」开关 ----------
-        print("\n--- 第二轮：delete_source=True ---")
+        # ---------- 第二轮：多文件目录（>20 个 → 触发分批）----------
+        #
+        # ⚠️ **一次建分享最多 20 个文件**（实测，服务端 code 220）——
+        # 这个场景必须验，否则「按 20 分批」和「自适应减半」都是纸面功夫。
+        print("\n--- 第二轮：25 个文件的目录（应分 2 批：20 + 5）---")
+        many_dir, _ = await src.create_dir(f"__relay_many_{TS}__", "")
+        cleanup.append((src, many_dir))
+        for i in range(25):
+            await upload(src, many_dir, f"Many.{i:02d}.mkv", 1024)
+        tgt_many, _ = await tgt.create_dir(f"__relay_many_t_{TS}__", "")
+        cleanup.append((tgt, tgt_many))
+
+        job_many = RelayJob(
+            id="probe-relay-many",
+            params=RelayParams(
+                source_driver_id=SRC_DRIVER_ID,
+                source_file_id=many_dir,
+                target_driver_id=TGT_DRIVER_ID,
+                target_file_id=tgt_many,
+                submit_interval_sec=15.0,
+            ),
+        )
+        await run_relay(job_many)
+
+        entries_many = await tgt.list_entries(tgt_many)
+        expected = {f"Many.{i:02d}.mkv": 1024 for i in range(25)}
+        # ``list_entries`` 的值是 ``(大小, fileId)``——比大小时取第 0 项
+        got_many = {name: value[0] for name, value in entries_many.items()}
+        check(
+            "多文件目录：全部转存成功",
+            job_many.success == 25,
+            f"success={job_many.success}（应为 25）",
+        )
+        check(
+            "多文件目录：文件名与大小全对",
+            got_many == expected,
+            f"目标 {len(got_many)} 个文件（应为 25）",
+        )
+
+        # ---------- 第三轮：delete_source=True ----------
+        print("\n--- 第三轮：delete_source=True ---")
         src_dir2, _ = await src.create_dir(f"__relay_probe2_{TS}__", "")
         cleanup.append((src, src_dir2))
         await upload(src, src_dir2, f"Probe.C.{ext_main}", 4096)
