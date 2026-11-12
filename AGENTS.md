@@ -334,6 +334,7 @@
   - **根因**：扫描/调度作业大批量写库时，中转请求写 `link_cache` 撞上 SQLite 写锁。`DB_JOURNAL_MODE=DELETE` 的写锁是**全库排他**的；且 `busy_timeout=10s` 对**死锁升级**无效——读事务持共享锁 + 写事务要升级时 SQLite **直接报** `database is locked` 而非等待，加超时兜不住
   - **修法（业务语义优先）**：直链缓存是**优化**，不是播放的前提——直链已经换到手，缓存读写失败一律降级：读失败按「未命中」继续换取；写失败退避 0.3s 重试一次后**静默放弃**（只留 L1 内存缓存）。只 catch `OperationalError`，其它异常（真 bug）照常抛
   - 契约由 `tests/unit/test_link_cache.py::TestDbLockDegradation` 固化（patch `session_scope` 让 DB 整体抛锁，验证两条路径都不抛）
+  - **同款场景第三处：作业历史落库**（2026-11-12 生产撞锁后修，`scheduler.py` 的 `_record_run._persist`）：扫描批量写库期间调度作业的 `job_runs` 落库 commit 撞锁，`OperationalError` 逃逸成「Task exception was never retrieved」ERROR 且历史丢失——修法同款：退避 0.5s 重试一次，仍失败 warning 降级（作业历史是统计性副产品，保留期 30 天）；其它异常同样降级记 warning 不吞真 bug。契约由 `tests/unit/test_scheduler.py::TestRecordRun` 固化
 
 - **光鸭扫描走全量列表，~16 请求替代逐目录递归**（2026-11-12 生产探针实测，`app/adapters/drivers/guangya.py`）：
   - `fs_files` 支持 `parent_id="*"`（全账号）+ `res_type` 过滤，条目带 **`fullParentIds`**（从账号根到父目录的完整 fileId 链，`/` 分隔）——一次目录翻页（`res_type=2`，生产 726 目录 = 1 请求）建 fileId→目录名映射 + 一次文件翻页（`res_type=1`）按链首过滤 `media_cid` 子树，`relative_dir` 由链上 fileId 换算目录名拼出
