@@ -249,5 +249,5 @@ class TestAttachmentTimeout:
         assert isinstance(timeout, dict)
         assert timeout["read"] == attachments.ATTACHMENT_TIMEOUT.read
         assert timeout["connect"] == attachments.ATTACHMENT_TIMEOUT.connect
-        # 远小于共享 client 的 60s
-        assert timeout["read"] == 15.0
+        # 比共享 client 的 60s 短，但够慢 CDN 节点（15s 实测失败率 17%）
+        assert timeout["read"] == 45.0
