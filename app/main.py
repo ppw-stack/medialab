@@ -302,6 +302,7 @@ def _mount_routes(app: FastAPI) -> None:
         media,
         migrations,
         redirect,
+        relays,
         scan_jobs,
         scheduler,
         scrape,
@@ -339,6 +340,7 @@ def _mount_routes(app: FastAPI) -> None:
         scan_jobs.router,
         incremental_jobs.router,
         migrations.router,
+        relays.router,
         upload_tasks.router,
         dav_users.router,
         # 中转路由挂根路径：/302/<media_id>/<sig>

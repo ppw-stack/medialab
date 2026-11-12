@@ -42,6 +42,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'drivers', name: 'drivers', component: () => import('./pages/media/Drivers.vue') },
       { path: 'library', name: 'library', component: () => import('./pages/media/Library.vue') },
       { path: 'migrations', name: 'migrations', component: () => import('./pages/media/Migrations.vue') },
+      { path: 'relays', name: 'relays', component: () => import('./pages/media/Relays.vue') },
       { path: 'scrape', name: 'scrape', component: () => import('./pages/media/Scrape.vue') },
       { path: 'uploads', name: 'uploads', component: () => import('./pages/media/Uploads.vue') },
       { path: 'health', name: 'health', component: () => import('./pages/media/Health.vue') },
