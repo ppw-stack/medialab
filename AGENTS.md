@@ -343,6 +343,8 @@
   - **收益实测**：DELETE 模式写锁全库排他，扫描批量写期间播放写 `link_cache` 必撞锁（播放 500 事故的根因）；WAL 下读写不互斥——锁冲突从「持续刷屏」收敛为「**仅容器启动瞬间一次性**」
   - **切法**：停容器 → 冷备份 `medialab.db.bak.<时间戳>` → 改 `.env.prod` 一行 → `docker compose up -d`（首个连接即完成切换，属性持久化在 DB 头）→ 验证 `PRAGMA journal_mode` 返回 `wal` + `-wal`/`-shm` 文件出现。回滚：改回 `DELETE` + 重启（SQLite 自动合并 WAL，无损失）
   - **降级逻辑保留**：撞锁降级仍要有（WAL 下多写者仍会冲突，只是窗口小得多；且 `drain_task_queue` 的历史清理是大事务，扫描启动瞬间仍可能撞上）
+  - **文件系统的注意**：DB 在 `/mnt/disk1`（本地阵列盘）经 `/mnt/user`（shfs/FUSE）访问——SQLite 官方警告的是**网络文件系统**（NFS/SMB），shfs 底下是本地盘，WAL 的 `-shm`（mmap 共享内存）实践可靠；这台 Unraid 无 cache 池
+  - **备份注意**：Unraid 备份 appdata 要连 `-wal` 文件一起（或接受最近事务未合并——库内数据全是可重建的派生数据）
 
 - **历史清理必须分批**（2026-11-12，`app/services/task_drain.py` 的 `_purge_in_batches`）：
   - **为什么**：一次性 `DELETE WHERE started_at < cutoff` 删几千行会**长时间持有 SQLite 写锁**——`job_runs` 单条 `result_json` 有 10–30KB，几千行即几十 MB 的删除事务，与扫描/调度的写事务互相撞（`database is locked`）
@@ -350,8 +352,6 @@
   - **单次上限**：`_PURGE_MAX_BATCHES=10`（= 5,000 行），删不完**下轮继续**（作业每 5 分钟一轮）——任何时刻都不会长时间持锁；停机 N 天的补账也只需几轮
   - **实测数据**：`job_runs` 稳态 ~1,300 行/天（drain 自身 518 + fetch_all_sites 313 + monitor 306…），单条 ~19KB → 30 天保留期 ≈ 4 万行 / ~750MB（占库 89%，全是派生数据，SQLite 无压力但值得留意）
   - 契约由 `tests/integration/test_task_drain.py::TestPurgeBatching` 固化（超量分批 + 上限 + 不足批一次删完 + `probe_results` 清理——后者此前零覆盖）
-  - **文件系统的注意**：DB 在 `/mnt/disk1`（本地阵列盘）经 `/mnt/user`（shfs/FUSE）访问——SQLite 官方警告的是**网络文件系统**（NFS/SMB），shfs 底下是本地盘，WAL 的 `-shm`（mmap 共享内存）实践可靠；这台 Unraid 无 cache 池
-  - **备份注意**：Unraid 备份 appdata 要连 `-wal` 文件一起（或接受最近事务未合并——库内数据全是可重建的派生数据）
 
 - **光鸭扫描走全量列表，~16 请求替代逐目录递归**（2026-11-12 生产探针实测，`app/adapters/drivers/guangya.py`）：
   - `fs_files` 支持 `parent_id="*"`（全账号）+ `res_type` 过滤，条目带 **`fullParentIds`**（从账号根到父目录的完整 fileId 链，`/` 分隔）——一次目录翻页（`res_type=2`，生产 726 目录 = 1 请求）建 fileId→目录名映射 + 一次文件翻页（`res_type=1`）按链首过滤 `media_cid` 子树，`relative_dir` 由链上 fileId 换算目录名拼出
