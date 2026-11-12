@@ -61,6 +61,7 @@ class EnvSettingsUpdateIn(BaseModel):
     """
 
     cross_seed_scan_dirs: str | None = None
+    proxy_url: str | None = None
 
 
 def _assert_model_covers_specs() -> None:

@@ -163,6 +163,15 @@ class ScrapeService:
         value = get_runtime_params().get_int("scrape_policy")
         return ScrapePolicy.OVERWRITE if value == 1 else ScrapePolicy.MISSING_ONLY
 
+    @staticmethod
+    def proxy_url() -> str:
+        """当前配置的代理地址（空 = 直连）。
+
+        国内直连 TMDB 经常不通——API 与图片都走它。**只作用于外网元数据源**，
+        不影响站点、下载器、网盘。
+        """
+        return get_env_setting("proxy_url").strip()
+
     def _client(self) -> TmdbClient:
         """取 TMDB 客户端。
 
@@ -173,21 +182,22 @@ class ScrapeService:
         key = self.api_key()
         if not key:
             raise ServiceError("未配置 TMDB API Key，刮削功能不可用", status=400)
-        self._tmdb = TmdbClient(key)
+        self._tmdb = TmdbClient(key, proxy=self.proxy_url() or None)
         return self._tmdb
 
     def _url_client(self) -> TmdbClient:
         """取用于拼图片地址的客户端（无 Key 也能用）。"""
         if self._tmdb is not None:
             return self._tmdb
-        return TmdbClient(self.api_key())
+        return TmdbClient(self.api_key(), proxy=self.proxy_url() or None)
 
     def _http_client(self) -> httpx.AsyncClient:
-        """取图片下载客户端（自建时跟随重定向）。"""
+        """取图片下载客户端（自建时跟随重定向，带配置的代理）。"""
         if self._http is None:
             self._http = httpx.AsyncClient(
                 timeout=httpx.Timeout(IMAGE_TIMEOUT_SECONDS),
                 follow_redirects=True,
+                proxy=self.proxy_url() or None,
             )
         return self._http
 
@@ -763,7 +773,9 @@ class ScrapeService:
         language = mediainfo.original_language
         if not language or language == "zh":
             return mediainfo
-        client = TmdbClient(self.api_key(), locale=language)
+        client = TmdbClient(
+            self.api_key(), locale=language, proxy=self.proxy_url() or None
+        )
         try:
             if mediainfo.media_type == MediaKind.TV:
                 original = await client.get_tv(mediainfo.tmdb_id)

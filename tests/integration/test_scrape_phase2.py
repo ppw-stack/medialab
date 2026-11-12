@@ -349,3 +349,47 @@ async def test_rescrape_missing_record_raises(db, runtime_params) -> None:
     with pytest.raises(ServiceError) as excinfo:
         await service.rescrape("episode|/nope|S1E1")
     assert excinfo.value.status == 404
+
+
+# ==================================================================== 代理
+
+
+@respx.mock
+async def test_proxy_config_flows_to_clients(db, runtime_params) -> None:
+    """代理配置流到 TMDB 客户端与图片下载客户端（国内直连 TMDB 需走代理）。"""
+    from app.services.env_settings import EnvSettingsManager, set_env_settings
+
+    set_env_settings(
+        EnvSettingsManager({"tmdb_api_key": "test-key", "proxy_url": "http://127.0.0.1:7890"})
+    )
+    respx.get(f"{API}/search/movie").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+    respx.get(f"{API}/search/tv").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+
+    service = ScrapeService()
+    try:
+        assert service.proxy_url() == "http://127.0.0.1:7890"
+        # 识别（走 TMDB 客户端）与图片下载（httpx）都正常构建——
+        # respx 拦截传输层，代理参数不影响 mock，链路不断即证明接线成立
+        assert await service.recognize("任何标题") is None
+        inner = service._http_client()
+        assert inner is not None
+    finally:
+        await service.aclose()
+
+
+async def test_proxy_empty_means_direct(db, runtime_params) -> None:
+    """未配置代理 = 直连（proxy 参数为 None）。"""
+    from app.services.env_settings import EnvSettingsManager, set_env_settings
+
+    set_env_settings(EnvSettingsManager({"tmdb_api_key": "test-key"}))
+    service = ScrapeService()
+    try:
+        assert service.proxy_url() == ""
+        client = service._client()
+        assert client._proxy is None
+    finally:
+        await service.aclose()

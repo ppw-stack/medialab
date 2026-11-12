@@ -128,6 +128,17 @@ ENV_SETTING_SPECS: tuple[EnvSettingSpec, ...] = (
         max_length=4096,
         hidden=True,
     ),
+    EnvSettingSpec(
+        key="proxy_url",
+        label="代理服务器（TMDB）",
+        note=(
+            "国内直连 TMDB 经常不通——配置后 TMDB 的 API 与图片请求走此代理，"
+            "如 http://127.0.0.1:7890。**只作用于外网元数据源（现阶段即 TMDB）**，"
+            "不影响站点、下载器、网盘。留空 = 直连。"
+        ),
+        placeholder="http://127.0.0.1:7890",
+        max_length=256,
+    ),
 )
 
 

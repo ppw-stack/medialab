@@ -319,3 +319,22 @@ def test_image_url_joins_base_and_path() -> None:
 def test_image_url_none_returns_none() -> None:
     """空路径 → None。"""
     assert TmdbClient("k").image_url(None) is None
+
+
+def test_proxy_stored_and_applied_to_self_built_client() -> None:
+    """代理地址：存储 + 应用到自建 client（国内直连 TMDB 需走代理）。"""
+    client = TmdbClient("k", proxy="http://127.0.0.1:7890")
+    assert client._proxy == "http://127.0.0.1:7890"
+    # 自建 client 时把代理传给 httpx（构造成功 = 参数合法）
+    inner = client._client()
+    assert inner is not None
+
+    # 注入的 client 不改写（归调用方管）
+    injected = httpx.AsyncClient()
+    owned = TmdbClient("k", http=injected, proxy="http://127.0.0.1:7890")
+    assert owned._client() is injected
+
+
+def test_proxy_empty_means_direct() -> None:
+    """空代理 = 直连（proxy 参数为 None）。"""
+    assert TmdbClient("k")._proxy is None

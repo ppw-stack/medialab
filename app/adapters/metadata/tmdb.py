@@ -125,6 +125,7 @@ class TmdbClient:
         http: httpx.AsyncClient | None = None,
         api_base: str = TMDB_API_BASE,
         image_base: str = TMDB_IMAGE_BASE,
+        proxy: str | None = None,
     ) -> None:
         self._api_key = api_key
         self._locale = locale
@@ -132,13 +133,19 @@ class TmdbClient:
         self._owns_http = http is None
         self._api_base = api_base.rstrip("/")
         self._image_base = image_base.rstrip("/")
+        #: 代理地址（``http://`` / ``socks5://``）——国内直连 TMDB 经常不通，
+        #: 走代理由调用方按配置决定。仅对**自建** client 生效（注入的
+        #: client 归调用方管，不在构造时改写）。
+        self._proxy = proxy or None
 
     # ---------------------------------------------------------------- 内部
 
     def _client(self) -> httpx.AsyncClient:
-        """取 HTTP 客户端（未注入时按需创建）。"""
+        """取 HTTP 客户端（未注入时按需创建，带配置的代理）。"""
         if self._http is None:
-            self._http = httpx.AsyncClient(timeout=httpx.Timeout(20.0))
+            self._http = httpx.AsyncClient(
+                timeout=httpx.Timeout(20.0), proxy=self._proxy
+            )
         return self._http
 
     async def aclose(self) -> None:
