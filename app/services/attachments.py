@@ -16,11 +16,17 @@ MoviePilot 之类生成的（中文标题、豆瓣评分、自制海报）对不
 - **固定 UA**：115 直链 ``f=1`` 绑定 UA，下载用什么 UA 就得用什么。
   这与播放器的 UA 分桶是两条互不影响的路径。
 - **失败隔离**：单个附件失败只返回失败状态，不抛异常、不中断整轮扫描。
+- **磁盘 IO 全部在线程池**（2026-11-12 加入）：输出目录在 CIFS 上——
+  事件循环里出现同步 ``stat`` / ``write`` / ``rename``，挂载拥塞时会把
+  整个事件循环卡死（2026-11-06 prod 假死事故的同款故障模式——
+  ``write_strm`` / ``delete_strm`` 当时就改了线程池，附件这条路径漏了）。
+  读响应流是异步的留在事件循环，每个落盘动作逐块丢 ``to_thread``。
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -98,7 +104,7 @@ async def sync_attachment(
     Returns:
         同步结果。**不抛异常**——失败折叠成 ``status=FAILED``。
     """
-    if _is_up_to_date(target, cloud_file.size):
+    if await asyncio.to_thread(_is_up_to_date, target, cloud_file.size):
         return AttachmentResult(UNCHANGED)
 
     last_error = ""
@@ -128,7 +134,12 @@ async def _download_once(
     *,
     http: httpx.AsyncClient,
 ) -> AttachmentResult:
-    """下载一次（换直链 → 流式写入 → 校验 → rename）。"""
+    """下载一次（换直链 → 流式写入 → 校验 → rename）。
+
+    **磁盘 IO 全部在线程池**（输出目录在 CIFS 上，同步 ``stat`` /
+    ``write`` / ``rename`` 卡事件循环 = 2026-11-06 假死事故同款）：
+    读响应流是异步的留在事件循环，落盘动作逐块丢 ``to_thread``。
+    """
     try:
         link = await driver.get_direct_link(
             cloud_file.remote_id, ATTACHMENT_USER_AGENT
@@ -138,28 +149,42 @@ async def _download_once(
 
     part = target.with_name(target.name + PART_SUFFIX)
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
         headers = {"User-Agent": ATTACHMENT_USER_AGENT, **link.extra_headers}
         async with http.stream("GET", link.url, headers=headers) as response:
             if response.status_code >= 400:
                 return AttachmentResult(FAILED, f"HTTP {response.status_code}")
-            written = 0
-            with part.open("wb") as fh:
-                async for chunk in response.aiter_bytes(CHUNK_SIZE):
-                    fh.write(chunk)
-                    written += len(chunk)
+            written = await _drain_to_file(response, part)
 
         if cloud_file.size and written != cloud_file.size:
-            _remove(part)
+            await asyncio.to_thread(_remove, part)
             return AttachmentResult(
                 FAILED, f"大小不符：下载 {written} 字节，期望 {cloud_file.size}"
             )
         # rename 是原子的：要么是完整文件，要么没有
-        part.replace(target)
+        await asyncio.to_thread(part.replace, target)
         return AttachmentResult(SYNCED)
     except (httpx.HTTPError, OSError) as exc:
-        _remove(part)
+        await asyncio.to_thread(_remove, part)
         return AttachmentResult(FAILED, f"下载失败：{exc}")
+
+
+async def _drain_to_file(response: httpx.Response, part: Path) -> int:
+    """把响应流写进 ``part`` 文件，返回写入字节数。
+
+    每个块的 ``fh.write`` 都丢线程池——CIFS 上单次写可达几十毫秒，
+    挂载拥塞时同步写会无限等待，把事件循环一起拖死。
+    """
+    fh = await asyncio.to_thread(part.open, "wb")
+    written = 0
+    try:
+        async for chunk in response.aiter_bytes(CHUNK_SIZE):
+            await asyncio.to_thread(fh.write, chunk)
+            written += len(chunk)
+    finally:
+        with contextlib.suppress(OSError):  # pragma: no cover - 写入已报错时关闭失败仅兜底
+            await asyncio.to_thread(fh.close)
+    return written
 
 
 def _is_up_to_date(target: Path, expected_size: int) -> bool:
