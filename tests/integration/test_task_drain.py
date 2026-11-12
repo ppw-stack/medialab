@@ -11,18 +11,26 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import pytest
 import respx
 from app.core.timeutils import bj_now, bj_now_dt, format_bj
 from app.db.models import (
     DownloaderInstance,
+    Driver,
     JobRun,
+    ProbeResult,
     Site,
     TaskQueue,
     TorrentIndex,
 )
 from app.db.session import session_scope
+from app.services import task_drain
 from app.services.factory import AdapterFactory
-from app.services.task_drain import _JOB_RUN_PURGE_DAYS, drain_task_queue
+from app.services.task_drain import (
+    _JOB_RUN_PURGE_DAYS,
+    _PROBE_RESULT_PURGE_DAYS,
+    drain_task_queue,
+)
 from sqlalchemy import select
 
 
@@ -177,3 +185,77 @@ async def test_停用站点的遗留任务不再推送(
     # 连 .torrent 都没下载（检查发生在下载之前）
     assert not no_network.calls
 
+
+
+class TestPurgeBatching:
+    """历史清理**分批**（2026-11-12 生产撞锁后固化）。
+
+    一次性 DELETE 几千行（``job_runs`` 单条 ``result_json`` 有 10–30KB）
+    会长时间持有 SQLite 写锁，与扫描/调度作业的写事务互相撞
+    （``database is locked``）。分批后每批只持锁毫秒级，且单次作业有
+    上限——删不完下轮继续，任何时刻都不会长时间持锁。
+    """
+
+    async def test_超量时按批删且不超过单次上限(
+        self, db: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(task_drain, "_PURGE_BATCH", 10)
+        monkeypatch.setattr(task_drain, "_PURGE_MAX_BATCHES", 2)
+        old = format_bj(bj_now_dt() - timedelta(days=_JOB_RUN_PURGE_DAYS + 1))
+        for _ in range(25):
+            await _add_job_run(old)
+
+        result = await drain_task_queue(AdapterFactory())
+
+        # 单次只删 2 批 × 10 = 20 条（剩下 5 条留给下一轮）
+        assert result["job_runs_purged"] == 20
+        assert await _count_job_runs() == 5
+        step = next(s for s in result["steps"] if s.name == "清理作业历史")
+        assert step.status == "ok"
+        assert step.count == 20
+
+        # 下一轮继续删完
+        result2 = await drain_task_queue(AdapterFactory())
+        assert result2["job_runs_purged"] == 5
+        assert await _count_job_runs() == 0
+
+    async def test_不足一批时一次删完(
+        self, db: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """行数少于一批上限 → 一次删完（不空转第二轮）。"""
+        monkeypatch.setattr(task_drain, "_PURGE_BATCH", 10)
+        monkeypatch.setattr(task_drain, "_PURGE_MAX_BATCHES", 2)
+        old = format_bj(bj_now_dt() - timedelta(days=_JOB_RUN_PURGE_DAYS + 1))
+        for _ in range(7):
+            await _add_job_run(old)
+
+        result = await drain_task_queue(AdapterFactory())
+
+        assert result["job_runs_purged"] == 7
+        assert await _count_job_runs() == 0
+
+    async def test_probe_results_超期也清理(self, db: None) -> None:
+        """探测历史清理此前零覆盖——同样走分批路径。"""
+        old = format_bj(bj_now_dt() - timedelta(days=_PROBE_RESULT_PURGE_DAYS + 1))
+        async with session_scope() as session:
+            driver = Driver(name="d1", type="guangya", credential="{}", enabled=True)
+            session.add(driver)
+            await session.flush()
+            session.add(
+                ProbeResult(
+                    driver_id=driver.id,
+                    used_gb=1.0,
+                    total_gb=2.0,
+                    available=True,
+                    probed_at=old,
+                )
+            )
+
+        result = await drain_task_queue(AdapterFactory())
+
+        async with session_scope() as session:
+            rows = (await session.execute(select(ProbeResult))).scalars().all()
+            assert len(rows) == 0
+        step = next(s for s in result["steps"] if s.name == "清理探测历史")
+        assert step.status == "ok"
+        assert step.count == 1

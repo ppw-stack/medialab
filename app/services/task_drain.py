@@ -11,16 +11,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 from datetime import timedelta
 from typing import TYPE_CHECKING, cast
 
-from sqlalchemy import CursorResult, delete
+from sqlalchemy import CursorResult, delete, inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
 
 from app.core.logging import get_logger
 from app.core.timeutils import bj_now, bj_now_dt, format_bj
-from app.db.models import JobRun, ProbeResult
+from app.db.models import Base, JobRun, ProbeResult
 from app.db.session import session_scope
 from app.services.scheduler import JobStep, JobStepItem, build_items
 from app.services.task_executor import PushItemError, execute_task
@@ -51,6 +53,20 @@ _JOB_RUN_PURGE_DAYS = 30
 #: 启动自动测连 + 手动测连 + 登录后自动测连，一天能写几十行。
 #: 探测历史是**排障用**的（看「昨天还正常，今天突然 401」），30 天够用。
 _PROBE_RESULT_PURGE_DAYS = 30
+
+#: 分批删除的**单批行数**。
+#:
+#: 500 行 ≈ 10MB 的删除量，锁持有毫秒级。
+_PURGE_BATCH = 500
+
+#: 单次作业最多删多少批（500 × 10 = 5,000 行）。
+#:
+#: 删不完**下轮继续**（作业每 5 分钟一轮）——把「一次删完」改成
+#: 「每次只删一小批」，天然错峰，任何时刻都不会长时间持锁。
+_PURGE_MAX_BATCHES = 10
+
+#: 批间暂停（秒）——让出事件循环，给其它写者插队机会。
+_PURGE_BATCH_PAUSE_SEC = 0.05
 
 
 async def drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
@@ -243,34 +259,64 @@ async def drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
 
 
 async def _purge_old_job_runs(session: AsyncSession) -> int:
-    """删除超期的作业执行历史，返回删除条数。
+    """删除超期的作业执行历史，返回**本次**删除条数。
 
     ``started_at`` 是**北京时间字符串**（``yyyy-MM-dd HH:mm:ss``），
     字典序 == 时间序，故可直接字符串比较（与 ``task_queue`` 的
     ``purge_finished`` 同款口径）。
     """
     cutoff = format_bj(bj_now_dt() - timedelta(days=_JOB_RUN_PURGE_DAYS))
-    result = cast(
-        CursorResult[object],
-        await session.execute(
-            delete(JobRun).where(JobRun.started_at < cutoff)
-        ),
-    )
-    return int(result.rowcount or 0)
+    return await _purge_in_batches(session, JobRun, JobRun.started_at, cutoff)
 
 
 async def _purge_old_probe_results(session: AsyncSession) -> int:
-    """删除超期的存储源探测历史，返回删除条数。
+    """删除超期的存储源探测历史，返回**本次**删除条数。
 
     ``probed_at`` 是**北京时间字符串**（``yyyy-MM-dd HH:mm:ss``），
     字典序 == 时间序，故可直接字符串比较（与 ``_purge_old_job_runs``
     同款口径）。
     """
     cutoff = format_bj(bj_now_dt() - timedelta(days=_PROBE_RESULT_PURGE_DAYS))
-    result = cast(
-        CursorResult[object],
-        await session.execute(
-            delete(ProbeResult).where(ProbeResult.probed_at < cutoff)
-        ),
+    return await _purge_in_batches(
+        session, ProbeResult, ProbeResult.probed_at, cutoff
     )
-    return int(result.rowcount or 0)
+
+
+async def _purge_in_batches(
+    session: AsyncSession,
+    model: type[Base],
+    column: InstrumentedAttribute[str | None],
+    cutoff: str,
+) -> int:
+    """按批删除超期行，返回本次删除条数。
+
+    **为什么要分批**（2026-11-12 生产实测）：一次性 DELETE 几千行会
+    长时间持有 SQLite 写锁——与扫描/调度作业的写事务互相撞
+    （``database is locked``，容器启动瞬间 drain 的清理撞上扫描的批量
+    写）。``job_runs`` 单条 ``result_json`` 就有 10–30KB，几千行即
+    几十 MB 的删除事务。分批后每批只持锁毫秒级。
+
+    **单次上限**：删不完**下轮继续**（作业每 5 分钟一轮）——任何时刻
+    都不会长时间持锁；停机 N 天的补账也只需几轮消化完。
+
+    批间 :func:`asyncio.sleep` 是为了**让出事件循环**：SQLite 只有一个
+    写者，背靠背的写事务会让播放中转 / 面板读等其它写者插不上队。
+    """
+    id_col = inspect(model).primary_key[0]
+    total = 0
+    for _ in range(_PURGE_MAX_BATCHES):
+        subq = select(id_col).where(column < cutoff).limit(_PURGE_BATCH)
+        result = cast(
+            CursorResult[object],
+            await session.execute(
+                delete(model).where(id_col.in_(subq))
+            ),
+        )
+        deleted = int(result.rowcount or 0)
+        total += deleted
+        # 每批独立提交——事务边界与批次对齐，中断不留半批
+        await session.commit()
+        if deleted < _PURGE_BATCH:
+            break
+        await asyncio.sleep(_PURGE_BATCH_PAUSE_SEC)
+    return total
