@@ -34,11 +34,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import select
 
 from app.adapters.drivers.base import CloudFile, DriverError
-from app.adapters.drivers.guangya import (
-    SHARE_CREATE_FILE_LIMIT,
-    SHARE_SAVE_FILE_LIMIT,
-    ShareInfo,
-)
+from app.adapters.drivers.guangya import SHARE_SAVE_FILE_LIMIT, ShareInfo
 from app.core.logging import get_logger
 from app.db.models import Driver
 from app.db.session import session_scope
@@ -61,20 +57,11 @@ logger = get_logger(__name__)
 #: 建分享的**最小间隔**（秒）——防「同账号连续建分享」被限流。
 #:
 #: 2026-11-12 实测：连着建 3 个分享（间隔 30~60s）有被判「已失效」的，
-#: 间隔 90s 以上稳定。默认取 15s——**每个源目录都要建一次分享**（目录
-#: 多时按 30s 要半小时），撞到 201 时会自动退避，故短间隔是安全的。
-DEFAULT_SUBMIT_INTERVAL_SEC = 15.0
+#: 间隔 90s 以上稳定。故默认 30s，并在撞到 201 时自动退避。
+DEFAULT_SUBMIT_INTERVAL_SEC = 30.0
 
-#: 单批最多保存多少个文件。
-#:
-#: ⚠️ **建分享的上限更严**（:data:`SHARE_CREATE_FILE_LIMIT` = 20）——
-#: 一次建分享最多带 20 个文件，而一次保存能吃 500 个。故**瓶颈是建分享**，
-#: 批次按建分享的上限切（2026-11-12 生产踩过：按 500 切 → 一遇到多文件
-#: 的目录就报「分享目录文件数量超过限制」整轮失败）。
-BATCH_SIZE = SHARE_CREATE_FILE_LIMIT
-
-#: 单次「保存分享」的文件数上限（服务端 500）——留作上界校验。
-SAVE_BATCH_LIMIT = SHARE_SAVE_FILE_LIMIT
+#: 单批最多保存多少个文件（服务端上限 500，实测）。
+BATCH_SIZE = SHARE_SAVE_FILE_LIMIT
 
 #: 保存后校验落盘的轮询间隔 / 超时（秒）。
 VERIFY_INTERVAL_SEC = 3.0
@@ -83,25 +70,6 @@ VERIFY_TIMEOUT_SEC = 300.0
 #: 建分享撞限流（``201``）时的重试次数与退避上限。
 MAX_SHARE_ATTEMPTS = 5
 MAX_BACKOFF_SEC = 300.0
-
-#: 遍历源树 / 准备目标目录 / 单批保存的**网络抖动**重试次数与退避基数。
-#:
-#: 生产容器 DNS 偶发 ``Temporary failure in name resolution``（已知问题）。
-#: 转存是长跑任务（几十个目录、几十分钟），不重试的话一次抖动就毁掉
-#: 整轮——2026-11-12 生产实测踩到过。
-TRAVERSE_ATTEMPTS = 3
-DIR_ATTEMPTS = 3
-BATCH_ATTEMPTS = 3
-RETRY_DELAY_SEC = 5.0
-
-
-def _is_transient(exc: DriverError) -> bool:
-    """是不是「可以重试」的瞬时故障（网络抖动）。
-
-    只认 ``kind == "network"``——业务错误（限流 / 参数错 / 数量超限）
-    各有各的处理方式，别混进重试。
-    """
-    return exc.kind == "network"
 
 
 async def _sleep(seconds: float) -> None:
@@ -253,37 +221,20 @@ async def run_relay(job: RelayJob) -> None:
     job.log(f"源：{source.name}（{source.id}） → 目标：{target.name}（{target.id}）")
 
     # ---------- ① 遍历源树，按目录分组 ----------
-    #
-    # 遍历是**全量列表**（约 16 个请求），偶发 DNS 抖动要能重试——
-    # 否则一次抖动就毁掉整轮（生产实测踩到）。
     groups: dict[str, _Group] = {}
-    for attempt in range(TRAVERSE_ATTEMPTS):
-        groups = {}
-        job.discovered = 0
-        try:
-            async for entry in src.iter_tree_by_cid(
-                params.source_file_id, parent_path="/", include_subdirs=True
-            ):
-                if job.state != "running":
-                    return
-                rel = entry.relative_dir or ""
-                group = groups.get(rel)
-                if group is None:
-                    group = groups[rel] = _Group(rel_dir=rel)
-                group.files.append(entry)
-                job.discovered += 1
-            break
-        except DriverError as exc:
-            if _is_transient(exc) and attempt + 1 < TRAVERSE_ATTEMPTS:
-                job.log(
-                    f"⚠️ 遍历源目录失败（{exc}），{RETRY_DELAY_SEC * (attempt + 1)}s 后重试"
-                )
-                await _sleep(RETRY_DELAY_SEC * (attempt + 1))
-                continue
-            raise
+    async for entry in src.iter_tree_by_cid(
+        params.source_file_id, parent_path="/", include_subdirs=True
+    ):
+        if job.state != "running":
+            return
+        rel = entry.relative_dir or ""
+        group = groups.get(rel)
+        if group is None:
+            group = groups[rel] = _Group(rel_dir=rel)
+        group.files.append(entry)
+        job.discovered += 1
 
     job.dirs_walked = len(groups)
-    job.total_dirs = len(groups)
     if not groups:
         job.log("源目录下没有文件，无需转存")
         return
@@ -335,36 +286,11 @@ async def run_relay(job: RelayJob) -> None:
         if not pending:
             continue
 
-        # ---- 目标侧建目录 + 预检（网络抖动要能重试）----
-        target_dir = ""
-        existing: dict[str, tuple[int, str]] = {}
-        for attempt in range(DIR_ATTEMPTS):
-            try:
-                # 逐层建目录（幂等：同名目录复用，不会建出 xxx(1)）
-                target_dir = await tgt.ensure_dir(rel, params.target_file_id)
-                existing = await tgt.list_entries(target_dir)
-                break
-            except DriverError as exc:
-                if _is_transient(exc) and attempt + 1 < DIR_ATTEMPTS:
-                    job.log(
-                        f"⚠️ 准备目标目录失败（{exc}），"
-                        f"{RETRY_DELAY_SEC * (attempt + 1)}s 后重试"
-                    )
-                    await _sleep(RETRY_DELAY_SEC * (attempt + 1))
-                    continue
-                # 预检都失败 → 该目录的文件全部记失败，继续下一个目录
-                for entry in pending:
-                    job.record_failed(entry, f"{type(exc).__name__}: {exc}")
-                job.log(f"⚠️ 目标目录准备失败，已跳过：{rel or '/'}（{exc}）")
-                break
-        else:
-            for entry in pending:
-                job.record_failed(entry, "目标目录准备失败（重试耗尽）")
-            continue
-        if not target_dir:
-            continue
+        # 目标侧逐层建目录（幂等：同名目录复用，不会建出 xxx(1)）
+        target_dir = await tgt.ensure_dir(rel, params.target_file_id)
 
         # 预检目标目录 —— 逐文件判冲突（同名同大小跳过 / 不同大小记冲突）
+        existing = await tgt.list_entries(target_dir)
         to_save: list[CloudFile] = []
         for entry in pending:
             hit = existing.get(entry.name)
@@ -380,57 +306,12 @@ async def run_relay(job: RelayJob) -> None:
                     f"（源 {entry.size:,} / 目标 {hit[0]:,} 字节）"
                 )
         if not to_save:
-            job.processed_dirs += 1
             continue
 
-        # 分批转存（建分享上限 20；遇「数量超限」自动把批次减半）
-        job.processed_dirs += 1
-        try:
-            await _transfer_directory(
-                job,
-                src=src,
-                tgt=tgt,
-                entries=to_save,
-                target_dir=target_dir,
-                gate=gate,
-                delete_source=params.delete_source,
-            )
-        except DriverError as exc:
-            # 单个目录失败**不炸整轮**——逐文件记失败，继续下一个目录。
-            #
-            # ⚠️ 这里不能重复计数：``_transfer_batch`` 内部已记过的失败
-            # （落盘校验不过等）是**逐文件**记的且**不抛异常**，所以能走到
-            # 这里说明是**整批失败**，把该目录的文件统一记一次。
-            for entry in to_save:
-                job.record_failed(entry, f"{type(exc).__name__}: {exc}")
-            job.log(f"⚠️ 目录转存失败，已跳过：{rel or '/'}（{exc}）")
-
-    job.current_path = ""
-
-
-async def _transfer_directory(
-    job: RelayJob,
-    *,
-    src: Any,
-    tgt: Any,
-    entries: list[CloudFile],
-    target_dir: str,
-    gate: _ShareGate,
-    delete_source: bool,
-) -> None:
-    """把一个目录下的文件分批转存。
-
-    **遇「分享数量超限」（``220``）自动把批次减半重试**——服务端的上限
-    可能随内容而异（实测一次建分享最多 20 个文件），别写死。
-    """
-    batch = min(BATCH_SIZE, max(len(entries), 1))
-    index = 0
-    attempts = 0
-    while index < len(entries):
-        if job.state != "running":
-            return
-        chunk = entries[index : index + batch]
-        try:
+        # 分批保存（服务端单批上限 500）
+        for chunk in _chunks(to_save, BATCH_SIZE):
+            if job.state != "running":
+                return
             await _transfer_batch(
                 job,
                 src=src,
@@ -438,25 +319,15 @@ async def _transfer_directory(
                 entries=chunk,
                 target_dir=target_dir,
                 gate=gate,
-                delete_source=delete_source,
+                delete_source=params.delete_source,
             )
-        except DriverError as exc:
-            if exc.kind == "limit" and batch > 1:
-                batch = max(1, batch // 2)
-                attempts = 0
-                job.log(f"⚠️ 分享数量超限，批次降到 {batch} 个文件后重试")
-                continue  # index 不变 → 用更小的批次重新切
-            if _is_transient(exc) and attempts + 1 < BATCH_ATTEMPTS:
-                attempts += 1
-                job.log(
-                    f"⚠️ 网络抖动（{exc}），"
-                    f"{RETRY_DELAY_SEC * attempts}s 后重试本批"
-                )
-                await _sleep(RETRY_DELAY_SEC * attempts)
-                continue  # index 不变 → 重试同一批
-            raise
-        attempts = 0
-        index += len(chunk)
+
+    job.current_path = ""
+
+
+def _chunks(items: list[CloudFile], size: int) -> list[list[CloudFile]]:
+    """按 ``size`` 切批。"""
+    return [items[i : i + size] for i in range(0, len(items), size)]
 
 
 async def _transfer_batch(

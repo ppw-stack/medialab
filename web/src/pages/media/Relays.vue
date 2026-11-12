@@ -133,12 +133,6 @@
         {{ job.current_path || "（等待第一个目录）" }}
       </div>
 
-      <a-progress v-if="job.total_dirs" :percent="dirProgress" size="small" />
-      <div v-if="job.total_dirs" class="muted">
-        已处理 {{ job.processed_dirs }} / {{ job.total_dirs }} 个目录
-        <span v-if="remainMinutes > 0">· 预计还需 {{ remainMinutes }} 分钟</span>
-      </div>
-
       <a-descriptions :column="4" size="small" bordered class="stats">
         <a-descriptions-item label="已遍历目录">{{ job.dirs_walked }}</a-descriptions-item>
         <a-descriptions-item label="已发现文件">{{ job.discovered }}</a-descriptions-item>
@@ -240,7 +234,7 @@ const targetError = ref("")
 const form = reactive({
   minSizeGb: 0,
   maxSizeGb: 0,
-  submitIntervalSec: 15,
+  submitIntervalSec: 30,
   excludeDisc: true,
   deleteSource: false,
 })
@@ -290,24 +284,6 @@ const canRun = computed(
     currentTarget.value !== undefined &&
     job.value?.state !== "running",
 )
-
-/** 目录处理进度（%）。 */
-const dirProgress = computed(() => {
-  if (!job.value?.total_dirs) return 0
-  return Math.round((job.value.processed_dirs / job.value.total_dirs) * 100)
-})
-
-/**
- * 预计还需多少分钟。
- *
- * 每个源目录都要建一次分享，故剩余时间 ≈ 剩余目录数 × 建分享间隔。
- * （分享上限 20 个文件/次，目录多时这个数是主要的等待来源。）
- */
-const remainMinutes = computed(() => {
-  if (!job.value?.total_dirs) return 0
-  const left = Math.max(0, job.value.total_dirs - job.value.processed_dirs)
-  return Math.ceil((left * form.submitIntervalSec) / 60)
-})
 
 onMounted(async () => {
   try {
@@ -610,12 +586,6 @@ function logText(line: string): string {
 .log-text {
   color: #444;
   min-width: 0;
-}
-
-.muted {
-  color: #999;
-  font-size: 12px;
-  margin-bottom: 8px;
 }
 
 .err {

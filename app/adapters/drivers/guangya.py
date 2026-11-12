@@ -137,27 +137,10 @@ CODE_SHARE_EXPIRED = 201
 #: 后缀）。映射成 ``config``，调用方不该重试。
 CODE_PARAM_ERROR = 112
 
-#: 「分享目录文件数量超过限制」的业务码（2026-11-12 生产实测）。
-#:
-#: **可降级**：一次建分享最多 :data:`SHARE_CREATE_FILE_LIMIT` 个文件，
-#: 超了把批次改小即可（映射成 ``limit``）。
-CODE_SHARE_TOO_MANY = 220
-
 #: 单次「保存分享」的文件数上限（2026-11-12 生产实测：500）。
 #:
 #: 超了服务端会拒。引擎按这个数切批。
 SHARE_SAVE_FILE_LIMIT = 500
-
-#: **单次「建分享」的文件数上限**（2026-11-12 生产实测：**20**）。
-#:
-#: ⚠️ **与 :data:`SHARE_SAVE_FILE_LIMIT` 是两个不同的限制**——保存能吃
-#: 500 个，但**建分享只能带 20 个**（超了报 ``220 分享目录文件数量超过
-#: 限制``）。曾按 500 切批 → 生产转存一遇到多文件的目录就整轮失败。
-#:
-#: 实测方式：``scripts/probe_guangya_share_limit.py``（用**不存在的
-#: fileId** 探测——服务端先校验数量再校验 id 存在性，故失败请求**不会
-#: 真的建分享**，不占建分享配额）。
-SHARE_CREATE_FILE_LIMIT = 20
 
 #: 光鸭**网页端**的 User-Agent（公开接口用）。
 #:
@@ -335,12 +318,7 @@ class GuangyaDriver:
                 getattr(self.client, method), *args, **kwargs
             )
         except Exception as exc:
-            # ⚠️ **网络类错误要标成 ``network``**——调用方据此决定要不要
-            # 重试。生产容器 DNS 偶发 ``Temporary failure in name
-            # resolution``（已知问题），转存这类长跑任务必须能重试，
-            # 否则一次抖动就毁掉整轮。
-            kind = "network" if isinstance(exc, httpx.HTTPError) else "unknown"
-            raise DriverError(f"光鸭接口 {method} 调用失败：{exc}", kind=kind) from exc
+            raise DriverError(f"光鸭接口 {method} 调用失败：{exc}") from exc
         return result if isinstance(result, dict) else {}
 
     # -- 协议实现 --
@@ -1126,8 +1104,6 @@ def _map_code(code: Any) -> str:
     - ``201`` —— 分享已失效 → ``rate_limit``（**可重试**：同账号连续建
       分享会被限流，等一会儿再试就好）
     - ``112`` —— 参数错误 → ``config``（**不可重试**：调用方拼错了）
-    - ``220`` —— 分享目录文件数量超过限制 → ``limit``（**可降级**：把
-      批次改小即可——一次建分享最多 20 个文件）
     """
     try:
         value = int(code)
@@ -1137,8 +1113,6 @@ def _map_code(code: Any) -> str:
         return "rate_limit"
     if value == CODE_PARAM_ERROR:
         return "config"
-    if value == CODE_SHARE_TOO_MANY:
-        return "limit"
     if value == 117:
         return "auth"
     if value == 111:

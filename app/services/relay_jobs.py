@@ -97,9 +97,6 @@ class RelayJob:
     #: 已遍历目录数 / 已发现文件数
     dirs_walked: int = 0
     discovered: int = 0
-    #: 待转存的目录总数 / 已处理的目录数（页面算进度与剩余时间）
-    total_dirs: int = 0
-    processed_dirs: int = 0
 
     success: int = 0
     failed: int = 0
@@ -181,8 +178,6 @@ class RelayJob:
             "current_path": self.current_path,
             "dirs_walked": self.dirs_walked,
             "discovered": self.discovered,
-            "total_dirs": self.total_dirs,
-            "processed_dirs": self.processed_dirs,
             "success": self.success,
             "failed": self.failed,
             "skipped_existing": self.skipped_existing,
