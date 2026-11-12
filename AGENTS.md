@@ -337,6 +337,15 @@
   - 契约由 `tests/unit/test_link_cache.py::TestDbLockDegradation` 固化（patch `session_scope` 让 DB 整体抛锁，验证两条路径都不抛）
   - **同款场景第三处：作业历史落库**（2026-11-12 生产撞锁后修，`scheduler.py` 的 `_record_run._persist`）：扫描批量写库期间调度作业的 `job_runs` 落库 commit 撞锁，`OperationalError` 逃逸成「Task exception was never retrieved」ERROR 且历史丢失——修法同款：退避 0.5s 重试一次，仍失败 warning 降级（作业历史是统计性副产品，保留期 30 天）；其它异常同样降级记 warning 不吞真 bug。契约由 `tests/unit/test_scheduler.py::TestRecordRun` 固化
 
+- **生产数据库已切 WAL 模式**（2026-11-12，`.env.prod` 的 `DB_JOURNAL_MODE=WAL`）：
+  - **代码默认本来就是 WAL**（`config.py` 的 `db_journal_mode` 默认 `"WAL"`，`session.py` 每个连接建立时执行 `PRAGMA journal_mode=`）——生产当初是 `.env.prod` **显式覆盖成 DELETE**
+  - **当初 DELETE 的理由不成立**：注释写「commit 后立即落盘，重启不丢 WAL 缓冲」，但 `.env.prod` 同时设了 `DB_SYNCHRONOUS=NORMAL`——DELETE+NORMAL 同样不保证 commit 落盘，两者持久性几乎相同，WAL 的并发收益却是数量级的
+  - **收益实测**：DELETE 模式写锁全库排他，扫描批量写期间播放写 `link_cache` 必撞锁（播放 500 事故的根因）；WAL 下读写不互斥——锁冲突从「持续刷屏」收敛为「**仅容器启动瞬间一次性**」
+  - **切法**：停容器 → 冷备份 `medialab.db.bak.<时间戳>` → 改 `.env.prod` 一行 → `docker compose up -d`（首个连接即完成切换，属性持久化在 DB 头）→ 验证 `PRAGMA journal_mode` 返回 `wal` + `-wal`/`-shm` 文件出现。回滚：改回 `DELETE` + 重启（SQLite 自动合并 WAL，无损失）
+  - **降级逻辑保留**：撞锁降级仍要有（WAL 下多写者仍会冲突，只是窗口小得多；且 `drain_task_queue` 的历史清理是大事务，扫描启动瞬间仍可能撞上）
+  - **文件系统的注意**：DB 在 `/mnt/disk1`（本地阵列盘）经 `/mnt/user`（shfs/FUSE）访问——SQLite 官方警告的是**网络文件系统**（NFS/SMB），shfs 底下是本地盘，WAL 的 `-shm`（mmap 共享内存）实践可靠；这台 Unraid 无 cache 池
+  - **备份注意**：Unraid 备份 appdata 要连 `-wal` 文件一起（或接受最近事务未合并——库内数据全是可重建的派生数据）
+
 - **光鸭扫描走全量列表，~16 请求替代逐目录递归**（2026-11-12 生产探针实测，`app/adapters/drivers/guangya.py`）：
   - `fs_files` 支持 `parent_id="*"`（全账号）+ `res_type` 过滤，条目带 **`fullParentIds`**（从账号根到父目录的完整 fileId 链，`/` 分隔）——一次目录翻页（`res_type=2`，生产 726 目录 = 1 请求）建 fileId→目录名映射 + 一次文件翻页（`res_type=1`）按链首过滤 `media_cid` 子树，`relative_dir` 由链上 fileId 换算目录名拼出
   - **收益**：生产 970 目录 ≈ 1100+ 请求（0.2s 限速下 5-9 分钟）→ ≈16 请求（≈10 秒）；`page_size` 实测支持 1000+（200/500/1000 全生效，无 code=112）
