@@ -75,6 +75,8 @@ class _FakeGuangya:
         self.max_inflight = 0
         #: 改名的记录：``(旧名, 新名)``
         self.renamed: list[tuple[str, str]] = []
+        #: 删除的文件 id
+        self.deleted: list[str] = []
         #: 让 create_offline_task 抛错（额度耗尽场景）
         self.submit_error: str | None = None
         #: fileId → 文件名
@@ -141,6 +143,14 @@ class _FakeGuangya:
         files[new_name] = size
         self._file_names[file_id] = new_name
         self.renamed.append((old_name, new_name))
+
+    async def delete_file(self, file_id: str) -> None:
+        """删除文件（假实现：记录并从目录里摘掉）。"""
+        name = self._file_names.pop(file_id, None)
+        parent = self._file_parents.pop(file_id, None)
+        if name is not None and parent is not None:
+            self._files.get(parent, {}).pop(name, None)
+        self.deleted.append(file_id)
 
     def _file_id_of(self, dir_id: str, name: str) -> str:
         for fid, fname in self._file_names.items():
@@ -366,16 +376,17 @@ async def test_run_migration_end_to_end(
 
     await migration.run_migration(job)
 
-    assert job.success == 1, job.logs
+    assert job.success == 2, job.logs
     assert job.skipped_existing == 1
     assert job.skipped_inflight == 1
     assert job.conflicts == 1
     assert job.filtered_small == 1
     assert job.filtered_ext == 1
     assert job.failed == 0
-    assert job.migrated_bytes == 3_000_000_000
+    assert job.migrated_bytes == 3_000_000_000 + 2_500_000_000
     assert job.legacy_inflight == 1
-    assert [p for p, _ in gyp.submitted] == ["new1"]
+    # E03 与目标同名但**源更大** → 删目标侧旧文件并重传（保留大的）
+    assert [p for p, _ in gyp.submitted] == ["new1", "conflict1"]
     # 目标目录层级与源目录镜像
     assert "Show (2025)" in gyp._dirs["root"]
 
@@ -383,6 +394,8 @@ async def test_run_migration_end_to_end(
     show_id = gyp._dirs["root"]["Show (2025)"]
     season_id = gyp._dirs[show_id]["Season 1"]
     assert gyp._files[season_id]["E01.mkv"] == 3_000_000_000
+    # E03 最终是**大的那份**（旧的 1GB 已被替换）
+    assert gyp._files[season_id]["E03.mkv"] == 2_500_000_000
 
 
 async def test_run_migration_skips_fully_migrated_dir(
@@ -840,3 +853,137 @@ async def test_delete_source_ignored_for_p115_source(
     assert job.success == 1, job.logs
     assert any("115 源不支持清理源" in line for line in job.logs)
     assert job.deleted_source == 0
+
+
+async def test_delete_source_removes_already_existing(
+    db_session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """目标**已有同名同大小** → 跳过传输，并把源副本清掉（腾空间的本意）。"""
+    await _seed_guangya_drivers(db_session)
+
+    files = [_entry("/影视/电影/A (2020)/A.mkv", 1_000_000, "f1")]
+    src = _FakeGuangyaSource(files)
+    gyp = _FakeGuangya({"f1": ("A.mkv", 1_000_000)}, landed_name="download")
+    # 目标侧已有同名同大小
+    gyp.seed_file("A (2020)", "A.mkv", 1_000_000)
+
+    monkeypatch.setattr(migration, "build_driver", _guangya_build(src, gyp))
+
+    params = migration_jobs.MigrationParams(
+        source_driver_id=201,
+        source_cid="1962124234139361322",
+        source_path="/影视/电影",
+        target_driver_id=202,
+        target_file_id="root",
+        delete_source=True,
+    )
+    job = migration_jobs.MigrationJob(id="deljob6", params=params)
+
+    await migration.run_migration(job)
+
+    assert job.skipped_existing == 1, job.logs
+    assert job.success == 0, "不该重复传输"
+    assert gyp.submitted == [], "不该重复提交云下载"
+    assert src.deleted == ["f1"], "已存在的同名同大小 → 源副本应清掉"
+    assert job.deleted_source == 1
+
+
+async def test_delete_source_keeps_conflicting_file(
+    db_session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同名不同大小 → **保留大的**：目标更大则跳过（不删源）。
+
+    「保留大的」= 保留目标那份；源是更小的副本，**只有在开启清理源时**
+    才随之清掉。源更大时走「删目标侧旧文件 + 重传」。
+    """
+    await _seed_guangya_drivers(db_session)
+
+    files = [_entry("/影视/电影/A (2020)/A.mkv", 1_000_000, "f1")]
+    src = _FakeGuangyaSource(files)
+    gyp = _FakeGuangya({"f1": ("A.mkv", 1_000_000)}, landed_name="download")
+    # 目标侧同名但**更大**
+    gyp.seed_file("A (2020)", "A.mkv", 2_000_000)
+
+    monkeypatch.setattr(migration, "build_driver", _guangya_build(src, gyp))
+
+    params = migration_jobs.MigrationParams(
+        source_driver_id=201,
+        source_cid="1962124234139361322",
+        source_path="/影视/电影",
+        target_driver_id=202,
+        target_file_id="root",
+        delete_source=True,
+    )
+    job = migration_jobs.MigrationJob(id="deljob7", params=params)
+
+    await migration.run_migration(job)
+
+    assert job.skipped_existing == 1, job.logs
+    assert gyp.submitted == [], "目标更大就不该重传"
+    # 目标更大 → 保留目标的；源是更小的副本 → 清理源开启时清掉
+    assert src.deleted == ["f1"], "目标更大 → 源的冗余小副本应清掉"
+    assert job.deleted_source == 1
+
+
+async def test_source_bigger_replaces_target(
+    db_session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同名不同大小且**源更大** → 删目标侧的小文件并重传（保留大的）。"""
+    await _seed_guangya_drivers(db_session)
+
+    files = [_entry("/影视/电影/A (2020)/A.mkv", 2_000_000, "f1")]
+    src = _FakeGuangyaSource(files)
+    gyp = _FakeGuangya({"f1": ("A.mkv", 2_000_000)}, landed_name="download")
+    # 目标侧同名但**更小**
+    gyp.seed_file("A (2020)", "A.mkv", 1_000_000)
+
+    monkeypatch.setattr(migration, "build_driver", _guangya_build(src, gyp))
+
+    params = migration_jobs.MigrationParams(
+        source_driver_id=201,
+        source_cid="1962124234139361322",
+        source_path="/影视/电影",
+        target_driver_id=202,
+        target_file_id="root",
+    )
+    job = migration_jobs.MigrationJob(id="deljob9", params=params)
+
+    await migration.run_migration(job)
+
+    assert job.conflicts == 1, job.logs
+    assert job.success == 1, "源更大 → 应重传"
+    assert gyp.submitted == [("f1", "A (2020)")] or len(gyp.submitted) == 1
+    show_id = gyp._dirs["root"]["A (2020)"]
+    assert gyp._files[show_id]["A.mkv"] == 2_000_000, "最终应是大的那份"
+
+
+async def test_delete_source_removes_adopted_leftover(
+    db_session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """认领上一轮残留（已落盘未改名）→ 认领后同名同大小 → 源也清掉。"""
+    await _seed_guangya_drivers(db_session)
+
+    files = [_entry("/影视/电影/A (2020)/A.mkv", 1_000_000, "f1")]
+    src = _FakeGuangyaSource(files)
+    gyp = _FakeGuangya({"f1": ("A.mkv", 1_000_000)}, landed_name="download")
+    # 上一轮落盘残留（还没改名）
+    gyp.seed_file("A (2020)", "download", 1_000_000)
+
+    monkeypatch.setattr(migration, "build_driver", _guangya_build(src, gyp))
+
+    params = migration_jobs.MigrationParams(
+        source_driver_id=201,
+        source_cid="1962124234139361322",
+        source_path="/影视/电影",
+        target_driver_id=202,
+        target_file_id="root",
+        delete_source=True,
+    )
+    job = migration_jobs.MigrationJob(id="deljob8", params=params)
+
+    await migration.run_migration(job)
+
+    assert job.skipped_existing == 1, job.logs
+    assert gyp.submitted == [], "认领残留不该再提交云下载"
+    assert src.deleted == ["f1"], "认领后目标已有同名同大小 → 源副本清掉"
+    assert job.deleted_source == 1
