@@ -93,12 +93,14 @@ class TestScanDriver:
         assert len(rows) == 1
         assert rows[0].remote_id == "pc1"
 
-    async def test_filename_kept_as_is(
+    async def test_video_extension_stripped(
         self, db_session, settings, driver_row, fake_driver, tmp_path
     ):
-        """**文件名沿用网盘原样**（不重命名）——加 .strm 即可。
+        """**strm 文件名去掉视频扩展名**——目录与标题仍沿用网盘原样。
 
-        原文件名已含完整发行信息，播放器对标准命名解析最准。
+        理由：媒体服务器按「同目录同 stem」匹配 nfo——
+        ``x.mkv.strm`` 的 stem 是 ``x.mkv``，网盘侧的 nfo 多数叫 ``x.nfo``
+        （stem ``x``）→ 对不上，元数据刮不出来。
         """
         driver_row.output_dir = str(tmp_path)
         await db_session.commit()
@@ -109,7 +111,91 @@ class TestScanDriver:
 
         strms = list(tmp_path.rglob("*.strm"))
         assert len(strms) == 1
-        assert strms[0].name == f"{src_name}.strm"
+        assert strms[0].name == "唐探1900 (2025) - 2160p.WEB-DL.strm"
+
+    async def test_ext_not_configured_not_generated(
+        self, db_session, settings, driver_row, fake_driver, tmp_path
+    ):
+        """**没配进 video_exts 的后缀不生成 strm**（剥离用的是驱动配置）。
+
+        ``.ts`` 不在 ``video_exts="mkv,mp4"`` 里 → 该文件不是视频。
+        剥离逻辑据此「用户配什么剥什么」，而不是硬编码一份后缀表。
+        """
+        driver_row.output_dir = str(tmp_path)
+        await db_session.commit()
+        fake_driver.add_file("pc1", "a.ts", path="/影视/a.ts")
+
+        stats = await scan_driver(db_session, settings, driver_row)
+
+        assert stats.skipped_unknown == 1
+        assert list(tmp_path.rglob("*.strm")) == []
+
+    async def test_stale_strm_removed_on_rename(
+        self, db_session, settings, driver_row, fake_driver, tmp_path
+    ):
+        """**改名后旧 strm 被删掉**——否则变成无主文件（Emby 重复条目）。
+
+        模拟存量库：DB 里记的是旧命名（``x.mkv.strm``），重扫后新命名
+        （``x.strm``）生效，旧文件必须消失。
+        """
+        driver_row.output_dir = str(tmp_path)
+        await db_session.commit()
+        src_name = "movie.mkv"
+        fake_driver.add_file("pc1", src_name, path=f"/影视/{src_name}")
+
+        # 先按旧规则落库 + 落盘
+        old_strm = tmp_path / "movie.mkv.strm"
+        old_strm.write_text("http://localhost:8080/302/1/sig\n", encoding="utf-8")
+        db_session.add(
+            MediaFile(
+                driver_id=driver_row.id,
+                remote_id="pc1",
+                path=f"/影视/{src_name}",
+                name=src_name,
+                size=100,
+                strm_path=str(old_strm),
+                signature="sig",
+                mtime=None,
+                created_at="2026-01-01 00:00:00",
+                updated_at="2026-01-01 00:00:00",
+            )
+        )
+        await db_session.commit()
+
+        await scan_driver(db_session, settings, driver_row)
+
+        # 旧文件已删，新文件已生成
+        assert not old_strm.exists()
+        strms = list(tmp_path.rglob("*.strm"))
+        assert [p.name for p in strms] == ["movie.strm"]
+        # DB 路径同步更新
+        row = (
+            await db_session.execute(
+                select(MediaFile).where(MediaFile.remote_id == "pc1")
+            )
+        ).scalar_one()
+        assert row.strm_path == str(tmp_path / "movie.strm")
+
+    async def test_same_stem_different_ext_conflict_reported(
+        self, db_session, settings, driver_row, fake_driver, tmp_path
+    ):
+        """**同名不同扩展名的冲突要报告**（去掉扩展名后新增的风险）。
+
+        ``x.mp4`` 与 ``x.mkv`` 映射到同一个 ``x.strm`` → 媒体服务器只会
+        看到一个条目。允许覆盖（播放仍指向正确源文件），但必须点名。
+        """
+        driver_row.output_dir = str(tmp_path)
+        await db_session.commit()
+        fake_driver.add_file("pc1", "movie.mp4", path="/影视/movie.mp4")
+        fake_driver.add_file("pc2", "movie.mkv", path="/影视/movie.mkv")
+
+        stats = await scan_driver(db_session, settings, driver_row)
+
+        assert stats.failed == 1
+        assert len(stats.errors) == 1
+        assert "strm 文件名冲突" in stats.errors[0]
+        assert "movie.mp4" in stats.errors[0]
+        assert "movie.mkv" in stats.errors[0]
 
     async def test_subdir_structure_preserved(
         self, db_session, settings, driver_row, fake_driver, tmp_path
@@ -123,7 +209,7 @@ class TestScanDriver:
 
         strms = list(tmp_path.rglob("*.strm"))
         assert len(strms) == 1
-        assert strms[0].relative_to(tmp_path).as_posix() == "电影/华语/a.mkv.strm"
+        assert strms[0].relative_to(tmp_path).as_posix() == "电影/华语/a.strm"
 
 
 class TestExtensionClassification:

@@ -322,15 +322,22 @@ def target_relative_path(
     两个部分都**直接沿用网盘里的原样**：
 
     - 目录：源路径去掉媒体库根（``media_path``）后的部分
-    - 文件名：源文件名 + ``.strm``
+    - 文件名：源文件名**去掉视频扩展名**再追加 ``.strm``
 
     例：媒体库根 ``/影视``，文件 ``/影视/电影/阿凡达 (2009)/阿凡达 (2009) - 2160p.mkv``
-    → ``电影/阿凡达 (2009)/阿凡达 (2009) - 2160p.mkv.strm``
+    → ``电影/阿凡达 (2009)/阿凡达 (2009) - 2160p.strm``
 
-    不重命名理由：原文件名已含完整发行信息，Emby / Jellyfin 对标准命名
+    去扩展名的理由：媒体服务器按「同目录同 stem」匹配 nfo——
+    ``x.mkv.strm`` 的 stem 是 ``x.mkv``，网盘侧的 nfo 多数叫 ``x.nfo``
+    （stem ``x``）→ 对不上，元数据刮不出来（见
+    :mod:`app.services.naming` 模块 docstring）。
+
+    目录与标题不重排：原文件名已含完整发行信息，Emby / Jellyfin 对标准命名
     解析最准；自己拼容易出错（如把片名里的 ``1900`` 误当年份）。
     """
-    return target_relative_dir(driver, cloud_file) / strm_filename(cloud_file.name)
+    return target_relative_dir(driver, cloud_file) / strm_filename(
+        cloud_file.name, parse_ext_list(driver.video_exts)
+    )
 
 
 def target_attachment_path(driver: Driver, cloud_file: CloudFile) -> Path:
@@ -358,8 +365,20 @@ async def _upsert_media(
     cloud_file: CloudFile,
     strm_path: Path,
     secret: str,
+    stale_paths: list[Path] | None = None,
 ) -> MediaFile:
-    """按 (driver_id, remote_id) 落库媒体条目。"""
+    """按 (driver_id, remote_id) 落库媒体条目。
+
+    ``stale_paths``：收集**因改名而遗留的旧 strm 路径**。
+
+    命名规则变更（如去掉视频扩展名）后，条目的 ``strm_path`` 会指向新
+    路径，磁盘上的旧文件必须删掉——否则它变成无主文件：Emby 里多出一条
+    重复条目，:mod:`app.services.health` 持续报 orphan。
+
+    调用方负责删除，且**必须在写锁之外**做（``asyncio.to_thread``）——
+    CIFS 上的 unlink 可能卡秒级，持有 SQLite 写锁时会把别人的写事务
+    全挡住（2026-11-12 prod 事故的同款教训）。
+    """
     existing = (
         await db.execute(
             select(MediaFile).where(
@@ -388,6 +407,12 @@ async def _upsert_media(
         media.signature = sign(secret, media.id)
         return media
 
+    if (
+        existing.strm_path
+        and existing.strm_path != str(strm_path)
+        and stale_paths is not None
+    ):
+        stale_paths.append(Path(existing.strm_path))
     existing.path = cloud_file.path
     existing.name = cloud_file.name
     existing.size = cloud_file.size
@@ -395,6 +420,37 @@ async def _upsert_media(
     existing.mtime = _cloud_mtime_to_bj(cloud_file.mtime)
     existing.updated_at = now
     return existing
+
+
+async def find_strm_conflict(
+    db: AsyncSession,
+    driver: Driver,
+    cloud_file: CloudFile,
+    strm_path: Path,
+) -> MediaFile | None:
+    """查「同一个 strm 路径已被别的条目占用」——同名不同扩展名的冲突。
+
+    **去掉视频扩展名后新增的风险**：同目录的 ``x.mp4`` 与 ``x.mkv``
+    会映射到同一个 ``x.strm``（保留扩展名时不会）。后写的覆盖先写的
+    → 媒体服务器只看到一个条目，另一个静默消失。
+
+    这里**只报告不阻止**：strm 内容里是中转 URL（带各自签名），覆盖后
+    播放仍指向正确的源文件——损失的是「媒体服务器少一个条目」，
+    属于可恢复的展示问题，不该拦住扫描。但必须**点名**（作业历史可见），
+    静默丢文件是底线问题。
+
+    Returns:
+        占用该路径的**其它**条目；无冲突返回 ``None``。
+    """
+    return (
+        await db.execute(
+            select(MediaFile).where(
+                MediaFile.driver_id == driver.id,
+                MediaFile.strm_path == str(strm_path),
+                MediaFile.remote_id != cloud_file.remote_id,
+            )
+        )
+    ).scalar_one_or_none()
 
 
 def _build_driver(driver: Driver) -> Any:
@@ -501,6 +557,26 @@ async def _write_strm_batch(
     pending.clear()
 
 
+async def _delete_stale_batch(paths: list[Path]) -> int:
+    """删掉「因改名而遗留」的旧 strm 文件（**必须在写锁之外**执行）。
+
+    顺序：**先写新文件、再删旧**——反过来会让媒体服务器扫库时短暂
+    看到文件消失（条目被标记为「缺失」）。
+
+    单个失败不中断其余：旧文件留着只是多一个孤儿条目，不该让整轮
+    扫描失败。
+    """
+    if not paths:
+        return 0
+    removed = 0
+    for path in paths:
+        # ⚠️ 删文件放线程池（CIFS 卡死时同步 unlink 会卡住事件循环）
+        if await asyncio.to_thread(delete_strm, path):
+            removed += 1
+    paths.clear()
+    return removed
+
+
 async def scan_driver(
     db: AsyncSession,
     settings: AppSettings,
@@ -571,6 +647,8 @@ async def scan_driver(
     cancelled = False
     #: 待写 strm 清单：(路径, URL)——**提交之后**才落文件
     pending_strms: list[tuple[Path, str]] = []
+    #: 因改名而遗留的旧 strm 路径——写完新文件后删
+    pending_stale: list[Path] = []
 
     owns_client = http_client is None
     if http_client is None:
@@ -630,12 +708,32 @@ async def scan_driver(
             relative = target_relative_path(driver, cloud_file)
             strm_path = output_dir / relative
 
+            # 同名不同扩展名的冲突：``x.mp4`` 与 ``x.mkv`` 去掉扩展名后
+            # 映射到同一个 ``x.strm``——后写的覆盖先写的，媒体服务器只会
+            # 看到一个条目。**报告不阻止**（播放仍指向正确源文件），
+            # 但必须点名（见 find_strm_conflict 的 docstring）。
+            conflict = await find_strm_conflict(db, driver, cloud_file, strm_path)
+            if conflict is not None:
+                stats.failed += 1
+                if len(stats.errors) < 20:
+                    stats.errors.append(
+                        f"strm 文件名冲突：{cloud_file.path} 与 {conflict.path} "
+                        f"映射到同一个 {strm_path.name}（同名不同扩展名）"
+                    )
+                logger.warning(
+                    "strm 文件名冲突：%s 与 %s 映射到同一个 %s",
+                    cloud_file.path,
+                    conflict.path,
+                    strm_path.name,
+                )
+
             media = await _upsert_media(
                 db,
                 driver=driver,
                 cloud_file=cloud_file,
                 strm_path=strm_path,
                 secret=secret,
+                stale_paths=pending_stale,
             )
             url = build_redirect_url(base_url, media.id, secret)
             # ⚠️ **写文件推迟到提交之后**：上面的 flush 已经拿到 SQLite
@@ -650,6 +748,8 @@ async def scan_driver(
                 await db.commit()
                 # 提交后再写文件：此刻不持写锁
                 await _write_strm_batch(pending_strms, stats)
+                # 写完新文件再删旧文件（改名遗留）
+                await _delete_stale_batch(pending_stale)
     except asyncio.CancelledError:
         cancelled = True
         raise
@@ -673,6 +773,8 @@ async def scan_driver(
     # CIFS IO 绝不能发生在持写锁的事务里（2026-11-12 prod 事故）。
     await db.commit()
     await _write_strm_batch(pending_strms, stats)
+    # 改名遗留的旧 strm：新文件已落盘，此刻删旧
+    await _delete_stale_batch(pending_stale)
 
     if prune:
         stats.skipped_unknown += await _prune_orphans(

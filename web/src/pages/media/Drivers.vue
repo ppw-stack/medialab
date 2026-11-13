@@ -238,7 +238,10 @@
             placeholder="输入后缀后回车"
             class="mono"
           />
-          <div class="hint">只有这些后缀的文件会生成 strm。</div>
+          <div class="hint">
+            只有这些后缀的文件会生成 strm——strm
+            文件名会去掉视频后缀（<code>x.mkv</code> → <code>x.strm</code>）。
+          </div>
         </a-form-item>
 
         <a-form-item label="媒体图片后缀">

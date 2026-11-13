@@ -802,7 +802,7 @@ export interface Driver {
   media_cid_label: string
   /** 本地媒体库目录 */
   output_dir: string | null
-  /** 视频后缀（逗号分隔，扫描依据——生成 strm） */
+  /** 视频后缀（逗号分隔，扫描依据——生成 strm；strm 文件名会去掉该后缀） */
   video_exts: string
   /** 媒体图片后缀（逗号分隔，附件同步到本地；空 = 不同步） */
   image_exts: string

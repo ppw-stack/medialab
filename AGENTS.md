@@ -338,6 +338,14 @@
   - **「当前忽略」的注释是过时的**：图片 / 数据后缀**实际生效**——扫描时**附件同步**（`attachment_*`，下载到本地与 strm 同目录），`models.py` / `types.ts` 注释已修正
   - 契约由 `tests/unit/test_media_exts.py`（格式规范 + `parse_ext_list` 往返 + 单一真源断言）+ `test_db_models.py` 列默认值 + `drivers-media-pick.spec.ts`（预填 + 随保存落库）固化
 
+- **strm 文件名去掉视频扩展名**（2026-11-14 加入，`app/services/naming.py:strm_filename`）：
+  - `x.mkv` → `x.strm`——**目录与标题沿用网盘原样**，只多这一个扩展名
+  - **理由**：媒体服务器按「同目录同 stem」匹配 nfo 与媒体文件——`x.mkv.strm` 的 stem 是 `x.mkv`，网盘侧的 nfo 多数叫 `x.nfo`（stem `x`）→ 对不上，Emby / Jellyfin 认不到 nfo，元数据刮不出来（用户实测「媒体服务器识别有问题」）
+  - **只剥离属于该存储源 `video_exts` 的后缀**（用户配什么剥什么），不硬编码后缀表；后缀 >5 字符按 `split_name` 的既有语义**不算扩展名**（`movie.2020.1080p` 不被剥成 `movie.2020`）
+  - **改名必留旧文件清理**：`_upsert_media` 用 `stale_paths` 收集旧路径，扫描 / 增量**写完新文件再删旧**（写锁之外，`asyncio.to_thread`）——不删就变成无主文件（Emby 重复条目 + `health` 报 orphan）。存量库靠**重扫一次**完成改名
+  - **同名不同扩展名冲突**（去后缀后新增的风险）：同目录 `x.mp4` 与 `x.mkv` 会映射到同一个 `x.strm` → 后写覆盖先写，媒体服务器只看到一个条目。**报告不阻止**（strm 内容是带签名的中转 URL，播放仍指向正确源文件），但必须进 `stats.errors` **点名**两个源文件
+  - 契约由 `tests/unit/test_strm_naming.py` + `tests/integration/test_scan.py` + `tests/unit/test_incremental.py` 固化
+
 - **直链缓存读写失败必须降级，不能让播放 500**（2026-11-12 prod 事故，`app/services/link_cache.py`）：
   - **现象**：播放中转 `GET /302/...` 首次请求 **500**、重试才 302——播放器通常不重试，等于随机播放失败
   - **根因**：扫描/调度作业大批量写库时，中转请求写 `link_cache` 撞上 SQLite 写锁。`DB_JOURNAL_MODE=DELETE` 的写锁是**全库排他**的；且 `busy_timeout=10s` 对**死锁升级**无效——读事务持共享锁 + 写事务要升级时 SQLite **直接报** `database is locked` 而非等待，加超时兜不住

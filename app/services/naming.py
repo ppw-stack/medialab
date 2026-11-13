@@ -1,11 +1,16 @@
 """文件后缀分类与文件名清洗。
 
-**命名规则已移除**：生成的 ``.strm`` 文件名直接沿用网盘里的原文件名
-（``东极岛 (2025) - 1080p.mp4`` → ``东极岛 (2025) - 1080p.mp4.strm``）。
+**strm 文件名去掉视频扩展名**：``东极岛 (2025) - 1080p.mp4`` →
+``东极岛 (2025) - 1080p.strm``。
 
-理由：原文件名通常已包含完整的发行信息（标题 / 年份 / 画质 / 编码），
-Emby / Jellyfin 的解析器对标准命名最擅长——自己再拼一遍反而容易出错
-（如把片名里的 ``1900`` 误当年份）。
+理由：媒体服务器按「同目录同 stem」匹配 nfo 与媒体文件——
+``x.mkv.strm`` 的 stem 是 ``x.mkv``，而网盘侧的 nfo 多数叫 ``x.nfo``
+（stem ``x``）→ 对不上，Emby / Jellyfin 认不到 nfo，元数据刮不出来。
+去掉扩展名后 stem 统一成 ``x``，媒体服务器才能认到。
+
+其余部分沿用网盘里的原文件名（原文件名通常已包含完整的发行信息：
+标题 / 年份 / 画质 / 编码，自己再拼一遍反而容易出错，如把片名里的
+``1900`` 误当年份）。
 
 本模块只保留两件事：
 
@@ -136,15 +141,26 @@ def sanitize(name: str) -> str:
     return cleaned
 
 
-def strm_filename(source_name: str) -> str:
+def strm_filename(
+    source_name: str, video_exts: frozenset[str] | None = None
+) -> str:
     """由源文件名算出 ``.strm`` 文件名。
 
-    ``东极岛 (2025) - 1080p.mp4`` → ``东极岛 (2025) - 1080p.mp4.strm``
+    ``东极岛 (2025) - 1080p.mp4`` → ``东极岛 (2025) - 1080p.strm``
 
-    保留完整原名（含视频扩展名）再追加 ``.strm``——播放器据此识别文件类型，
-    剥离扩展名反而可能让它认不出。
+    **去掉视频扩展名**：媒体服务器按「同目录同 stem」匹配 nfo——
+    ``x.mkv.strm`` 的 stem 是 ``x.mkv``，网盘侧的 nfo 多数叫 ``x.nfo``
+    （stem ``x``）→ 对不上，刮不到元数据（见模块 docstring）。
+
+    只剥离**属于 ``video_exts`` 的**后缀（用户配什么剥什么）：其余后缀
+    一律保留，避免把 ``movie.2020.1080p`` 剥成 ``movie.2020``。
+    ``video_exts`` 为 ``None`` 时不剥离（保留完整原名）。
     """
     cleaned = sanitize(source_name)
     if not cleaned:
         return "untitled.strm"
+    if video_exts:
+        stem, ext = split_name(cleaned)
+        if stem and f".{ext}" in video_exts:
+            cleaned = stem
     return f"{cleaned}.strm"

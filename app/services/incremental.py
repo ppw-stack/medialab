@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import time
 from dataclasses import dataclass, field
@@ -51,12 +52,13 @@ from app.services.attachments import (
 )
 from app.services.media import (
     _upsert_media,
+    find_strm_conflict,
     target_attachment_path,
     target_relative_path,
 )
 from app.services.naming import classify_by_ext, parse_ext_list, sanitize
 from app.services.signing import build_redirect_url
-from app.services.strm_writer import StrmWriteResult, write_strm
+from app.services.strm_writer import StrmWriteResult, delete_strm, write_strm
 
 logger = get_logger(__name__)
 
@@ -384,15 +386,36 @@ async def _handle_video(
         )
         return
 
+    # 同名不同扩展名的冲突（去掉视频扩展名后新增的风险）：报告不阻止
+    conflict = await find_strm_conflict(db, driver, cloud_file, strm_path)
+    if conflict is not None:
+        stats.conflicts += 1
+        logger.warning(
+            "strm 文件名冲突：%s 与 %s 映射到同一个 %s",
+            cloud_file.path,
+            conflict.path,
+            strm_path.name,
+        )
+
+    # 改名遗留的旧 strm 路径（命名规则变更时才有）
+    stale_paths: list[Path] = []
     media = await _upsert_media(
         db,
         driver=driver,
         cloud_file=cloud_file,
         strm_path=strm_path,
         secret=secret,
+        stale_paths=stale_paths,
     )
     url = build_redirect_url(base_url, media.id, secret)
-    result = write_strm(strm_path, url)
+    # ⚠️ 写文件放线程池：输出目录在 CIFS 上，同步 IO 卡住会冻住事件循环
+    # （2026-11-06 prod 事故的同款教训，media.py 那边已改）
+    result = await asyncio.to_thread(write_strm, strm_path, url)
+
+    # **先写新、再删旧**（改名遗留）——反过来会让媒体服务器扫库时
+    # 短暂看到文件消失
+    for old_path in stale_paths:
+        await asyncio.to_thread(delete_strm, old_path)
 
     if result == StrmWriteResult.CREATED:
         stats.created += 1
@@ -455,9 +478,8 @@ async def _handle_delete(
         return
 
     if existing.strm_path:
-        from app.services.strm_writer import delete_strm
-
-        delete_strm(Path(existing.strm_path))
+        # ⚠️ 删文件放线程池（CIFS 卡死时同步 unlink 会卡住事件循环）
+        await asyncio.to_thread(delete_strm, Path(existing.strm_path))
     await db.delete(existing)
     stats.deleted += 1
     await db.commit()

@@ -353,6 +353,63 @@ class TestIncrementalFlow:
         assert stats.cursor_old == ev.today_str()
         assert stats.cursor_new == ev.today_str()
 
+    async def test_stale_strm_removed_on_rename(
+        self, db_session, settings, driver_row, fake_driver, tmp_path
+    ):
+        """**改名后旧 strm 被删掉**——否则变成无主文件（Emby 重复条目）。
+
+        存量条目记的是旧命名（``movie.mkv.strm``），增量事件触发新命名
+        （``movie.strm``）后，旧文件必须消失。
+        """
+        await self._setup(db_session, driver_row, tmp_path)
+
+        from app.db.models import MediaFile
+
+        old_strm = tmp_path / "movie.mkv.strm"
+        old_strm.write_text("http://localhost:8080/302/1/sig\n", encoding="utf-8")
+        db_session.add(
+            MediaFile(
+                driver_id=driver_row.id,
+                remote_id="pc-1",
+                path="/影视/movie.mkv",
+                name="movie.mkv",
+                size=1024,
+                strm_path=str(old_strm),
+                signature="sig",
+                mtime=None,
+                created_at="2026-01-01 00:00:00",
+                updated_at="2026-01-01 00:00:00",
+            )
+        )
+        await db_session.commit()
+
+        client = FakeClient(
+            {
+                "*": {
+                    "count": 1,
+                    "next_page": False,
+                    "list": [
+                        _event(
+                            id=700,
+                            file_name="movie.mkv",
+                            pick_code="pc-1",
+                            parent_id="cid-parent",
+                            parent_name="影视",
+                        )
+                    ],
+                }
+            }
+        )
+        _patch_driver(fake_driver, client, {"/影视": "cid-parent"})
+
+        stats = await incremental.run_incremental(
+            db_session, settings, driver_row, driver_impl=_FakeDriverImpl(client)
+        )
+
+        assert stats.created == 1
+        assert not old_strm.exists()
+        assert (tmp_path / "movie.strm").exists()
+
     async def test_skips_out_of_scope(
         self, db_session, settings, driver_row, fake_driver, tmp_path
     ):
