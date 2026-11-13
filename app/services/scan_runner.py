@@ -105,6 +105,7 @@ async def _run_job(job: scan_jobs.ScanJob, *, prune: bool) -> None:
         job.attachment_failed = stats.attachment_failed
         job.skipped_unknown = stats.skipped_unknown
         job.skipped_small = stats.skipped_small
+        job.deduped = stats.deduped
         job.failed = stats.failed
         job.current_path = ""
 
@@ -114,7 +115,8 @@ async def _run_job(job: scan_jobs.ScanJob, *, prune: bool) -> None:
             f"未变 {stats.unchanged}；"
             f"附件新增 {stats.attachment_synced}，未变 {stats.attachment_unchanged}，"
             f"失败 {stats.attachment_failed}；"
-            f"跳过 未知 {stats.skipped_unknown} / 太小 {stats.skipped_small}"
+            f"跳过 未知 {stats.skipped_unknown} / 太小 {stats.skipped_small} / "
+            f"去重 {stats.deduped}"
         )
         logger.info("扫描任务 %s 完成", job.id)
 

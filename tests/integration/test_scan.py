@@ -176,26 +176,71 @@ class TestScanDriver:
         ).scalar_one()
         assert row.strm_path == str(tmp_path / "movie.strm")
 
-    async def test_same_stem_different_ext_conflict_reported(
+    async def test_same_stem_different_ext_keeps_larger(
         self, db_session, settings, driver_row, fake_driver, tmp_path
     ):
-        """**同名不同扩展名的冲突要报告**（去掉扩展名后新增的风险）。
+        """**同名不同扩展名 → 保留大的**（对齐 conflict_policy=1）。
 
-        ``x.mp4`` 与 ``x.mkv`` 映射到同一个 ``x.strm`` → 媒体服务器只会
-        看到一个条目。允许覆盖（播放仍指向正确源文件），但必须点名。
+        两份是不同压制版本（内容不同、体积差几倍），不是冗余拷贝——
+        所以规则是「保留大的」，且**小的那个不落库**（DB 里只留一条）。
         """
         driver_row.output_dir = str(tmp_path)
         await db_session.commit()
-        fake_driver.add_file("pc1", "movie.mp4", path="/影视/movie.mp4")
-        fake_driver.add_file("pc2", "movie.mkv", path="/影视/movie.mkv")
+        fake_driver.add_file("pc1", "movie.mp4", path="/影视/movie.mp4", size=100)
+        fake_driver.add_file("pc2", "movie.mkv", path="/影视/movie.mkv", size=200)
 
         stats = await scan_driver(db_session, settings, driver_row)
 
-        assert stats.failed == 1
-        assert len(stats.errors) == 1
-        assert "strm 文件名冲突" in stats.errors[0]
+        assert stats.deduped == 1
+        # 大的那个留下，小的不落库
+        rows = (await db_session.execute(select(MediaFile))).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].remote_id == "pc2"
+        # 磁盘上只有一个 strm
+        strms = list(tmp_path.rglob("*.strm"))
+        assert [p.name for p in strms] == ["movie.strm"]
+        # 明细点名两个源文件
         assert "movie.mp4" in stats.errors[0]
         assert "movie.mkv" in stats.errors[0]
+
+    async def test_same_stem_different_ext_keeps_existing_when_larger(
+        self, db_session, settings, driver_row, fake_driver, tmp_path
+    ):
+        """**库里那份更大 → 跳过当前这份**（不分遍历顺序）。
+
+        与上一个用例互为镜像：先落库的是大的，后来的小的被跳过。
+        """
+        driver_row.output_dir = str(tmp_path)
+        await db_session.commit()
+        fake_driver.add_file("pc1", "movie.mp4", path="/影视/movie.mp4", size=200)
+        fake_driver.add_file("pc2", "movie.mkv", path="/影视/movie.mkv", size=100)
+
+        stats = await scan_driver(db_session, settings, driver_row)
+
+        assert stats.deduped == 1
+        rows = (await db_session.execute(select(MediaFile))).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].remote_id == "pc1"
+        assert len(list(tmp_path.rglob("*.strm"))) == 1
+
+    async def test_same_stem_different_ext_dedup_is_idempotent(
+        self, db_session, settings, driver_row, fake_driver, tmp_path
+    ):
+        """去重**幂等**：重复扫描结果一致，不来回翻转。"""
+        driver_row.output_dir = str(tmp_path)
+        await db_session.commit()
+        fake_driver.add_file("pc1", "movie.mp4", path="/影视/movie.mp4", size=100)
+        fake_driver.add_file("pc2", "movie.mkv", path="/影视/movie.mkv", size=200)
+
+        first = await scan_driver(db_session, settings, driver_row)
+        second = await scan_driver(db_session, settings, driver_row)
+
+        assert first.deduped == 1
+        assert second.deduped == 1
+        rows = (await db_session.execute(select(MediaFile))).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].remote_id == "pc2"
+        assert len(list(tmp_path.rglob("*.strm"))) == 1
 
     async def test_subdir_structure_preserved(
         self, db_session, settings, driver_row, fake_driver, tmp_path
@@ -348,6 +393,79 @@ class TestPrune:
         assert len(list(tmp_path.rglob("*.strm"))) == 0
         rows = (await db_session.execute(select(MediaFile))).scalars().all()
         assert len(rows) == 0
+
+    async def test_prune_keeps_strm_shared_with_surviving_entry(
+        self, db_session, settings, driver_row, fake_driver, tmp_path
+    ):
+        """**prune 不能误删被别人共用的 strm 文件**（2026-11-14 回归）。
+
+        去掉视频扩展名后，同名不同扩展名的两条记录**共用一个 strm 路径**
+        （《伟大的长征》每集 mkv + mp4 两版）。源端消失一条时，若顺手把
+        文件删了，幸存那条的 strm 就凭空消失——Emby 里整集不见。
+        """
+        driver_row.output_dir = str(tmp_path)
+        await db_session.commit()
+
+        shared = tmp_path / "movie.strm"
+        shared.write_text("http://localhost:8080/302/2/sig\n", encoding="utf-8")
+        for rid, name in (("pc1", "movie.mp4"), ("pc2", "movie.mkv")):
+            db_session.add(
+                MediaFile(
+                    driver_id=driver_row.id,
+                    remote_id=rid,
+                    path=f"/影视/{name}",
+                    name=name,
+                    size=100,
+                    strm_path=str(shared),
+                    signature="sig",
+                    mtime=None,
+                    created_at="2026-01-01 00:00:00",
+                    updated_at="2026-01-01 00:00:00",
+                )
+            )
+        await db_session.commit()
+
+        # 源端只剩 pc2（pc1 消失）
+        fake_driver.add_file("pc2", "movie.mkv", path="/影视/movie.mkv", size=100)
+
+        await scan_driver(db_session, settings, driver_row, prune=True)
+
+        rows = (await db_session.execute(select(MediaFile))).scalars().all()
+        assert [r.remote_id for r in rows] == ["pc2"]
+        # ⚠️ 共用的 strm 必须还在（幸存那条还在用它）
+        assert shared.exists()
+
+    async def test_prune_deletes_strm_when_last_reference_gone(
+        self, db_session, settings, driver_row, fake_driver, tmp_path
+    ):
+        """两条共用同一个 strm，**两条都没了** → 文件才删（最后一个引用者）。"""
+        driver_row.output_dir = str(tmp_path)
+        await db_session.commit()
+
+        shared = tmp_path / "movie.strm"
+        shared.write_text("http://localhost:8080/302/2/sig\n", encoding="utf-8")
+        for rid, name in (("pc1", "movie.mp4"), ("pc2", "movie.mkv")):
+            db_session.add(
+                MediaFile(
+                    driver_id=driver_row.id,
+                    remote_id=rid,
+                    path=f"/影视/{name}",
+                    name=name,
+                    size=100,
+                    strm_path=str(shared),
+                    signature="sig",
+                    mtime=None,
+                    created_at="2026-01-01 00:00:00",
+                    updated_at="2026-01-01 00:00:00",
+                )
+            )
+        await db_session.commit()
+
+        await scan_driver(db_session, settings, driver_row, prune=True)
+
+        assert not shared.exists()
+        rows = (await db_session.execute(select(MediaFile))).scalars().all()
+        assert rows == []
 
 
 class TestScanLockWindow:

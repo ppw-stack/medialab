@@ -97,6 +97,8 @@ class IncrementalStats:
     attachment_failed: int = 0
     #: 因路径冲突跳过（目录改名等）——**提示用户跑全量**
     conflicts: int = 0
+    #: 同名不同扩展名的**去重**（保留大的，小的不落库）
+    deduped: int = 0
     #: 因后缀不匹配跳过
     skipped_unknown: int = 0
     #: 跳过的删除事件（本地找不到对应记录）
@@ -121,6 +123,7 @@ class IncrementalStats:
             "attachment_unchanged": self.attachment_unchanged,
             "attachment_failed": self.attachment_failed,
             "conflicts": self.conflicts,
+            "deduped": self.deduped,
             "skipped_unknown": self.skipped_unknown,
             "skipped_deleted": self.skipped_deleted,
             "failed": self.failed,
@@ -133,6 +136,7 @@ class IncrementalStats:
                 + self.deleted
                 + self.attachment_synced
                 + self.attachment_unchanged
+                + self.deduped
             ),
         }
 
@@ -386,15 +390,40 @@ async def _handle_video(
         )
         return
 
-    # 同名不同扩展名的冲突（去掉视频扩展名后新增的风险）：报告不阻止
+    # 同名不同扩展名的冲突（去掉视频扩展名后新增的风险）：保留大的
     conflict = await find_strm_conflict(db, driver, cloud_file, strm_path)
     if conflict is not None:
-        stats.conflicts += 1
+        if conflict.size >= cloud_file.size:
+            # 库里那份不小（含相等——相等时保留先遇到的，行为稳定）
+            stats.deduped += 1
+            if len(stats.errors) < 20:
+                stats.errors.append(
+                    f"同名不同扩展名去重：{cloud_file.path} 与 {conflict.path} "
+                    f"映射到同一 strm，保留较大的（{conflict.path}）"
+                )
+            logger.warning(
+                "同名不同扩展名去重：保留 %s（%d 字节），跳过 %s（%d 字节）",
+                conflict.path,
+                conflict.size,
+                cloud_file.path,
+                cloud_file.size,
+            )
+            return
+        # 当前这份更大 → 淘汰库里的小的。
+        # ⚠️ **不能删 strm 文件**——它与当前这份共用同一路径，当前会重写它。
+        await db.delete(conflict)
+        stats.deduped += 1
+        if len(stats.errors) < 20:
+            stats.errors.append(
+                f"同名不同扩展名去重：{conflict.path} 与 {cloud_file.path} "
+                f"映射到同一 strm，保留较大的（{cloud_file.path}）"
+            )
         logger.warning(
-            "strm 文件名冲突：%s 与 %s 映射到同一个 %s",
+            "同名不同扩展名去重：保留 %s（%d 字节），淘汰 %s（%d 字节）",
             cloud_file.path,
+            cloud_file.size,
             conflict.path,
-            strm_path.name,
+            conflict.size,
         )
 
     # 改名遗留的旧 strm 路径（命名规则变更时才有）

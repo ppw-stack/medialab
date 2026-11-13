@@ -887,6 +887,8 @@ export interface ScanStats {
   skipped: number
   skipped_unknown: number
   skipped_small: number
+  /** 同名不同扩展名的去重数（保留大的，小的不落库） */
+  deduped: number
   failed: number
   total: number
   errors: string[]
@@ -918,6 +920,8 @@ export interface IncrementalJob {
   attachment_failed: number
   /** 路径冲突（疑似目录改名）——已跳过 */
   conflicts: number
+  /** 同名不同扩展名的去重数（保留大的，小的不落库） */
+  deduped: number
   skipped_unknown: number
   skipped_deleted: number
   failed: number
@@ -949,6 +953,8 @@ export interface ScanJob {
   attachment_failed: number
   skipped_unknown: number
   skipped_small: number
+  /** 同名不同扩展名的去重数（保留大的，小的不落库） */
+  deduped: number
   failed: number
   /** 实时日志（环形，最多 500 条） */
   logs: string[]

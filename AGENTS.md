@@ -343,8 +343,9 @@
   - **理由**：媒体服务器按「同目录同 stem」匹配 nfo 与媒体文件——`x.mkv.strm` 的 stem 是 `x.mkv`，网盘侧的 nfo 多数叫 `x.nfo`（stem `x`）→ 对不上，Emby / Jellyfin 认不到 nfo，元数据刮不出来（用户实测「媒体服务器识别有问题」）
   - **只剥离属于该存储源 `video_exts` 的后缀**（用户配什么剥什么），不硬编码后缀表；后缀 >5 字符按 `split_name` 的既有语义**不算扩展名**（`movie.2020.1080p` 不被剥成 `movie.2020`）
   - **改名必留旧文件清理**：`_upsert_media` 用 `stale_paths` 收集旧路径，扫描 / 增量**写完新文件再删旧**（写锁之外，`asyncio.to_thread`）——不删就变成无主文件（Emby 重复条目 + `health` 报 orphan）。存量库靠**重扫一次**完成改名
-  - **同名不同扩展名冲突**（去后缀后新增的风险）：同目录 `x.mp4` 与 `x.mkv` 会映射到同一个 `x.strm` → 后写覆盖先写，媒体服务器只看到一个条目。**报告不阻止**（strm 内容是带签名的中转 URL，播放仍指向正确源文件），但必须进 `stats.errors` **点名**两个源文件
-  - 契约由 `tests/unit/test_strm_naming.py` + `tests/integration/test_scan.py` + `tests/unit/test_incremental.py` 固化
+  - **同名不同扩展名冲突**（去后缀后新增的风险）：同目录 `x.mp4` 与 `x.mkv` 会映射到同一个 `x.strm` → 两份是**不同压制版本**（内容不同、体积常差几倍），不是冗余拷贝。规则是「**保留大的**」（对齐数据同步的 `conflict_policy=1`）——小的那个**不落库**（DB 里只留一条），大的落库并重写 strm。**确定性规则**，不靠遍历顺序碰运气（生产实测 30 集全是《伟大的长征》mkv+mp4 两版）
+  - ⚠️ **prune 必须按「strm 路径引用计数」删文件**（`media.py:_prune_orphans`）：共用同一路径的两条记录，先删的那行若顺手把文件删了，胜者的 strm 就会凭空消失（Emby 里整集不见）。只有**最后一个引用者**被清理时才删文件
+  - 契约由 `tests/unit/test_strm_naming.py` + `tests/integration/test_scan.py`（保留大的 / 幂等 / prune 不误删共用路径）+ `tests/unit/test_incremental.py` 固化
 
 - **直链缓存读写失败必须降级，不能让播放 500**（2026-11-12 prod 事故，`app/services/link_cache.py`）：
   - **现象**：播放中转 `GET /302/...` 首次请求 **500**、重试才 302——播放器通常不重试，等于随机播放失败

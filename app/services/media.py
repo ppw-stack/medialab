@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -83,6 +84,8 @@ class ScanStats:
     attachment_failed: int = 0
     skipped_unknown: int = 0
     skipped_small: int = 0
+    #: 同名不同扩展名的**去重**（保留大的，小的不落库）
+    deduped: int = 0
     failed: int = 0
     errors: list[str] = field(default_factory=list)
 
@@ -100,6 +103,7 @@ class ScanStats:
             + self.attachment_unchanged
             + self.attachment_failed
             + self.skipped
+            + self.deduped
             + self.failed
         )
 
@@ -114,6 +118,7 @@ class ScanStats:
             "skipped": self.skipped,
             "skipped_unknown": self.skipped_unknown,
             "skipped_small": self.skipped_small,
+            "deduped": self.deduped,
             "failed": self.failed,
             "total": self.total,
             "errors": self.errors[:20],
@@ -431,13 +436,11 @@ async def find_strm_conflict(
     """查「同一个 strm 路径已被别的条目占用」——同名不同扩展名的冲突。
 
     **去掉视频扩展名后新增的风险**：同目录的 ``x.mp4`` 与 ``x.mkv``
-    会映射到同一个 ``x.strm``（保留扩展名时不会）。后写的覆盖先写的
-    → 媒体服务器只看到一个条目，另一个静默消失。
+    会映射到同一个 ``x.strm``（保留扩展名时不会）。
 
-    这里**只报告不阻止**：strm 内容里是中转 URL（带各自签名），覆盖后
-    播放仍指向正确的源文件——损失的是「媒体服务器少一个条目」，
-    属于可恢复的展示问题，不该拦住扫描。但必须**点名**（作业历史可见），
-    静默丢文件是底线问题。
+    两份是**不同压制版本**（内容不同、体积往往差几倍），不是冗余拷贝
+    ——所以调用方按「保留大的」决策（对齐数据同步的 ``conflict_policy=1``：
+    同名不同大小保留大文件），而不是随便挑一个。
 
     Returns:
         占用该路径的**其它**条目；无冲突返回 ``None``。
@@ -451,6 +454,35 @@ async def find_strm_conflict(
             )
         )
     ).scalar_one_or_none()
+
+
+def note_dedup(
+    stats: ScanStats,
+    conflict: MediaFile,
+    cloud_file: CloudFile,
+    *,
+    keep_current: bool,
+) -> None:
+    """记一条「同名不同扩展名去重」的明细（点名两个源文件 + 谁胜出）。
+
+    去重不是错误，但**必须可追溯**——用户要能回答「网盘上那个小版本
+    为什么在本地媒体库里没有」。
+    """
+    stats.deduped += 1
+    winner = cloud_file if keep_current else conflict
+    loser = conflict if keep_current else cloud_file
+    if len(stats.errors) < 20:
+        stats.errors.append(
+            f"同名不同扩展名去重：{loser.path}（{loser.size} 字节）与 "
+            f"{winner.path}（{winner.size} 字节）映射到同一 strm，保留较大的"
+        )
+    logger.warning(
+        "同名不同扩展名去重：保留 %s（%d 字节），跳过 %s（%d 字节）",
+        winner.path,
+        winner.size,
+        loser.path,
+        loser.size,
+    )
 
 
 def _build_driver(driver: Driver) -> Any:
@@ -709,23 +741,19 @@ async def scan_driver(
             strm_path = output_dir / relative
 
             # 同名不同扩展名的冲突：``x.mp4`` 与 ``x.mkv`` 去掉扩展名后
-            # 映射到同一个 ``x.strm``——后写的覆盖先写的，媒体服务器只会
-            # 看到一个条目。**报告不阻止**（播放仍指向正确源文件），
-            # 但必须点名（见 find_strm_conflict 的 docstring）。
+            # 映射到同一个 ``x.strm``。两份是**不同版本**（内容不同），
+            # 规则是「保留大的」（对齐 conflict_policy=1）。
             conflict = await find_strm_conflict(db, driver, cloud_file, strm_path)
             if conflict is not None:
-                stats.failed += 1
-                if len(stats.errors) < 20:
-                    stats.errors.append(
-                        f"strm 文件名冲突：{cloud_file.path} 与 {conflict.path} "
-                        f"映射到同一个 {strm_path.name}（同名不同扩展名）"
-                    )
-                logger.warning(
-                    "strm 文件名冲突：%s 与 %s 映射到同一个 %s",
-                    cloud_file.path,
-                    conflict.path,
-                    strm_path.name,
-                )
+                if conflict.size >= cloud_file.size:
+                    # 库里那份不小（含相等——相等时保留先遇到的，行为稳定）
+                    note_dedup(stats, conflict, cloud_file, keep_current=False)
+                    continue  # 小的这份不落库、不写文件
+                # 当前这份更大 → 淘汰库里的小的。
+                # ⚠️ **不能删 strm 文件**——它与当前这份共用同一路径，
+                # 当前会重写它（URL 的 media_id 变了）。
+                await db.delete(conflict)
+                note_dedup(stats, conflict, cloud_file, keep_current=True)
 
             media = await _upsert_media(
                 db,
@@ -806,6 +834,11 @@ async def _prune_orphans(
     """删除「源端已消失」的条目及其 STRM 文件。
 
     只删**本存储源**产出的、且源端确实没有了的条目。
+
+    **strm 文件按「路径引用计数」决定谁来删**：去掉视频扩展名后，
+    同名不同扩展名的文件会共用一个 strm 路径（《伟大的长征》每集有
+    mkv + mp4 两版）——先删的那行若顺手把文件也删了，胜者的 strm 就会
+    凭空消失（Emby 里整集不见）。只有**最后一个引用者**被清理时才删文件。
     """
     rows = (
         await db.execute(
@@ -813,13 +846,21 @@ async def _prune_orphans(
         )
     ).scalars().all()
 
+    #: 每个 strm 路径被几条记录引用
+    path_refs: Counter[str] = Counter()
+    for media in rows:
+        if media.strm_path:
+            path_refs[media.strm_path] += 1
+
     removed = 0
     for media in rows:
         if media.remote_id in seen_remote_ids:
             continue
         if media.strm_path:
-            # ⚠️ 删文件放线程池（CIFS 卡死时同步 unlink 会卡住事件循环）
-            await asyncio.to_thread(delete_strm, Path(media.strm_path))
+            if path_refs[media.strm_path] <= 1:
+                # ⚠️ 删文件放线程池（CIFS 卡死时同步 unlink 会卡住事件循环）
+                await asyncio.to_thread(delete_strm, Path(media.strm_path))
+            path_refs[media.strm_path] -= 1
         await db.delete(media)
         removed += 1
     if removed:
