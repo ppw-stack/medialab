@@ -510,6 +510,10 @@ class _FakeGuangyaSource:
         self._files = files
         #: (remote_id, user_agent)——光鸭源**不绑 UA**
         self.links: list[tuple[str, str]] = []
+        #: 被删除的源文件 id（清理源开关）
+        self.deleted: list[str] = []
+        #: 让删除抛错
+        self.delete_error: str | None = None
 
     async def iter_tree_by_cid(
         self, cid: str, parent_path: str = "", include_subdirs: bool = True
@@ -523,6 +527,11 @@ class _FakeGuangyaSource:
             url=f"https://sh01-httpdown.guangyacdn.com/download/?fid={remote_id}",
             ua_required=False,
         )
+
+    async def delete_file(self, file_id: str) -> None:
+        if self.delete_error:
+            raise DriverError(self.delete_error, kind="unknown")
+        self.deleted.append(file_id)
 
 
 async def _seed_guangya_drivers(db_session) -> None:
@@ -676,3 +685,158 @@ def test_landed_name_from_url() -> None:
         == "A.mkv"
     )
     assert migration._landed_name_from_url("") == ""
+
+
+# --------------------------------------------------------------------------
+# 「搬完清理源」开关
+# --------------------------------------------------------------------------
+
+
+async def test_delete_source_off_by_default(
+    db_session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """默认**不删源文件**——迁移是纯复制。"""
+    await _seed_guangya_drivers(db_session)
+
+    files = [_entry("/影视/电影/A (2020)/A.mkv", 1_000_000, "f1")]
+    src = _FakeGuangyaSource(files)
+    gyp = _FakeGuangya({"f1": ("A.mkv", 1_000_000)}, landed_name="download")
+
+    monkeypatch.setattr(migration, "build_driver", _guangya_build(src, gyp))
+
+    params = migration_jobs.MigrationParams(
+        source_driver_id=201,
+        source_cid="1962124234139361322",
+        source_path="/影视/电影",
+        target_driver_id=202,
+        target_file_id="root",
+    )
+    job = migration_jobs.MigrationJob(id="deljob1", params=params)
+
+    await migration.run_migration(job)
+
+    assert job.success == 1, job.logs
+    assert src.deleted == [], "默认不该删源文件"
+    assert job.deleted_source == 0
+
+
+async def test_delete_source_removes_verified_files(
+    db_session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """开启后：**已校验成功**的源文件被删，计数与审计日志都有。"""
+    await _seed_guangya_drivers(db_session)
+
+    files = [_entry("/影视/电影/A (2020)/A.mkv", 1_000_000, "f1")]
+    src = _FakeGuangyaSource(files)
+    gyp = _FakeGuangya({"f1": ("A.mkv", 1_000_000)}, landed_name="download")
+
+    monkeypatch.setattr(migration, "build_driver", _guangya_build(src, gyp))
+
+    params = migration_jobs.MigrationParams(
+        source_driver_id=201,
+        source_cid="1962124234139361322",
+        source_path="/影视/电影",
+        target_driver_id=202,
+        target_file_id="root",
+        delete_source=True,
+    )
+    job = migration_jobs.MigrationJob(id="deljob2", params=params)
+
+    await migration.run_migration(job)
+
+    assert job.success == 1, job.logs
+    assert src.deleted == ["f1"], "已校验成功的源文件应被删"
+    assert job.deleted_source == 1
+    assert any("已清理源" in line for line in job.logs)
+
+
+async def test_delete_source_keeps_unverified_files(
+    db_session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """落盘没出现同名同大小 → **不删源**（顺序不能反：先删源会丢数据）。"""
+    await _seed_guangya_drivers(db_session)
+
+    files = [_entry("/影视/电影/A (2020)/A.mkv", 1_000_000, "f1")]
+    src = _FakeGuangyaSource(files)
+    # 目标侧什么都不落 → 校验必然失败
+    gyp = _FakeGuangya({}, landed_name="download")
+
+    monkeypatch.setattr(migration, "build_driver", _guangya_build(src, gyp))
+
+    params = migration_jobs.MigrationParams(
+        source_driver_id=201,
+        source_cid="1962124234139361322",
+        source_path="/影视/电影",
+        target_driver_id=202,
+        target_file_id="root",
+        delete_source=True,
+    )
+    job = migration_jobs.MigrationJob(id="deljob3", params=params)
+
+    await migration.run_migration(job)
+
+    assert job.success == 0, job.logs
+    assert src.deleted == [], "没落盘的文件绝不能删源"
+    assert job.failed == 1
+
+
+async def test_delete_source_failure_does_not_break_job(
+    db_session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """清理源失败只记失败明细，**不炸掉整个迁移**。"""
+    await _seed_guangya_drivers(db_session)
+
+    files = [_entry("/影视/电影/A (2020)/A.mkv", 1_000_000, "f1")]
+    src = _FakeGuangyaSource(files)
+    src.delete_error = "光鸭删除文件失败：boom"
+    gyp = _FakeGuangya({"f1": ("A.mkv", 1_000_000)}, landed_name="download")
+
+    monkeypatch.setattr(migration, "build_driver", _guangya_build(src, gyp))
+
+    params = migration_jobs.MigrationParams(
+        source_driver_id=201,
+        source_cid="1962124234139361322",
+        source_path="/影视/电影",
+        target_driver_id=202,
+        target_file_id="root",
+        delete_source=True,
+    )
+    job = migration_jobs.MigrationJob(id="deljob4", params=params)
+
+    await migration.run_migration(job)
+
+    assert job.success == 1, "迁移本身仍算成功"
+    assert job.deleted_source == 0
+    assert job.failed == 1
+    assert any("清理源失败" in (f.get("reason") or "") for f in job.failed_items)
+
+
+async def test_delete_source_ignored_for_p115_source(
+    db_session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """115 源没有删除能力 → 忽略该开关并记日志（不误删）。"""
+    await _seed_drivers(db_session)
+
+    files = [_entry("/影视/电影/A (2020)/A.mkv", 3_000_000, "new1")]
+    p115 = _FakeP115(files)
+    gyp = _FakeGuangya({"new1": ("A.mkv", 3_000_000)})
+
+    monkeypatch.setattr(
+        migration, "build_driver", lambda *a, **k: p115 if a[0] == "p115" else gyp
+    )
+
+    params = migration_jobs.MigrationParams(
+        source_driver_id=101,
+        source_cid="root-cid",
+        source_path="/影视/电影",
+        target_driver_id=102,
+        target_file_id="root",
+        delete_source=True,
+    )
+    job = migration_jobs.MigrationJob(id="deljob5", params=params)
+
+    await migration.run_migration(job)
+
+    assert job.success == 1, job.logs
+    assert any("115 源不支持清理源" in line for line in job.logs)
+    assert job.deleted_source == 0

@@ -56,6 +56,8 @@ class MigrationRunIn(BaseModel):
     submit_interval_sec: float = Field(default=60.0, ge=0.0, le=600.0)
     #: 排除原盘（iso / m2ts / BDMV / CERTIFICATE）
     exclude_disc: bool = True
+    #: 搬完清理源：迁移成功后删除源端文件（**默认关**；仅光鸭源支持）
+    delete_source: bool = False
     #: 只用于展示
     source_path: str = Field(default="", max_length=1024)
     target_path: str = Field(default="", max_length=1024)
@@ -121,6 +123,7 @@ async def run_migration(payload: MigrationRunIn) -> dict[str, Any]:
         concurrency=payload.concurrency,
         submit_interval_sec=payload.submit_interval_sec,
         exclude_disc=payload.exclude_disc,
+        delete_source=payload.delete_source,
     )
     job = await migration_jobs.start_migration_job(params)
     return {"job_id": job.id, "state": job.state}

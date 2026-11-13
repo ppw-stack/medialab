@@ -61,6 +61,11 @@ class MigrationParams:
     submit_interval_sec: float = 60.0
     #: 排除原盘（iso / m2ts / BDMV / CERTIFICATE）
     exclude_disc: bool = True
+    #: 「搬完清理源」——迁移成功后删除源端文件（**默认关**）
+    #:
+    #: 只删**目标侧已确认落盘同名同大小**的文件；删除走回收站（可恢复）；
+    #: **仅光鸭源支持**（115 驱动无删除能力，会被忽略并在日志里说明）。
+    delete_source: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -75,6 +80,7 @@ class MigrationParams:
             "concurrency": self.concurrency,
             "submit_interval_sec": self.submit_interval_sec,
             "exclude_disc": self.exclude_disc,
+            "delete_source": self.delete_source,
         }
 
 
@@ -117,6 +123,8 @@ class MigrationJob:
     filtered_ext: int = 0
     #: 已成功迁移的字节数
     migrated_bytes: int = 0
+    #: 已清理的源文件数（「搬完清理源」开启时）
+    deleted_source: int = 0
     #: 启动时检测到的上一轮在途任务数
     legacy_inflight: int = 0
 
@@ -227,6 +235,7 @@ class MigrationJob:
             "filtered_large": self.filtered_large,
             "filtered_ext": self.filtered_ext,
             "migrated_bytes": self.migrated_bytes,
+            "deleted_source": self.deleted_source,
             "legacy_inflight": self.legacy_inflight,
             "failed_items": self.failed_items,
             "conflict_items": self.conflict_items,
@@ -338,6 +347,7 @@ async def _run_job(job: MigrationJob) -> None:
                 f"完成：成功 {job.success} 个（{job.migrated_bytes / 1024**3:.2f} GB），"
                 f"已存在跳过 {job.skipped_existing}，在途跳过 {job.skipped_inflight}，"
                 f"冲突 {job.conflicts}，失败 {job.failed}"
+                + (f"，清理源 {job.deleted_source}" if job.deleted_source else "")
             )
             logger.info("迁移任务 %s 完成", job.id)
         else:
