@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from app.adapters.drivers.base import CloudFile, DirectLink
+from app.adapters.drivers.base import CloudFile, DirectLink, DriverError
 from app.db.models import Driver
 from app.services import migration, migration_jobs
 
@@ -50,9 +50,15 @@ class _FakeGuangya:
 
     name = "guangya"
 
-    def __init__(self, info: dict[str, tuple[str, int]]) -> None:
+    def __init__(
+        self,
+        info: dict[str, tuple[str, int]],
+        landed_name: str | None = None,
+    ) -> None:
         #: pickcode → (文件名, 大小)——提交任务后"落盘"用
         self._info = info
+        #: 落盘名覆盖——光鸭直链的 URL 末段是 ``download``，云下载按它落名
+        self._landed_name = landed_name
         #: parent_id → {目录名: fileId}
         self._dirs: dict[str, dict[str, str]] = {"root": {}}
         #: fileId → {文件名: 大小}
@@ -64,6 +70,17 @@ class _FakeGuangya:
         self.submitted: list[tuple[str, str]] = []
         #: 每次提交的时刻（用于断言「错开提交」）
         self.submit_times: list[float] = []
+        #: 已提交但尚未被轮询取走的任务数峰值（用于断言「串行」）
+        self.inflight = 0
+        self.max_inflight = 0
+        #: 改名的记录：``(旧名, 新名)``
+        self.renamed: list[tuple[str, str]] = []
+        #: 让 create_offline_task 抛错（额度耗尽场景）
+        self.submit_error: str | None = None
+        #: fileId → 文件名
+        self._file_names: dict[str, str] = {}
+        self._file_sizes: dict[str, int] = {}
+        self._file_parents: dict[str, str] = {}
 
     # -- 目录 --
 
@@ -105,16 +122,54 @@ class _FakeGuangya:
     async def list_files(self, dir_id: str) -> dict[str, int]:
         return dict(self._files.get(dir_id or "root", {}))
 
+    async def list_entries(self, dir_id: str) -> dict[str, tuple[int, str]]:
+        """带 fileId 的文件清单——改名要靠它定位。"""
+        files = self._files.get(dir_id or "root", {})
+        out: dict[str, tuple[int, str]] = {}
+        for name, size in files.items():
+            out[name] = (size, self._file_id_of(dir_id or "root", name))
+        return out
+
+    async def rename_file(self, file_id: str, new_name: str) -> None:
+        """改名（fileId → 新名）。"""
+        old_name = self._file_names.get(file_id)
+        if old_name is None:
+            raise AssertionError(f"未知 fileId：{file_id}")
+        parent = self._file_parents[file_id]
+        files = self._files.get(parent, {})
+        size = files.pop(old_name, 0)
+        files[new_name] = size
+        self._file_names[file_id] = new_name
+        self.renamed.append((old_name, new_name))
+
+    def _file_id_of(self, dir_id: str, name: str) -> str:
+        for fid, fname in self._file_names.items():
+            if fname == name and self._file_parents.get(fid) == dir_id:
+                return fid
+        self._next_id += 1
+        fid = f"file{self._next_id}"
+        self._file_names[fid] = name
+        self._file_sizes[fid] = self._files.get(dir_id, {}).get(name, 0)
+        self._file_parents[fid] = dir_id
+        return fid
+
     # -- 离线任务 --
 
     async def create_offline_task(self, url: str, parent_id: str = "") -> str:
-        pickcode = url.removeprefix("fake://")
-        name, size = self._info[pickcode]
-        self._files.setdefault(parent_id or "root", {})[name] = size
-        task_id = f"task-{pickcode}"
+        if self.submit_error:
+            raise DriverError(self.submit_error, kind="unknown")
+        key = url.rsplit("=", 1)[-1] if "=" in url else url.removeprefix("fake://")
+        name, size = self._info[key]
+        landed = self._landed_name or name
+        target_dir = parent_id or "root"
+        self._files.setdefault(target_dir, {})[landed] = size
+        self._file_id_of(target_dir, landed)
+        task_id = f"task-{key}"
         self._submitted.add(task_id)
-        self.submitted.append((pickcode, parent_id))
+        self.submitted.append((key, parent_id))
         self.submit_times.append(time.monotonic())
+        self.inflight += 1
+        self.max_inflight = max(self.max_inflight, self.inflight)
         return task_id
 
     async def list_active_offline_tasks(self) -> list[dict[str, Any]]:
@@ -123,6 +178,7 @@ class _FakeGuangya:
         for task_id in list(self._submitted):
             items.append({"taskId": task_id, "res": "https://cdn/x"})
             self._submitted.remove(task_id)  # 下一次轮询就"消失"
+            self.inflight = max(0, self.inflight - 1)
         return items
 
 
@@ -438,3 +494,185 @@ async def test_target_index_note_submitted_updates_cache() -> None:
 
     _, after = await index.resolve("Show")
     assert after.get("A.mkv") == 100
+
+
+# --------------------------------------------------------------------------
+# 光鸭 → 光鸭（直链 → 云下载 → 改名）
+# --------------------------------------------------------------------------
+
+
+class _FakeGuangyaSource:
+    """假光鸭源账号：直链 URL 末段是 ``download``（实测的真实形态）。"""
+
+    name = "guangya"
+
+    def __init__(self, files: list[CloudFile]) -> None:
+        self._files = files
+        #: (remote_id, user_agent)——光鸭源**不绑 UA**
+        self.links: list[tuple[str, str]] = []
+
+    async def iter_tree_by_cid(
+        self, cid: str, parent_path: str = "", include_subdirs: bool = True
+    ) -> AsyncIterator[CloudFile]:
+        for entry in self._files:
+            yield entry
+
+    async def get_direct_link(self, remote_id: str, user_agent: str) -> DirectLink:
+        self.links.append((remote_id, user_agent))
+        return DirectLink(
+            url=f"https://sh01-httpdown.guangyacdn.com/download/?fid={remote_id}",
+            ua_required=False,
+        )
+
+
+async def _seed_guangya_drivers(db_session) -> None:
+    """两个光鸭账号（源 + 目标）。
+
+    凭据不同——测试里用它区分「源驱动」与「目标驱动」（两者类型都是 guangya）。
+    """
+    db_session.add(
+        Driver(
+            id=201,
+            type="guangya",
+            name="光鸭源",
+            credential="src-cred",
+            enabled=True,
+            video_exts="mkv,mp4",
+            created_at=int(time.time()),
+        )
+    )
+    db_session.add(
+        Driver(
+            id=202,
+            type="guangya",
+            name="光鸭目标",
+            credential="tgt-cred",
+            enabled=True,
+            created_at=int(time.time()),
+        )
+    )
+    await db_session.commit()
+
+
+def _guangya_build(src: Any, gyp: Any):
+    """造一个 build_driver 替身：按凭据区分源 / 目标。"""
+
+    def _build(driver_type: str, credential: str | None = None, *a: Any, **k: Any) -> Any:
+        return src if credential == "src-cred" else gyp
+
+    return _build
+
+
+async def test_guangya_source_end_to_end(db_session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """光鸭源端到端：落盘名 ``download`` → 改名回原名 → 校验通过。"""
+    await _seed_guangya_drivers(db_session)
+
+    files = [
+        _entry("/影视/电影/A (2020)/A.mkv", 1_000_000, "f1"),
+        _entry("/影视/电影/A (2020)/B.mkv", 2_000_000, "f2"),
+    ]
+    src = _FakeGuangyaSource(files)
+    gyp = _FakeGuangya(
+        {"f1": ("A.mkv", 1_000_000), "f2": ("B.mkv", 2_000_000)},
+        landed_name="download",
+    )
+
+    monkeypatch.setattr(migration, "build_driver", _guangya_build(src, gyp))
+
+    params = migration_jobs.MigrationParams(
+        source_driver_id=201,
+        source_cid="1962124234139361322",
+        source_path="/影视/电影",
+        target_driver_id=202,
+        target_file_id="root",
+        target_path="/影视",
+        concurrency=5,  # 光鸭源必须强制收敛到 1
+    )
+    job = migration_jobs.MigrationJob(id="gypjob", params=params)
+
+    await migration.run_migration(job)
+
+    assert job.success == 2, job.logs
+    assert job.failed == 0
+    # 直链不绑 UA
+    assert all(ua == "" for _, ua in src.links), src.links
+    # 落盘名是 download → 被改名回原名
+    assert sorted(old for old, _ in gyp.renamed) == ["download", "download"]
+    assert sorted(new for _, new in gyp.renamed) == ["A.mkv", "B.mkv"]
+    # 目标目录里是原名 + 正确大小
+    show_id = gyp._dirs["root"]["A (2020)"]
+    assert gyp._files[show_id]["A.mkv"] == 1_000_000
+    assert gyp._files[show_id]["B.mkv"] == 2_000_000
+    # 恒串行：任何时刻只有一个任务在途
+    assert gyp.max_inflight == 1, f"并发没收敛：{gyp.max_inflight}"
+
+
+async def test_guangya_source_adopts_leftover(db_session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """中断恢复：目标目录里已落盘但没改名的 ``download`` → 认领改名，不重下。"""
+    await _seed_guangya_drivers(db_session)
+
+    files = [_entry("/影视/电影/A (2020)/A.mkv", 1_000_000, "f1")]
+    src = _FakeGuangyaSource(files)
+    gyp = _FakeGuangya({"f1": ("A.mkv", 1_000_000)}, landed_name="download")
+    # 上一轮已落盘（名字还是 download）
+    gyp.seed_file("A (2020)", "download", 1_000_000)
+
+    monkeypatch.setattr(migration, "build_driver", _guangya_build(src, gyp))
+
+    params = migration_jobs.MigrationParams(
+        source_driver_id=201,
+        source_cid="1962124234139361322",
+        source_path="/影视/电影",
+        target_driver_id=202,
+        target_file_id="root",
+    )
+    job = migration_jobs.MigrationJob(id="gypjob2", params=params)
+
+    await migration.run_migration(job)
+
+    assert job.skipped_existing == 1, job.logs
+    assert gyp.submitted == [], "不该重复提交（云添加额度稀缺）"
+    show_id = gyp._dirs["root"]["A (2020)"]
+    assert gyp._files[show_id]["A.mkv"] == 1_000_000
+
+
+async def test_quota_exhausted_pauses_job(db_session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """云添加额度耗尽 → 作业**暂停**（不硬撞、不重试），次日重跑即可续传。"""
+    await _seed_guangya_drivers(db_session)
+
+    files = [_entry("/影视/电影/A (2020)/A.mkv", 1_000_000, "f1")]
+    src = _FakeGuangyaSource(files)
+    gyp = _FakeGuangya({"f1": ("A.mkv", 1_000_000)}, landed_name="download")
+    gyp.submit_error = "光鸭创建离线任务失败：云添加次数超限，下个自然日刷新"
+
+    monkeypatch.setattr(migration, "build_driver", _guangya_build(src, gyp))
+
+    params = migration_jobs.MigrationParams(
+        source_driver_id=201,
+        source_cid="1962124234139361322",
+        source_path="/影视/电影",
+        target_driver_id=202,
+        target_file_id="root",
+    )
+    job = migration_jobs.MigrationJob(id="gypjob3", params=params)
+
+    await migration.run_migration(job)
+
+    assert job.state == migration_jobs.STATE_PAUSED, job.logs
+    assert job.error and "次数超限" in job.error
+    assert job.failed == 0, "额度耗尽不是文件失败"
+
+
+def test_landed_name_from_url() -> None:
+    """落盘名 = URL 末段（光鸭 CDN 直链末段是 ``download``）。"""
+    assert (
+        migration._landed_name_from_url(
+            "https://sh01-httpdown.guangyacdn.com/download/?fid=abc"
+        )
+        == "download"
+    )
+    assert (
+        migration._landed_name_from_url("https://cdn.115.com/影视/A.mkv?uid=1")
+        == "A.mkv"
+    )
+    assert migration._landed_name_from_url("") == ""

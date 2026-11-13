@@ -1193,7 +1193,7 @@ export interface MigrationJobItem {
 /** 一次迁移任务的进度快照。 */
 export interface MigrationJob {
   id: string
-  state: "running" | "success" | "failed" | "cancelled"
+  state: "running" | "success" | "failed" | "cancelled" | "paused"
   started_at: number
   finished_at: number | null
   elapsed_sec: number
