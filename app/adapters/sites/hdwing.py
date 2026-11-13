@@ -35,7 +35,7 @@ cookie 鉴权，简体中文界面（账号语言设定）。
   不带 ``uid`` 会返回「下载提示」确认页（HTML，分享率门槛），带上才返回
   bencoded 字节。hash 本身内嵌 uid（base64 解出 ``"1\\n<tid>\\n<uid>"``），
   自身 uid 从 navbar ``invite.php?id=N`` 提取。签名**不可合成**（必须从
-  页面解析，不伪造——见 AGENTS.md 合规边界）。
+  页面解析）。
 
 - **签到**：**不是** NexusPHP 标准的 ``/attendance.php``（实测 2026-11-07 返回
   404），而是 X2015 主题自带的插件端点 ``plugin_sign-in.php``
