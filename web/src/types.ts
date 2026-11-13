@@ -1210,6 +1210,8 @@ export interface MigrationJob {
     /** 两次提交给光鸭之间的最小间隔（秒） */
     submit_interval_sec: number
     exclude_disc: boolean
+    /** 搬完清理源：迁移成功后删除源端文件（默认关；仅光鸭源支持） */
+    delete_source?: boolean
   }
   source_path: string
   current_path: string
@@ -1227,6 +1229,8 @@ export interface MigrationJob {
   filtered_large: number
   filtered_ext: number
   migrated_bytes: number
+  /** 已清理的源文件数（「搬完清理源」开启时） */
+  deleted_source?: number
   legacy_inflight: number
   failed_items: MigrationJobItem[]
   conflict_items: MigrationJobItem[]
@@ -1247,6 +1251,8 @@ export interface MigrationRunInput {
   concurrency: number
   submit_interval_sec: number
   exclude_disc: boolean
+  /** 搬完清理源：迁移成功后删除源端文件（默认关；仅光鸭源支持） */
+  delete_source?: boolean
 }
 
 // ---- WebDAV ----

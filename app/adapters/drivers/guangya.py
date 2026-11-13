@@ -570,6 +570,26 @@ class GuangyaDriver:
                 kind=_map_code(code),
             )
 
+    async def delete_file(self, file_id: str) -> None:
+        """删除一个文件（**进回收站**，非永久删除）。
+
+        用于「搬完清理源」——那个开关默认关闭，且只删**已校验成功**（目标
+        侧已确认落盘同名同大小）的文件。
+
+        Args:
+            file_id: 待删文件的 fileId。
+
+        Raises:
+            DriverError: 删除失败（接口返回非 0 业务码）。
+        """
+        payload = await self._call("fs_delete", [str(file_id)])
+        code = payload.get("code")
+        if code not in (None, 0):
+            raise DriverError(
+                f"光鸭删除文件失败：{payload.get('msg') or payload}",
+                kind=_map_code(code),
+            )
+
     # -- 离线下载任务 --
 
     async def create_offline_task(self, url: str, parent_id: str = "") -> str:

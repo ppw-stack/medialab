@@ -37,6 +37,14 @@
         </template>
       </a-alert>
 
+      <a-alert v-if="form.deleteSource" type="error" show-icon :closable="false" class="tip">
+        <template #message>
+          <b>已开启「搬完清理源」</b>：每个文件在<b>目标侧确认落盘同名同大小</b>后，
+          源端同名文件会被删除（进回收站，可恢复）。中途失败/额度耗尽时
+          <b>已迁成功的会被删、未迁的保留</b>——重跑可续。
+        </template>
+      </a-alert>
+
       <a-row :gutter="12">
         <a-col :span="12">
           <a-form layout="inline" class="driver-row">
@@ -122,6 +130,16 @@
           <a-switch v-model:checked="form.excludeDisc" />
           <span class="hint">iso / m2ts / BDMV</span>
         </a-form-item>
+        <a-form-item label="搬完清理源">
+          <a-switch v-model:checked="form.deleteSource" :disabled="!isGuangyaSource" />
+          <span class="hint">
+            {{
+              isGuangyaSource
+                ? "只删已校验成功的；进回收站可恢复"
+                : "仅光鸭源支持"
+            }}
+          </span>
+        </a-form-item>
         <a-form-item>
           <a-button type="primary" :loading="starting" :disabled="!canRun" @click="start">
             开始迁移
@@ -158,6 +176,9 @@
         <a-descriptions-item label="在途任务">{{ job.in_flight }}</a-descriptions-item>
         <a-descriptions-item label="已迁移体积">
           {{ formatBytes(job.migrated_bytes) }}
+        </a-descriptions-item>
+        <a-descriptions-item label="已清理源">
+          {{ job.deleted_source ?? 0 }}
         </a-descriptions-item>
 
         <a-descriptions-item label="成功">{{ job.success }}</a-descriptions-item>
@@ -278,6 +299,7 @@ const form = reactive({
   concurrency: 2,
   submitIntervalSec: 60,
   excludeDisc: true,
+  deleteSource: false,
 })
 
 const job = ref<MigrationJob | null>(null)
@@ -413,6 +435,8 @@ async function resetSourceStack(): Promise<void> {
 /** 换源存储源——目录栈复位并重新加载。 */
 async function onSourceDriverChange(): Promise<void> {
   await resetSourceStack()
+  // 115 源不支持清理源 → 切过去时把开关关掉（避免带着无效开关开跑）
+  if (!isGuangyaSource.value) form.deleteSource = false
   await loadSource()
 }
 
@@ -508,6 +532,7 @@ async function start(): Promise<void> {
       concurrency: form.concurrency,
       submit_interval_sec: form.submitIntervalSec,
       exclude_disc: form.excludeDisc,
+      delete_source: form.deleteSource,
     }
     const res = await api.post<{ job_id: string }>("/migrations/run", payload)
     job.value = await api.get<MigrationJob>(`/migrations/jobs/${res.job_id}`)

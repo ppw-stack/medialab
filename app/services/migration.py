@@ -531,6 +531,17 @@ async def run_migration(job: MigrationJob) -> None:
         if submit_interval > 0:
             submit_interval = min(submit_interval, GUANGYA_SUBMIT_INTERVAL_MAX)
 
+    # 「搬完清理源」：**只有光鸭源支持**（115 驱动没有删除能力）
+    delete_source = bool(params.delete_source)
+    if delete_source and not needs_rename:
+        delete_source = False
+        job.log("⚠️ 115 源不支持清理源（驱动无删除能力），本次只迁移不删除")
+    elif delete_source:
+        job.log(
+            "🗑️ 已开启「搬完清理源」：**只删目标侧已确认落盘同名同大小的文件**，"
+            "删除进回收站（可恢复）"
+        )
+
     # 上一轮遗留的在途任务（中断恢复）
     inflight = await _collect_inflight(gyp, job)
     job.legacy_inflight = len(inflight)
@@ -595,6 +606,7 @@ async def run_migration(job: MigrationJob) -> None:
                     inflight=inflight,
                     base_path=base_path,
                     needs_rename=needs_rename,
+                    delete_source=delete_source,
                 )
             )
             for _ in range(concurrency)
@@ -675,6 +687,7 @@ async def _worker(
     inflight: set[str],
     base_path: str,
     needs_rename: bool,
+    delete_source: bool = False,
 ) -> None:
     """消费队列：一个文件失败不影响其它文件。"""
     while True:
@@ -692,6 +705,7 @@ async def _worker(
                 inflight=inflight,
                 base_path=base_path,
                 needs_rename=needs_rename,
+                delete_source=delete_source,
             )
         except asyncio.CancelledError:
             raise
@@ -732,6 +746,7 @@ async def _migrate_one(
     inflight: set[str],
     base_path: str,
     needs_rename: bool,
+    delete_source: bool = False,
 ) -> None:
     """处理单个文件：预检 → 换链 → 提交 → 等结束 → 改名 → 校验落盘。"""
     job.current_path = entry.path
@@ -825,6 +840,10 @@ async def _migrate_one(
             job.success += 1
             job.migrated_bytes += entry.size
             job.log(f"✅ 完成：{entry.path}")
+            # ⑦ 「搬完清理源」——**只在目标侧已确认落盘同名同大小**之后删。
+            #    顺序不能反：先删源再传，一旦传失败就是数据没了。
+            if delete_source:
+                await _delete_source_file(job, source, entry)
             return
         if attempt + 1 < VERIFY_RETRIES:
             await asyncio.sleep(VERIFY_DELAY_SEC)
@@ -835,6 +854,26 @@ async def _migrate_one(
     job.record_failed(
         entry, reason or "任务已结束但目标目录未出现同名同大小文件"
     )
+
+
+async def _delete_source_file(job: MigrationJob, source: Any, entry: CloudFile) -> None:
+    """清理源端文件（**仅在显式开启「搬完清理源」时调用**）。
+
+    - **只删已校验成功的**（调用点保证：目标侧已确认同名同大小落盘）
+    - 走 ``fs_delete`` → **进回收站**，不是永久删除（可恢复）
+    - **记审计日志**——删数据不可逆，必须能回答「删了什么」
+    - 单个失败不中断其余条目（只记警告）
+    """
+    try:
+        await source.delete_file(entry.remote_id)
+    except Exception as exc:  # 清理失败不该炸掉整个迁移
+        job.record_failed(entry, f"清理源失败：{exc}")
+        logger.warning("迁移清理源失败 %s：%s", entry.path, exc)
+        job.log(f"⚠️ 清理源失败：{entry.path}（{exc}）")
+        return
+    job.deleted_source += 1
+    logger.warning("迁移清理源：删除 %s（%d 字节）", entry.path, entry.size)
+    job.log(f"🗑️ 已清理源：{entry.path}")
 
 
 def _landed_name_from_url(url: str) -> str:
