@@ -1,8 +1,15 @@
-"""115 → 光鸭 迁移引擎（一次性手动同步）。
+"""迁移引擎：把源存储源的文件搬到光鸭（一次性手动同步）。
 
-**原理**：115 直链的 ``f=1`` 绑定「换链时用的 UA」。光鸭下载器有固定 UA
-（:data:`app.adapters.drivers.guangya.GUANGYA_DOWNLOAD_UA`），用它换链后
-交给光鸭「离线下载」→ 数据走 ``115 CDN → 光鸭服务器``，不占本地磁盘/带宽。
+支持两种源：
+
+- **115**（历史路径）：115 直链的 ``f=1`` 绑定「换链时用的 UA」。光鸭下载器
+  有固定 UA（:data:`app.adapters.drivers.guangya.GUANGYA_DOWNLOAD_UA`），
+  用它换链后交给光鸭「云下载」→ 数据走 ``115 CDN → 光鸭服务器``，不占本地
+  磁盘/带宽。115 直链的 URL 末段是**文件名**，故落盘名天然正确。
+- **光鸭**（2026-11-13 新增）：光鸭直链**不绑 UA**，云下载落盘名取自 URL
+  末段——光鸭 CDN 直链末段是 ``download``（实测），故**必须改名**回原名。
+  光鸭源的好处是**能搬被分享审核拒绝的文件**（``shareAuditStatus=3``
+  的影视文件分享不出去，但直链+云下载完全可用，336MB 实测 7 秒落盘）。
 
 **流式**：不预先跑一遍完整目录树。生产者用 ``iter_tree_by_cid`` 实时爬，
 爬到一个合格文件就塞进有界队列；N 个消费者并发处理。所以：
@@ -13,10 +20,18 @@
 **幂等**（支持重复执行）：提交前先查光鸭目标目录，同名 + 同大小 →
 `skipped_existing`。目标目录就是唯一真相源，不需要任何状态表。
 
+**光鸭源的额外约束**（实测得出）：
+
+- **恒串行**（并发 1）——落盘名都是 URL 末段，同目录并发提交会触发服务端
+  自动改名 ``download(1)``，改名完成前不能提交下一个
+- **提交间隔收紧到 5s**——光鸭源没有 115 的下载频控，瓶颈是云添加额度
+- **改名后仍按「同名同大小」校验**——目标目录仍是唯一真相源
+
 **中断恢复**：上一轮提交的任务可能还在光鸭服务端下载，目标目录里还没有
 文件。故启动时拉一次活跃任务列表，从 ``res`` 链接的 ``d=`` 参数里解析
 115 pickcode，命中则记 `skipped_inflight`（不提交、不等待）——下一轮由
-目标目录预检自然收尾。
+目标目录预检自然收尾。光鸭源没有 pickcode，改用「认领残留」：目标目录里
+若留着上一轮已落盘但没改名的 ``download`` 文件，按大小认领并改名。
 
 **只看状态**：任务结束 = 从活跃列表消失（``cloud_task_list`` 默认不含
 完成态，这里只拉 0/1）。不设任何超时——`get_task_status(taskId)` 对在途
@@ -38,6 +53,7 @@ from app.adapters.drivers.guangya import GUANGYA_DOWNLOAD_UA
 from app.core.logging import get_logger
 from app.db.models import Driver
 from app.db.session import session_scope
+from app.domain.driver_types import ROOT_DIR_IDS
 from app.services import naming
 from app.services.driver_factory import build_driver
 
@@ -104,9 +120,52 @@ FILTER_SMALL = "small"
 FILTER_LARGE = "large"
 FILTER_EXT = "ext"
 
+#: 允许作为**源**的存储源类型。
+#:
+#: - ``p115``：历史路径（直链绑 UA，落盘名正确）
+#: - ``guangya``：新增——光鸭 → 光鸭（直链不绑 UA，落盘名需改名）
+SOURCE_DRIVER_TYPES = frozenset({"p115", "guangya"})
+
+#: 光鸭源的最大提交间隔（秒）。
+#:
+#: 115 源需要 60s 间隔是因为 115 对「短时间拉取不同文件」有频控
+#: （403 ``115 pmt user 11-10``）；光鸭源没有这个限制，瓶颈是云添加
+#: 额度，故间隔自动收紧——用户显式设更小的值照用，设 0（不限速）也照用。
+GUANGYA_SUBMIT_INTERVAL_MAX = 5.0
+
+#: 光鸭源的并发数——**恒为 1**。
+#:
+#: 云下载的落盘名取自 URL 末段（光鸭直链末段 = ``download``），同目录
+#: 并发提交会触发服务端自动改名 ``download(1)``，改名完成前不能提交
+#: 下一个。额度也是瓶颈，并行无收益。
+GUANGYA_SOURCE_CONCURRENCY = 1
+
+#: 云下载落盘的默认文件名——光鸭 CDN 直链的 URL 末段（实测 2026-11-13：
+#: ``https://<pool>-httpdown.guangyacdn.com/download/?fid=...``）。
+#:
+#: 云下载按 URL 末段落名，故光鸭源的每个文件都先落成这个名字，再改名。
+GUANGYA_LANDED_NAME = "download"
+
+#: 云添加额度耗尽的文案特征（命中即暂停，不硬撞不重试）。
+#:
+#: 实测文案：「云添加次数超限，下个自然日刷新」。额度当天不恢复，重试
+#: 只是白扣（**失败的也扣额度**），故撞上就暂停整个作业——幂等设计保证
+#: 次日重跑会自动续上。
+QUOTA_ERROR_MARKERS = ("次数超限", "额度", "配额", "每日上限")
+
 
 class MigrationError(RuntimeError):
     """迁移无法开始（配置错误 / 驱动不可用）。"""
+
+
+class MigrationQuotaExceeded(MigrationError):
+    """云添加额度耗尽——作业暂停（当日不恢复，次日重跑即可续传）。"""
+
+
+def _is_quota_error(message: str) -> bool:
+    """错误文案里是否含「额度耗尽」特征。"""
+    text = str(message or "")
+    return any(marker in text for marker in QUOTA_ERROR_MARKERS)
 
 
 # --------------------------------------------------------------------------
@@ -159,6 +218,57 @@ class _TargetIndex:
         async with self._lock:
             files = self._files.setdefault(rel, {})
             files[name] = size
+
+    async def rename_landed(
+        self,
+        rel_dir: str,
+        landed_names: tuple[str, ...],
+        size: int,
+        new_name: str,
+    ) -> str:
+        """把「已落盘但还没改名」的文件改名成 ``new_name``。
+
+        云下载按 **URL 末段**落名——115 直链末段是文件名（落名正确），
+        光鸭直链末段是 ``download``（实测），故光鸭源必须改名。
+
+        匹配条件（都要满足，避免误改用户自己的文件）：
+
+        1. 文件名是 ``landed_names`` 里的名字，或它的服务端自动改名形态
+           （``download(1)``）
+        2. **字节数完全一致**
+        3. 目标名与现名不同
+
+        Args:
+            rel_dir: 目标下的相对目录。
+            landed_names: 可能的落盘名（一般只有 ``download``）。
+            size: 期望的字节数。
+            new_name: 改成的目标名。
+
+        Returns:
+            改成的文件名；没找到可认领的文件则返回空串。
+        """
+        rel = _norm_dir(rel_dir)
+        async with self._lock:
+            dir_id = await self._resolve_dir(rel)
+            entries: dict[str, tuple[int, str]] = await self._driver.list_entries(
+                dir_id
+            )
+            for name, (entry_size, file_id) in entries.items():
+                if entry_size != size:
+                    continue
+                if name == new_name:
+                    continue
+                if not any(
+                    name == candidate or name.startswith(f"{candidate}(")
+                    for candidate in landed_names
+                ):
+                    continue
+                await self._driver.rename_file(file_id, new_name)
+                files = self._files.setdefault(rel, {})
+                files.pop(name, None)
+                files[new_name] = size
+                return name
+            return ""
 
     async def failure_reason(self, task_id: str) -> str:
         """查光鸭给出的失败原因（查不到就返回空串）。
@@ -363,15 +473,33 @@ async def run_migration(job: MigrationJob) -> None:
 
     if source is None or target is None:
         raise MigrationError("存储源不存在")
-    if source.type != "p115":
-        raise MigrationError(f"源存储源必须是 115（当前：{source.type}）")
+    if source.type not in SOURCE_DRIVER_TYPES:
+        raise MigrationError(
+            f"源存储源类型不支持迁移（当前：{source.type}，"
+            f"支持：{'、'.join(sorted(SOURCE_DRIVER_TYPES))}）"
+        )
     if target.type != "guangya":
         raise MigrationError(f"目标存储源必须是光鸭盘（当前：{target.type}）")
+    if source.id == target.id:
+        raise MigrationError("源与目标是同一个存储源")
 
     async def _on_refresh(cred: Any) -> None:
         await persist_guangya_credential(params.target_driver_id, cred)
 
-    p115 = build_driver("p115", source.credential, source.device_type)
+    async def _on_refresh_source(cred: Any) -> None:
+        await persist_guangya_credential(params.source_driver_id, cred)
+
+    #: 光鸭源：直链不绑 UA、落盘名要改名、必须串行
+    needs_rename = source.type == "guangya"
+    if needs_rename:
+        source_driver = build_driver(
+            "guangya",
+            source.credential,
+            source.device_type,
+            on_token_refresh=_on_refresh_source,
+        )
+    else:
+        source_driver = build_driver("p115", source.credential, source.device_type)
     gyp = build_driver(
         "guangya",
         target.credential,
@@ -381,7 +509,7 @@ async def run_migration(job: MigrationJob) -> None:
 
     # 源目录路径：以 cid 反解的路径为准（前端传来的路径可能过期）
     base_path = (params.source_path or "/").rstrip("/") or "/"
-    resolver = getattr(p115, "resolve_path", None)
+    resolver = getattr(source_driver, "resolve_path", None)
     if resolver is not None:
         try:
             resolved = await resolver(params.source_cid)
@@ -389,7 +517,19 @@ async def run_migration(job: MigrationJob) -> None:
                 base_path = str(resolved).rstrip("/") or "/"
         except Exception as exc:
             job.log(f"⚠️ 源目录路径解析失败，沿用前端传入的路径：{exc}")
+    elif needs_rename:
+        # 光鸭接口不返回路径字符串——用前端传来的目录名链拼成绝对路径
+        # （前端给的是「影视/电视剧」这种无首斜杠的相对串）
+        base_path = "/" + params.source_path.strip("/")
     job.source_path = base_path
+
+    # 并发与提交间隔：光鸭源收紧（落盘名撞车 + 没有 115 频控）
+    concurrency = params.concurrency
+    submit_interval = params.submit_interval_sec
+    if needs_rename:
+        concurrency = GUANGYA_SOURCE_CONCURRENCY
+        if submit_interval > 0:
+            submit_interval = min(submit_interval, GUANGYA_SUBMIT_INTERVAL_MAX)
 
     # 上一轮遗留的在途任务（中断恢复）
     inflight = await _collect_inflight(gyp, job)
@@ -402,14 +542,20 @@ async def run_migration(job: MigrationJob) -> None:
     max_bytes = max(params.max_size_mb, 0) * 1024 * 1024
 
     job.log(
-        f"源 {base_path}（cid={params.source_cid}）→ 目标 {params.target_path or '/'}"
-        f"；阈值 ≥{params.min_size_mb} MB，并发 {params.concurrency}"
-        f"，提交间隔 {params.submit_interval_sec:g}s"
+        f"源 {base_path}（{source.name} / cid={params.source_cid}）"
+        f"→ 目标 {params.target_path or '/'}（{target.name}）"
+        f"；阈值 ≥{params.min_size_mb} MB，并发 {concurrency}"
+        f"，提交间隔 {submit_interval:g}s"
     )
+    if needs_rename:
+        job.log(
+            "ℹ️ 光鸭源：直链不绑 UA，云下载按 URL 末段落名（download）"
+            "→ 落盘后自动改名回原名；并发恒为 1（同目录并发会撞名）"
+        )
     if inflight:
         job.log(
             f"检测到 {len(inflight)} 个上一轮遗留的在途任务，本轮跳过对应文件"
-            f"（实际光鸭并发 ≈ {len(inflight) + params.concurrency}）"
+            f"（实际光鸭并发 ≈ {len(inflight) + concurrency}）"
         )
         if len(inflight) >= 5:
             job.log(
@@ -417,12 +563,10 @@ async def run_migration(job: MigrationJob) -> None:
                 "建议等它们跑完再开新任务（否则更容易撞上「云添加失败 code=8」）"
             )
 
-    queue: asyncio.Queue[CloudFile] = asyncio.Queue(
-        maxsize=max(params.concurrency * 2, 4)
-    )
+    queue: asyncio.Queue[CloudFile] = asyncio.Queue(maxsize=max(concurrency * 2, 4))
     index = _TargetIndex(gyp, params.target_file_id)
     watcher = _TaskWatcher(gyp, job)
-    gate = _SubmitGate(params.submit_interval_sec)
+    gate = _SubmitGate(submit_interval)
 
     producer: asyncio.Task[None] | None = None
     workers: list[asyncio.Task[None]] = []
@@ -430,7 +574,7 @@ async def run_migration(job: MigrationJob) -> None:
         producer = asyncio.create_task(
             _produce(
                 job,
-                p115,
+                source_driver,
                 queue,
                 base_path=base_path,
                 video_exts=video_exts,
@@ -443,16 +587,17 @@ async def run_migration(job: MigrationJob) -> None:
             asyncio.create_task(
                 _worker(
                     job,
-                    p115=p115,
+                    source=source_driver,
                     index=index,
                     watcher=watcher,
                     gate=gate,
                     queue=queue,
                     inflight=inflight,
                     base_path=base_path,
+                    needs_rename=needs_rename,
                 )
             )
-            for _ in range(params.concurrency)
+            for _ in range(concurrency)
         ]
 
         await producer
@@ -490,7 +635,7 @@ async def _produce(
     max_bytes: int,
     exclude_disc: bool,
 ) -> None:
-    """实时爬 115 目录树，把合格文件塞进队列。"""
+    """实时爬源目录树，把合格文件塞进队列。"""
     dirs: set[str] = set()
 
     async for entry in driver.iter_tree_by_cid(
@@ -522,13 +667,14 @@ async def _produce(
 async def _worker(
     job: MigrationJob,
     *,
-    p115: Any,
+    source: Any,
     index: _TargetIndex,
     watcher: _TaskWatcher,
     gate: _SubmitGate,
     queue: asyncio.Queue[CloudFile],
     inflight: set[str],
     base_path: str,
+    needs_rename: bool,
 ) -> None:
     """消费队列：一个文件失败不影响其它文件。"""
     while True:
@@ -539,15 +685,22 @@ async def _worker(
             await _migrate_one(
                 job,
                 entry,
-                p115=p115,
+                source=source,
                 index=index,
                 watcher=watcher,
                 gate=gate,
                 inflight=inflight,
                 base_path=base_path,
+                needs_rename=needs_rename,
             )
         except asyncio.CancelledError:
             raise
+        except MigrationQuotaExceeded as exc:
+            # 额度耗尽：**暂停整个作业**（当日不恢复，重试只是白扣额度）。
+            # 必须把队列排空——否则生产者会卡在 put 上，作业永远收不了尾。
+            job.pause(str(exc))
+            _drain_queue(queue)
+            return
         except Exception as exc:  # 任何异常 = 跳过这个文件
             job.record_failed(
                 entry, f"{type(exc).__name__}: {exc}"
@@ -557,18 +710,30 @@ async def _worker(
             queue.task_done()
 
 
+def _drain_queue(queue: asyncio.Queue[CloudFile]) -> None:
+    """把队列里剩余的条目丢弃（配合 ``task_done`` 让 ``join`` 能返回）。"""
+    while True:
+        try:
+            queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return
+        else:
+            queue.task_done()
+
+
 async def _migrate_one(
     job: MigrationJob,
     entry: CloudFile,
     *,
-    p115: Any,
+    source: Any,
     index: _TargetIndex,
     watcher: _TaskWatcher,
     gate: _SubmitGate,
     inflight: set[str],
     base_path: str,
+    needs_rename: bool,
 ) -> None:
-    """处理单个文件：预检 → 换链 → 提交 → 等结束 → 校验落盘。"""
+    """处理单个文件：预检 → 换链 → 提交 → 等结束 → 改名 → 校验落盘。"""
     job.current_path = entry.path
     rel_dir = _relative_dir(entry.path, base_path)
 
@@ -584,9 +749,20 @@ async def _migrate_one(
             job.record_conflict(entry, remote_size)
             job.log(
                 f"⚠️ 同名但大小不同，跳过：{entry.path}"
-                f"（115 {entry.size:,} / 光鸭 {remote_size:,} 字节）"
+                f"（源 {entry.size:,} / 光鸭 {remote_size:,} 字节）"
             )
         return
+
+    # ①' 光鸭源：上一轮可能已落盘但没改名（改名前中断/被取消）→ 认领它，
+    #     别重复下载（云添加额度稀缺，重复提交就是白扣）。
+    if needs_rename:
+        adopted = await index.rename_landed(
+            rel_dir, (GUANGYA_LANDED_NAME,), entry.size, entry.name
+        )
+        if adopted:
+            job.skipped_existing += 1
+            job.log(f"♻️ 认领上一轮残留（已落盘未改名）：{entry.path}")
+            return
 
     # ② 上一轮还在下载（目标目录里还没有文件）
     if entry.remote_id in inflight:
@@ -601,13 +777,22 @@ async def _migrate_one(
     if waited >= 1:
         job.log(f"⏱️ 错开提交，等待 {waited:.0f}s：{entry.path}")
 
-    # ④ 用光鸭下载器的 UA 换 115 直链（f=1 必须匹配，否则 403）
-    link = await p115.get_direct_link(entry.remote_id, GUANGYA_DOWNLOAD_UA)
+    # ④ 换直链
+    #    - 115 源：f=1 必须匹配光鸭下载器的 UA，否则 403
+    #    - 光鸭源：**不绑 UA**（光鸭直链与 UA 无关）
+    link = await source.get_direct_link(
+        entry.remote_id, GUANGYA_DOWNLOAD_UA if not needs_rename else ""
+    )
     if not link.url:
-        raise DriverError("115 返回空直链", kind="not_found")
+        raise DriverError("源存储源返回空直链", kind="not_found")
     job.log(f"🔗 已换取直链：{entry.path}")
 
-    task_id = await index.create_offline_task(link.url, target_dir_id)
+    try:
+        task_id = await index.create_offline_task(link.url, target_dir_id)
+    except DriverError as exc:
+        if _is_quota_error(str(exc)):
+            raise MigrationQuotaExceeded(str(exc)) from exc
+        raise
     # 登记到缓存——否则同目录的后续预检看不到这个文件（缓存与实际不一致）
     await index.note_submitted(rel_dir, entry.name, entry.size)
     job.log(
@@ -623,7 +808,16 @@ async def _migrate_one(
         job.in_flight -= 1
         job.untrack_task(task_id)
 
-    # ④ 任务结束 → 以「目标目录里是否真的出现同名同大小文件」为准
+    # ⑤ 光鸭源：落盘名是 URL 末段（download）→ 改名回原名
+    if needs_rename:
+        landed_names = (_landed_name_from_url(link.url), GUANGYA_LANDED_NAME)
+        renamed = await index.rename_landed(
+            rel_dir, tuple(n for n in landed_names if n), entry.size, entry.name
+        )
+        if renamed:
+            job.log(f"✏️ 已改名：{renamed} → {entry.name}")
+
+    # ⑥ 任务结束 → 以「目标目录里是否真的出现同名同大小文件」为准
     #    索引有延迟，验早了会误报，故重试几次
     for attempt in range(VERIFY_RETRIES):
         files = await index.refresh(rel_dir)
@@ -636,9 +830,23 @@ async def _migrate_one(
             await asyncio.sleep(VERIFY_DELAY_SEC)
 
     reason = await index.failure_reason(task_id)
+    if _is_quota_error(reason):
+        raise MigrationQuotaExceeded(reason)
     job.record_failed(
         entry, reason or "任务已结束但目标目录未出现同名同大小文件"
     )
+
+
+def _landed_name_from_url(url: str) -> str:
+    """从直链 URL 推导云下载的落盘名（取路径末段）。
+
+    光鸭云下载按 URL 末段命名——115 直链末段是文件名（落名正确），
+    光鸭 CDN 直链末段是 ``download``。取不到就返回空串。
+    """
+    if not url:
+        return ""
+    path = str(url).split("?", 1)[0].rstrip("/")
+    return path.rsplit("/", 1)[-1] if "/" in path else ""
 
 
 # --------------------------------------------------------------------------
@@ -787,6 +995,22 @@ async def _load_driver_row(driver_id: int, expected_type: str) -> Any:
     Raises:
         MigrationBrowseError: 存储源不存在（404）/ 类型不符（400）。
     """
+    row = await _load_driver_row_any(driver_id)
+    if row.type != expected_type:
+        raise MigrationBrowseError(
+            f"该接口需要 {expected_type} 存储源（当前：{row.type}）",
+            status_code=400,
+            kind="config",
+        )
+    return row
+
+
+async def _load_driver_row_any(driver_id: int) -> Any:
+    """取存储源行（**不校验类型**）。
+
+    Raises:
+        MigrationBrowseError: 存储源不存在（404）。
+    """
     from sqlalchemy import select
 
     from app.db.models import Driver
@@ -799,13 +1023,16 @@ async def _load_driver_row(driver_id: int, expected_type: str) -> Any:
             raise MigrationBrowseError(
                 f"存储源不存在：{driver_id}", status_code=404, kind="not_found"
             )
-        if row.type != expected_type:
-            raise MigrationBrowseError(
-                f"该接口需要 {expected_type} 存储源（当前：{row.type}）",
-                status_code=400,
-                kind="config",
-            )
         return row
+
+
+def _guangya_refresh_callback(driver_id: int) -> Any:
+    """造一个「光鸭 Token 刷新后写回 DB」的回调（驱动构造用）。"""
+
+    async def _cb(cred: Any) -> None:
+        await persist_guangya_credential(driver_id, cred)
+
+    return _cb
 
 
 def _default_source_cid(media_cid: str | None) -> str:
@@ -853,13 +1080,35 @@ async def _list_by_cid(driver: Any, cid: str) -> list[Any]:
 async def browse_source_dirs(
     driver_id: int, parent_id: str = ""
 ) -> list[tuple[str, str]]:
-    """列出 115 目录下的子目录（按 cid 逐层浏览）。
+    """列出源目录下的子目录（逐层浏览）。
+
+    两种源各按自己的 id 语义浏览：
+
+    - **115**：按 ``cid``（目录 id 恒定，改名不失效）
+    - **光鸭**：按 ``fileId``，**从账号根开始**（光鸭账号根 id 是空串，
+      见 :data:`app.domain.driver_types.ROOT_DIR_IDS`）——光鸭账号可以
+      没有配置媒体库根，迁移的源目录由用户在页面里逐层选
 
     返回 ``[(remote_id, name), ...]``——只含目录。
     """
-    row = await _load_driver_row(driver_id, "p115")
-    cid = parent_id or _default_source_cid(row.media_cid)
-    driver = build_driver(row.type, row.credential, row.device_type)
+    row = await _load_driver_row_any(driver_id)
+    if row.type == "p115":
+        cid = parent_id or _default_source_cid(row.media_cid)
+        driver = build_driver(row.type, row.credential, row.device_type)
+    elif row.type == "guangya":
+        cid = parent_id or ROOT_DIR_IDS.get("guangya", "")
+        driver = build_driver(
+            row.type,
+            row.credential,
+            row.device_type,
+            on_token_refresh=_guangya_refresh_callback(row.id),
+        )
+    else:
+        raise MigrationBrowseError(
+            f"该存储源类型不支持作为迁移源（当前：{row.type}）",
+            status_code=400,
+            kind="config",
+        )
     entries = await _list_by_cid(driver, cid)
     return [(e.remote_id, e.name) for e in entries if e.is_dir]
 
@@ -886,11 +1135,26 @@ async def browse_target_dirs(
 async def validate_migration_drivers(
     source_driver_id: int, target_driver_id: int
 ) -> None:
-    """校验迁移的源 / 目标存储源（类型必须对）。
+    """校验迁移的源 / 目标存储源。
+
+    - 源：``p115`` 或 ``guangya``（光鸭 → 光鸭）
+    - 目标：**必须是** ``guangya``
+    - 源与目标**不能是同一个**（自己搬自己没意义，还会撞名）
 
     Raises:
-        MigrationBrowseError: 存储源不存在（404）/ 类型不符（400）。
+        MigrationBrowseError: 存储源不存在（404）/ 类型不符（400）/ 同源（400）。
     """
-    await _load_driver_row(source_driver_id, "p115")
+    source = await _load_driver_row_any(source_driver_id)
+    if source.type not in SOURCE_DRIVER_TYPES:
+        raise MigrationBrowseError(
+            f"源存储源类型不支持迁移（当前：{source.type}，"
+            f"支持：{'、'.join(sorted(SOURCE_DRIVER_TYPES))}）",
+            status_code=400,
+            kind="config",
+        )
     await _load_driver_row(target_driver_id, "guangya")
+    if source_driver_id == target_driver_id:
+        raise MigrationBrowseError(
+            "源与目标是同一个存储源", status_code=400, kind="config"
+        )
 

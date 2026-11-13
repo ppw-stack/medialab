@@ -37,6 +37,8 @@ STATE_RUNNING = "running"
 STATE_SUCCESS = "success"
 STATE_FAILED = "failed"
 STATE_CANCELLED = "cancelled"
+#: 额度耗尽暂停（云添加额度当日不恢复，次日重跑即可续传）
+STATE_PAUSED = "paused"
 
 
 @dataclass(frozen=True)
@@ -133,6 +135,17 @@ class MigrationJob:
         self.logs.append(f"[{stamp}] {message}")
         if len(self.logs) > MAX_LOGS:
             del self.logs[: len(self.logs) - MAX_LOGS]
+
+    def pause(self, reason: str) -> None:
+        """暂停作业（云添加额度耗尽）。
+
+        **不是失败**——已迁成功的文件不受影响，幂等设计保证次日重跑会自动
+        从断点续上（目标目录即真相源）。
+        """
+        self.state = STATE_PAUSED
+        self.error = reason
+        self.finished_at = int(time.time())
+        self.log(f"⏸️ 已暂停：{reason}")
 
     def count_filtered(self, reason: str) -> None:
         """累计被过滤器丢弃的文件数。"""
@@ -318,13 +331,17 @@ async def _run_job(job: MigrationJob) -> None:
 
         await migration.run_migration(job)
 
-        job.state = STATE_SUCCESS
-        job.log(
-            f"完成：成功 {job.success} 个（{job.migrated_bytes / 1024**3:.2f} GB），"
-            f"已存在跳过 {job.skipped_existing}，在途跳过 {job.skipped_inflight}，"
-            f"冲突 {job.conflicts}，失败 {job.failed}"
-        )
-        logger.info("迁移任务 %s 完成", job.id)
+        # 额度耗尽时 worker 已把状态置为 paused——**别覆盖**成 success
+        if job.state == STATE_RUNNING:
+            job.state = STATE_SUCCESS
+            job.log(
+                f"完成：成功 {job.success} 个（{job.migrated_bytes / 1024**3:.2f} GB），"
+                f"已存在跳过 {job.skipped_existing}，在途跳过 {job.skipped_inflight}，"
+                f"冲突 {job.conflicts}，失败 {job.failed}"
+            )
+            logger.info("迁移任务 %s 完成", job.id)
+        else:
+            logger.info("迁移任务 %s 结束（状态=%s）", job.id, job.state)
     except asyncio.CancelledError:
         job.state = STATE_CANCELLED
         job.log("任务被取消")

@@ -346,9 +346,14 @@ class GuangyaDriver:
         不返回路径字符串。
 
         Args:
-            cid: 媒体库根 fileId。**必须非空**（扫描入口已校验
-                ``media_cid``；空串无法与 ``fullParentIds`` 匹配）。
-            include_subdirs: False 时只产出 ``cid`` 直接子文件（链长 1）。
+            cid: 子树根 fileId。**必须非空**。
+                扫描入口传媒体库根（``media_cid``）；迁移的「光鸭 → 光鸭」
+                源目录传用户选中的任意目录——**两种都用同一套实现**：
+                ``fullParentIds`` 链是「账号根的直接子目录 → 父目录」的
+                完整链（**不含账号根本身**），故链里任意深度都能定位到
+                ``cid``，取其后的部分即相对目录（实测：链首是账号根的
+                子目录，不是媒体库根）。
+            include_subdirs: False 时只产出 ``cid`` 直接子文件。
 
         Yields:
             子树内每个文件。
@@ -356,7 +361,8 @@ class GuangyaDriver:
         root = str(cid or "")
         if not root:
             raise DriverError(
-                "光鸭遍历需要非空的媒体库根 fileId（media_cid）", kind="config"
+                "光鸭遍历需要非空的根 fileId（媒体库根 media_cid 或选中的源目录）",
+                kind="config",
             )
 
         dir_names = await self._fetch_dir_name_map()
@@ -381,13 +387,14 @@ class GuangyaDriver:
                     "接口可能已改版",
                     kind="unknown",
                 )
-            if chain[0] != root:
-                continue  # 不在媒体库子树（全账号列表里有其它内容）
-            if not include_subdirs and len(chain) > 1:
+            if root not in chain:
+                continue  # 不在 cid 子树（全账号列表里有其它内容）
+            root_idx = chain.index(root)
+            if not include_subdirs and (len(chain) - root_idx) > 1:
                 continue  # 仅顶层
 
             rel_parts: list[str] = []
-            for ancestor in chain[1:]:
+            for ancestor in chain[root_idx + 1 :]:
                 dir_name = dir_names.get(ancestor)
                 if dir_name is None:
                     # 目录映射缺 id（两次调用间的竞态删除/接口异常）。
@@ -540,6 +547,28 @@ class GuangyaDriver:
         """列出目录下的**子目录**。"""
         entries = await self.list_dir_by_cid(dir_id)
         return [f for f in entries if f.is_dir]
+
+    async def rename_file(self, file_id: str, new_name: str) -> None:
+        """重命名文件（**不移动位置**，只改名）。
+
+        用途：光鸭「云下载」的落盘名取自 URL 末段——115 直链末段是文件名
+        （落名正确），而**光鸭直链末段是 ``download``**（实测 2026-11-13），
+        故「光鸭 → 光鸭」迁移必须把落盘文件改回原名。
+
+        Args:
+            file_id: 目标文件 fileId。
+            new_name: 新文件名（不含路径）。
+
+        Raises:
+            DriverError: 重命名失败（接口返回非 0 业务码）。
+        """
+        payload = self.client.fs_rename(str(file_id), str(new_name))
+        code = payload.get("code")
+        if code not in (None, 0):
+            raise DriverError(
+                f"光鸭重命名失败：{payload.get('msg') or payload}",
+                kind=_map_code(code),
+            )
 
     # -- 离线下载任务 --
 

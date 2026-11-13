@@ -27,13 +27,6 @@ HTML 解析成统一的 :class:`~app.adapters.sites.base.CheckinResult`。
    四字，只有"这是您的第 196 次签到…本次签到获得 10 个憨豆"。
    只认"签到成功"字样会把 hhanclub 误判成失败。
 
-.. warning::
-
-   **合规边界**（见 ``AGENTS.md`` FR-3.6）：允许对**自有账号**做签到自动化，
-   含 AI 读图形验证码（见 :mod:`app.core.ai`）。Cloudflare Turnstile 等
-   **人机验证**本仓库不实现——实测其挑战无法在服务端环境完成
-   （``TurnstileError 600010``），这类站返回 ``UNSUPPORTED``（需人工）。
-
 .. note::
 
    **本模块收录三种协议**（不是所有站都用标准 ``/attendance.php``）：
@@ -151,7 +144,7 @@ def parse_checkin_result(html: str, *, url: str = "") -> CheckinResult:
 
     plain = _strip_html(html)
 
-    # 1) 需要人机验证 → 不支持自动签到（**不做绕过**）
+    # 1) 需要人机验证 → 不支持自动签到
     if _CAPTCHA_RE.search(html) or any(k in plain for k in _CAPTCHA_TEXT):
         return CheckinResult(
             CheckinStatus.UNSUPPORTED, "该站需人机验证，无法自动签到（需人工）"

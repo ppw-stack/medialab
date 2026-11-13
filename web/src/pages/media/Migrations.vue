@@ -2,8 +2,8 @@
   <div class="page">
     <PageHeader
       eyebrow="媒体库 · MEDIA"
-      title="迁移（115 → 光鸭盘）"
-      sub="边扫边迁——爬到合格文件就提交光鸭离线下载"
+      title="迁移（115 / 光鸭 → 光鸭盘）"
+      sub="边扫边迁——爬到合格文件就提交光鸭云下载"
       compact
     >
       <template #actions>
@@ -15,13 +15,13 @@
     <a-card size="small">
       <a-alert type="info" show-icon :closable="false" class="tip">
         <template #message>
-          边扫边迁：不预先遍历整棵树，爬到合格文件就提交光鸭离线下载。
+          边扫边迁：不预先遍历整棵树，爬到合格文件就提交光鸭云下载。
           提交前会先查目标目录，<b>同名同大小直接跳过</b>，可以放心重复执行。
-          光鸭离线下载失败即跳过，不重试、不阻塞队列。
+          光鸭云下载失败即跳过，不重试、不阻塞队列。
         </template>
       </a-alert>
 
-      <a-alert type="warning" show-icon :closable="false" class="tip">
+      <a-alert v-if="sourceDriver?.type === 'p115'" type="warning" show-icon :closable="false" class="tip">
         <template #message>
           115 对「短时间拉取不同文件」有频控，超限会返回 403
           <span class="mono">115 pmt user</span>，光鸭记为<b>「云添加失败 code=8」</b>。
@@ -29,10 +29,45 @@
         </template>
       </a-alert>
 
+      <a-alert v-else-if="sourceDriver?.type === 'guangya'" type="warning" show-icon :closable="false" class="tip">
+        <template #message>
+          光鸭源没有 115 的频控，但<b>云添加额度有限</b>（每天每账号，失败也扣）。
+          云下载按 URL 末段落名（<span class="mono">download</span>），落盘后会自动<b>改名回原名</b>；
+          并发恒为 1（同目录并发会撞名）。撞到额度上限会<b>暂停</b>作业，次日重跑即可续传。
+        </template>
+      </a-alert>
+
+      <a-row :gutter="12">
+        <a-col :span="12">
+          <a-form layout="inline" class="driver-row">
+            <a-form-item label="源存储源">
+              <a-select
+                v-model:value="sourceDriverId"
+                :options="sourceDriverOptions"
+                style="width: 220px"
+                @change="onSourceDriverChange"
+              />
+            </a-form-item>
+          </a-form>
+        </a-col>
+        <a-col :span="12">
+          <a-form layout="inline" class="driver-row">
+            <a-form-item label="目标存储源">
+              <a-select
+                v-model:value="targetDriverId"
+                :options="targetDriverOptions"
+                style="width: 220px"
+                @change="onTargetDriverChange"
+              />
+            </a-form-item>
+          </a-form>
+        </a-col>
+      </a-row>
+
       <a-row :gutter="12">
         <a-col :span="12">
           <DirBrowser
-            title="① 115 源目录"
+            :title="sourceBrowserTitle"
             :stack="sourceStack"
             :dirs="sourceDirs"
             :loading="loadingSource"
@@ -63,8 +98,14 @@
           <span class="hint">0 = 不限</span>
         </a-form-item>
         <a-form-item label="并发数">
-          <a-input-number v-model:value="form.concurrency" :min="1" :max="20" style="width: 80px" />
-          <span class="hint">1–20</span>
+          <a-input-number
+            v-model:value="form.concurrency"
+            :min="1"
+            :max="20"
+            :disabled="isGuangyaSource"
+            style="width: 80px"
+          />
+          <span class="hint">{{ isGuangyaSource ? "光鸭源恒为 1" : "1–20" }}</span>
         </a-form-item>
         <a-form-item label="提交间隔">
           <a-input-number
@@ -72,9 +113,10 @@
             :min="0"
             :max="600"
             :step="10"
+            :disabled="isGuangyaSource"
             style="width: 90px"
           />
-          <span class="hint">秒，0 = 不限速</span>
+          <span class="hint">{{ isGuangyaSource ? "光鸭源自动收紧到 5s" : "秒，0 = 不限速" }}</span>
         </a-form-item>
         <a-form-item label="排除原盘">
           <a-switch v-model:checked="form.excludeDisc" />
@@ -218,8 +260,8 @@ import { formatBytes } from "../../utils/format"
 import DataTable from '../../components/DataTable.vue'
 
 const drivers = ref<Driver[]>([])
-const sourceDriver = ref<Driver | null>(null)
-const targetDriver = ref<Driver | null>(null)
+const sourceDriverId = ref<number | undefined>(undefined)
+const targetDriverId = ref<number | undefined>(undefined)
 
 const sourceStack = ref<DirEntry[]>([])
 const targetStack = ref<DirEntry[]>([])
@@ -253,12 +295,44 @@ const failedColumns = [
 
 const conflictColumns = [
   { title: "文件", dataIndex: "name", key: "name", ellipsis: true },
-  { title: "115", key: "local", width: 110 },
+  { title: "源", key: "local", width: 110 },
   { title: "光鸭", key: "remote", width: 110 },
 ]
 
+/** 源可选：115 或任意光鸭账号（光鸭 → 光鸭也是支持的）。 */
+const sourceDriverOptions = computed(() =>
+  drivers.value
+    .filter((d) => d.type === "p115" || d.type === "guangya")
+    .map((d) => ({
+      value: d.id,
+      label: `${d.name}（${d.type === "p115" ? "115" : "光鸭"}）`,
+    })),
+)
+
+/** 目标只能是光鸭盘。 */
+const targetDriverOptions = computed(() =>
+  drivers.value
+    .filter((d) => d.type === "guangya")
+    .map((d) => ({ value: d.id, label: d.name })),
+)
+
+const sourceDriver = computed(
+  () => drivers.value.find((d) => d.id === sourceDriverId.value) ?? null,
+)
+const targetDriver = computed(
+  () => drivers.value.find((d) => d.id === targetDriverId.value) ?? null,
+)
+
 const currentSource = computed(() => sourceStack.value[sourceStack.value.length - 1])
 const currentTarget = computed(() => targetStack.value[targetStack.value.length - 1])
+
+/** 源浏览器标题随驱动类型变（115 叫 cid、光鸭叫 fileId）。 */
+const sourceBrowserTitle = computed(() =>
+  sourceDriver.value?.type === "guangya" ? "① 光鸭源目录" : "① 115 源目录",
+)
+
+/** 源是光鸭账号——并发/间隔由后端强制收紧，前端置灰说明。 */
+const isGuangyaSource = computed(() => sourceDriver.value?.type === "guangya")
 
 /** 在途任务（提交顺序） */
 const inFlightList = computed(() => {
@@ -275,6 +349,7 @@ const canRun = computed(
   () =>
     !!sourceDriver.value &&
     !!targetDriver.value &&
+    sourceDriverId.value !== targetDriverId.value &&
     !!currentSource.value &&
     currentTarget.value !== undefined &&
     job.value?.state !== "running",
@@ -288,16 +363,14 @@ onMounted(async () => {
     return
   }
 
-  sourceDriver.value = drivers.value.find((d) => d.type === "p115") ?? null
-  targetDriver.value = drivers.value.find((d) => d.type === "guangya") ?? null
+  // 源：优先 115，没有就退到光鸭账号（光鸭 → 光鸭）
+  const first115 = drivers.value.find((d) => d.type === "p115")
+  const firstGuangya = drivers.value.find((d) => d.type === "guangya")
+  sourceDriverId.value = (first115 ?? firstGuangya)?.id
+  targetDriverId.value = firstGuangya?.id
 
+  await resetSourceStack()
   if (sourceDriver.value) {
-    sourceStack.value = [
-      {
-        id: sourceDriver.value.media_cid || "0",
-        name: sourceDriver.value.media_path || "115 根目录",
-      },
-    ]
     await loadSource()
   }
   if (targetDriver.value) {
@@ -316,6 +389,38 @@ onMounted(async () => {
     // 没有任务不算错
   }
 })
+
+/** 源目录栈复位——起点按驱动类型不同（115 从媒体库 cid 起，光鸭从账号根起）。 */
+async function resetSourceStack(): Promise<void> {
+  const driver = sourceDriver.value
+  if (!driver) {
+    sourceStack.value = []
+    return
+  }
+  if (driver.type === "guangya") {
+    // 光鸭账号根 id 是空串——目录由用户在下面逐层选
+    sourceStack.value = [{ id: "", name: "光鸭根目录" }]
+  } else {
+    sourceStack.value = [
+      {
+        id: driver.media_cid || "0",
+        name: driver.media_path || "115 根目录",
+      },
+    ]
+  }
+}
+
+/** 换源存储源——目录栈复位并重新加载。 */
+async function onSourceDriverChange(): Promise<void> {
+  await resetSourceStack()
+  await loadSource()
+}
+
+/** 换目标存储源——目标目录栈复位并重新加载。 */
+async function onTargetDriverChange(): Promise<void> {
+  targetStack.value = [{ id: "", name: "光鸭根目录" }]
+  await loadTarget()
+}
 
 onUnmounted(stopPolling)
 
@@ -339,7 +444,7 @@ async function loadSource(): Promise<void> {
     )
     sourceDirs.value = res.dirs
   } catch (e) {
-    sourceError.value = errMsg(e, "读取 115 目录失败")
+    sourceError.value = errMsg(e, "读取源目录失败")
     sourceDirs.value = []
   } finally {
     loadingSource.value = false
@@ -449,6 +554,10 @@ async function tick(): Promise<void> {
         message.success(
           `迁移结束：成功 ${job.value.success} 个，失败 ${job.value.failed} 个`,
         )
+      } else if (job.value.state === "paused") {
+        message.warning(
+          `迁移已暂停（云添加额度耗尽）：${job.value.error ?? ""}——次日重跑即可续传`,
+        )
       }
     }
   } catch (e) {
@@ -469,6 +578,8 @@ function stateLabel(state: string): string {
       return "失败"
     case "cancelled":
       return "已取消"
+    case "paused":
+      return "已暂停（额度耗尽）"
     default:
       return state
   }
@@ -482,6 +593,8 @@ function stateColor(state: string): string {
       return "success"
     case "failed":
       return "error"
+    case "paused":
+      return "warning"
     default:
       return "default"
   }
@@ -512,6 +625,11 @@ function logText(line: string): string {
 
 .mt {
   margin-top: 12px;
+}
+
+/* 源/目标存储源选择行——与下面的目录浏览器之间留点间距 */
+.driver-row {
+  margin-bottom: 8px;
 }
 
 .mt-sm {

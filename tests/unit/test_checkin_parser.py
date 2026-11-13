@@ -67,7 +67,7 @@ def test_hdhome_already_page() -> None:
 
 
 def test_audiences_turnstile_is_unsupported() -> None:
-    """audiences：Cloudflare Turnstile → UNSUPPORTED（不做绕过）。"""
+    """audiences：Cloudflare Turnstile → UNSUPPORTED。"""
     result = parse_checkin_result(
         _load("audiences_attendance.html"),
         url="https://audiences.me/attendance.php",

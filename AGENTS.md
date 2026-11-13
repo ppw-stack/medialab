@@ -76,11 +76,16 @@
   - **随之删除**：6 个后端文件（`offline_download` / `offline_files` / `offline_config` / `offline_jobs` + 两个路由）+ 「离线下载」页 + 三项环境变量配置（`OFFLINE_HMAC_SECRET` / `OFFLINE_PUBLIC_BASE` / `OFFLINE_FILES_ROOT`）。存量配置行由幂等迁移 `delete_offline_env_settings` 清掉（连带那个死密钥）
   - **光鸭的「离线任务」机制仍在用**（迁移功能）：`guangya.py` 的 `create_offline_task` / `list_active_offline_tasks` / `list_failed_offline_tasks` **保留**，别跟着删
   - **仍然有效的坑（2026-11-11 实测补充）**：光鸭的 `progress` 字段**不是可靠的百分比**（2.3GB 文件下载到 88% 时它只有 4）→ **不用它判定完成，也不再展示**——迁移在途列表只报「路径 + 大小」（假百分比曾误导用户，已随展示一起移除）。判定走「活跃列表消失 + 目标目录同名同大小校验」。实测还确认：任务项初始结构**没有** `progress` 字段（只有 taskId/fileName/totalSize/status/createTime/res/parentDirType），它只在真实拉取时动态出现；对**非媒体 URL**（TUNA 的 .iso/.gz）云添加会挂 3 分钟后统一 `code=8 云添加失败`——历史成功案例全是媒体文件（.mkv / 115 直链），**疑似云添加只接受媒体类 URL（待证）**；`get_task_status()` 是**上传任务**的接口，查云下载任务返回 145；**中途删目标目录会静默终止或卡住任务**（探测时踩到：一个 15MB 任务卡在活跃列表不结束）
+- **迁移功能支持「115 → 光鸭」与「光鸭 → 光鸭」**（2026-11-13 新增光鸭源，`app/services/migration.py`）：
+  - **只有一条传输路线**：直链 → **云下载**（`cloud_create_task`）→ **改名**。光鸭源的直链**不绑 UA**（115 源绑 `GUANGYA_DOWNLOAD_UA`）
+  - **云下载按 URL 末段落名**——115 直链末段是文件名（落名正确），**光鸭 CDN 直链末段是 `download`** → 光鸭源落盘后必须 `fs_rename` 改回原名（驱动层 `rename_file`）
+  - **光鸭源恒串行**（并发 1）+ 提交间隔收紧到 5s：落盘名撞车会触发服务端自动改名 `download(1)`，改名完成前不能提交下一个；光鸭源没有 115 的频控，瓶颈是云添加额度
+  - **能搬分享审核拒绝的文件**：`shareAuditStatus=3`（`canShare=None`）的影视文件**分享不出去但直链+云下载完全可用**（实测 336MB / 7s ≈ 48MB/s）
+  - **幂等不变**：目标目录同名同大小跳过、不同大小记冲突（不覆盖不重传）；**中断恢复**多一条——认领上一轮「已落盘但没改名」的 `download` 残留（按大小匹配后改名），不重复提交
+  - ⚠️ **云添加额度是硬墙：实测 3 次/账号/天**（前端文案「VIP 1000 次/天」对实测账号不成立；**失败也扣**）→ 撞限额转 **`paused`** 状态（不硬撞不重试），幂等设计保证**次日重跑自动续传**
+  - 光鸭源的目录浏览**从账号根开始**（根 id 是空串，`ROOT_DIR_IDS`）；`fullParentIds` 链首是**账号根的直接子目录**（不是媒体库根）→ `iter_tree_by_cid` 支持**任意目录**作根（扫描传 media_cid，迁移传选中的源目录）
+  - 探针 `scripts/probe_guangya_migration.py`（`probe` = 单文件端到端；`engine` = 跑真实引擎 + 幂等复跑；未部署时可用 `MEDIALAB_APP_PATH` 指向注入的新代码，不动生产镜像）
 - **Bearer 长期凭据只用 `WEB_TOKEN`**（2026-10-30 加入）：`verify_bearer` 同时接受 API Token（`WEB_TOKEN`）与 session cookie 值两种口径，但 session cookie 值 24h 过期（`SESSION_MAX_AGE`）。CLI / 脚本长期使用应存 `WEB_TOKEN`，不可把 session cookie 值当长期 token 存储——后者会突然 401。session 值口径仅为面板/CLI 同源便利，非长期凭据。
-- **自动化 / 合规边界**（2026-10-22 修订，原「不引入未文档化的反爬对抗 / 验证码绕过（R2）」）：
-  - ✅ **允许**对**自有账号**做站点自动化，含 AI 读图形验证码（`app/core/ai.py`）、真实浏览器交互
-  - ❌ **禁止**伪造 / 破解站点**鉴权凭据**（如 soulvoice 的 JWT/HS256 downhash）、伪造站点签名、越权访问他人资源
-  - Cloudflare Turnstile 等**人机验证**本仓库不实现（实测 `TurnstileError 600010`，服务端环境无法完成），相关站返回 `UNSUPPORTED`（需人工）
 - **站点适配层保持 9 站独立文件**（2026-10-21 决定）：不抽公共基类，各站独立实现。重复代码接受现状。
 - **FR-1.6 站点用户数据契约**（2026-10-18 加入，2026-10-18 精简为单方法，2026-10-22 加时魔）：
   - 不抽 9 站 user_data 基类；NexusPHP 7 站共用 `app/adapters/sites/parsers/nexus_php.py` module-level helper（`parse_user_snapshot` / `parse_hourly_bonus`）

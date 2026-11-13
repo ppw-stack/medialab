@@ -17,11 +17,6 @@
 4. **`thinking.type="disabled"` 会报 400**。该模型系列要求 adaptive
    thinking，不能关——所以只能靠"给够 token + 短提示词"来控制。
 
-.. warning::
-
-   **合规边界**（AGENTS.md FR-3.6）：允许对**自有账号**做签到自动化
-   （含 AI 读图形验证码），**不允许**伪造/破解站点鉴权凭据。
-   本模块只读验证码图片，不触碰任何站点的加密签名。
 """
 
 from __future__ import annotations
