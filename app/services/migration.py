@@ -270,6 +270,25 @@ class _TargetIndex:
                 return name
             return ""
 
+    async def delete_replaced(self, rel_dir: str, name: str, size: int) -> bool:
+        """删除目标侧「同名但更小」的文件（同名不同大小、保留大的时用）。
+
+        进回收站（可恢复）。找不到同名同大小的文件 → 返回 False（不删）。
+        """
+        rel = _norm_dir(rel_dir)
+        async with self._lock:
+            dir_id = await self._resolve_dir(rel)
+            entries: dict[str, tuple[int, str]] = await self._driver.list_entries(
+                dir_id
+            )
+            hit = entries.get(name)
+            if hit is None or hit[0] != size:
+                return False
+            await self._driver.delete_file(hit[1])
+            files = self._files.setdefault(rel, {})
+            files.pop(name, None)
+            return True
+
     async def failure_reason(self, task_id: str) -> str:
         """查光鸭给出的失败原因（查不到就返回空串）。
 
@@ -754,19 +773,44 @@ async def _migrate_one(
 
     target_dir_id, existing = await index.resolve(rel_dir)
 
-    # ① 目标已有：同名同大小 → 跳过；同名不同大小 → 冲突（不覆盖、不重传）
+    # ① 目标已有同名文件 → **保留大的**（与数据同步的既有口径一致）：
+    #    - 同名同大小 → 跳过（目标已有，源是冗余副本）
+    #    - 目标更大   → 保留目标那份，跳过（源是冗余的小副本）
+    #    - 源更大     → 删除目标侧的小文件，然后正常传（保留大的）
     remote_size = existing.get(entry.name)
     if remote_size is not None:
         if remote_size == entry.size:
             job.skipped_existing += 1
             job.log(f"⏭️ 已存在，跳过：{entry.path}")
-        else:
-            job.record_conflict(entry, remote_size)
+            # 「搬完清理源」：目标已有**同名同大小** → 源副本冗余，一并清掉
+            # （否则「跳过」会留下源副本，腾空间的目的就落空了）
+            if delete_source:
+                await _delete_source_file(job, source, entry)
+            return
+        if remote_size > entry.size:
+            job.skipped_existing += 1
             job.log(
-                f"⚠️ 同名但大小不同，跳过：{entry.path}"
-                f"（源 {entry.size:,} / 光鸭 {remote_size:,} 字节）"
+                f"⏭️ 同名但目标更大（目标 {remote_size:,} / 源 {entry.size:,} 字节），"
+                f"保留目标那份，跳过：{entry.path}"
             )
-        return
+            if delete_source:
+                await _delete_source_file(job, source, entry)
+            return
+        # 源更大 → 删目标侧的小文件，保留大的（源那份）
+        job.record_conflict(entry, remote_size)
+        job.log(
+            f"⚠️ 同名但源更大（源 {entry.size:,} / 目标 {remote_size:,} 字节）"
+            f"→ 保留大的：删除目标侧旧文件并重传：{entry.path}"
+        )
+        try:
+            removed = await index.delete_replaced(rel_dir, entry.name, remote_size)
+        except Exception as exc:  # 删不掉就退回「不覆盖」
+            job.log(f"⚠️ 删除目标侧旧文件失败（保留目标那份，不重传）：{exc}")
+            return
+        if not removed:
+            job.log("⚠️ 目标侧旧文件已变化，跳过（不覆盖）")
+            return
+        job.log(f"🗑️ 已删除目标侧旧文件（{remote_size:,} 字节），改用源那份")
 
     # ①' 光鸭源：上一轮可能已落盘但没改名（改名前中断/被取消）→ 认领它，
     #     别重复下载（云添加额度稀缺，重复提交就是白扣）。
@@ -777,6 +821,9 @@ async def _migrate_one(
         if adopted:
             job.skipped_existing += 1
             job.log(f"♻️ 认领上一轮残留（已落盘未改名）：{entry.path}")
+            # 认领后目标侧已是同名同大小 → 同「已存在」处理
+            if delete_source:
+                await _delete_source_file(job, source, entry)
             return
 
     # ② 上一轮还在下载（目标目录里还没有文件）
