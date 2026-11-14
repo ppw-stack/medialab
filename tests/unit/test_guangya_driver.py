@@ -136,8 +136,22 @@ class TestCredential:
         )
         encrypted = encode_credential(cred, "test-secret")
         assert encrypted.startswith("gypcipher:v2:")
-        assert "tok" not in encrypted
+        # ⚠️ **不能断言「明文子串」不在密文里**：base64 是 3 字节对齐的编码，
+        # 密文里随机出现 "tok" 这类 3 字符子串的概率约 1.5e-4
+        # （2026-11-14 CI 就是这么随机挂的）。可靠判据是「完整明文不在密文里」。
+        assert cred.to_json() not in encrypted
         assert decode_credential(encrypted) == cred
+
+    def test_encrypt_is_randomized(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """同一明文两次加密结果不同（nonce 随机）——密文不可比对。"""
+        monkeypatch.setenv("CREDENTIAL_ENCRYPTION_SECRET", "test-secret")
+        cred = GuangyaCredential(
+            access_token="tok", refresh_token="ref", device_id="dev", expires_at=9
+        )
+        first = encode_credential(cred, "test-secret")
+        second = encode_credential(cred, "test-secret")
+        assert first != second
+        assert decode_credential(first) == decode_credential(second) == cred
 
     def test_plaintext_accepted(self) -> None:
         raw = _credential_json(access_token="plain")
