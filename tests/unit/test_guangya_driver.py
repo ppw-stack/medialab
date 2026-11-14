@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from app.adapters.drivers import guangya as gyp_module
@@ -40,6 +40,12 @@ class FakeGuangyaClient:
     user_info_impl: Callable[..., dict[str, Any]] | None = None
     #: 光鸭**忽略** page 参数——默认实现就模拟这个行为
     cloud_task_list_impl: Callable[..., dict[str, Any]] | None = None
+    #: 批量写调用的实参（记录下来断言「id 一定是字符串」）
+    copy_calls: ClassVar[list[tuple[list[str], str]]] = []
+    delete_calls: ClassVar[list[list[str]]] = []
+    #: 注入业务错误码（模拟服务端拒绝）
+    copy_code: int | None = None
+    delete_code: int | None = None
 
     def __init__(
         self,
@@ -90,6 +96,24 @@ class FakeGuangyaClient:
             return impl(self, page=page, page_size=page_size, status=status)
         return {"code": 0, "data": {"list": [], "total": 0}}
 
+    def fs_copy(
+        self, file_ids: list[str], parent_id: str | None = None
+    ) -> dict[str, Any]:
+        """复制（记录实参——用来断言 id 是字符串）。"""
+        type(self).copy_calls.append((list(file_ids), str(parent_id)))
+        code = type(self).copy_code
+        if code is not None:
+            return {"code": code, "msg": "复制失败"}
+        return {"code": 0, "msg": "success", "data": {"taskId": "t-copy"}}
+
+    def fs_delete(self, file_ids: list[str]) -> dict[str, Any]:
+        """删除（记录实参——用来断言 id 是字符串）。"""
+        type(self).delete_calls.append(list(file_ids))
+        code = type(self).delete_code
+        if code is not None:
+            return {"code": code, "msg": "删除失败"}
+        return {"code": 0, "msg": "success", "data": {"taskId": "t-del"}}
+
     def close(self) -> None:
         return None
 
@@ -103,12 +127,20 @@ def fake_gyp(monkeypatch: pytest.MonkeyPatch):
     FakeGuangyaClient.download_url_impl = None
     FakeGuangyaClient.user_info_impl = None
     FakeGuangyaClient.cloud_task_list_impl = None
+    FakeGuangyaClient.copy_calls = []
+    FakeGuangyaClient.delete_calls = []
+    FakeGuangyaClient.copy_code = None
+    FakeGuangyaClient.delete_code = None
     monkeypatch.setattr(guangyaclient, "GuangyaClient", FakeGuangyaClient)
     yield
     FakeGuangyaClient.fs_files_impl = None
     FakeGuangyaClient.download_url_impl = None
     FakeGuangyaClient.user_info_impl = None
     FakeGuangyaClient.cloud_task_list_impl = None
+    FakeGuangyaClient.copy_calls = []
+    FakeGuangyaClient.delete_calls = []
+    FakeGuangyaClient.copy_code = None
+    FakeGuangyaClient.delete_code = None
 
 
 def _credential_json(**kwargs: Any) -> str:
@@ -676,3 +708,49 @@ class TestDirectLinkBucket:
         # 列目录用的桶不能混进来（两者官方限频不同）
         assert gyp_module.PROVIDER not in seen
         assert gyp_module.PROVIDER_LINK != gyp_module.PROVIDER
+
+
+class TestBatchCopyDelete:
+    """批量复制/删除：**id 与 parentId 一律转字符串**。
+
+    光鸭的 ``fs_copy`` / ``fs_delete`` 收到数字 id 会返回
+    ``code=112 参数错误``（2026-11-13 生产实测），而第三方客户端
+    ``guangyaclient`` 的类型签名写着 ``Optional[int]``——照签名传 int
+    必炸。驱动层统一转 str，调用方传什么都安全。
+    """
+
+    async def test_copy_files_converts_ids_to_str(self) -> None:
+        driver = gyp_module.GuangyaDriver(_credential_json())
+
+        await driver.copy_files([123, "456"], parent_id=789)  # type: ignore[list-item]
+
+        assert FakeGuangyaClient.copy_calls == [(["123", "456"], "789")]
+
+    async def test_delete_files_converts_ids_to_str(self) -> None:
+        driver = gyp_module.GuangyaDriver(_credential_json())
+
+        await driver.delete_files([123, "456"])  # type: ignore[list-item]
+
+        assert FakeGuangyaClient.delete_calls == [["123", "456"]]
+
+    async def test_delete_file_uses_same_path(self) -> None:
+        """单删与批删走同一条路径（id 转字符串 + 同一套错误映射）。"""
+        driver = gyp_module.GuangyaDriver(_credential_json())
+
+        await driver.delete_file("789")
+
+        assert FakeGuangyaClient.delete_calls == [["789"]]
+
+    async def test_copy_files_raises_on_error_code(self) -> None:
+        FakeGuangyaClient.copy_code = 112
+        driver = gyp_module.GuangyaDriver(_credential_json())
+
+        with pytest.raises(DriverError, match="复制文件失败"):
+            await driver.copy_files(["1"], parent_id="2")
+
+    async def test_delete_files_raises_on_error_code(self) -> None:
+        FakeGuangyaClient.delete_code = 111
+        driver = gyp_module.GuangyaDriver(_credential_json())
+
+        with pytest.raises(DriverError, match="删除文件失败"):
+            await driver.delete_files(["1"])

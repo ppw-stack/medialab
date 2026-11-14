@@ -414,6 +414,39 @@
   - 混合列表（`file_types=[]`）里 nfo/jpg/iso 全在——本地按后缀分类不变，**绕开**光鸭自有类型分类（视频=2/图片=1/文档=4/压缩包=5，与我们的后缀清单对不上）
   - 契约由 `tests/unit/test_guangya_driver.py::TestIterTree` 固化；探针脚本 `scripts/probe_guangya_scan.py` / `probe_guangya_verify.py`（生产容器 `docker exec -i medialab /opt/venv/bin/python -` 跑，探针目录自建自删、绝不碰 `fs_clear_recycle_bin`）
 
+- **光鸭批量写操作的铁律**（2026-11-13 生产实测，规则）：
+  - **id 与 parentId 一律传字符串**：`fs_copy` / `fs_delete` 收到数字 id 返回 `code=112 参数错误`，而第三方客户端 `guangyaclient` 的签名却写着 `Optional[int]`——照签名传 int 必炸。**统一走驱动层的公开方法** `GuangyaDriver.copy_files(file_ids, parent_id)` / `delete_files(file_ids)`（内部强制 `str()`），**不要直接调客户端的方法**
+  - **同名不覆盖**：目标已有同名文件时光鸭自动改名成 `xxx(1).xxx` → 要真正覆盖必须**先删掉旧的那份**再复制
+  - **`fs_create_dir` 只接受一层名字**（带 `/` → `code=141`），且必须 `fail_if_name_exist=True`（否则重名建出 `xxx(1)` 副本；已存在时返回 `code=159` 但 `data.fileId` 仍是目标目录 id）
+  - **`fs_delete` 是异步任务**（返回 taskId）：实测单文件 <0.5 s 生效，但**批量删 20+ 个要重列确认**——曾有 6 个文件到 60 s 后才从列表消失
+  - **回收站保留期远短于 `leftTime` 字段**：2026-11-09 删进回收站的 12863 项（约 236 GB），到 11-13 只剩 12 项 → **回收站不是长期保险**，要留退路就另存清单
+  - **平台会自删暂存目录 / 重建分享目录**：`来自：云添加` 在 2026-11-09 20:12:14 被整棵删除（连带里面 14 集《长安的荔枝》）；`分享` 被重建成 `来自：分享`（每次 id 都变）→ **分享进来的内容要尽快归置**
+  - **同名不同版本的取舍按「保留大的」**（与数据同步 `conflict_policy=1`、迁移功能同口径）：源更大 → 先删目标那份小的再复制；目标更大 → 跳过复制、只删源副本
+  - 契约由 `tests/unit/test_guangya_driver.py::TestBatchCopyDelete` 固化（id 转字符串 / 错误码映射 / 单删与批删同路径）
+
+- **批量整理网盘目录的三条硬规则**（2026-11-13 自己踩过，规则）：
+  - **「残留」判定只算文件，子目录一律不碰**；空目录只在最后自底向上删，且删前必须重列确认「无文件且无子目录」。曾把「目录里还有条目就重删」做成目录级判定 → **提前删掉 37 个未处理的剧目目录 + 160 多个 Season 目录**（内容进回收站，靠整体还原救回）
+  - **写操作（copy/delete/create_dir）后立刻失效目录列表缓存**；轮询判据一律用**新鲜列表**。曾用缓存列表做「等复制落地」「等文件消失」的轮询 → 读到陈旧快照，**每目录空等 60 s、大目录空等 900 s**（40 分钟只跑 5 个目录）
+  - **遍历期间绝不对子目录发 `fs_delete`**；删源只等**文件**消失（≤30 s），不等目录变空
+
+- **光鸭分享目录归置流程**（2026-11-13 加入，`scripts/organize_guangya_share.py`）：
+  - 把主号（driver 2）根下的 `来自：分享` 按**路径映射**并进 `影视`：剥掉前导的 `来自：分享`/`影视` 段即得目标相对路径（`来自：分享/影视/电影/外语电影/X/poster.jpg` → `影视/电影/外语电影/X/poster.jpg`）
+  - 跑法：`ssh unraid 'docker exec -i medialab /opt/venv/bin/python - --dry-run' < scripts/organize_guangya_share.py`（只出统计）/ `--conflict keep-larger`（实跑，默认）/ `--keep-share-root`（保留空分享根目录，平台会重建）
+  - **盘点走全账号批量列表**（`fs_files(parent_id="*")` + `fullParentIds` 链）：788 目录 / 15107 文件 ≈ 16 个请求出全量索引，比逐目录爬快两个数量级
+  - 逐目录：建目标目录 → 批量 copy（20/批）→ 等落地 → 校验（**全部比字节数，≥1 MB 再比 gcid**）→ 批量 delete（50/批）→ 重列确认文件消失 → 最后自底向上清空目录
+  - **删除只走 `fs_delete`（进回收站），绝不碰 `fs_clear_recycle_bin`**
+  - ⚠️ **128 容器 DNS 偶发 `Temporary failure in name resolution`**（已知问题）→ 驱动层 `_call` **不重试网络失败**，脚本必须自带重试（4 次、3/6/9/12 s 退避）
+  - 实测战绩：2026-11-13 三轮共归置 **508 个文件 / 9.56 GB**，失败 0
+
+- **172 NAS 上三个目录的分工**（2026-11-13 摸清，别搞混）：
+  - `strmmangerLibrary` = 容器 `/app/library`（compose 的 `LIBRARY_DIR`）——**STRM 与附件的真实输出目录，应用直接写**
+  - `movietmp` = compose 的 `WATCH_DIR`——「数据同步」上传任务的监听目录，文件放这里会被传到目标存储源（**跨账号合并只能走这条路**：光鸭「云下载」实测 3 次/账号/天，批量搬不动）
+  - `strmtmp` = **不在容器挂载里**的独立目录（外部产物）；2026-11-14 按「只删与库同路径同字节的真重复」清到 1618 个，再由人工移入 `movietmp` 走上传任务完成合并
+  - ⚠️ **NAS 没有回收站** → 删除必须**先留清单**（`strmtmp_rm_manifest.tsv`），恢复靠从库里拷同名同大小那份
+  - ⚠️ **QNAP 是 BusyBox**：`find -printf` 不支持、无 `comm`/`join`；`stat -c`/`md5sum`/`sort`/`awk`/`find -exec … +` 可用 → NAS 侧脚本按这个约束写
+
+- **媒体库扫描不落地音频**（2026-11-13 现状）：驱动的 `video_exts`/`image_exts`/`data_exts` 里**没有 flac** → 音乐文件只在光鸭盘上、**Emby 听不到**（扫描判成未知后缀跳过）。要让 Emby 支持音乐得另加一条「音频附件」通道（功能开发，非整理可解）
+
 - **事件循环里绝不出现同步 CIFS IO**（2026-11-06 prod 事故，规则）
   - 挂载是 `hard` 模式 → IO 卡死时**无限等待**；一次同步 `stat` 就能把整个事件循环卡住 → uvicorn 无法处理请求 → `/healthz` 被 RST → 容器 unhealthy、**面板实际不可用**（实测假死 20 分钟，挂载恢复才自愈）
   - **规则**：任何对「监听根 / 源根目录 / 挂载点」的 `stat` / `is_dir` / `resolve` / `scandir` 都必须 `asyncio.to_thread`（`_check_stable_once` 的 `FileStamp.of`、`start_watcher` 的 `resolve_watch_dir` 已改）

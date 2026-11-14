@@ -570,6 +570,58 @@ class GuangyaDriver:
                 kind=_map_code(code),
             )
 
+    async def copy_files(self, file_ids: list[str], parent_id: str) -> None:
+        """批量复制文件到 ``parent_id`` 目录下。
+
+        **id 与 parentId 一律转字符串再发**——光鸭的 ``fs_copy`` /
+        ``fs_delete`` 收到数字 id 会返回 ``code=112 参数错误``（实测
+        2026-11-13），而第三方客户端 ``guangyaclient`` 的类型签名却写着
+        ``Optional[int]``，照签名传 int 必炸。这里在驱动层统一 ``str()``，
+        调用方传什么都安全。
+
+        **同名不覆盖**：目标目录已有同名文件时，光鸭会自动改名成
+        ``xxx(1).xxx``（实测）——要真正覆盖必须**先删掉旧的那份**。
+
+        Args:
+            file_ids: 待复制的 fileId 列表（可传 int，内部转 str）。
+            parent_id: 目标目录 fileId（可传 int，内部转 str）。
+
+        Raises:
+            DriverError: 复制失败（接口返回非 0 业务码）。
+        """
+        payload = await self._call(
+            "fs_copy", [str(fid) for fid in file_ids], parent_id=str(parent_id)
+        )
+        code = payload.get("code")
+        if code not in (None, 0):
+            raise DriverError(
+                f"光鸭复制文件失败：{payload.get('msg') or payload}",
+                kind=_map_code(code),
+            )
+
+    async def delete_files(self, file_ids: list[str]) -> None:
+        """批量删除文件（**进回收站**，非永久删除）。
+
+        **id 一律转字符串再发**（同 :meth:`copy_files`：数字 id → code=112）。
+
+        **删除是异步任务**（接口返回 taskId）：实测单文件 <0.5 s 生效，但
+        批量删 20+ 个时要**重列目录确认**——曾有 6 个文件到 60 s 后才从
+        列表里消失。
+
+        Args:
+            file_ids: 待删 fileId 列表（可传 int，内部转 str）。
+
+        Raises:
+            DriverError: 删除失败（接口返回非 0 业务码）。
+        """
+        payload = await self._call("fs_delete", [str(fid) for fid in file_ids])
+        code = payload.get("code")
+        if code not in (None, 0):
+            raise DriverError(
+                f"光鸭删除文件失败：{payload.get('msg') or payload}",
+                kind=_map_code(code),
+            )
+
     async def delete_file(self, file_id: str) -> None:
         """删除一个文件（**进回收站**，非永久删除）。
 
@@ -582,13 +634,7 @@ class GuangyaDriver:
         Raises:
             DriverError: 删除失败（接口返回非 0 业务码）。
         """
-        payload = await self._call("fs_delete", [str(file_id)])
-        code = payload.get("code")
-        if code not in (None, 0):
-            raise DriverError(
-                f"光鸭删除文件失败：{payload.get('msg') or payload}",
-                kind=_map_code(code),
-            )
+        await self.delete_files([file_id])
 
     # -- 离线下载任务 --
 
