@@ -69,6 +69,8 @@ class ScanJob:
     skipped_small: int = 0
     #: 同名不同扩展名的去重数（保留大的，小的不落库）
     deduped: int = 0
+    #: prune 清理的「源端已消失」条目数（与「未知后缀」是两回事）
+    pruned: int = 0
     failed: int = 0
     #: 已遍历的目录数
     dirs: int = 0
@@ -108,6 +110,7 @@ class ScanJob:
             "skipped_unknown": self.skipped_unknown,
             "skipped_small": self.skipped_small,
             "deduped": self.deduped,
+            "pruned": self.pruned,
             "failed": self.failed,
             "logs": self.logs[-MAX_LOGS:],
             "error": self.error,

@@ -412,6 +412,12 @@
               {{ scanJob.skipped_small }}
             </span>
           </a-descriptions-item>
+          <a-descriptions-item label="去重 / 清理" :span="2">
+            <span class="mono">
+              去重 {{ scanJob.deduped }}（同名不同扩展名，保留大的） / 清理
+              {{ scanJob.pruned }}（网盘上已消失）
+            </span>
+          </a-descriptions-item>
           <a-descriptions-item label="正在处理" :span="2">
             <span class="mono path-line" :title="scanJob.current_path">
               {{ scanJob.current_path || "—" }}

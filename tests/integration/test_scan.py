@@ -394,6 +394,28 @@ class TestPrune:
         rows = (await db_session.execute(select(MediaFile))).scalars().all()
         assert len(rows) == 0
 
+    async def test_prune_count_not_polluting_skipped_unknown(
+        self, db_session, settings, driver_row, fake_driver, tmp_path
+    ):
+        """**prune 的清理数不能混进「跳过 未知」**（2026-11-14 回归）。
+
+        「跳过 未知」= 后缀不认识的文件；「清理」= 网盘上已消失的旧条目。
+        两者混在一起会让「未知」虚高几十条，用户以为有文件没被识别。
+        """
+        driver_row.output_dir = str(tmp_path)
+        await db_session.commit()
+        fake_driver.add_file("pc1", "movie.mkv", path="/影视/movie.mkv")
+        await scan_driver(db_session, settings, driver_row)
+        assert len(list(tmp_path.rglob("*.strm"))) == 1
+
+        # 源端清空 → prune 会删 1 条
+        fake_driver.files.clear()
+        stats = await scan_driver(db_session, settings, driver_row, prune=True)
+
+        assert stats.pruned == 1
+        assert stats.skipped_unknown == 0  # 之前这里会被写成 1
+        assert stats.skipped_small == 0
+
     async def test_prune_keeps_strm_shared_with_surviving_entry(
         self, db_session, settings, driver_row, fake_driver, tmp_path
     ):

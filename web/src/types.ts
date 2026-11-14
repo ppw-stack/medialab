@@ -889,6 +889,8 @@ export interface ScanStats {
   skipped_small: number
   /** 同名不同扩展名的去重数（保留大的，小的不落库） */
   deduped: number
+  /** prune 清理的「源端已消失」条目数（与「未知后缀」是两回事） */
+  pruned: number
   failed: number
   total: number
   errors: string[]
@@ -955,6 +957,8 @@ export interface ScanJob {
   skipped_small: number
   /** 同名不同扩展名的去重数（保留大的，小的不落库） */
   deduped: number
+  /** prune 清理的「源端已消失」条目数（与「未知后缀」是两回事） */
+  pruned: number
   failed: number
   /** 实时日志（环形，最多 500 条） */
   logs: string[]

@@ -347,6 +347,15 @@
   - ⚠️ **prune 必须按「strm 路径引用计数」删文件**（`media.py:_prune_orphans`）：共用同一路径的两条记录，先删的那行若顺手把文件删了，胜者的 strm 就会凭空消失（Emby 里整集不见）。只有**最后一个引用者**被清理时才删文件
   - 契约由 `tests/unit/test_strm_naming.py` + `tests/integration/test_scan.py`（保留大的 / 幂等 / prune 不误删共用路径）+ `tests/unit/test_incremental.py` 固化
 
+- **扫描统计的各计数**互不混用（2026-11-14 修正，`app/services/media.py:ScanStats`）：
+  - `skipped_unknown` = **后缀不认识**的文件（不在 video/image/data 三个配置里）→ 被忽略，不生成 strm 也不下附件
+  - `skipped_small` = 体积低于 `min_size_mb` 阈值
+  - `deduped` = 同名不同扩展名被合并的条数（**保留大的**）——**不是错误**，不进 `failed`
+  - `pruned` = prune 清理的「网盘上已消失」的旧条目数
+  - ⚠️ **prune 的清理数以前被写成 `stats.skipped_unknown += _prune_orphans(...)`** → 把「源端消失」混进「未知后缀」，生产实测虚高 52 条（179 → 231），用户会以为有文件没被识别。**两类计数必须分开**
+  - 前端「扫描进度」弹框分三行展示：跳过（未知/太小）/ 去重 / 清理
+  - 契约由 `tests/integration/test_scan.py::TestPrune::test_prune_count_not_polluting_skipped_unknown` 固化
+
 - **直链缓存读写失败必须降级，不能让播放 500**（2026-11-12 prod 事故，`app/services/link_cache.py`）：
   - **现象**：播放中转 `GET /302/...` 首次请求 **500**、重试才 302——播放器通常不重试，等于随机播放失败
   - **根因**：扫描/调度作业大批量写库时，中转请求写 `link_cache` 撞上 SQLite 写锁。`DB_JOURNAL_MODE=DELETE` 的写锁是**全库排他**的；且 `busy_timeout=10s` 对**死锁升级**无效——读事务持共享锁 + 写事务要升级时 SQLite **直接报** `database is locked` 而非等待，加超时兜不住

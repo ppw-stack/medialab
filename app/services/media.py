@@ -86,6 +86,9 @@ class ScanStats:
     skipped_small: int = 0
     #: 同名不同扩展名的**去重**（保留大的，小的不落库）
     deduped: int = 0
+    #: prune 清理的「源端已消失」条目数（**不是**未知后缀——别混进
+    #: ``skipped_unknown``，那是两回事，混了会让统计误导人）
+    pruned: int = 0
     failed: int = 0
     errors: list[str] = field(default_factory=list)
 
@@ -104,6 +107,7 @@ class ScanStats:
             + self.attachment_failed
             + self.skipped
             + self.deduped
+            + self.pruned
             + self.failed
         )
 
@@ -119,6 +123,7 @@ class ScanStats:
             "skipped_unknown": self.skipped_unknown,
             "skipped_small": self.skipped_small,
             "deduped": self.deduped,
+            "pruned": self.pruned,
             "failed": self.failed,
             "total": self.total,
             "errors": self.errors[:20],
@@ -805,16 +810,18 @@ async def scan_driver(
     await _delete_stale_batch(pending_stale)
 
     if prune:
-        stats.skipped_unknown += await _prune_orphans(
-            db, driver, seen_remote_ids
-        )
+        # ⚠️ 清理数**单独记**（``pruned``）——不能加进 ``skipped_unknown``：
+        # 前者是「网盘上已消失的旧文件被清掉」，后者是「后缀不认识」，
+        # 混在一起会让「跳过 未知」虚高几十条，用户以为有文件没被识别。
+        stats.pruned = await _prune_orphans(db, driver, seen_remote_ids)
     driver.last_scan_at = bj_now()
     driver.last_synced_count = stats.created + stats.updated
     await db.commit()
 
     logger.info(
         "存储源 %s 扫描完成：strm 新增 %d 更新 %d 未变 %d；"
-        "附件新增 %d 未变 %d 失败 %d；跳过 未知 %d 太小 %d",
+        "附件新增 %d 未变 %d 失败 %d；"
+        "跳过 未知 %d 太小 %d；去重 %d 清理 %d",
         driver.id,
         stats.created,
         stats.updated,
@@ -824,6 +831,8 @@ async def scan_driver(
         stats.attachment_failed,
         stats.skipped_unknown,
         stats.skipped_small,
+        stats.deduped,
+        stats.pruned,
     )
     return stats
 
