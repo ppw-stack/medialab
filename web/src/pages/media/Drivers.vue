@@ -283,6 +283,21 @@
             关闭则只扫 cid 指向的那一层，不递归其下子目录。
           </div>
         </a-form-item>
+
+        <a-form-item label="扫描时清理已删除">
+          <a-switch v-model:checked="configForm.auto_prune" />
+          <div class="hint">
+            开启后，扫描会把**网盘上已删除**的文件对应的条目与本地 strm
+            一并清理掉。关闭则只加不删（DB 与本地会留下旧数据）。
+          </div>
+          <a-alert
+            v-if="configForm.auto_prune"
+            type="warning"
+            show-icon
+            message="清理会永久删除本地 strm 文件（不进回收站），无法恢复。"
+            style="margin-top: 6px"
+          />
+        </a-form-item>
       </a-form>
 
       <template #footer>
@@ -685,6 +700,7 @@ const configForm = ref<DriverConfig>({
   data_exts: [],
   min_size_mb: 0,
   include_subdirs: true,
+  auto_prune: false,
 })
 
 /** 编辑存储源（名称 / 设备类型） */
@@ -1022,6 +1038,7 @@ function openConfig(driver: Driver): void {
       : [...DEFAULT_DATA_EXTS],
     min_size_mb: driver.min_size_mb ?? 0,
     include_subdirs: driver.include_subdirs ?? true,
+    auto_prune: driver.auto_prune ?? false,
   }
   // 浏览状态回到账号根——本次浏览的选中记录清空（已有配置仍显示在下方）
   mediaStack.value = [{ id: "", name: "网盘根目录" }]
@@ -1101,6 +1118,7 @@ async function onSaveConfig(): Promise<void> {
       data_exts: configForm.value.data_exts.join(","),
       min_size_mb: configForm.value.min_size_mb ?? 0,
       include_subdirs: configForm.value.include_subdirs ?? true,
+      auto_prune: configForm.value.auto_prune ?? false,
     })
     message.success("已保存")
     configOpen.value = false

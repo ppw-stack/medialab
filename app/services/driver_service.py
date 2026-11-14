@@ -105,6 +105,8 @@ class DriverRow:
     min_size_mb: int
     #: 是否包含子目录
     include_subdirs: bool
+    #: 扫描时是否自动清理「网盘上已消失」的条目（prune）
+    auto_prune: bool
     #: 上次扫描时间（北京时间字符串，NULL = 从未扫描）
     last_scan_at: str | None
     #: 上次扫描新增 / 更新的条目数
@@ -147,6 +149,7 @@ def to_driver_row(row: Driver) -> DriverRow:
         data_exts=row.data_exts or "",
         min_size_mb=row.min_size_mb or 0,
         include_subdirs=bool(row.include_subdirs),
+        auto_prune=bool(row.auto_prune),
         last_scan_at=row.last_scan_at,
         last_synced_count=row.last_synced_count or 0,
     )
@@ -439,11 +442,15 @@ async def update_driver_config(
     data_exts: str | None = None,
     min_size_mb: int = 0,
     include_subdirs: bool = True,
+    auto_prune: bool = False,
 ) -> DriverRow:
     """保存媒体库配置。
 
     ``media_cid`` 保存时会**实时解析出路径**填入 ``media_path``（只读展示）。
     cid 无效 → 400（**不做路径降级**——按设计，cid 失效就是配置错误）。
+
+    ``auto_prune``：扫描时自动清理「网盘上已消失」的条目。清理会**永久
+    删除**本地 strm（不进回收站），故默认关。
     """
     async with session_scope() as db:
         row = await get_driver(db, driver_id)
@@ -460,6 +467,7 @@ async def update_driver_config(
         row.data_exts = data_exts or ""
         row.min_size_mb = min_size_mb
         row.include_subdirs = include_subdirs
+        row.auto_prune = auto_prune
         row.updated_at = bj_now()
         await db.commit()
         await db.refresh(row)
@@ -668,13 +676,19 @@ async def diagnose_driver_direct_link(
         raise DriverServiceError(str(exc), status_code=502, kind="upstream") from exc
 
 
-async def start_scan_task(driver_id: int, *, prune: bool = False) -> JobRef:
+async def start_scan_task(driver_id: int, *, prune: bool | None = None) -> JobRef:
     """启动扫描任务（**立即返回 job_id**，扫描在后台跑）。
 
     为什么要异步：限速 1s/请求下扫一棵大树要几分钟，同步 HTTP 会让用户
     只看到转圈，且反代 / 网关的 60s 超时会把请求掐断。
 
     进度用 ``GET /api/scan-jobs/{job_id}`` 轮询。
+
+    Args:
+        prune: ``None``（**默认**）= 用存储源配置的 ``auto_prune``；
+            ``True`` / ``False`` = 显式覆盖（手动单次强制清理 / 强制不清理）。
+            区分「没传」与「传了 false」是这里的关键——配置为关时，
+            手动 ``?prune=true`` 仍应能单次清理。
     """
     from app.services.scan_jobs import find_running
     from app.services.scan_runner import start_scan_job
@@ -682,6 +696,7 @@ async def start_scan_task(driver_id: int, *, prune: bool = False) -> JobRef:
     async with session_scope() as db:
         row = await get_driver(db, driver_id)
         driver_name = row.name
+        effective_prune = bool(row.auto_prune) if prune is None else prune
 
     # 同一存储源不允许并发扫描（限速下并发只会互相拖慢，且会打爆 115）
     running = await find_running(driver_id)
@@ -692,7 +707,7 @@ async def start_scan_task(driver_id: int, *, prune: bool = False) -> JobRef:
             kind="conflict",
         )
 
-    job = start_scan_job(driver_id, driver_name, prune=prune)
+    job = start_scan_job(driver_id, driver_name, prune=effective_prune)
     return JobRef(job_id=job.id, state=job.state)
 
 

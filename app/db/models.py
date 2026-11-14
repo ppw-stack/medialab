@@ -574,6 +574,14 @@ class Driver(Base):
     include_subdirs: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False
     )
+    #: 扫描时是否**自动清理**「网盘上已消失」的条目（prune）。
+    #:
+    #: 默认关：清理会**永久删除**本地 strm（不进回收站），不可逆。
+    #: 关着时扫描只加不删——网盘删了文件，DB 与本地 strm 会一直留着。
+    #: 手动 ``?prune=true`` 仍可单次强制清理（覆盖本配置）。
+    auto_prune: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
     #: 上次扫描时间（北京时间字符串，NULL = 从未扫描）
     last_scan_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
     #: 上次扫描新增/更新的条目数

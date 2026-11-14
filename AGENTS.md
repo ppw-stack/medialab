@@ -356,6 +356,15 @@
   - 前端「扫描进度」弹框分三行展示：跳过（未知/太小）/ 去重 / 清理
   - 契约由 `tests/integration/test_scan.py::TestPrune::test_prune_count_not_polluting_skipped_unknown` 固化
 
+- **prune 是存储源级配置**（2026-11-14 加入，`drivers.auto_prune`）：
+  - **起因**：prune 原本只能靠手敲 `?prune=true` 触发——**面板上的「扫描」按钮从不带这个参数** → DB 与本地 strm 里一直攒着网盘已删文件的遗留数据（生产实测 52 条）
+  - 现在是 `drivers.auto_prune`（**默认关**）：开启后扫描自动清理「网盘上已消失」的条目与本地 strm
+  - **默认关的理由**：清理会**永久删除**本地 strm（`rm`，**不进回收站**），不可逆
+  - **三态语义**：`POST /api/drivers/{id}/scan` 的 `prune` 参数是 `bool | None`——**不传** = 用存储源配置；`true` / `false` = 显式覆盖（配置为关时仍可单次强制清理）。区分「没传」与「传 false」是关键（`prune: bool = False` 会让配置永远失效）
+  - ⚠️ **prune 只清视频条目**（`media_files` 表）——**附件不进 DB**，网盘删了附件，本地的 jpg/nfo 会成孤儿残留（目前无清理机制）
+  - ⚠️ **`min_size_mb` 过滤掉的文件会被连带清掉**——被「跳过」的文件不进 `seen_remote_ids`，下次 prune 就当成「源端消失」。改小阈值后再跑 prune，之前入库的小文件会被清掉
+  - 契约由 `tests/integration/test_driver_auto_prune.py` 固化（默认值 / 配置往返 / 三态解析 / API 透传）
+
 - **直链缓存读写失败必须降级，不能让播放 500**（2026-11-12 prod 事故，`app/services/link_cache.py`）：
   - **现象**：播放中转 `GET /302/...` 首次请求 **500**、重试才 302——播放器通常不重试，等于随机播放失败
   - **根因**：扫描/调度作业大批量写库时，中转请求写 `link_cache` 撞上 SQLite 写锁。`DB_JOURNAL_MODE=DELETE` 的写锁是**全库排他**的；且 `busy_timeout=10s` 对**死锁升级**无效——读事务持共享锁 + 写事务要升级时 SQLite **直接报** `database is locked` 而非等待，加超时兜不住

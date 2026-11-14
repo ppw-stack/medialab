@@ -294,6 +294,8 @@ class DbBootstrap:
             ("data_exts", "TEXT", "''"),
             ("min_size_mb", "INTEGER", "0"),
             ("include_subdirs", "INTEGER", "1"),
+            # 自动清理「网盘上已消失」的条目——默认关（清理不可逆）
+            ("auto_prune", "INTEGER", "0"),
             ("last_scan_at", "VARCHAR(32)", None),
             ("last_synced_count", "INTEGER", "0"),
         )

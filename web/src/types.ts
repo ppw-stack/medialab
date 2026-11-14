@@ -812,6 +812,8 @@ export interface Driver {
   min_size_mb: number
   /** 是否包含子目录 */
   include_subdirs: boolean
+  /** 扫描时是否自动清理「网盘上已消失」的条目（prune） */
+  auto_prune: boolean
   last_scan_at: string | null
   last_synced_count: number
   /**
@@ -874,6 +876,8 @@ export interface DriverConfig {
   min_size_mb: number
   /** 是否包含子目录 */
   include_subdirs: boolean
+  /** 扫描时是否自动清理「网盘上已消失」的条目（prune） */
+  auto_prune: boolean
 }
 
 /** 扫描统计。 */

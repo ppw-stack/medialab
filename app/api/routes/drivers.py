@@ -74,6 +74,10 @@ class DriverConfigIn(BaseModel):
     min_size_mb: int = Field(default=0, ge=0)
     #: 是否包含子目录
     include_subdirs: bool = True
+    #: 扫描时是否**自动清理**「网盘上已消失」的条目（prune）。
+    #:
+    #: 默认关——清理会**永久删除**本地 strm（不进回收站），不可逆。
+    auto_prune: bool = False
 
 
 class DeviceTypeOut(BaseModel):
@@ -134,6 +138,8 @@ class DriverOut(BaseModel):
     data_exts: str = ""
     min_size_mb: int = 0
     include_subdirs: bool = True
+    #: 扫描时是否自动清理「网盘上已消失」的条目（prune）
+    auto_prune: bool = False
     last_scan_at: str | None = None
     last_synced_count: int = 0
 
@@ -267,6 +273,7 @@ def _to_out(row: DriverRow, conn: CachedProbe | None = None) -> DriverOut:
         data_exts=row.data_exts or "",
         min_size_mb=row.min_size_mb or 0,
         include_subdirs=bool(row.include_subdirs),
+        auto_prune=bool(row.auto_prune),
         last_scan_at=row.last_scan_at,
         last_synced_count=row.last_synced_count or 0,
         conn=conn_out,
@@ -327,6 +334,7 @@ async def update_config_route(driver_id: int, payload: DriverConfigIn) -> Driver
             data_exts=payload.data_exts,
             min_size_mb=payload.min_size_mb,
             include_subdirs=payload.include_subdirs,
+            auto_prune=payload.auto_prune,
         )
     except DriverServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -389,7 +397,9 @@ async def set_incremental_baseline_route(driver_id: int) -> dict[str, object]:
 
 
 @router.post("/{driver_id}/scan")
-async def scan_driver_route(driver_id: int, prune: bool = False) -> dict[str, object]:
+async def scan_driver_route(
+    driver_id: int, prune: bool | None = None
+) -> dict[str, object]:
     """启动扫描任务（**立即返回 job_id**，扫描在后台跑）。
 
     为什么要异步：限速 1s/请求下扫一棵大树要几分钟，同步 HTTP 会让用户
@@ -398,7 +408,9 @@ async def scan_driver_route(driver_id: int, prune: bool = False) -> dict[str, ob
     进度用 ``GET /api/scan-jobs/{job_id}`` 轮询。
 
     Args:
-        prune: 是否删除源端已消失条目的 STRM 文件。
+        prune: **不传** = 用存储源配置的 ``auto_prune``；
+            ``true`` / ``false`` = 显式覆盖（手动单次强制清理 / 强制不清理）。
+            清理会**永久删除**本地 strm（不进回收站），故配置默认为关。
     """
     try:
         job = await start_scan_task(driver_id, prune=prune)
