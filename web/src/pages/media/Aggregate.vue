@@ -212,6 +212,7 @@ import { errMsg, mediaApi as api } from "../../api"
 import type {
   AggregateGroup,
   AggregateGroupStats,
+  AggregateSyncJob,
   Driver,
   StagingRow,
 } from "../../types"
@@ -323,18 +324,26 @@ function stateColor(state: string): string {
 async function loadAll() {
   loading.value = true
   try {
-    const [g, s, d, st, lim] = await Promise.all([
+    // 核心数据一起拉；limits 是辅助展示，**单独拉、失败降级**——
+    // 别让一个常量接口失败把整页拖垮。
+    const [g, s, d, st] = await Promise.all([
       api.get<AggregateGroup[]>("/aggregate/groups"),
       api.get<AggregateGroupStats[]>("/aggregate/stats"),
       api.get<Driver[]>("/drivers"),
       api.get<StagingRow[]>("/aggregate/staging"),
-      api.get<{ daily_cloud_add_quota: number }>("/aggregate/limits"),
     ])
     groups.value = g
     stats.value = s
     drivers.value = d
     staging.value = st
-    dailyQuota.value = lim.daily_cloud_add_quota
+    try {
+      const lim = await api.get<{ daily_cloud_add_quota: number }>(
+        "/aggregate/limits",
+      )
+      dailyQuota.value = lim.daily_cloud_add_quota
+    } catch {
+      // 降级：保持默认值 3（文案仍正确，只是数字可能过时）
+    }
   } catch (e) {
     message.error(errMsg(e, "加载聚合数据失败"))
   } finally {
@@ -435,13 +444,37 @@ async function enqueue(groupId: number) {
   }
 }
 
+/**
+ * 手动触发归拢：**立即返回 job_id**，前端每 2s 轮询到结束。
+ *
+ * 为什么轮询：单文件传输要几分钟，同步请求会被网关 60s 超时掐断
+ * （与「存储源扫描」同款处理）。
+ */
 async function syncNow(groupId: number) {
   syncingGroupId.value = groupId
   try {
-    const result = await api.post<{ synced: number; failed: number; paused: number }>(
+    const ref = await api.post<{ job_id: string; state: string }>(
       `/aggregate/groups/${groupId}/sync`,
     )
-    message.success(`归拢完成：成功 ${result.synced} / 失败 ${result.failed} / 暂停 ${result.paused}`)
+    const jobId = ref.job_id
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 2000))
+      const job = await api.get<AggregateSyncJob>(`/aggregate/sync-jobs/${jobId}`)
+      if (job.state === "success") {
+        message.success(
+          `归拢完成：成功 ${job.synced} / 清理 ${job.cleaned} / 暂停 ${job.paused} / 失败 ${job.failed} / 跳过 ${job.skipped}`,
+        )
+        break
+      }
+      if (job.state === "failed") {
+        message.error(errMsg(job.error || "归拢失败", "归拢失败"))
+        break
+      }
+      if (job.state === "cancelled") {
+        message.warning("归拢已取消")
+        break
+      }
+    }
     await loadAll()
   } catch (e) {
     message.error(errMsg(e, "归拢失败"))

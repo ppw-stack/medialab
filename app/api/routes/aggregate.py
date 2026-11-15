@@ -21,11 +21,13 @@ from app.domain.aggregate_types import (
     ROLE_SECONDARY,
     STAGING_STATES,
 )
+from app.services import aggregate_jobs
 from app.services.aggregate_groups import (
     assign_driver_role,
     clear_driver_role,
     create_group,
     delete_group,
+    get_group,
     list_groups,
     update_group,
 )
@@ -36,7 +38,6 @@ from app.services.aggregate_staging import (
     list_staging,
     retry_staging,
 )
-from app.services.aggregate_sync import sync_group_now
 from app.services.errors import ServiceError
 
 router = APIRouter(
@@ -122,16 +123,31 @@ class EnqueueResultOut(BaseModel):
     skipped: int
 
 
-class SyncResultOut(BaseModel):
-    """手动跑一轮归拢的结果。"""
+class SyncJobRefOut(BaseModel):
+    """手动归拢任务引用（**立即返回**，归拢在后台跑）。"""
 
-    groups: int
+    job_id: str
+    state: str
+
+
+class SyncJobOut(BaseModel):
+    """手动归拢任务的运行状态（轮询用）。"""
+
+    id: str
+    group_id: int
+    group_name: str
+    state: str
+    started_at: int
+    finished_at: int | None
+    elapsed_sec: int
     synced: int
     cleaned: int
     paused: int
     failed: int
     skipped: int
     details: list[str]
+    logs: list[str]
+    error: str | None
 
 
 class LimitsOut(BaseModel):
@@ -307,14 +323,55 @@ async def enqueue_route(group_id: int) -> EnqueueResultOut:
     return EnqueueResultOut(**result)
 
 
-@router.post("/groups/{group_id}/sync", response_model=SyncResultOut)
-async def sync_route(group_id: int) -> SyncResultOut:
-    """手动跑一轮归拢（同步执行，可能要几分钟）。"""
+@router.post("/groups/{group_id}/sync", response_model=SyncJobRefOut)
+async def sync_route(group_id: int) -> SyncJobRefOut:
+    """手动触发一轮归拢（**立即返回 job_id**，归拢在后台跑）。
+
+    为什么异步：单文件传输要几分钟，同步 HTTP 会被反代 / 网关的 60s 超时
+    掐断（``drivers.py`` 的 scan 路由注释里记过同款坑）。进度用
+    ``GET /api/aggregate/sync-jobs/{job_id}`` 轮询。
+
+    同组已有人在跑 → 409（组级锁保证归拢互斥，这里提前拦避免排队干等）。
+    """
     try:
-        result = await sync_group_now(group_id)
+        group = await get_group(group_id)
     except ServiceError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
-    return SyncResultOut(**result.to_dict())
+
+    running = await aggregate_jobs.find_running(group_id)
+    if running is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"该组已有归拢任务在跑（job={running.id}）",
+        )
+
+    job = await aggregate_jobs.start_sync_job(group_id, group.name)
+    return SyncJobRefOut(job_id=job.id, state=job.state)
+
+
+@router.get("/sync-jobs/{job_id}", response_model=SyncJobOut)
+async def sync_job_status(job_id: str) -> SyncJobOut:
+    """查手动归拢任务的进度（前端每 2s 轮询）。"""
+    job = await aggregate_jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"归拢任务不存在：{job_id}")
+    return SyncJobOut(**job.to_dict())
+
+
+@router.get("/sync-jobs", response_model=list[SyncJobOut])
+async def list_sync_jobs(group_id: int | None = None) -> list[SyncJobOut]:
+    """列出手动归拢任务（最新在前）。"""
+    jobs = await aggregate_jobs.list_jobs(group_id)
+    return [SyncJobOut(**j.to_dict()) for j in jobs]
+
+
+@router.post("/sync-jobs/{job_id}/cancel")
+async def cancel_sync_job(job_id: str) -> dict[str, bool]:
+    """取消一个在跑的归拢任务（正在传输的文件会被打断，进 failed）。"""
+    cancelled = await aggregate_jobs.cancel_job(job_id)
+    if not cancelled:
+        raise HTTPException(status_code=404, detail=f"任务不存在或已结束：{job_id}")
+    return {"ok": True}
 
 
 @router.post("/staging/{staging_id}/retry")

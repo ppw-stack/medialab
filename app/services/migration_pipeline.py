@@ -148,6 +148,12 @@ class TargetIndex:
             entries: dict[str, tuple[int, str]] = await self._driver.list_entries(
                 dir_id
             )
+            # 先收集全部匹配项，再按优先级处理：**服务端自动改名形态
+            # （``download(1)``）优先于原名**——前者必是服务端生成的（没有
+            # 用户会给文件起名 ``download(1)``），后者可能是用户自己的文件。
+            # 场景：用户的 ``download`` 与我们的残留 ``download(1)`` 同时存在
+            # 且字节数恰好一致时，按字典序会挑中用户的文件（误改，不可逆）。
+            matches: list[tuple[str, int, str]] = []
             for name, (entry_size, file_id) in entries.items():
                 if entry_size != size:
                     continue
@@ -158,6 +164,17 @@ class TargetIndex:
                     for candidate in landed_names
                 ):
                     continue
+                matches.append((name, entry_size, file_id))
+
+            def _is_auto_renamed(item: tuple[str, int, str]) -> bool:
+                name = item[0]
+                return any(
+                    name != candidate and name.startswith(f"{candidate}(")
+                    for candidate in landed_names
+                )
+
+            matches.sort(key=lambda item: not _is_auto_renamed(item))
+            for name, _entry_size, file_id in matches:
                 await self._driver.rename_file(file_id, new_name)
                 files = self._files.setdefault(rel, {})
                 files.pop(name, None)

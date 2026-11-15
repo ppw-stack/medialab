@@ -598,10 +598,19 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
       → 服务端内部复制，**不吃本机带宽**）。别与 2026-11-11 下线的
       「离线下载」功能混淆：那套是**本地文件 → 光鸭**（光鸭去拉本机，
       实测 0.75 MB/s），已整体删除
-    - ⚠️ **改名不得误伤用户原有文件**：落地名固定是 `download`——用户目录里
-      若**原本就有**同名且字节数恰好一致的文件，改名会误改它（不可逆）。
-      故候选落盘名要**排除目标目录里提交前就存在的文件**
-      （`_landed_candidates(existing)`）
+    - ⚠️ **认领残留与改名对「`download` 是谁的」判断相反**，按
+      `row.attempts`（本次处理**前**的快照值）分流：
+      - **从未提交过**（attempts == 0）：目录里的 `download` 只可能是用户
+        的 → **不认领**（认了 = 把用户的文件改名，不可逆）
+      - **提交过**（attempts > 0，重试 / 中断恢复）：`download` 大概率是我们
+        的残留 → **不排除**，认领它（排除 = 永远认领不到 → 重试重新提交
+        白扣额度 + 落成 `download(1)` 死循环 + 垃圾累积）
+      - **提交后改名**（步骤⑦）：候选**排除提交前已存在的文件**——用户有
+        `download` 时服务端落成 `download(1)`，排除后恰好只改我们那份
+      - 认领命中多个匹配时，**服务端自动改名形态（`download(N)`）优先**于
+        原名——前者必是服务端生成的，后者可能是用户文件
+      - 契约：`test_user_download_file_protected_then_leftover_claimed`
+        （两阶段：首次保护用户文件 → 人工重试认领残留完成）
   - **迁移与归拢都恒串行，不支持并发**（2026-11-15 决策）：
     - 落盘名撞车（`download(1)`）+ 云添加额度稀缺，并发只会更快撞墙
     - 归拢：组内并发 1、组与组之间也串行；单轮提交上限 20（**纯运行时保护**，
@@ -624,6 +633,23 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
     remote_id)` 唯一约束——重复登记 = 白扣两次额度）
   - **调度作业 `aggregate_sync`**（cron `29 * * * *`）：归拢速度受额度限制而
     非调度频率，跑得再勤也不会超过当日额度
+  - **并发防护与手动触发**（2026-11-15 审查修复）：
+    - **组级锁**（`aggregate_sync._group_lock`）：手动 `POST /sync` 与 cron
+      作业可重叠（APScheduler `max_instances=1` 只防作业自身重叠），两个
+      run 各拿同一批 pending 行 → 同一文件提交两次白扣额度。单进程应用，
+      进程内 per-group `asyncio.Lock` 足够
+    - **手动触发走后台 job**（`aggregate_jobs.py`，照 scan_jobs 模式）：
+      `POST /groups/{id}/sync` **立即返回 job_id**，前端轮询
+      `GET /sync-jobs/{id}`——单文件传输几分钟，同步 HTTP 会被网关 60s
+      超时掐断；同组已有任务在跑 → 409
+    - **云下载等待有上限**（`TASK_MAX_WAIT_SEC` = 2h）：光鸭会把任务卡在
+      活跃列表不结束（实测），无超时 = run 永不结束 = **其它组也饿死**。
+      超时记 `failed`（`cloud_task_id` 保留，人工重试时认领残留能接住
+      已落盘的情况）。契约：`test_stuck_task_times_out_and_marks_failed`
+    - **在途任务查询失败 → 本轮跳过 syncing 行**：查询失败返回 `None`
+      （绝不能返回空集冒充「都不在跑」——那会把在途任务重置为待归拢并
+      重新提交，白扣额度）。128 容器 DNS 偶发故障是已知触发源。
+      契约：`test_active_task_query_failure_skips_syncing_rows`
   - **待办（用户明确暂缓）**：写入入口形态（上传任务目标是「选组」还是
     「选具体盘」+ planner 自动溢出）——阶段 1、2 落地后结合实际使用再定
   - 契约由 `tests/unit/test_aggregate.py` + `tests/integration/test_aggregate.py`

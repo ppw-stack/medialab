@@ -93,6 +93,17 @@ MAX_SUBMISSIONS_PER_RUN = 20
 #: 云添加额度耗尽的文案特征（命中即暂停，不硬撞不重试）。
 QUOTA_ERROR_MARKERS = ("次数超限", "额度", "配额", "每日上限")
 
+#: 单个云下载任务的**最大等待时长**（秒）——2 小时。
+#:
+#: ⚠️ 光鸭已知会把任务**卡在活跃列表不结束**（AGENTS.md 实测：15MB 任务
+#: 卡住）。无超时的话 run 永不结束 → APScheduler ``max_instances=1`` →
+#: 后续 hourly 触发全部跳过 → **不止本组，其它组的归拢也全部饿死**。
+#: 超时把该行标 ``failed``（人工重试），run 继续下一行。
+#:
+#: 注意：超时**不代表任务失败**——它可能仍在服务端下载，甚至最终落盘。
+#: 故 ``cloud_task_id`` 保留，人工重试时「认领残留」能接住已落盘的情况。
+TASK_MAX_WAIT_SEC = 2 * 3600.0
+
 
 @dataclass(slots=True)
 class AggregateSyncResult:
@@ -145,23 +156,33 @@ def _landed_name_from_url(url: str) -> str:
     return path.rsplit("/", 1)[-1] if "/" in path else ""
 
 
-def _landed_candidates(existing: dict[str, int], url: str = "") -> tuple[str, ...]:
-    """可被认领 / 改名的落盘名候选（**排除目录里本来就有的文件**）。
+def _landed_candidate_names(url: str = "") -> tuple[str, ...]:
+    """落盘名候选**全集**（不做任何排除）。
 
     云下载落盘名取自 URL 末段（光鸭直链 = ``download``），撞名时服务端会
     自动改成 ``download(1)``（:func:`app.services.migration_pipeline.TargetIndex.
     rename_landed` 已支持该形态）。
-
-    ⚠️ **必须排除目标目录里原有的同名文件**——用户自己有个叫 ``download``
-    的文件、且字节数恰好与落地文件一致时，改名会**误改用户的文件**
-    （改名不可逆）。``existing`` 是提交**前**的目录快照，故不含本次落地的
-    文件，但含用户原有的文件——正是要排除的那些。
     """
     names = {GUANGYA_LANDED_NAME}
     derived = _landed_name_from_url(url)
     if derived:
         names.add(derived)
-    return tuple(sorted(name for name in names if name and name not in existing))
+    return tuple(sorted(name for name in names if name))
+
+
+def _landed_candidates_for_submit(existing: dict[str, int], url: str) -> tuple[str, ...]:
+    """**提交后改名**用的候选——**排除目录里本来就有的文件**。
+
+    ``existing`` 是**提交前**的目录快照。若用户自己在目标目录放了叫
+    ``download`` 的文件，服务端会把我们的落地文件自动改成 ``download(1)``——
+    排除 ``download`` 后只剩 ``download(1)`` 能匹配，恰好只改**我们的**
+    落地文件，不会误改用户的（改名不可逆）。
+
+    ⚠️ 只用于**提交后**的改名。**认领残留**不能用这个——残留正是上一轮
+    失败留下的 ``download``，它在目录快照里，排除它 = 永远认领不到 =
+    重试死循环（见 :func:`_sync_one` 步骤②的注释）。
+    """
+    return tuple(sorted(set(_landed_candidate_names(url)) - set(existing)))
 
 
 def _refresh_callback(driver_id: int) -> Any:
@@ -169,6 +190,34 @@ def _refresh_callback(driver_id: int) -> Any:
         await persist_guangya_credential(driver_id, cred)
 
     return _cb
+
+
+# --------------------------------------------------------------------------
+# 组级归拢锁（**归拢全程串行**的并发保护）
+# --------------------------------------------------------------------------
+#
+# 为什么需要：组内串行、组间串行都只保护**单次调用内部**——手动
+# ``POST /groups/{id}/sync`` 与每小时 cron 作业可重叠（APScheduler 的
+# ``max_instances=1`` 只防作业自身重叠，防不了 API 触发），连点两次按钮
+# 也一样。两个 run 各自 ``_load_processable_rows`` 拿到同一批 pending 行
+# → 同一文件被提交两次（**白扣额度**）。本应用是单进程，进程内锁足够。
+
+_GROUP_LOCKS: dict[int, asyncio.Lock] = {}
+_LOCKS_GUARD = asyncio.Lock()
+
+
+async def _group_lock(group_id: int) -> asyncio.Lock:
+    """取某组的归拢锁（惰性创建；创建本身也要防竞态）。
+
+    锁随组的删除**不回收**——组是极少量对象（个位数），泄漏量可忽略；
+    回收逻辑反而引入「锁在别人手里被清掉」的新竞态。
+    """
+    async with _LOCKS_GUARD:
+        lock = _GROUP_LOCKS.get(group_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _GROUP_LOCKS[group_id] = lock
+        return lock
 
 
 # --------------------------------------------------------------------------
@@ -205,7 +254,14 @@ async def run_aggregate_sync() -> dict[str, Any]:
 
 
 async def _sync_group(group_id: int, result: AggregateSyncResult) -> None:
-    """归拢一个聚合组。"""
+    """归拢一个聚合组（**持组级锁**——手动触发与 cron 作业互斥）。"""
+    lock = await _group_lock(group_id)
+    async with lock:
+        await _sync_group_locked(group_id, result)
+
+
+async def _sync_group_locked(group_id: int, result: AggregateSyncResult) -> None:
+    """归拢一个聚合组（调用方必须已持组级锁）。"""
     async with session_scope() as db:
         group = (
             await db.execute(
@@ -255,6 +311,9 @@ async def _sync_group(group_id: int, result: AggregateSyncResult) -> None:
     watcher = TaskWatcher(master_driver, log=logger.info)
     gate = SubmitGate(SUBMIT_INTERVAL_SEC)
     submissions = 0
+    #: 副盘驱动按 ``source_driver_id`` 缓存——同一副盘 N 行只建 1 个实例
+    #: （每建一次都要走一遍 token 刷新，白费请求）。
+    source_drivers: dict[int, Any] = {}
 
     try:
         for row in rows:
@@ -264,7 +323,10 @@ async def _sync_group(group_id: int, result: AggregateSyncResult) -> None:
                     "其余留到下一轮"
                 )
                 break
-            source = await _build_source_driver(row)
+            source = source_drivers.get(row.source_driver_id)
+            if source is None:
+                source = await _build_source_driver(row)
+                source_drivers[row.source_driver_id] = source
             try:
                 need_submit = await _sync_one(
                     row,
@@ -343,15 +405,27 @@ async def _sync_one(
 
     # ② 认领残留：上一轮已落盘但没改名（中断 / 被取消）
     #
-    # ⚠️ **候选落盘名要排除「目录里本来就有的文件」**——用户自己有个叫
-    # ``download`` 的文件且字节数恰好一致时，改名会误改它（不可逆）。
-    # ``existing`` 是**提交前**的目录快照，故不会含本次落地的文件。
-    adopted = await index.rename_landed(
-        row.target_dir,
-        _landed_candidates(existing),
-        row.size_bytes,
-        row.file_name,
-    )
+    # 候选是否排除由「**本行是否提交过**」（``row.attempts`` 是本次处理前
+    # 的快照值）决定——两个场景对「``download`` 是谁的」判断相反：
+    #
+    # - **从未提交过**（``attempts == 0``）：目录里的 ``download`` 只可能
+    #   是用户自己的文件 → **不认领**（认了就是把用户的文件改名 = 不可逆
+    #   的数据损坏）
+    # - **提交过**（``attempts > 0``，重试 / 中断恢复）：``download`` 大概率
+    #   是我们上一轮的残留 → **不做排除**，认领它（与迁移引擎语义一致）。
+    #   残留在目录快照里，排除它 = 永远认领不到 → 重试时重新提交（白扣
+    #   额度）+ 落成 ``download(1)`` 还是改不了名 → 死循环 + 垃圾累积。
+    #
+    # 「提交后改名」对用户原有文件的保护由步骤⑦的排除负责（见下）。
+    if row.attempts > 0:
+        adopted = await index.rename_landed(
+            row.target_dir,
+            _landed_candidate_names(),
+            row.size_bytes,
+            row.file_name,
+        )
+    else:
+        adopted = ""
     if adopted:
         await _cleanup_source(row, source, result)
         result.skipped += 1
@@ -384,11 +458,24 @@ async def _sync_one(
     await index.note_submitted(row.target_dir, row.file_name, row.size_bytes)
     await _mark(row.id, STAGING_SYNCING, task_id=task_id, error=None)
 
-    # ⑥ 等任务结束（从活跃列表消失）
-    await watcher.wait(task_id, path=row.file_name, size=row.size_bytes)
+    # ⑥ 等任务结束（从活跃列表消失）——**有上限**：光鸭会把任务卡在活跃
+    #    列表不结束（实测），无超时 = run 永不结束 = 其它组全部饿死。
+    try:
+        await asyncio.wait_for(
+            watcher.wait(task_id, path=row.file_name, size=row.size_bytes),
+            timeout=TASK_MAX_WAIT_SEC,
+        )
+    except TimeoutError as exc:
+        raise DriverError(
+            f"云下载超过 {TASK_MAX_WAIT_SEC / 3600:.0f} 小时仍未结束"
+            "（疑似光鸭卡单），已放弃等待——请到光鸭确认后重试",
+            kind="unknown",
+        ) from exc
 
-    # ⑦ 改名（落盘名是 URL 末段 = download）
-    landed_names = _landed_candidates(existing, link.url)
+    # ⑦ 改名（落盘名是 URL 末段 = download）——**排除提交前就存在的
+    #    同名文件**：用户自己有个 ``download`` 时，服务端会把我们的落地
+    #    文件改成 ``download(1)``，排除后恰好只改我们那份。
+    landed_names = _landed_candidates_for_submit(existing, link.url)
     renamed = await index.rename_landed(
         row.target_dir,
         landed_names,
@@ -470,7 +557,8 @@ async def _load_processable_rows(group_id: int) -> list[_Row]:
     - ``failed``（泛化失败，认不出是不是额度）→ **不自动重试**，只由人工点
       「重试」——失败也扣额度，自动重试就是白扣
     - ``syncing`` → 先看光鸭活跃任务：**还在跑就跳过**（别重复提交），
-      已消失则重置为 ``pending``（残留认领会接住已落盘的情况）
+      已消失则重置为 ``pending``（残留认领会接住已落盘的情况）；
+      **查询失败本轮整批跳过**（分不清在不在跑，保守不碰）
     """
     async with session_scope() as db:
         rows = (
@@ -510,6 +598,12 @@ async def _load_processable_rows(group_id: int) -> list[_Row]:
     result: list[_Row] = []
     for row in detached:
         if row.state == STAGING_SYNCING:
+            if active_ids is None:
+                # 查询失败 → **分不清任务还在不在跑** → 保守跳过。
+                # 若当「已消失」处理会把它重置为 pending → 重新提交 →
+                # 同一文件双任务（白扣额度 + 主盘留 download(1) 垃圾）。
+                # 下轮查询恢复后自然接上。128 容器 DNS 偶发故障是已知问题。
+                continue
             if row.cloud_task_id and row.cloud_task_id in active_ids:
                 continue  # 云下载还在跑 → 本轮不碰
             # 任务已消失（可能已落盘）→ 重置为待归拢，残留认领会接住
@@ -524,8 +618,15 @@ async def _load_processable_rows(group_id: int) -> list[_Row]:
     return result
 
 
-async def _active_task_ids(rows: list[_Row]) -> set[str]:
-    """查光鸭在途任务 id 集合（失败返回空集——不阻塞本轮）。"""
+async def _active_task_ids(rows: list[_Row]) -> set[str] | None:
+    """查光鸭在途任务 id 集合。
+
+    Returns:
+        任务 id 集合；``None`` = **查询失败**——调用方必须跳过 ``syncing``
+        行（分不清「还在跑」与「已结束」，保守不碰）。绝不能返回空集冒充
+        「都不在跑」：那会把在途任务重置为待归拢 → 重复提交（白扣额度）。
+        128 容器 DNS 偶发故障（AGENTS.md 记录）是已知触发源。
+    """
     ids = {r.cloud_task_id for r in rows if r.cloud_task_id}
     if not ids:
         return set()
@@ -542,7 +643,7 @@ async def _active_task_ids(rows: list[_Row]) -> set[str]:
             .first()
         )
         if driver_row is None:
-            return set()
+            return None
         credential = driver_row.credential
         device_type = driver_row.device_type
         driver_id = int(driver_row.id)
@@ -556,8 +657,8 @@ async def _active_task_ids(rows: list[_Row]) -> set[str]:
     try:
         items = await driver.list_active_offline_tasks()  # type: ignore[attr-defined]
     except Exception as exc:
-        logger.warning("读取在途任务失败（不做中断去重）：%s", exc)
-        return set()
+        logger.warning("读取在途任务失败（本轮跳过 syncing 行，保守不碰）：%s", exc)
+        return None
     return {str(item.get("taskId") or "") for item in items}
 
 
@@ -655,7 +756,15 @@ async def _build_source_driver(row: _Row) -> Any:
 
 
 async def sync_group_now(group_id: int) -> AggregateSyncResult:
-    """手动跑一轮某个组的归拢（API 触发）。"""
+    """手动跑一轮某个组的归拢（API 触发，**持组级锁**）。"""
+    async with session_scope() as db:
+        exists = (
+            await db.execute(
+                select(AggregateGroup.id).where(AggregateGroup.id == group_id)
+            )
+        ).scalar_one_or_none()
+    if exists is None:
+        raise ServiceError(f"聚合组不存在：{group_id}", status=404)
     result = AggregateSyncResult(groups=1)
     await _sync_group(group_id, result)
     return result

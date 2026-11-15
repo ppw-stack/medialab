@@ -858,6 +858,26 @@ export interface AggregateGroupStats {
   pending_bytes: number
 }
 
+/** 手动归拢任务的运行状态（后台跑，前端轮询）。 */
+export interface AggregateSyncJob {
+  id: string
+  group_id: number
+  group_name: string
+  /** running / success / failed / cancelled */
+  state: string
+  started_at: number
+  finished_at: number | null
+  elapsed_sec: number
+  synced: number
+  cleaned: number
+  paused: number
+  failed: number
+  skipped: number
+  details: string[]
+  logs: string[]
+  error: string | null
+}
+
 /** 在途台账一行（副盘 → 主盘的待归拢文件）。 */
 export interface StagingRow {
   id: number

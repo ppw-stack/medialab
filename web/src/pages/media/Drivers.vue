@@ -1180,7 +1180,12 @@ function isSecondary(record: Driver): boolean {
 
 const stagingSelectedLabel = computed(() => {
   if (!configForm.value.staging_root_id) return "（未选）"
-  return configForm.value.staging_root_id
+  // 与媒体库目录的标签格式一致：本次浏览选中的显示「路径（id）」，
+  // 打开抽屉时的既有配置只有 id → 显示裸 id
+  if (stagingPicked.value) {
+    return `${stagingPicked.value.path}（id: ${stagingPicked.value.id}）`
+  }
+  return `id: ${configForm.value.staging_root_id}`
 })
 
 /**

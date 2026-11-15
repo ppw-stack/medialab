@@ -192,17 +192,27 @@ async def enqueue_from_staging_root(group_id: int) -> dict[str, int]:
             driver_id, root_id, credential, device_type
         )
         scanned += len(entries)
+        if not entries:
+            continue
         async with session_scope() as db:
-            for entry in entries:
-                exists = (
+            # 一次查出该盘已登记的 remote_id（**别逐文件查**——缓冲根目录
+            # 几百个文件就是几百条 SELECT 的 N+1）
+            existing_ids: set[str] = set(
+                (
                     await db.execute(
-                        select(SecondaryStaging.id).where(
+                        select(SecondaryStaging.remote_id).where(
                             SecondaryStaging.source_driver_id == driver_id,
-                            SecondaryStaging.remote_id == entry["remote_id"],
+                            SecondaryStaging.remote_id.in_(
+                                [e["remote_id"] for e in entries]
+                            ),
                         )
                     )
-                ).scalar_one_or_none()
-                if exists is not None:
+                )
+                .scalars()
+                .all()
+            )
+            for entry in entries:
+                if entry["remote_id"] in existing_ids:
                     skipped += 1
                     continue
                 db.add(
