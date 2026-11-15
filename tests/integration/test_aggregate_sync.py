@@ -473,6 +473,30 @@ async def test_scheduled_sync_registers_new_files_first(
     assert states.get("x.mkv") == "done", "新登记的文件应在本轮被归拢"
 
 
+async def test_manual_sync_also_registers_new_files(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """**手动触发也要先登记在途**——「全量」应含刚上传的新文件。"""
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    master, _source = fake_drivers
+    group_id, _master_id, _secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+
+    class _Fake:
+        async def list_dir_by_cid(self, cid, parent_path=""):
+            from app.adapters.drivers.base import CloudFile
+
+            return [CloudFile(remote_id="new9", path="/y.mkv", name="y.mkv", size=100)]
+
+    monkeypatch.setattr(aggregate_staging, "build_driver", lambda *a, **k: _Fake())
+
+    result = await aggregate_sync.sync_group_now(group_id)
+    rows = await aggregate_staging.list_staging(group_id=group_id)
+    states = {r.file_name: r.state for r in rows}
+    assert states.get("y.mkv") == "done", "手动触发也应先登记再归拢"
+    assert result.synced == 2  # _setup 的 1 个 + 新登记的 1 个
+
+
 async def test_scheduled_sync_skips_group_when_locked(
     db, fast_watcher, fake_drivers
 ) -> None:

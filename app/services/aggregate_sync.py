@@ -67,7 +67,12 @@ from app.services.migration_pipeline import (
 
 logger = get_logger(__name__)
 
-__all__ = ["AggregateSyncResult", "run_aggregate_sync", "sync_group_now"]
+__all__ = [
+    "AggregateSyncResult",
+    "run_aggregate_sync",
+    "run_group",
+    "sync_group_now",
+]
 
 #: 光鸭源的提交间隔（秒）——云添加额度稀缺，**慢一点比撞限额好**。
 #:
@@ -254,26 +259,9 @@ async def run_aggregate_sync() -> dict[str, Any]:
             continue
         result.groups += 1
         try:
-            # ① 先登记在途：副盘缓冲根里的**新文件**（数据同步刚传上去的）
-            #    必须先进台账，否则永远不会被归拢——副盘是**流动的缓冲区**，
-            #    不是一次性快照。登记是幂等的（重复扫不重复登记）。
-            try:
-                enq = await enqueue_from_staging_root(group_id)
-                if enq["added"]:
-                    result.details.append(
-                        f"组「{group_name}」：登记在途 {enq['added']} 个"
-                        f"（扫描 {enq['scanned']} 个，已存在 {enq['skipped']} 个）"
-                    )
-            except ServiceError as exc:
-                # 组没配目标目录 / 没有副盘缓冲根 → 记一笔，不炸整轮
-                result.details.append(f"组「{group_name}」：登记在途跳过（{exc}）")
-            except Exception as exc:
-                logger.warning("组 %s 登记在途失败：%s", group_name, exc)
-                result.details.append(f"组「{group_name}」：登记在途失败（{exc}）")
-
-            # ② 再归拢：**限 20 次**（无人值守的运行时保护）+ 锁被占就跳过
-            #    （手动触发正在跑时不必排队干等——下一轮自然会补）
-            await _sync_group(
+            # 定时作业：**限 20 次**（无人值守的运行时保护）+ 锁被占就跳过
+            # （手动触发正在跑时不必排队干等——下一轮自然会补）
+            await run_group(
                 group_id,
                 result,
                 max_submissions=MAX_SUBMISSIONS_PER_RUN,
@@ -284,6 +272,60 @@ async def run_aggregate_sync() -> dict[str, Any]:
             result.failed += 1
             result.details.append(f"组「{group_name}」失败：{exc}")
     return result.to_dict()
+
+
+async def run_group(
+    group_id: int,
+    result: AggregateSyncResult,
+    *,
+    max_submissions: int | None = MAX_SUBMISSIONS_PER_RUN,
+    wait_for_lock: bool = True,
+) -> None:
+    """跑一个组的完整流程：**先登记在途 → 再归拢**。
+
+    两条入口（定时作业 / 手动触发）**共用**这一步——副盘是**流动的缓冲区**
+    （「数据同步」上传任务持续往缓冲根写新文件），不先登记就永远不会被归拢。
+
+    Args:
+        group_id: 聚合组 id。
+        result: 结果对象（**就地更新**）。
+        max_submissions: 单轮最多提交多少次（None = 不限）。
+        wait_for_lock: 锁被占时等待还是跳过。
+    """
+    group_name = await _group_name(group_id)
+    # ① 登记在途（幂等）
+    try:
+        enq = await enqueue_from_staging_root(group_id)
+        if enq["added"]:
+            result.details.append(
+                f"组「{group_name}」：登记在途 {enq['added']} 个"
+                f"（扫描 {enq['scanned']} 个，已存在 {enq['skipped']} 个）"
+            )
+    except ServiceError as exc:
+        # 组没配目标目录 / 没有副盘缓冲根 → 记一笔，不炸整轮
+        result.details.append(f"组「{group_name}」：登记在途跳过（{exc}）")
+    except Exception as exc:
+        logger.warning("组 %s 登记在途失败：%s", group_name, exc)
+        result.details.append(f"组「{group_name}」：登记在途失败（{exc}）")
+
+    # ② 归拢
+    await _sync_group(
+        group_id,
+        result,
+        max_submissions=max_submissions,
+        wait_for_lock=wait_for_lock,
+    )
+
+
+async def _group_name(group_id: int) -> str:
+    """取组名（取不到就用 id 兜底）。"""
+    async with session_scope() as db:
+        row = (
+            await db.execute(
+                select(AggregateGroup.name).where(AggregateGroup.id == group_id)
+            )
+        ).scalar_one_or_none()
+    return str(row) if row else str(group_id)
 
 
 async def _sync_group(
@@ -847,5 +889,7 @@ async def sync_group_now(
         result.details.append("另一轮归拢在跑，本轮等它结束后继续")
     # **手动触发：全量归拢，不限单轮次数**（用户盯着，要搬到台账清空；
     # 只有服务端额度墙才会停——那是硬约束，无视不了）
-    await _sync_group(group_id, result, max_submissions=None, wait_for_lock=True)
+    await run_group(
+        group_id, result, max_submissions=None, wait_for_lock=True
+    )
     return result
