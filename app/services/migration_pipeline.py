@@ -120,6 +120,7 @@ class TargetIndex:
         landed_names: tuple[str, ...],
         size: int,
         new_name: str,
+        exclude_names: frozenset[str] | set[str] | tuple[str, ...] = (),
     ) -> str:
         """把「已落盘但还没改名」的文件改名成 ``new_name``。
 
@@ -132,17 +133,26 @@ class TargetIndex:
            （``download(1)``）
         2. **字节数完全一致**
         3. 目标名与现名不同
+        4. 文件名**不在** ``exclude_names`` 里
 
         Args:
             rel_dir: 目标下的相对目录。
             landed_names: 可能的落盘名（一般只有 ``download``）。
             size: 期望的字节数。
             new_name: 改成的目标名。
+            exclude_names: **要跳过的不动的文件名**（精确匹配）。
+
+               为什么需要：用户自己有个叫 ``download`` 的文件时，服务端会把
+               我们的落地文件自动改名成 ``download(1)``。若把候选名整个排除
+               （不传 ``download``），``download(1)`` 也认不出来 → **归拢
+               必然失败**。故改成「跳过同名条目，但保留 ``download(N)``
+               形态」。
 
         Returns:
             改成的文件名；没找到可认领的文件则返回空串。
         """
         rel = norm_dir(rel_dir)
+        excluded = set(exclude_names)
         async with self._lock:
             dir_id = await self._resolve_dir(rel)
             entries: dict[str, tuple[int, str]] = await self._driver.list_entries(
@@ -159,6 +169,8 @@ class TargetIndex:
                     continue
                 if name == new_name:
                     continue
+                if name in excluded:
+                    continue  # 用户自己的文件，不动
                 if not any(
                     name == candidate or name.startswith(f"{candidate}(")
                     for candidate in landed_names
@@ -350,8 +362,17 @@ class TaskWatcher:
             self._task = asyncio.create_task(self._loop())
 
     async def _loop(self) -> None:
-        while not self._stopped and self._pending:
+        # ⚠️ **轮询协程不在「空闲」时退出**——那会留一个竞态窗口：
+        # 协程判定「没有在途任务」→ 决定退出 → 但任务对象还没被标记 done；
+        # 此刻下一个 ``wait()`` 进来，``_ensure_running`` 看到「协程还活着」
+        # → 不新建协程 → **那个任务永远等不到事件**（wait 永久阻塞）。
+        #
+        # 生产里靠「文件间 5 秒提交间隔」侥幸避开（测试里间隔为 0，必现）。
+        # 故这里让协程**活着等到 close()**：空闲时只 sleep、**不发请求**。
+        while not self._stopped:
             await asyncio.sleep(self._poll_interval)
+            if not self._pending:
+                continue  # 空闲：不发任何请求
             try:
                 items = await self._driver.list_active_offline_tasks()
             except Exception as exc:  # 轮询失败不致命，下一轮再来

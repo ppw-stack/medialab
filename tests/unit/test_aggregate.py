@@ -25,6 +25,7 @@ from app.services.migration_pipeline import (
     GUANGYA_LANDED_NAME,
     SubmitGate,
     TargetIndex,
+    TaskWatcher,
     norm_dir,
 )
 
@@ -169,6 +170,28 @@ async def test_target_index_delete_replaced_requires_exact_size() -> None:
     assert gyp.deleted == []
     assert await index.delete_replaced("", "x.mkv", 100) is True
     assert gyp.deleted == ["f1"]
+
+
+async def test_task_watcher_survives_sequential_waits() -> None:
+    """连续多次 ``wait()`` 不能卡死（**轮询协程的竞态回归**）。
+
+    旧实现里轮询协程在「没有在途任务」时退出；若下一个 ``wait()`` 恰好落在
+    「协程已决定退出、还没被标记 done」的窗口里，``_ensure_running`` 会以为
+    「协程还活着」→ 不新建 → **那个任务永远等不到事件**（wait 永久阻塞）。
+    生产里靠文件间 5 秒提交间隔侥幸避开——这是**真实的隐患**，不是测试问题。
+    """
+    import asyncio
+
+    class _FakeDriver:
+        async def list_active_offline_tasks(self) -> list[dict[str, object]]:
+            return []  # 任务立刻「消失」
+
+    watcher = TaskWatcher(_FakeDriver(), poll_interval=0.01)
+    try:
+        for i in range(8):
+            await asyncio.wait_for(watcher.wait(f"task-{i}"), timeout=5)
+    finally:
+        await watcher.close()
 
 
 async def test_submit_gate_serializes_submissions() -> None:

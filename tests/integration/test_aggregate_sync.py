@@ -37,6 +37,8 @@ class _FakeMaster:
         self.landed_size = landed_size
         self.submitted: list[str] = []
         self.renamed: list[tuple[str, str]] = []
+        #: 落地文件的自增序号（fileId / taskId 都用它 → **保证唯一**）
+        self._seq = 0
 
     async def create_dir(self, name: str, parent_id: str = "") -> tuple[str, bool]:
         dir_id = f"dir-{name}"
@@ -66,8 +68,12 @@ class _FakeMaster:
         while name in self.files:
             name = f"download({n})"
             n += 1
-        self.files[name] = (self.landed_size, f"landed-{n}")
-        return f"task-{n}"
+        # ⚠️ **fileId 每次都不同**——真实光鸭每次落地都是新 fileId。
+        #   早期这里用 ``landed-{n}``，而 n 只在撞名时才 +1 → 多个文件
+        #   fileId 相同 → 改名时改到了**别的文件**上（测试假象）。
+        self._seq += 1
+        self.files[name] = (self.landed_size, f"landed-{self._seq}")
+        return f"task-{self._seq}"
 
     async def list_active_offline_tasks(self) -> list[dict[str, object]]:
         return []
@@ -95,6 +101,19 @@ class _FakeSource:
 
     async def delete_file(self, file_id: str) -> None:
         self.deleted.append(file_id)
+
+
+@pytest.fixture(autouse=True)
+def _clear_group_locks():
+    """每个用例前清掉**组级锁**。
+
+    锁是模块级字典、按 group id 索引——而测试里每个用例的组 id 都是 1
+    （每个用例一份新库）。上一个用例若异常退出（没释放锁），下一个用例
+    就会**永久阻塞**在 ``async with lock`` 上。
+    """
+    aggregate_sync._GROUP_LOCKS.clear()
+    yield
+    aggregate_sync._GROUP_LOCKS.clear()
 
 
 @pytest.fixture
@@ -359,6 +378,104 @@ async def test_manual_sync_runs_in_background(db, fast_watcher, fake_drivers) ->
     assert job.to_dict()["synced"] == 1
 
 
+async def test_manual_sync_has_no_round_cap(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """**手动触发不限单轮次数**——要搬到台账清空（只有额度墙才停）。
+
+    定时作业仍限 20 次（无人值守的运行时保护）——见下一个用例。
+    """
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    master, _source = fake_drivers
+    group_id, master_id, _secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+
+    # 25 个待归拢文件（加上 _setup 建的 1 个 = 26，超过定时作业的 20 次上限）
+    async with session_scope() as db_session:
+        for i in range(25):
+            db_session.add(
+                SecondaryStaging(
+                    group_id=group_id,
+                    source_driver_id=_secondary_id,
+                    target_driver_id=master_id,
+                    remote_id=f"x{i}",
+                    file_name=f"ep{i:02d}.mkv",
+                    size_bytes=100,
+                    state="pending",
+                )
+            )
+        await db_session.commit()
+
+    result = await aggregate_sync.sync_group_now(group_id)
+    assert result.synced == 26, "手动触发应全量归拢，不受 20 次上限"
+    assert result.failed == 0
+    rows = await aggregate_staging.list_staging(group_id=group_id)
+    assert all(r.state == "done" for r in rows), "不该有 pending 残留"
+
+
+async def test_scheduled_sync_keeps_round_cap(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """**定时作业仍限 20 次**（无人值守的运行时保护）——其余留到下一轮。"""
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    master, _source = fake_drivers
+    group_id, master_id, _secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+
+    async with session_scope() as db_session:
+        for i in range(25):
+            db_session.add(
+                SecondaryStaging(
+                    group_id=group_id,
+                    source_driver_id=_secondary_id,
+                    target_driver_id=master_id,
+                    remote_id=f"x{i}",
+                    file_name=f"ep{i:02d}.mkv",
+                    size_bytes=100,
+                    state="pending",
+                )
+            )
+        await db_session.commit()
+
+    result = await aggregate_sync.run_aggregate_sync()
+    assert result["synced"] == aggregate_sync.MAX_SUBMISSIONS_PER_RUN
+    assert any("已达最大提交数" in d for d in result["details"])
+    rows = await aggregate_staging.list_staging(group_id=group_id)
+    assert sum(1 for r in rows if r.state == "pending") == 6
+
+
+async def test_scheduled_sync_skips_group_when_locked(
+    db, fast_watcher, fake_drivers
+) -> None:
+    """手动触发正在跑时，定时作业**跳过该组**（不排队干等）。"""
+    master, _source = fake_drivers
+    group_id, master_id, _secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+
+    async with session_scope() as db_session:
+        db_session.add(
+            SecondaryStaging(
+                group_id=group_id,
+                source_driver_id=_secondary_id,
+                target_driver_id=master_id,
+                remote_id="x1",
+                file_name="a.mkv",
+                size_bytes=100,
+                state="pending",
+            )
+        )
+        await db_session.commit()
+
+    lock = await aggregate_sync._group_lock(group_id)
+    await lock.acquire()
+    try:
+        result = await aggregate_sync.run_aggregate_sync()
+    finally:
+        lock.release()
+    assert result["synced"] == 0
+    assert any("另一轮归拢在跑" in d for d in result["details"])
+
+
 async def test_sync_pauses_group_when_hitting_quota_wall(
     db, fast_watcher, fake_drivers, monkeypatch
 ) -> None:
@@ -465,18 +582,17 @@ async def test_generic_failure_is_failed_and_not_auto_retried(
     assert rows[0].state == "pending"
 
 
-async def test_user_download_file_protected_then_leftover_claimed(
+async def test_user_download_file_is_protected(
     db, fast_watcher, fake_drivers
 ) -> None:
-    """用户原有的 ``download`` 文件受保护，而**我们自己的残留**能被认领。
+    """目标目录里**原本就有** ``download`` 文件时，用户的文件分毫未动。
 
-    两阶段契约（2026-11-15 审查修复）：
+    服务端会把我们的落地文件自动改名成 ``download(1)`` → 改名时**跳过**
+    用户原有的同名条目、只改我们那份 → 归拢**一次就成功**。
 
-    - **首次处理**（从未提交过）：目录里的 ``download`` 只可能是用户的
-      → 不认领；提交后服务端落成 ``download(1)``，改名候选排除了用户
-      的 ``download`` → 校验不过 → 记 failed，**用户的文件分毫未动**
-    - **人工重试**（提交过）：``download(1)`` 是我们的残留 → 认领并改名
-      → 归拢完成（不重复提交、不再白扣额度）
+    ⚠️ 曾经的错法：把候选名 ``download`` 整个排除 → ``download(1)`` 也
+    认不出来 → **这个目录的归拢必然失败**（已修：排除改为「跳过同名
+    条目」，保留 ``download(N)`` 形态）。
     """
     master, source = fake_drivers
     group_id, _master_id, _secondary_id = await _setup(db, size=100)
@@ -484,27 +600,52 @@ async def test_user_download_file_protected_then_leftover_claimed(
     master.files["download"] = (100, "user-file")
     master.landed_size = 100
 
-    # —— 第一阶段：首次处理，用户的文件必须分毫未动 ——
     result = await aggregate_sync.sync_group_now(group_id)
-    assert result.failed == 1
+    assert result.synced == 1, "应当一次成功（我们的文件落成了 download(1)）"
+    assert result.failed == 0
+    # 用户的文件分毫未动
     assert ("user-file", "a.mkv") not in master.renamed, "误改了用户的文件！"
     assert master.files.get("download") == (100, "user-file"), "用户的文件被动了"
-    # 残留（我们那份 download(1)）留在主盘
-    assert master.files.get("download(1)") == (100, "landed-2")
-
-    # —— 第二阶段：人工重试，残留被认领（不重复提交） ——
-    submitted_before = len(master.submitted)
-    rows = await aggregate_staging.list_staging(group_id=group_id)
-    await aggregate_staging.retry_staging(rows[0].id)
-
-    result = await aggregate_sync.sync_group_now(group_id)
-    assert result.skipped == 1, "应通过认领残留完成，而不是重新提交"
-    assert len(master.submitted) == submitted_before, "认领残留不该再提交云下载"
-    # 残留（fileId=landed-2，即 download(1)）被改名；用户的文件（user-file）没动
-    assert ("landed-2", "a.mkv") in master.renamed
-    assert ("user-file", "a.mkv") not in master.renamed, "误改了用户的文件！"
-    assert master.files.get("download") == (100, "user-file"), "用户的文件被动了"
+    # 我们那份被改名成了目标名
+    assert master.files.get("a.mkv") is not None
     rows = await aggregate_staging.list_staging(group_id=group_id)
     assert rows[0].state == "done"
     # 副盘副本也被清理
+    assert source.deleted == ["f1"]
+
+
+async def test_leftover_is_claimed_on_retry(
+    db, fast_watcher, fake_drivers
+) -> None:
+    """上一轮落盘没改名的**残留**，人工重试时被认领（不重复提交）。"""
+    master, source = fake_drivers
+    group_id, _master_id, _secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+
+    # 上一轮的残留：主盘里躺着一个没改名的 download（我们的）
+    master.files["download"] = (100, "leftover-1")
+    # 该行已经试过一次（attempts >= 1 → 残留认领生效）
+    async with session_scope() as db_session:
+        row = (
+            await db_session.execute(
+                select(SecondaryStaging).where(
+                    SecondaryStaging.group_id == group_id
+                )
+            )
+        ).scalar_one()
+        row.attempts = 1
+        row.state = "failed"
+        await db_session.commit()
+
+    # failed 行**不自动重试**（失败也扣额度）→ 人工点「重试」才再来
+    rows = await aggregate_staging.list_staging(group_id=group_id)
+    await aggregate_staging.retry_staging(rows[0].id)
+
+    submitted_before = len(master.submitted)
+    result = await aggregate_sync.sync_group_now(group_id)
+    assert result.skipped == 1, "应通过认领残留完成，而不是重新提交"
+    assert len(master.submitted) == submitted_before, "认领残留不该再提交云下载"
+    assert ("leftover-1", "a.mkv") in master.renamed
+    rows = await aggregate_staging.list_staging(group_id=group_id)
+    assert rows[0].state == "done"
     assert source.deleted == ["f1"]

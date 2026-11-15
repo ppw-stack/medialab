@@ -171,18 +171,17 @@ def _landed_candidate_names(url: str = "") -> tuple[str, ...]:
 
 
 def _landed_candidates_for_submit(existing: dict[str, int], url: str) -> tuple[str, ...]:
-    """**提交后改名**用的候选——**排除目录里本来就有的文件**。
+    """**提交后改名**用的候选（不排除任何名字）。
 
-    ``existing`` 是**提交前**的目录快照。若用户自己在目标目录放了叫
-    ``download`` 的文件，服务端会把我们的落地文件自动改成 ``download(1)``——
-    排除 ``download`` 后只剩 ``download(1)`` 能匹配，恰好只改**我们的**
-    落地文件，不会误改用户的（改名不可逆）。
+    「保护用户原有文件」靠 :func:`rename_landed` 的 ``exclude_names``
+    **精确跳过同名条目**——而不是把候选名整个删掉。
 
-    ⚠️ 只用于**提交后**的改名。**认领残留**不能用这个——残留正是上一轮
-    失败留下的 ``download``，它在目录快照里，排除它 = 永远认领不到 =
-    重试死循环（见 :func:`_sync_one` 步骤②的注释）。
+    ⚠️ **为什么不能删候选**：用户在目标目录放了叫 ``download`` 的文件时，
+    服务端会把我们的落地文件自动改名成 ``download(1)``。若把候选 ``download``
+    整个排除，``download(1)`` 也认不出来 → **这个目录的归拢必然失败**。
+    故候选保持完整，改名时只跳过「目录里原有的同名条目」。
     """
-    return tuple(sorted(set(_landed_candidate_names(url)) - set(existing)))
+    return _landed_candidate_names(url)
 
 
 def _refresh_callback(driver_id: int) -> Any:
@@ -204,6 +203,15 @@ def _refresh_callback(driver_id: int) -> Any:
 
 _GROUP_LOCKS: dict[int, asyncio.Lock] = {}
 _LOCKS_GUARD = asyncio.Lock()
+
+
+def forget_group_lock(group_id: int) -> None:
+    """忘掉某组的归拢锁（**组被解散时**调用）。
+
+    锁字典是进程级的、只增不减——组的数量是固定的（个位数），但「建组 →
+    解散 → 建组」反复循环会让字典慢慢长。组没了，锁就该一起走。
+    """
+    _GROUP_LOCKS.pop(group_id, None)
 
 
 async def _group_lock(group_id: int) -> asyncio.Lock:
@@ -245,7 +253,14 @@ async def run_aggregate_sync() -> dict[str, Any]:
             continue
         result.groups += 1
         try:
-            await _sync_group(group_id, result)
+            # 定时作业：**限 20 次**（无人值守的运行时保护）+ 锁被占就跳过
+            # （手动触发正在跑时不必排队干等——下一轮自然会补）
+            await _sync_group(
+                group_id,
+                result,
+                max_submissions=MAX_SUBMISSIONS_PER_RUN,
+                wait_for_lock=False,
+            )
         except Exception as exc:  # 单组失败不影响其它组
             logger.exception("聚合组 %s 归拢失败", group_name)
             result.failed += 1
@@ -253,14 +268,40 @@ async def run_aggregate_sync() -> dict[str, Any]:
     return result.to_dict()
 
 
-async def _sync_group(group_id: int, result: AggregateSyncResult) -> None:
-    """归拢一个聚合组（**持组级锁**——手动触发与 cron 作业互斥）。"""
+async def _sync_group(
+    group_id: int,
+    result: AggregateSyncResult,
+    *,
+    max_submissions: int | None = MAX_SUBMISSIONS_PER_RUN,
+    wait_for_lock: bool = True,
+) -> None:
+    """归拢一个聚合组（**持组级锁**——手动触发与 cron 作业互斥）。
+
+    Args:
+        group_id: 聚合组 id。
+        result: 结果对象（**就地更新**，调用方能实时读进度）。
+        max_submissions: 单轮最多提交多少次（``None`` = 不限）。
+            - **手动触发不限**（用户盯着，要搬完为止）
+            - **定时作业限 20**（无人值守，别一轮跑飞占着事件循环）
+        wait_for_lock: 组级锁被别人占着时是**等待**还是**跳过**。
+            定时作业 → 跳过（不白等）；手动 → 等待（用户明确要的）。
+    """
     lock = await _group_lock(group_id)
+    if not wait_for_lock and lock.locked():
+        result.details.append("另一轮归拢在跑，本轮跳过（等下一轮）")
+        return
     async with lock:
-        await _sync_group_locked(group_id, result)
+        await _sync_group_locked(
+            group_id, result, max_submissions=max_submissions
+        )
 
 
-async def _sync_group_locked(group_id: int, result: AggregateSyncResult) -> None:
+async def _sync_group_locked(
+    group_id: int,
+    result: AggregateSyncResult,
+    *,
+    max_submissions: int | None = MAX_SUBMISSIONS_PER_RUN,
+) -> None:
     """归拢一个聚合组（调用方必须已持组级锁）。"""
     async with session_scope() as db:
         group = (
@@ -323,9 +364,9 @@ async def _sync_group_locked(group_id: int, result: AggregateSyncResult) -> None
 
     try:
         for row in rows:
-            if submissions >= MAX_SUBMISSIONS_PER_RUN:
+            if max_submissions is not None and submissions >= max_submissions:
                 result.details.append(
-                    f"组「{group_name}」：本轮已达最大提交数（{MAX_SUBMISSIONS_PER_RUN}），"
+                    f"组「{group_name}」：本轮已达最大提交数（{max_submissions}），"
                     "其余留到下一轮"
                 )
                 break
@@ -487,6 +528,8 @@ async def _sync_one(
         landed_names,
         row.size_bytes,
         row.file_name,
+        # 用户原有的同名文件**跳过**（但服务端自动改名形态 download(N) 照改）
+        exclude_names=set(existing),
     )
     if renamed:
         logger.info("归拢改名：%s → %s", renamed, row.file_name)
@@ -781,5 +824,10 @@ async def sync_group_now(
     if exists is None:
         raise ServiceError(f"聚合组不存在：{group_id}", status=404)
     result = result if result is not None else AggregateSyncResult(groups=1)
-    await _sync_group(group_id, result)
+    lock = await _group_lock(group_id)
+    if lock.locked():
+        result.details.append("另一轮归拢在跑，本轮等它结束后继续")
+    # **手动触发：全量归拢，不限单轮次数**（用户盯着，要搬到台账清空；
+    # 只有服务端额度墙才会停——那是硬约束，无视不了）
+    await _sync_group(group_id, result, max_submissions=None, wait_for_lock=True)
     return result

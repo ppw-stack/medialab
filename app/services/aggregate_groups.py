@@ -201,6 +201,10 @@ async def delete_group(group_id: int) -> None:
         await db.execute(delete(SecondaryStaging).where(SecondaryStaging.group_id == group_id))
         await db.execute(delete(AggregateGroup).where(AggregateGroup.id == group_id))
         await db.commit()
+        # 清掉该组的归拢锁（组没了，锁也不该留着）
+        from app.services.aggregate_sync import forget_group_lock
+
+        forget_group_lock(group_id)
 
 
 async def get_mapping(group_id: int) -> GroupMapping:

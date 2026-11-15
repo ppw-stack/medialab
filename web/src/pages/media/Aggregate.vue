@@ -391,7 +391,7 @@ function enqueueTip(group: AggregateGroup): string {
 function syncTip(group: AggregateGroup): string {
   const m = mappingOf(group.id)
   if (!m?.target_dir_id) return "缺少归拢目标目录——请先「配置」目录映射"
-  return "立刻跑一轮归拢（受当日云添加额度限制）"
+  return "全量归拢：一直搬到台账清空（只有云添加额度墙会停）"
 }
 
 /** 组内的副数据源 */
