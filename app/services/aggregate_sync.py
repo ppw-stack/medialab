@@ -52,6 +52,7 @@ from app.domain.aggregate_types import (
     STAGING_SYNCING,
     STAGING_VERIFIED,
 )
+from app.services.aggregate_staging import enqueue_from_staging_root
 from app.services.driver_factory import build_driver
 from app.services.errors import ServiceError
 from app.services.migration import persist_guangya_credential
@@ -253,8 +254,25 @@ async def run_aggregate_sync() -> dict[str, Any]:
             continue
         result.groups += 1
         try:
-            # 定时作业：**限 20 次**（无人值守的运行时保护）+ 锁被占就跳过
-            # （手动触发正在跑时不必排队干等——下一轮自然会补）
+            # ① 先登记在途：副盘缓冲根里的**新文件**（数据同步刚传上去的）
+            #    必须先进台账，否则永远不会被归拢——副盘是**流动的缓冲区**，
+            #    不是一次性快照。登记是幂等的（重复扫不重复登记）。
+            try:
+                enq = await enqueue_from_staging_root(group_id)
+                if enq["added"]:
+                    result.details.append(
+                        f"组「{group_name}」：登记在途 {enq['added']} 个"
+                        f"（扫描 {enq['scanned']} 个，已存在 {enq['skipped']} 个）"
+                    )
+            except ServiceError as exc:
+                # 组没配目标目录 / 没有副盘缓冲根 → 记一笔，不炸整轮
+                result.details.append(f"组「{group_name}」：登记在途跳过（{exc}）")
+            except Exception as exc:
+                logger.warning("组 %s 登记在途失败：%s", group_name, exc)
+                result.details.append(f"组「{group_name}」：登记在途失败（{exc}）")
+
+            # ② 再归拢：**限 20 次**（无人值守的运行时保护）+ 锁被占就跳过
+            #    （手动触发正在跑时不必排队干等——下一轮自然会补）
             await _sync_group(
                 group_id,
                 result,

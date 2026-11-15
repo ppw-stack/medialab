@@ -444,6 +444,35 @@ async def test_scheduled_sync_keeps_round_cap(
     assert sum(1 for r in rows if r.state == "pending") == 6
 
 
+async def test_scheduled_sync_registers_new_files_first(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """定时作业**先登记在途再归拢**——副盘是流动缓冲区，新文件必须先进台账。
+
+    没有这一步的话：数据同步刚传到副盘的文件永远不会被归拢
+    （台账里没有它们的行）。
+    """
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    master, _source = fake_drivers
+    group_id, _master_id, _secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+
+    class _Fake:
+        async def list_dir_by_cid(self, cid, parent_path=""):
+            from app.adapters.drivers.base import CloudFile
+
+            return [CloudFile(remote_id="new1", path="/x.mkv", name="x.mkv", size=100)]
+
+    monkeypatch.setattr(aggregate_staging, "build_driver", lambda *a, **k: _Fake())
+
+    result = await aggregate_sync.run_aggregate_sync()
+    # 归拢 2 个：_setup 建的 1 个 + 本轮新登记的 1 个
+    assert result["synced"] == 2
+    rows = await aggregate_staging.list_staging(group_id=group_id)
+    states = {r.file_name: r.state for r in rows}
+    assert states.get("x.mkv") == "done", "新登记的文件应在本轮被归拢"
+
+
 async def test_scheduled_sync_skips_group_when_locked(
     db, fast_watcher, fake_drivers
 ) -> None:

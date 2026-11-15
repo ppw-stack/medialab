@@ -651,6 +651,10 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
     「剧名 / Season N / 集」组织，压平会认不出剧集）
   - 「登记在途」扫描副盘缓冲根 → 进台账（**幂等**，`(source_driver_id,
     remote_id)` 唯一约束——重复登记 = 白扣两次额度）
+    - ⚠️ **定时作业必须「先登记再归拢」**（`run_aggregate_sync`）：副盘是
+      **流动的缓冲区**——「数据同步」上传任务会持续往副盘缓冲根写新文件，
+      而台账里没有它们的行 → **永远不会被归拢**。故每轮先扫描登记（幂等）
+      再归拢。契约：`test_scheduled_sync_registers_new_files_first`
   - **调度作业 `aggregate_sync`**（cron `29 * * * *`）：**单轮限 20 次提交**
     （无人值守的运行时保护），其余留到下一轮；**手动触发不限**（用户盯着，
     要搬到台账清空，只有服务端的额度墙才会停）
