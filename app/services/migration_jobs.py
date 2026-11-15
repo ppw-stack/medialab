@@ -55,8 +55,8 @@ class MigrationParams:
     min_size_mb: int = 0
     #: 体积上限（MB），0 = 不限
     max_size_mb: int = 0
-    #: 光鸭上同时进行的离线任务数
-    concurrency: int = 2
+    # 注：**没有并发参数**——迁移恒串行（2026-11-15 决策，理由见
+    # ``app.services.migration.MIGRATION_CONCURRENCY``）
     #: 两次提交给光鸭之间的最小间隔（秒）——错开提交，避开 115 下载频控
     submit_interval_sec: float = 60.0
     #: 排除原盘（iso / m2ts / BDMV / CERTIFICATE）
@@ -77,7 +77,6 @@ class MigrationParams:
             "target_path": self.target_path,
             "min_size_mb": self.min_size_mb,
             "max_size_mb": self.max_size_mb,
-            "concurrency": self.concurrency,
             "submit_interval_sec": self.submit_interval_sec,
             "exclude_disc": self.exclude_disc,
             "delete_source": self.delete_source,

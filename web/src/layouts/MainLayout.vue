@@ -18,6 +18,7 @@ import {
   DatabaseFilled,
   MenuOutlined,
   FileImageOutlined,
+  ClusterOutlined,
 } from '@ant-design/icons-vue'
 import { useAuthStore } from '../stores/auth'
 import { useResponsive } from '../composables/useResponsive'
@@ -69,6 +70,7 @@ const menuGroups = [
     icon: DatabaseFilled,
     items: [
       { key: '/drivers', icon: DatabaseFilled, label: '存储源', sub: '网盘账号', iconColor: 'violet' },
+      { key: '/aggregate', icon: ClusterOutlined, label: '网盘聚合', sub: '主盘 + 副盘缓冲', iconColor: 'gold' },
       { key: '/library', icon: FolderOpenOutlined, label: '媒体库', sub: 'STRM 条目', iconColor: 'blue' },
       { key: '/migrations', icon: SwapOutlined, label: '迁移', sub: '115 → 光鸭', iconColor: 'amber' },
       { key: '/scrape', icon: FileImageOutlined, label: '整理与刮削', sub: '下载 → 媒体库 → NFO', iconColor: 'purple' },

@@ -111,6 +111,13 @@ class DriverRow:
     last_scan_at: str | None
     #: 上次扫描新增 / 更新的条目数
     last_synced_count: int
+    # -- 聚合（主从）配置 --
+    #: 所属聚合组（None = 独立存储源）
+    aggregate_group_id: int | None
+    #: 组内角色（``master`` / ``secondary``；None = 不参与聚合）
+    role: str | None
+    #: 副数据源的缓冲根目录 id（光鸭 fileId）
+    staging_root_id: str | None
 
 
 @dataclass(slots=True)
@@ -152,6 +159,9 @@ def to_driver_row(row: Driver) -> DriverRow:
         auto_prune=bool(row.auto_prune),
         last_scan_at=row.last_scan_at,
         last_synced_count=row.last_synced_count or 0,
+        aggregate_group_id=row.aggregate_group_id,
+        role=row.role,
+        staging_root_id=row.staging_root_id,
     )
 
 
@@ -178,6 +188,13 @@ def mask_credential(credential: str | None) -> str:
     if credential.startswith(("p115cipher:", "gypcipher:")):
         return "encrypted"
     return f"set({len(credential)} chars)"
+
+
+#: 「未传该参数」的哨兵——区分「不传」与「传空串」。
+#:
+#: 用于 ``staging_root_id``：配置抽屉保存时会显式传空串表示「清空」，
+#: 而不传表示「这次不动它」。
+_UNSET: Any = object()
 
 
 # ================================================================ 内部函数
@@ -443,6 +460,7 @@ async def update_driver_config(
     min_size_mb: int = 0,
     include_subdirs: bool = True,
     auto_prune: bool = False,
+    staging_root_id: str | Any | None = _UNSET,
 ) -> DriverRow:
     """保存媒体库配置。
 
@@ -468,6 +486,9 @@ async def update_driver_config(
         row.min_size_mb = min_size_mb
         row.include_subdirs = include_subdirs
         row.auto_prune = auto_prune
+        if staging_root_id is not _UNSET:
+            # 副数据源的缓冲根目录（光鸭 fileId）——清空 = 传空串
+            row.staging_root_id = staging_root_id or None
         row.updated_at = bj_now()
         await db.commit()
         await db.refresh(row)
@@ -697,6 +718,13 @@ async def start_scan_task(driver_id: int, *, prune: bool | None = None) -> JobRe
         row = await get_driver(db, driver_id)
         driver_name = row.name
         effective_prune = bool(row.auto_prune) if prune is None else prune
+        # 副数据源是**缓冲**：内容不参与媒体库（不生成 strm、不进库）
+        if row.role == "secondary":
+            raise DriverServiceError(
+                "副数据源不参与媒体库扫描（它的内容会归拢到主数据源）",
+                status_code=400,
+                kind="config",
+            )
 
     # 同一存储源不允许并发扫描（限速下并发只会互相拖慢，且会打爆 115）
     running = await find_running(driver_id)

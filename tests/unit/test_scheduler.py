@@ -147,6 +147,7 @@ def test_default_cron_covers_all_registered_jobs() -> None:
         "cross_seed_maintenance",
         "scrape_metadata",
         "organize_files",
+        "aggregate_sync",
     }
 
 

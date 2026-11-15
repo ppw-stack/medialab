@@ -11,7 +11,7 @@ async function login(page: any) {
 /** 全站页面清单——响应式检查要覆盖全部页面。 */
 const PAGES = [
   '/', '/sites', '/downloaders', '/torrent-index', '/cross-seed', '/settings',
-  '/drivers', '/library', '/migrations', '/uploads', '/health', '/dav-users', '/media-settings',
+  '/drivers', '/aggregate', '/library', '/migrations', '/uploads', '/health', '/dav-users', '/media-settings',
 ]
 
 /**

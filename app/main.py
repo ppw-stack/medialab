@@ -291,6 +291,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 def _mount_routes(app: FastAPI) -> None:
     from app.api.auth import router as auth_router
     from app.api.routes import (
+        aggregate,
         cross_seed,
         dashboard,
         dav_users,
@@ -333,6 +334,7 @@ def _mount_routes(app: FastAPI) -> None:
     for router in (
         system.router,
         drivers.router,
+        aggregate.router,
         media.router,
         scrape.router,
         health.router,

@@ -53,6 +53,7 @@ from app.domain.media_exts import (
 from app.domain.upload_types import DEFAULT_UPLOAD_CONCURRENCY
 
 __all__ = [
+    "AggregateGroup",
     "AppEnvSetting",
     "Base",
     "CrossSeedOrphan",
@@ -70,6 +71,7 @@ __all__ = [
     "SchedulerJobSetting",
     "ScrapeAlias",
     "ScrapeCache",
+    "SecondaryStaging",
     "Setting",
     "Site",
     "SiteUserData",
@@ -586,6 +588,119 @@ class Driver(Base):
     last_scan_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
     #: 上次扫描新增/更新的条目数
     last_synced_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # -- 聚合（主从）配置 --
+
+    #: 所属聚合组（NULL = 独立存储源，不参与聚合）。
+    #:
+    #: **一盘一组**：不允许跨组嵌套——否则归拢链路会成环、额度归属混乱。
+    aggregate_group_id: Mapped[int | None] = mapped_column(
+        ForeignKey("aggregate_groups.id"), nullable=True
+    )
+    #: 组内角色（``master`` / ``secondary``；NULL = 不参与聚合）。
+    #:
+    #: - ``master`` —— 主数据源：内容以它为准（扫描 / STRM / 播放只认它）
+    #: - ``secondary`` —— 副数据源：缓冲，**内容不对外展示**
+    role: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
+    #: 副数据源的**缓冲根目录 id**（光鸭 fileId）。
+    #:
+    #: 副盘是「缓冲」——放进这个目录里的文件会被登记进归拢台账，随后搬到
+    #: 主数据源的媒体库目录下的**同名相对路径**。
+    #:
+    #: 只对副数据源有意义（主数据源不需要）。
+    staging_root_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    __table_args__ = (
+        Index("idx_drivers_group_role", "aggregate_group_id", "role"),
+    )
+
+
+class AggregateGroup(Base):
+    """聚合组：1 个主数据源 + N 个副数据源。
+
+    **组才是聚合的单位**——不同组互不影响（G1 的主盘额度耗尽不影响 G2 归拢）。
+    组外独立盘（``drivers.aggregate_group_id IS NULL``）行为与引入聚合前**完全
+    一致**（不参与任何自动流程）。
+    """
+
+    __tablename__ = "aggregate_groups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: 组名（用户可读）
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    #: 是否启用（停用的组不参与归拢调度）
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    #: 创建时间（北京时间字符串）
+    created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
+    updated_at: Mapped[str] = mapped_column(
+        String(32), default=_bj_now, onupdate=_bj_now
+    )
+
+
+class SecondaryStaging(Base):
+    """副盘在途台账：一个待归拢的文件。
+
+    生命周期（``state``，取值见 :mod:`app.domain.aggregate_types`）::
+
+        pending → syncing → verified → done
+           ↓          ↓         ↓
+        failed     paused    （人工介入 / 次日续传）
+
+    **副盘内容永不对外展示**——这张表是「在路上」的唯一可见形态。
+    """
+
+    __tablename__ = "secondary_staging"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: 所属聚合组
+    group_id: Mapped[int] = mapped_column(
+        ForeignKey("aggregate_groups.id", ondelete="CASCADE"), nullable=False
+    )
+    #: 副数据源（文件当前所在盘）
+    source_driver_id: Mapped[int] = mapped_column(
+        ForeignKey("drivers.id", ondelete="CASCADE"), nullable=False
+    )
+    #: 主数据源（文件要归拢到哪）
+    target_driver_id: Mapped[int] = mapped_column(
+        ForeignKey("drivers.id", ondelete="CASCADE"), nullable=False
+    )
+    #: 副盘上的文件 id（光鸭 fileId）
+    remote_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    #: 文件名（含扩展名）
+    file_name: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 副盘上的相对目录（用于定位文件 + 组装目标路径）
+    source_dir: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    #: 目标目录（相对主盘归拢根目录）
+    target_dir: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    #: 文件字节数
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    #: 状态（见 :mod:`app.domain.aggregate_types`）
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    #: 已尝试次数
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 最近一次失败原因（用户可见）
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 在途的云下载任务 id（中断恢复用）
+    cloud_task_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: 创建时间（北京时间字符串）
+    created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
+    updated_at: Mapped[str] = mapped_column(
+        String(32), default=_bj_now, onupdate=_bj_now
+    )
+    #: 归拢完成时间（北京时间字符串）
+    synced_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    #: 副盘副本清理完成时间（北京时间字符串）
+    cleaned_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_driver_id",
+            "remote_id",
+            name="uq_staging_source_remote",
+        ),
+        Index("idx_staging_group_state", "group_id", "state"),
+    )
 
 
 class MediaFile(Base):

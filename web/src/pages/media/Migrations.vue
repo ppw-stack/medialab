@@ -33,7 +33,7 @@
         <template #message>
           光鸭源没有 115 的频控，但<b>云添加额度有限</b>（每天每账号，失败也扣）。
           云下载按 URL 末段落名（<span class="mono">download</span>），落盘后会自动<b>改名回原名</b>；
-          并发恒为 1（同目录并发会撞名）。撞到额度上限会<b>暂停</b>作业，次日重跑即可续传。
+          <b>恒串行</b>提交（同目录并发会撞名）。撞到额度上限会<b>暂停</b>作业，次日重跑即可续传。
         </template>
       </a-alert>
 
@@ -108,16 +108,10 @@
           <a-input-number v-model:value="form.maxSizeGb" :min="0" :step="1" style="width: 100px" />
           <span class="hint">0 = 不限</span>
         </a-form-item>
-        <a-form-item label="并发数">
-          <a-input-number
-            v-model:value="form.concurrency"
-            :min="1"
-            :max="20"
-            :disabled="isGuangyaSource"
-            style="width: 80px"
-          />
-          <span class="hint">{{ isGuangyaSource ? "光鸭源恒为 1" : "1–20" }}</span>
-        </a-form-item>
+        <!--
+          没有「并发数」：迁移**恒串行**（2026-11-15 决策）——并发会让云下载
+          落盘名撞车（download(1)），且更快撞上云添加额度墙。
+        -->
         <a-form-item label="提交间隔">
           <a-input-number
             v-model:value="form.submitIntervalSec"
@@ -128,6 +122,7 @@
             style="width: 90px"
           />
           <span class="hint">{{ isGuangyaSource ? "光鸭源自动收紧到 5s" : "秒，0 = 不限速" }}</span>
+          <span class="hint">恒串行提交，不支持并发</span>
         </a-form-item>
         <a-form-item label="排除原盘">
           <a-switch v-model:checked="form.excludeDisc" />
@@ -203,7 +198,7 @@
         show-icon
         :closable="false"
         class="mt-sm"
-        :message="`启动时检测到 ${job.legacy_inflight} 个上一轮遗留的在途任务，本轮跳过对应文件；实际光鸭并发 ≈ ${job.legacy_inflight + job.params.concurrency}`"
+        :message="`启动时检测到 ${job.legacy_inflight} 个上一轮遗留的在途任务，本轮跳过对应文件；光鸭上实际在跑 ${job.legacy_inflight + 1} 个（恒串行）`"
       />
 
       <a-alert
@@ -299,7 +294,6 @@ const targetError = ref("")
 const form = reactive({
   minSizeGb: 0,
   maxSizeGb: 0,
-  concurrency: 2,
   submitIntervalSec: 60,
   excludeDisc: true,
   deleteSource: false,
@@ -356,7 +350,7 @@ const sourceBrowserTitle = computed(() =>
   sourceDriver.value?.type === "guangya" ? "① 光鸭源目录" : "① 115 源目录",
 )
 
-/** 源是光鸭账号——并发/间隔由后端强制收紧，前端置灰说明。 */
+/** 源是光鸭账号——提交间隔由后端强制收紧，前端置灰说明。 */
 const isGuangyaSource = computed(() => sourceDriver.value?.type === "guangya")
 
 /** 在途任务（提交顺序） */
@@ -532,7 +526,6 @@ async function start(): Promise<void> {
       target_path: targetStack.value.map((c) => c.name).join("/"),
       min_size_mb: Math.round((form.minSizeGb || 0) * 1024),
       max_size_mb: Math.round((form.maxSizeGb || 0) * 1024),
-      concurrency: form.concurrency,
       submit_interval_sec: form.submitIntervalSec,
       exclude_disc: form.excludeDisc,
       delete_source: form.deleteSource,

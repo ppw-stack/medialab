@@ -817,10 +817,66 @@ export interface Driver {
   last_scan_at: string | null
   last_synced_count: number
   /**
+   * 所属聚合组（`null` = 独立存储源，不参与聚合）。
+   * 一个聚合组 = 1 个主数据源 + N 个副数据源。
+   */
+  aggregate_group_id: number | null
+  /**
+   * 组内角色（`master` / `secondary`；`null` = 不参与聚合）。
+   * 副数据源是**缓冲**——内容不对外展示，归拢到主盘后自动清理副本。
+   */
+  role: string | null
+  /** 副数据源的缓冲根目录 id（光鸭 fileId）——放进这里的文件会被登记归拢 */
+  staging_root_id: string | null
+  /**
    * 测连状态（启动自动测连 / 手动测连的缓存）。
    * `null` = 尚未测连。
    */
   conn: DriverConnStatus | null
+}
+
+/** 聚合组（1 主 + N 副）。 */
+export interface AggregateGroup {
+  id: number
+  name: string
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+/** 聚合组水位（台账统计 + 主盘云添加额度）。 */
+export interface AggregateGroupStats {
+  group_id: number
+  group_name: string
+  /** 主数据源 id（`null` = 组还没配主盘） */
+  master_driver_id: number | null
+  /** 副数据源 id 列表 */
+  secondary_driver_ids: number[]
+  /** 各状态的条数（pending / syncing / verified / done / failed / paused） */
+  counts: Record<string, number>
+  /** 待归拢字节数 */
+  pending_bytes: number
+}
+
+/** 在途台账一行（副盘 → 主盘的待归拢文件）。 */
+export interface StagingRow {
+  id: number
+  group_id: number
+  source_driver_id: number
+  target_driver_id: number
+  remote_id: string
+  file_name: string
+  source_dir: string
+  target_dir: string
+  size_bytes: number
+  /** pending / syncing / verified / done / failed / paused */
+  state: string
+  attempts: number
+  last_error: string | null
+  created_at: string
+  updated_at: string
+  synced_at: string | null
+  cleaned_at: string | null
 }
 
 /** 存储源测连缓存（后端进程内缓存，含最近测连时间）。 */
@@ -878,6 +934,11 @@ export interface DriverConfig {
   include_subdirs: boolean
   /** 扫描时是否自动清理「网盘上已消失」的条目（prune） */
   auto_prune: boolean
+  /**
+   * 副数据源的缓冲根目录 id（光鸭 fileId）。
+   * 放进这个目录里的文件会被登记成在途任务 → 归拢回主数据源。
+   */
+  staging_root_id: string
 }
 
 /** 扫描统计。 */
@@ -1226,7 +1287,6 @@ export interface MigrationJob {
     target_path: string
     min_size_mb: number
     max_size_mb: number
-    concurrency: number
     /** 两次提交给光鸭之间的最小间隔（秒） */
     submit_interval_sec: number
     exclude_disc: boolean
@@ -1268,7 +1328,6 @@ export interface MigrationRunInput {
   target_path: string
   min_size_mb: number
   max_size_mb: number
-  concurrency: number
   submit_interval_sec: number
   exclude_disc: boolean
   /** 搬完清理源：迁移成功后删除源端文件（默认关；仅光鸭源支持） */

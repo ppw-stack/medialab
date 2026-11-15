@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import asyncio
 import posixpath
-import time
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
@@ -56,11 +55,25 @@ from app.db.session import session_scope
 from app.domain.driver_types import ROOT_DIR_IDS
 from app.services import naming
 from app.services.driver_factory import build_driver
+from app.services.migration_pipeline import (
+    GUANGYA_LANDED_NAME,
+    SubmitGate,
+    TargetIndex,
+    TaskWatcher,
+)
+from app.services.migration_pipeline import (
+    norm_dir as _norm_dir,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - 仅类型
     from app.services.migration_jobs import MigrationJob
 
 logger = get_logger(__name__)
+
+#: 兼容别名——管线件已抽到 :mod:`app.services.migration_pipeline`（归拢引擎共用），
+#: 但本模块历史上以私有名暴露它们，外部引用与测试仍按旧名访问。
+_TargetIndex = TargetIndex
+_SubmitGate = SubmitGate
 
 #: 轮询离线任务状态的间隔（秒）。
 #:
@@ -69,13 +82,10 @@ logger = get_logger(__name__)
 #:
 #: 实际取值来自配置 ``MIGRATION_POLL_INTERVAL_SEC``（默认 5 秒）；这里是
 #: **兜底默认值**，配置读不到时用它。
-POLL_INTERVAL_SEC = 5.0
-
-#: 「心跳」日志的间隔（秒）——超过这么久没有新日志就记一条当前在途状态。
 #:
-#: 大文件下载要几分钟，只有里程碑（25/50/75%）的话中间会长时间没动静，
-#: 看起来像卡死。心跳让页面始终有「活着」的证据。
-HEARTBEAT_INTERVAL_SEC = 30.0
+#: 注：轮询器实现已抽到 :mod:`app.services.migration_pipeline`（归拢引擎
+#: 共用），但**本模块保留这个常量**——测试会 monkeypatch 它来加速轮询。
+POLL_INTERVAL_SEC = 5.0
 
 #: 默认的「提交间隔」（秒）——两次给光鸭提交离线任务之间至少隔这么久。
 #:
@@ -86,14 +96,12 @@ HEARTBEAT_INTERVAL_SEC = 30.0
 #: 错开提交是**唯一可靠的对策**——重试只会再撞一次。
 DEFAULT_SUBMIT_INTERVAL_SEC = 60.0
 
-#: 任务从活跃列表「消失」几次才认定结束。
-#:
-#: 刚提交的任务可能还没出现在列表里，一次缺席就判结束会误杀。
-ABSENT_CONFIRM = 2
-
 #: 任务结束后校验落盘的重试次数与间隔。
 #:
 #: 文件索引有延迟：刚完成时目录里可能还查不到，验早了会误报失败。
+#:
+#: **单一真源在** :mod:`app.services.migration_pipeline`（归拢引擎共用），
+#: 此处再导出一份是为了让本模块的调用点读起来自洽。
 VERIFY_RETRIES = 3
 VERIFY_DELAY_SEC = 5.0
 
@@ -133,18 +141,12 @@ SOURCE_DRIVER_TYPES = frozenset({"p115", "guangya"})
 #: 额度，故间隔自动收紧——用户显式设更小的值照用，设 0（不限速）也照用。
 GUANGYA_SUBMIT_INTERVAL_MAX = 5.0
 
-#: 光鸭源的并发数——**恒为 1**。
+#: 迁移的并发数——**恒为 1**（迁移**不支持并发**，2026-11-15 决策）。
 #:
 #: 云下载的落盘名取自 URL 末段（光鸭直链末段 = ``download``），同目录
 #: 并发提交会触发服务端自动改名 ``download(1)``，改名完成前不能提交
 #: 下一个。额度也是瓶颈，并行无收益。
-GUANGYA_SOURCE_CONCURRENCY = 1
-
-#: 云下载落盘的默认文件名——光鸭 CDN 直链的 URL 末段（实测 2026-11-13：
-#: ``https://<pool>-httpdown.guangyacdn.com/download/?fid=...``）。
-#:
-#: 云下载按 URL 末段落名，故光鸭源的每个文件都先落成这个名字，再改名。
-GUANGYA_LANDED_NAME = "download"
+MIGRATION_CONCURRENCY = 1
 
 #: 云添加额度耗尽的文案特征（命中即暂停，不硬撞不重试）。
 #:
@@ -169,311 +171,6 @@ def _is_quota_error(message: str) -> bool:
 
 
 # --------------------------------------------------------------------------
-# 目标目录索引（光鸭侧）
-# --------------------------------------------------------------------------
-
-
-class _TargetIndex:
-    """目标目录的 fileId + 文件清单缓存。
-
-    一个 run 内共享：同一部影片目录会被多个文件命中，每个目录只查一次。
-    并发 worker 共用一个锁——目录解析是低频操作（每个目录一次），串行
-    反而避免了「两个 worker 同时给同一目录建副本」的竞态。
-    """
-
-    def __init__(self, driver: Any, root_id: str) -> None:
-        self._driver = driver
-        self._root = str(root_id or "")
-        self._dir_ids: dict[str, str] = {"": self._root}
-        self._files: dict[str, dict[str, int]] = {}
-        self._lock = asyncio.Lock()
-
-    async def resolve(self, rel_dir: str) -> tuple[str, dict[str, int]]:
-        """解析相对目录，返回 ``(fileId, {文件名: 大小})``（不存在就建）。
-
-        返回的是缓存的**副本**——调用方拿到后随便改都不会污染缓存。
-        """
-        rel = _norm_dir(rel_dir)
-        async with self._lock:
-            dir_id = await self._resolve_dir(rel)
-            files = self._files.get(rel)
-            if files is None:
-                files = dict(await self._driver.list_files(dir_id))
-                self._files[rel] = files
-            return dir_id, dict(files)
-
-    async def create_offline_task(self, url: str, dir_id: str) -> str:
-        """提交离线下载任务（转发给驱动，便于调用方只依赖 index）。"""
-        result: str = await self._driver.create_offline_task(url, dir_id)
-        return result
-
-    async def note_submitted(self, rel_dir: str, name: str, size: int) -> None:
-        """登记「已提交待下载」的文件。
-
-        **必须更新缓存**——否则后续对同一目录的预检会看不到刚提交的文件，
-        缓存与光鸭实际状态不一致（``resolve`` 返回旧数据、``refresh``
-        返回新数据，两者矛盾）。将来支持「重试失败项」时还会真的重复提交。
-        """
-        rel = _norm_dir(rel_dir)
-        async with self._lock:
-            files = self._files.setdefault(rel, {})
-            files[name] = size
-
-    async def rename_landed(
-        self,
-        rel_dir: str,
-        landed_names: tuple[str, ...],
-        size: int,
-        new_name: str,
-    ) -> str:
-        """把「已落盘但还没改名」的文件改名成 ``new_name``。
-
-        云下载按 **URL 末段**落名——115 直链末段是文件名（落名正确），
-        光鸭直链末段是 ``download``（实测），故光鸭源必须改名。
-
-        匹配条件（都要满足，避免误改用户自己的文件）：
-
-        1. 文件名是 ``landed_names`` 里的名字，或它的服务端自动改名形态
-           （``download(1)``）
-        2. **字节数完全一致**
-        3. 目标名与现名不同
-
-        Args:
-            rel_dir: 目标下的相对目录。
-            landed_names: 可能的落盘名（一般只有 ``download``）。
-            size: 期望的字节数。
-            new_name: 改成的目标名。
-
-        Returns:
-            改成的文件名；没找到可认领的文件则返回空串。
-        """
-        rel = _norm_dir(rel_dir)
-        async with self._lock:
-            dir_id = await self._resolve_dir(rel)
-            entries: dict[str, tuple[int, str]] = await self._driver.list_entries(
-                dir_id
-            )
-            for name, (entry_size, file_id) in entries.items():
-                if entry_size != size:
-                    continue
-                if name == new_name:
-                    continue
-                if not any(
-                    name == candidate or name.startswith(f"{candidate}(")
-                    for candidate in landed_names
-                ):
-                    continue
-                await self._driver.rename_file(file_id, new_name)
-                files = self._files.setdefault(rel, {})
-                files.pop(name, None)
-                files[new_name] = size
-                return name
-            return ""
-
-    async def delete_replaced(self, rel_dir: str, name: str, size: int) -> bool:
-        """删除目标侧「同名但更小」的文件（同名不同大小、保留大的时用）。
-
-        进回收站（可恢复）。找不到同名同大小的文件 → 返回 False（不删）。
-        """
-        rel = _norm_dir(rel_dir)
-        async with self._lock:
-            dir_id = await self._resolve_dir(rel)
-            entries: dict[str, tuple[int, str]] = await self._driver.list_entries(
-                dir_id
-            )
-            hit = entries.get(name)
-            if hit is None or hit[0] != size:
-                return False
-            await self._driver.delete_file(hit[1])
-            files = self._files.setdefault(rel, {})
-            files.pop(name, None)
-            return True
-
-    async def failure_reason(self, task_id: str) -> str:
-        """查光鸭给出的失败原因（查不到就返回空串）。
-
-        只在「任务已结束但目标目录没有文件」时调用——正常路径不额外花请求。
-        """
-        try:
-            items = await self._driver.list_failed_offline_tasks()
-        except Exception:
-            return ""
-        for item in items:
-            if str(item.get("taskId")) != task_id:
-                continue
-            message = str(item.get("errMsg") or "").strip()
-            code = item.get("errCode")
-            if not message:
-                continue
-            return f"光鸭离线下载失败：{message}" + (
-                f"（code={code}）" if code is not None else ""
-            )
-        return ""
-
-    async def refresh(self, rel_dir: str) -> dict[str, int]:
-        """**重新**列目录（任务结束后校验落盘用，绕过缓存）。"""
-        rel = _norm_dir(rel_dir)
-        async with self._lock:
-            dir_id = await self._resolve_dir(rel)
-            files: dict[str, int] = dict(await self._driver.list_files(dir_id))
-            self._files[rel] = files
-            return dict(files)
-
-    async def _resolve_dir(self, rel: str) -> str:
-        cached = self._dir_ids.get(rel)
-        if cached is not None:
-            return cached
-
-        parent_rel = posixpath.dirname(rel)
-        name = posixpath.basename(rel)
-        parent_id = await self._resolve_dir(parent_rel)
-        dir_id, created = await self._driver.create_dir(name, parent_id)
-        dir_id = str(dir_id)
-        self._dir_ids[rel] = dir_id
-        if created:
-            # 新建目录必定为空，省掉一次列表请求
-            self._files[rel] = {}
-        return dir_id
-
-
-# --------------------------------------------------------------------------
-# 离线任务监视器
-# --------------------------------------------------------------------------
-
-
-class _TaskWatcher:
-    """共享的离线任务轮询器（一个 run 一个）。
-
-    只判断「任务还在不在活跃列表里」——不读 progress 判定完成、不设超时。
-
-    **为什么不在途进度只报文件路径**：光鸭的 ``progress`` 字段语义不可靠
-    （实测它不是百分比，任务项初始甚至没有这个字段，只在真实拉取时出现），
-    展示它只会误导用户——大文件实际下到 88% 时它可能显示个位数。完成判定
-    走「任务从活跃列表消失」+「目标目录出现同名同大小文件」，与该字段无关。
-    """
-
-    def __init__(
-        self, driver: Any, job: MigrationJob, poll_interval: float | None = None
-    ) -> None:
-        self._driver = driver
-        self._job = job
-        self._pending: dict[str, asyncio.Event] = {}
-        self._seen: set[str] = set()
-        self._absent: dict[str, int] = {}
-        self._task: asyncio.Task[None] | None = None
-        self._stopped: bool = False
-        self._last_heartbeat = time.monotonic()
-        if poll_interval is None:
-            from app.core.config import get_settings
-
-            poll_interval = get_settings().migration_poll_interval_sec
-        self._poll_interval = max(1.0, float(poll_interval))
-
-    async def wait(self, task_id: str) -> None:
-        """等一个任务结束（从活跃列表消失）。"""
-        event = asyncio.Event()
-        self._pending[task_id] = event
-        self._ensure_running()
-        try:
-            await event.wait()
-        finally:
-            self._pending.pop(task_id, None)
-            self._seen.discard(task_id)
-            self._absent.pop(task_id, None)
-
-    def _ensure_running(self) -> None:
-        if self._stopped:
-            return
-        if self._task is None or self._task.done():
-            self._task = asyncio.create_task(self._loop())
-
-    async def _loop(self) -> None:
-        while not self._stopped and self._pending:
-            await asyncio.sleep(self._poll_interval)
-            try:
-                items = await self._driver.list_active_offline_tasks()
-            except Exception as exc:  # 轮询失败不致命，下一轮再来
-                self._job.log(f"⚠️ 查询离线任务失败（下轮重试）：{exc}")
-                continue
-
-            active: set[str] = set()
-            for item in items:
-                task_id = str(item.get("taskId") or "")
-                if not task_id:
-                    continue
-                active.add(task_id)
-
-            for task_id, event in list(self._pending.items()):
-                if task_id in active:
-                    self._seen.add(task_id)
-                    self._absent[task_id] = 0
-                    continue
-                self._absent[task_id] = self._absent.get(task_id, 0) + 1
-                if task_id in self._seen or self._absent[task_id] >= ABSENT_CONFIRM:
-                    event.set()
-
-            self._maybe_heartbeat()
-
-    async def close(self) -> None:
-        self._stopped = True
-        if self._task is not None:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
-
-    def _maybe_heartbeat(self) -> None:
-        """长时间没有新日志时，记一条当前在途状态（证明还活着）。
-
-        **每个任务一行**——早先把多个任务挤在一行，结果日志框里换行错乱、
-        完全看不出哪个是哪个（截图里就是这样）。且用**完整路径**，只看文件名
-        分不清是哪部剧。
-        """
-        now = time.monotonic()
-        if now - self._last_heartbeat < HEARTBEAT_INTERVAL_SEC:
-            return
-        self._last_heartbeat = now
-        items = self._job.in_flight_items
-        if not items:
-            return
-        self._job.log(f"⏱️ 仍在下载（{len(items)} 个）：")
-        for item in items.values():
-            # 用「│」做缩进标记——不能用空格（前端剥时间戳时会把前导空白吃掉）
-            self._job.log(f"│ {item['path']}")
-
-
-class _SubmitGate:
-    """全局提交闸门：保证两次提交之间至少间隔 N 秒。
-
-    **为什么要全局**（而不是每个 worker 各自 sleep）：worker 是并发的，
-    各自 sleep 仍可能撞在同一时刻。闸门用一把锁串行化「排队 + 计时」，
-    保证实际提交时刻彼此至少相隔 ``interval``。
-
-    **先过闸门再换链**：直链是「新鲜的」，光鸭收到就能开始拉；
-    若是先换链再等，链接可能在队列里放几十秒才开始下载。
-    """
-
-    def __init__(self, interval: float) -> None:
-        self._interval = max(0.0, float(interval))
-        self._next_at: float = 0.0
-        self._lock = asyncio.Lock()
-        #: 累计等待秒数（给日志/统计用）
-        self.total_waited = 0.0
-
-    async def wait(self) -> float:
-        """等到可以提交为止，返回本次实际等待的秒数。"""
-        if self._interval <= 0:
-            return 0.0
-        async with self._lock:
-            now = time.monotonic()
-            delay = max(0.0, self._next_at - now)
-            if delay > 0:
-                await asyncio.sleep(delay)
-            # 等待结束后才推进「下次可提交时刻」
-            self._next_at = time.monotonic() + self._interval
-            self.total_waited += delay
-            return delay
-
-
-# --------------------------------------------------------------------------
 # 主流程
 # --------------------------------------------------------------------------
 
@@ -487,7 +184,7 @@ async def run_migration(job: MigrationJob) -> None:
             await db.execute(select(Driver).where(Driver.id == params.source_driver_id))
         ).scalar_one_or_none()
         target = (
-            await db.execute(select(Driver).where(Driver.id == params.target_driver_id))
+            await db.execute(select(Driver).where(Driver.id == job.params.target_driver_id))
         ).scalar_one_or_none()
 
     if source is None or target is None:
@@ -503,7 +200,7 @@ async def run_migration(job: MigrationJob) -> None:
         raise MigrationError("源与目标是同一个存储源")
 
     async def _on_refresh(cred: Any) -> None:
-        await persist_guangya_credential(params.target_driver_id, cred)
+        await persist_guangya_credential(job.params.target_driver_id, cred)
 
     async def _on_refresh_source(cred: Any) -> None:
         await persist_guangya_credential(params.source_driver_id, cred)
@@ -542,13 +239,20 @@ async def run_migration(job: MigrationJob) -> None:
         base_path = "/" + params.source_path.strip("/")
     job.source_path = base_path
 
-    # 并发与提交间隔：光鸭源收紧（落盘名撞车 + 没有 115 频控）
-    concurrency = params.concurrency
+    # **恒串行**（2026-11-15 决策）：迁移**不支持并发**。
+    #
+    # 为什么串行是对的：
+    # - 云下载的落盘名取自 URL 末段（光鸭直链 = ``download``），同目录并发
+    #   提交会触发服务端自动改名 ``download(1)``，改名完成前不能提交下一个
+    # - 云添加额度稀缺（光鸭实测 3 次/账号/天）——并发提交只会更快撞墙
+    # - 115 源另有下载频控（403 ``115 pmt user 11-10``），错开提交是唯一
+    #   可靠对策
+    #
+    # 提交间隔仍按源类型收紧：115 源要 60s（避开下载频控），光鸭源 5s。
+    concurrency = MIGRATION_CONCURRENCY
     submit_interval = params.submit_interval_sec
-    if needs_rename:
-        concurrency = GUANGYA_SOURCE_CONCURRENCY
-        if submit_interval > 0:
-            submit_interval = min(submit_interval, GUANGYA_SUBMIT_INTERVAL_MAX)
+    if needs_rename and submit_interval > 0:
+        submit_interval = min(submit_interval, GUANGYA_SUBMIT_INTERVAL_MAX)
 
     # 「搬完清理源」：**只有光鸭源支持**（115 驱动没有删除能力）
     delete_source = bool(params.delete_source)
@@ -574,18 +278,18 @@ async def run_migration(job: MigrationJob) -> None:
     job.log(
         f"源 {base_path}（{source.name} / cid={params.source_cid}）"
         f"→ 目标 {params.target_path or '/'}（{target.name}）"
-        f"；阈值 ≥{params.min_size_mb} MB，并发 {concurrency}"
+        f"；阈值 ≥{params.min_size_mb} MB，串行提交"
         f"，提交间隔 {submit_interval:g}s"
     )
     if needs_rename:
         job.log(
             "ℹ️ 光鸭源：直链不绑 UA，云下载按 URL 末段落名（download）"
-            "→ 落盘后自动改名回原名；并发恒为 1（同目录并发会撞名）"
+            "→ 落盘后自动改名回原名；恒串行（同目录并发会撞名）"
         )
     if inflight:
         job.log(
             f"检测到 {len(inflight)} 个上一轮遗留的在途任务，本轮跳过对应文件"
-            f"（实际光鸭并发 ≈ {len(inflight) + concurrency}）"
+            f"（光鸭上实际在跑 {len(inflight) + concurrency} 个）"
         )
         if len(inflight) >= 5:
             job.log(
@@ -594,9 +298,9 @@ async def run_migration(job: MigrationJob) -> None:
             )
 
     queue: asyncio.Queue[CloudFile] = asyncio.Queue(maxsize=max(concurrency * 2, 4))
-    index = _TargetIndex(gyp, params.target_file_id)
-    watcher = _TaskWatcher(gyp, job)
-    gate = _SubmitGate(submit_interval)
+    index = TargetIndex(gyp, params.target_file_id)
+    watcher = TaskWatcher(gyp, log=job.log, poll_interval=POLL_INTERVAL_SEC)
+    gate = SubmitGate(submit_interval)
 
     producer: asyncio.Task[None] | None = None
     workers: list[asyncio.Task[None]] = []
@@ -699,9 +403,9 @@ async def _worker(
     job: MigrationJob,
     *,
     source: Any,
-    index: _TargetIndex,
-    watcher: _TaskWatcher,
-    gate: _SubmitGate,
+    index: TargetIndex,
+    watcher: TaskWatcher,
+    gate: SubmitGate,
     queue: asyncio.Queue[CloudFile],
     inflight: set[str],
     base_path: str,
@@ -759,9 +463,9 @@ async def _migrate_one(
     entry: CloudFile,
     *,
     source: Any,
-    index: _TargetIndex,
-    watcher: _TaskWatcher,
-    gate: _SubmitGate,
+    index: TargetIndex,
+    watcher: TaskWatcher,
+    gate: SubmitGate,
     inflight: set[str],
     base_path: str,
     needs_rename: bool,
@@ -835,6 +539,7 @@ async def _migrate_one(
     # ③ 错开提交：115 对「短时间拉取不同文件」有频控（实测 403
     #    "115 pmt user 11-10"），光鸭拉不到就记「云添加失败 code=8」。
     #    **先过闸门再换链**——直链是新鲜的，光鸭收到就能开始拉。
+    #
     waited = await gate.wait()
     if waited >= 1:
         job.log(f"⏱️ 错开提交，等待 {waited:.0f}s：{entry.path}")
@@ -849,6 +554,12 @@ async def _migrate_one(
         raise DriverError("源存储源返回空直链", kind="not_found")
     job.log(f"🔗 已换取直链：{entry.path}")
 
+    # ⑤ 提交云下载
+    #
+    # ⚠️ **额度靠撞墙判定**（没有账本——服务端不提供「剩余次数」查询）：
+    # 撞到「次数超限 / 额度 / 配额 / 每日上限」字样 → 作业暂停，次日自动续传。
+    # 泛化失败（「云添加失败」code=8）**认不出是不是额度** → 当普通失败，
+    # 跳过该文件继续下一个（**不自动重试**——失败也扣额度）。
     try:
         task_id = await index.create_offline_task(link.url, target_dir_id)
     except DriverError as exc:
@@ -865,7 +576,7 @@ async def _migrate_one(
     job.in_flight += 1
     job.track_task(task_id, entry.path, entry.size)
     try:
-        await watcher.wait(task_id)
+        await watcher.wait(task_id, path=entry.path, size=entry.size)
     finally:
         job.in_flight -= 1
         job.untrack_task(task_id)
@@ -996,10 +707,6 @@ def _relative_dir(path: str, base_path: str) -> str:
         return _norm_dir(parent[len(prefix) :])
     # 路径不在源目录下（cid 与后端反解的路径不一致）→ 落到目标根
     return ""
-
-
-def _norm_dir(rel: str) -> str:
-    return "/".join(p for p in rel.strip("/").split("/") if p)
 
 
 async def _collect_inflight(driver: Any, job: MigrationJob) -> set[str]:

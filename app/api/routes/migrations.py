@@ -50,8 +50,9 @@ class MigrationRunIn(BaseModel):
     min_size_mb: int = Field(default=0, ge=0)
     #: 体积上限（MB）——0 = 不限
     max_size_mb: int = Field(default=0, ge=0)
-    #: 光鸭上同时进行的离线任务数
-    concurrency: int = Field(default=2, ge=1, le=20)
+    # 注：**没有并发参数**——迁移恒串行（2026-11-15 决策）。
+    # 旧客户端若仍传 ``concurrency``，``extra="forbid"`` 会**显式拒绝**（422）
+    # ——而不是静默忽略（静默忽略会让调用方以为并发生效了）。
     #: 两次提交给光鸭之间的最小间隔（秒）——错开提交，避开 115 下载频控
     submit_interval_sec: float = Field(default=60.0, ge=0.0, le=600.0)
     #: 排除原盘（iso / m2ts / BDMV / CERTIFICATE）
@@ -120,7 +121,6 @@ async def run_migration(payload: MigrationRunIn) -> dict[str, Any]:
         target_path=payload.target_path,
         min_size_mb=payload.min_size_mb,
         max_size_mb=payload.max_size_mb,
-        concurrency=payload.concurrency,
         submit_interval_sec=payload.submit_interval_sec,
         exclude_disc=payload.exclude_disc,
         delete_source=payload.delete_source,

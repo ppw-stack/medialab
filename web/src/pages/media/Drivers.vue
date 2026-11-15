@@ -31,6 +31,18 @@
               <span>{{ record.name }}</span>
               <a-tag v-if="record.type === 'p115'" color="blue">115</a-tag>
               <a-tag v-else-if="record.type === 'guangya'" color="cyan">光鸭盘</a-tag>
+              <a-tooltip
+                v-if="record.role === 'master'"
+                title="聚合组的主数据源：内容以它为准（媒体库扫描 / STRM / 播放都只认它）"
+              >
+                <a-tag color="gold">主</a-tag>
+              </a-tooltip>
+              <a-tooltip
+                v-else-if="record.role === 'secondary'"
+                title="聚合组的副数据源：内容是缓冲，不对外展示——归拢到主盘后自动清理副本"
+              >
+                <a-tag color="orange">副</a-tag>
+              </a-tooltip>
             </div>
             <div v-if="statusText(record.id)" class="status-hint">
               {{ statusText(record.id) }}
@@ -111,7 +123,12 @@
                 tooltip 内层包 <span>：antd 的 disabled 按钮**不派发鼠标事件**，
                 tooltip 直接包按钮会完全不触发（antd 官方同款处理）。
               -->
-              <a-tooltip v-if="!record.media_cid || !record.output_dir" :title="scanDisabledTip(record)">
+              <a-tooltip v-if="isSecondary(record)" title="副数据源是缓冲，不参与媒体库扫描">
+                <span>
+                  <a-button size="small" disabled>扫描</a-button>
+                </span>
+              </a-tooltip>
+              <a-tooltip v-else-if="!record.media_cid || !record.output_dir" :title="scanDisabledTip(record)">
                 <span>
                   <a-button size="small" disabled>扫描</a-button>
                 </span>
@@ -194,6 +211,11 @@
       @ok="onSaveConfig"
     >
       <a-form layout="vertical">
+        <!--
+          副数据源是**缓冲**：不扫描、不生成 strm、不进媒体库 → 媒体库相关的
+          配置项全部隐藏（副盘只配「缓冲根目录」）。
+        -->
+        <template v-if="configDriver?.role !== 'secondary'">
         <a-form-item label="媒体库目录" required>
           <a-alert
             type="warning"
@@ -284,6 +306,25 @@
           </div>
         </a-form-item>
 
+        <a-form-item v-if="configDriver?.role === 'secondary'" label="缓冲根目录" required>
+          <a-alert
+            type="info"
+            show-icon
+            style="margin-bottom: 8px"
+            message="副数据源是缓冲盘"
+            description="放进这个目录里的文件会被登记成在途任务，后台搬回主数据源的媒体库目录下的同名相对路径；主盘确认落盘后自动清理这里的副本（进回收站，可恢复）。"
+          />
+          <DirBrowser
+            title="副盘缓冲根目录"
+            :stack="stagingStack"
+            :dirs="stagingDirs"
+            :loading="loadingStagingDirs"
+            @open="openStagingDir"
+            @go="goStagingDir"
+          />
+          <div class="muted hint">已选：{{ stagingSelectedLabel }}</div>
+        </a-form-item>
+
         <a-form-item label="扫描时清理已删除">
           <a-switch v-model:checked="configForm.auto_prune" />
           <div class="hint">
@@ -298,6 +339,7 @@
             style="margin-top: 6px"
           />
         </a-form-item>
+        </template>
       </a-form>
 
       <template #footer>
@@ -719,7 +761,14 @@ const configForm = ref<DriverConfig>({
   min_size_mb: 0,
   include_subdirs: true,
   auto_prune: false,
+  staging_root_id: "",
 })
+
+/** 副数据源的缓冲根目录浏览状态（与媒体库目录各一套，互不干扰）。 */
+const stagingStack = ref<DirEntry[]>([])
+const stagingDirs = ref<DirEntry[]>([])
+const stagingPicked = ref<{ id: string; path: string } | null>(null)
+const loadingStagingDirs = ref(false)
 
 /** 编辑存储源（名称 / 设备类型） */
 const editOpen = ref(false)
@@ -1057,13 +1106,18 @@ function openConfig(driver: Driver): void {
     min_size_mb: driver.min_size_mb ?? 0,
     include_subdirs: driver.include_subdirs ?? true,
     auto_prune: driver.auto_prune ?? false,
+    staging_root_id: driver.staging_root_id ?? "",
   }
   // 浏览状态回到账号根——本次浏览的选中记录清空（已有配置仍显示在下方）
   mediaStack.value = [{ id: "", name: "网盘根目录" }]
   mediaDirs.value = []
   mediaPicked.value = null
+  stagingStack.value = [{ id: "", name: "网盘根目录" }]
+  stagingDirs.value = []
+  stagingPicked.value = null
   configOpen.value = true
   void loadMediaDirs("")
+  void loadStagingDirs("")
 }
 
 /** 加载某目录下的**子目录**（逐层懒加载，不一次性拉全树）。 */
@@ -1082,6 +1136,52 @@ async function loadMediaDirs(parentId: string): Promise<void> {
     loadingMediaDirs.value = false
   }
 }
+
+/** 加载副盘缓冲根目录下的子目录（逐层懒加载）。 */
+async function loadStagingDirs(parentId: string): Promise<void> {
+  const driver = configDriver.value
+  if (!driver) return
+  loadingStagingDirs.value = true
+  try {
+    const resp = await api.get<{ dirs: DirEntry[] }>(
+      `/drivers/${driver.id}/browse-dirs?parent_id=${encodeURIComponent(parentId)}`,
+    )
+    stagingDirs.value = resp.dirs ?? []
+  } catch (e) {
+    message.error(errMsg(e, "加载缓冲目录失败"))
+  } finally {
+    loadingStagingDirs.value = false
+  }
+}
+
+function openStagingDir(entry: DirEntry): void {
+  stagingStack.value = [...stagingStack.value, entry]
+  pickStagingDir(entry)
+  void loadStagingDirs(entry.id)
+}
+
+function goStagingDir(index: number): void {
+  stagingStack.value = stagingStack.value.slice(0, index + 1)
+  const picked = stagingStack.value[index]
+  if (!picked) return
+  pickStagingDir(picked)
+  void loadStagingDirs(picked.id)
+}
+
+function pickStagingDir(entry: DirEntry): void {
+  stagingPicked.value = { id: entry.id, path: mediaPathOf(stagingStack.value) }
+  configForm.value.staging_root_id = entry.id
+}
+
+/** 副数据源？——副盘不参与媒体库扫描（内容会归拢到主盘）。 */
+function isSecondary(record: Driver): boolean {
+  return record.role === "secondary"
+}
+
+const stagingSelectedLabel = computed(() => {
+  if (!configForm.value.staging_root_id) return "（未选）"
+  return configForm.value.staging_root_id
+})
 
 /**
  * 进入子目录 —— **同时把它设为选中的媒体库目录**。
@@ -1137,6 +1237,7 @@ async function onSaveConfig(): Promise<void> {
       min_size_mb: configForm.value.min_size_mb ?? 0,
       include_subdirs: configForm.value.include_subdirs ?? true,
       auto_prune: configForm.value.auto_prune ?? false,
+      staging_root_id: configForm.value.staging_root_id || null,
     })
     message.success("已保存")
     configOpen.value = false

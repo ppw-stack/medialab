@@ -60,6 +60,13 @@ DEFAULT_CRON: dict[str, str] = {
     # 下载整理（每小时——用户在等下载入库，不宜太久）：
     # 分钟位 23 避开所有既有作业（*/10、*/30、5,15,…、*/5、37 8、17 */3、41 3）。
     "organize_files": "23 * * * *",
+    # 网盘聚合归拢（每小时）：副数据源的缓冲文件搬回主数据源。
+    # 分钟位 29 避开所有既有作业。
+    #
+    # **为什么是每小时**：归拢速度受**云添加额度**限制（光鸭实测 3 次/账号/天），
+    # 不是受调度频率限制——跑得再勤也不会超过当日额度。小时级足够，
+    # 且撞上额度耗尽时只是「等明天」，不会白扣。
+    "aggregate_sync": "29 * * * *",
 }
 
 
@@ -183,6 +190,15 @@ JOB_META: tuple[JobMeta, ...] = (
         ),
         make_func=lambda f: _job_fn(_run_organize),
     ),
+    JobMeta(
+        name="aggregate_sync",
+        title="聚合归拢",
+        description=(
+            "把副数据源缓冲的文件搬回主数据源（云下载），"
+            "主盘确认落盘后自动清理副盘副本"
+        ),
+        make_func=lambda f: _job_fn(_run_aggregate_sync),
+    ),
 )
 
 
@@ -258,6 +274,7 @@ def preflight_job_imports() -> None:
         "app.services.cross_seed_maintenance",  # _run_cross_seed_maintenance
         "app.services.scrape_jobs",     # _run_scrape_metadata（整理刮削迁移）
         "app.services.organize_service",  # _run_organize（整理刮削迁移）
+        "app.services.aggregate_sync",  # _run_aggregate_sync（网盘聚合归拢）
     ):
         importlib.import_module(mod)
 
@@ -335,6 +352,13 @@ async def _run_organize() -> dict[str, object]:
     from app.services.organize_service import run_organize
 
     return await run_organize()
+
+
+async def _run_aggregate_sync() -> dict[str, object]:
+    """执行聚合归拢（副数据源 → 主数据源）。"""
+    from app.services.aggregate_sync import run_aggregate_sync
+
+    return await run_aggregate_sync()
 
 
 def _job_fn(

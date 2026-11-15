@@ -369,7 +369,6 @@ async def test_run_migration_end_to_end(
         target_file_id="root",
         target_path="/影视",
         min_size_mb=1,
-        concurrency=2,
         submit_interval_sec=0.0,
     )
     job = migration_jobs.MigrationJob(id="testjob", params=params)
@@ -385,6 +384,8 @@ async def test_run_migration_end_to_end(
     assert job.failed == 0
     assert job.migrated_bytes == 3_000_000_000 + 2_500_000_000
     assert job.legacy_inflight == 1
+    # **恒串行**（2026-11-15 决策）：任何源类型都只有一个在途任务
+    assert gyp.max_inflight == 1, f"并发没收敛：{gyp.max_inflight}"
     # E03 与目标同名但**源更大** → 删目标侧旧文件并重传（保留大的）
     assert [p for p, _ in gyp.submitted] == ["new1", "conflict1"]
     # 目标目录层级与源目录镜像
@@ -461,7 +462,6 @@ async def test_submit_gate_spaces_out_submissions(
         target_driver_id=102,
         target_file_id="root",
         target_path="/影视/电影/动画电影",
-        concurrency=3,  # 并发拉满，仍必须错开
         submit_interval_sec=interval,
     )
     job = migration_jobs.MigrationJob(id="testjob3", params=params)
@@ -608,7 +608,6 @@ async def test_guangya_source_end_to_end(db_session, monkeypatch: pytest.MonkeyP
         target_driver_id=202,
         target_file_id="root",
         target_path="/影视",
-        concurrency=5,  # 光鸭源必须强制收敛到 1
     )
     job = migration_jobs.MigrationJob(id="gypjob", params=params)
 
@@ -656,6 +655,47 @@ async def test_guangya_source_adopts_leftover(db_session, monkeypatch: pytest.Mo
     assert gyp.submitted == [], "不该重复提交（云添加额度稀缺）"
     show_id = gyp._dirs["root"]["A (2020)"]
     assert gyp._files[show_id]["A.mkv"] == 1_000_000
+
+
+async def test_migration_is_strictly_serial(
+    db_session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """迁移**不支持并发**——任何时刻只有一个在途的云下载任务。
+
+    为什么必须串行：
+    - 云下载的落盘名取自 URL 末段（光鸭直链 = ``download``），同目录并发
+      提交会触发服务端自动改名 ``download(1)``，改名完成前不能提交下一个
+    - 云添加额度稀缺，并发只会更快撞墙
+    """
+    await _seed_guangya_drivers(db_session)
+
+    files = [
+        _entry("/影视/电影/A (2020)/A.mkv", 1_000_000, "f1"),
+        _entry("/影视/电影/A (2020)/B.mkv", 1_000_000, "f2"),
+        _entry("/影视/电影/A (2020)/C.mkv", 1_000_000, "f3"),
+    ]
+    src = _FakeGuangyaSource(files)
+    gyp = _FakeGuangya(
+        {"f1": ("A.mkv", 1_000_000), "f2": ("B.mkv", 1_000_000), "f3": ("C.mkv", 1_000_000)},
+        landed_name="download",
+    )
+
+    monkeypatch.setattr(migration, "build_driver", _guangya_build(src, gyp))
+
+    params = migration_jobs.MigrationParams(
+        source_driver_id=201,
+        source_cid="1962124234139361322",
+        source_path="/影视/电影",
+        target_driver_id=202,
+        target_file_id="root",
+        submit_interval_sec=0.0,
+    )
+    job = migration_jobs.MigrationJob(id="serial-job", params=params)
+
+    await migration.run_migration(job)
+
+    assert job.success == 3, job.logs
+    assert gyp.max_inflight == 1, f"并发没收敛：{gyp.max_inflight}"
 
 
 async def test_quota_exhausted_pauses_job(db_session, monkeypatch: pytest.MonkeyPatch) -> None:

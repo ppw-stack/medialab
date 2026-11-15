@@ -40,6 +40,7 @@ const routes: RouteRecordRaw[] = [
 
       // -- 媒体库域 --
       { path: 'drivers', name: 'drivers', component: () => import('./pages/media/Drivers.vue') },
+      { path: 'aggregate', name: 'aggregate', component: () => import('./pages/media/Aggregate.vue') },
       { path: 'library', name: 'library', component: () => import('./pages/media/Library.vue') },
       { path: 'migrations', name: 'migrations', component: () => import('./pages/media/Migrations.vue') },
       { path: 'scrape', name: 'scrape', component: () => import('./pages/media/Scrape.vue') },

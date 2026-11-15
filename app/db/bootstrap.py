@@ -277,7 +277,9 @@ class DbBootstrap:
         await self._migrate_upload_tasks()
         await self._migrate_scrape_tables()
         await self._drop_obsolete_columns()
-        await self._drop_obsolete_tables(("scan_rules", "dav_acl"))
+        # ``quota_ledger`` 是「云添加额度账本」表的遗留（2026-11-15 改方案：
+        # 额度改走**撞墙探测**，不再记账）——表已无用途，删掉。
+        await self._drop_obsolete_tables(("scan_rules", "dav_acl", "quota_ledger"))
 
     async def _migrate_driver_config(self) -> None:
         """给 ``drivers`` 表补齐媒体库配置列（幂等）。"""
@@ -298,6 +300,12 @@ class DbBootstrap:
             ("auto_prune", "INTEGER", "0"),
             ("last_scan_at", "VARCHAR(32)", None),
             ("last_synced_count", "INTEGER", "0"),
+            # 聚合（主从）配置 (2026-11-15)：组归属 + 组内角色。
+            # NULL = 独立存储源，行为与引入聚合前完全一致。
+            ("aggregate_group_id", "INTEGER", None),
+            ("role", "VARCHAR(16)", None),
+            # 副数据源的缓冲根目录 id（光鸭 fileId）
+            ("staging_root_id", "VARCHAR(64)", None),
         )
         await self._add_columns("drivers", columns)
 
