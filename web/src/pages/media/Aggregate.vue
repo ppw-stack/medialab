@@ -44,15 +44,33 @@
       </template>
       <template #extra>
         <a-space>
-          <a-tooltip title="扫描副盘缓冲目录，把里面的文件登记成在途任务（幂等）">
-            <a-button size="small" :loading="busyGroupId === group.id" @click="enqueue(group.id)">
-              登记在途
-            </a-button>
+          <!--
+            禁用原因必须写出来（仓库老规矩）：归拢要「主盘目标目录 + 至少
+            一个副盘缓冲根」，缺哪一项就点名说哪一项。
+          -->
+          <a-tooltip :title="enqueueTip(group)">
+            <span>
+              <a-button
+                size="small"
+                :disabled="!!enqueueTip(group)"
+                :loading="busyGroupId === group.id"
+                @click="enqueue(group.id)"
+              >
+                登记在途
+              </a-button>
+            </span>
           </a-tooltip>
-          <a-tooltip title="立刻跑一轮归拢（受当日云添加额度限制）">
-            <a-button size="small" :loading="syncingGroupId === group.id" @click="syncNow(group.id)">
-              立即归拢
-            </a-button>
+          <a-tooltip :title="syncTip(group)">
+            <span>
+              <a-button
+                size="small"
+                :disabled="!!syncTip(group)"
+                :loading="syncingGroupId === group.id"
+                @click="syncNow(group.id)"
+              >
+                立即归拢
+              </a-button>
+            </span>
           </a-tooltip>
           <a-switch
             :checked="group.enabled"
@@ -354,6 +372,26 @@ const candidates = computed(() => drivers.value.filter((d) => d.type === "guangy
 /** 某组的目录映射 */
 function mappingOf(groupId: number): AggregateGroupMapping | undefined {
   return mappings.value[groupId]
+}
+
+/** 「登记在途」的禁用原因（空串 = 可用）。 */
+function enqueueTip(group: AggregateGroup): string {
+  const m = mappingOf(group.id)
+  if (!m?.target_dir_id) return "缺少归拢目标目录——请先「配置」目录映射"
+  const withRoot = secondariesOf(group).filter((d) =>
+    (m?.roots ?? []).some((r) => r.driver_id === d.id),
+  )
+  if (withRoot.length === 0) {
+    return "副盘都没配缓冲根目录——请先「配置」目录映射"
+  }
+  return "扫描副盘缓冲目录，把里面的文件登记成在途任务（幂等）"
+}
+
+/** 「立即归拢」的禁用原因（空串 = 可用）。 */
+function syncTip(group: AggregateGroup): string {
+  const m = mappingOf(group.id)
+  if (!m?.target_dir_id) return "缺少归拢目标目录——请先「配置」目录映射"
+  return "立刻跑一轮归拢（受当日云添加额度限制）"
 }
 
 /** 组内的副数据源 */
