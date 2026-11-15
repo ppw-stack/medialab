@@ -54,6 +54,7 @@ from app.domain.upload_types import DEFAULT_UPLOAD_CONCURRENCY
 
 __all__ = [
     "AggregateGroup",
+    "AggregateGroupRoot",
     "AppEnvSetting",
     "Base",
     "CrossSeedOrphan",
@@ -603,14 +604,6 @@ class Driver(Base):
     #: - ``secondary`` —— 副数据源：缓冲，**内容不对外展示**
     role: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
-    #: 副数据源的**缓冲根目录 id**（光鸭 fileId）。
-    #:
-    #: 副盘是「缓冲」——放进这个目录里的文件会被登记进归拢台账，随后搬到
-    #: 主数据源的媒体库目录下的**同名相对路径**。
-    #:
-    #: 只对副数据源有意义（主数据源不需要）。
-    staging_root_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-
     __table_args__ = (
         Index("idx_drivers_group_role", "aggregate_group_id", "role"),
     )
@@ -631,10 +624,55 @@ class AggregateGroup(Base):
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     #: 是否启用（停用的组不参与归拢调度）
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    #: **归拢目标目录 id**（主盘上的目录，光鸭 fileId）。
+    #:
+    #: 归拢落点是**组自己的配置**——不是主盘的媒体库目录（那是存储源的
+    #: 媒体库配置，与聚合无关）。副盘缓冲根下的相对路径原样铺到它下面。
+    target_dir_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: 归拢目标目录路径（**只读展示**）
+    target_dir_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     #: 创建时间（北京时间字符串）
     created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
     updated_at: Mapped[str] = mapped_column(
         String(32), default=_bj_now, onupdate=_bj_now
+    )
+
+
+class AggregateGroupRoot(Base):
+    """组 ↔ 副盘**缓冲根目录**的映射（每个副盘一行）。
+
+    **为什么是组级而不是挂在存储源上**：「从副盘的哪个目录，搬到主盘的哪个
+    目录」是一条**组与组之间的映射关系**，两端都属于组。挂在 ``drivers``
+    上会把聚合的配置混进存储源配置（存储源那边管的是媒体库：媒体库目录 /
+    本地输出目录 / 后缀 / prune）。
+
+    ⚠️ **归属**（``drivers.aggregate_group_id`` / ``drivers.role``）仍然
+    挂在盘上——那是 1:1 的归属关系（一个盘一个组、组内一个角色），无处可挂。
+    """
+
+    __tablename__ = "aggregate_group_roots"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: 所属聚合组
+    group_id: Mapped[int] = mapped_column(
+        ForeignKey("aggregate_groups.id", ondelete="CASCADE"), nullable=False
+    )
+    #: 副数据源（缓冲根在这个账号里）
+    driver_id: Mapped[int] = mapped_column(
+        ForeignKey("drivers.id", ondelete="CASCADE"), nullable=False
+    )
+    #: 缓冲根目录 id（该副盘账号内的 fileId）
+    root_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: 缓冲根目录路径（**只读展示**）
+    root_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 创建时间（北京时间字符串）
+    created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
+    updated_at: Mapped[str] = mapped_column(
+        String(32), default=_bj_now, onupdate=_bj_now
+    )
+
+    __table_args__ = (
+        UniqueConstraint("group_id", "driver_id", name="uq_group_root_driver"),
     )
 
 

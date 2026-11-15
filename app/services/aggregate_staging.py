@@ -26,6 +26,7 @@ from sqlalchemy import func, select
 from app.core.timeutils import bj_now
 from app.db.models import (
     AggregateGroup,
+    AggregateGroupRoot,
     Driver,
     SecondaryStaging,
 )
@@ -158,9 +159,10 @@ async def enqueue_from_staging_root(group_id: int) -> dict[str, int]:
         )
         if master is None:
             raise ServiceError("该组还没有主数据源，无法登记归拢任务", status=400)
-        if not master.media_cid:
+        # 归拢落点是**组自己的配置**（不是主盘的媒体库目录）
+        if not group.target_dir_id:
             raise ServiceError(
-                f"主数据源「{master.name}」未配置媒体库目录，归拢目标无处可放",
+                "该组未配置「归拢目标目录」，无处可放——请在「网盘聚合」页配置",
                 status=400,
             )
 
@@ -176,12 +178,26 @@ async def enqueue_from_staging_root(group_id: int) -> dict[str, int]:
             .scalars()
             .all()
         )
+        # 缓冲根来自**组级映射表**（aggregate_group_roots）——
+        # 聚合的目录映射两端都属组，不挂在存储源上
+        roots = (
+            (
+                await db.execute(
+                    select(AggregateGroupRoot).where(
+                        AggregateGroupRoot.group_id == group_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        root_by_driver = {int(r.driver_id): str(r.root_id) for r in roots}
 
         master_id = int(master.id)
-        secondaries = [s for s in secondaries if s.enabled and s.staging_root_id]
         secondary_specs = [
-            (int(s.id), str(s.staging_root_id), s.credential, s.device_type)
+            (int(s.id), root_by_driver[int(s.id)], s.credential, s.device_type)
             for s in secondaries
+            if s.enabled and int(s.id) in root_by_driver
         ]
 
     scanned = 0

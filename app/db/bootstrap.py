@@ -274,9 +274,14 @@ class DbBootstrap:
         故此处**不删** ``job_runs``——见下方注释。
         """
         await self._migrate_driver_config()
+        await self._migrate_aggregate_groups()
         await self._migrate_upload_tasks()
         await self._migrate_scrape_tables()
         await self._drop_obsolete_columns()
+        # ``drivers.staging_root_id``（副盘缓冲根）挪到了组级表
+        # ``aggregate_group_roots``——聚合的目录映射两端都属组，不混进存储源
+        # 配置。存量全为 NULL（从未使用），删列安全。
+        await self._drop_column("drivers", "staging_root_id")
         # ``quota_ledger`` 是「云添加额度账本」表的遗留（2026-11-15 改方案：
         # 额度改走**撞墙探测**，不再记账）——表已无用途，删掉。
         await self._drop_obsolete_tables(("scan_rules", "dav_acl", "quota_ledger"))
@@ -304,8 +309,6 @@ class DbBootstrap:
             # NULL = 独立存储源，行为与引入聚合前完全一致。
             ("aggregate_group_id", "INTEGER", None),
             ("role", "VARCHAR(16)", None),
-            # 副数据源的缓冲根目录 id（光鸭 fileId）
-            ("staging_root_id", "VARCHAR(64)", None),
         )
         await self._add_columns("drivers", columns)
 
@@ -333,6 +336,20 @@ class DbBootstrap:
         await self._drop_column("upload_tasks", "last_sync_at")
         await self._drop_column("upload_tasks", "last_uploaded_count")
         await self._drop_column("upload_tasks", "last_error")
+
+    async def _migrate_aggregate_groups(self) -> None:
+        """给 ``aggregate_groups`` 补「归拢目标目录」两列（幂等）。
+
+        归拢落点是**组自己的配置**（不是主盘的媒体库目录）——副盘缓冲根下的
+        相对路径原样铺到它下面。
+        """
+        await self._add_columns(
+            "aggregate_groups",
+            (
+                ("target_dir_id", "VARCHAR(64)", None),
+                ("target_dir_path", "TEXT", None),
+            ),
+        )
 
     async def _migrate_scrape_tables(self) -> None:
         """给 ``media_scrape`` 表补列（幂等）。

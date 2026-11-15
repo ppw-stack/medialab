@@ -19,13 +19,19 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import AggregateGroup, Driver, MediaFile, SecondaryStaging
+from app.db.models import (
+    AggregateGroup,
+    AggregateGroupRoot,
+    Driver,
+    MediaFile,
+    SecondaryStaging,
+)
 from app.db.session import session_scope
 from app.domain.aggregate_types import (
     ROLE_LABELS,
@@ -37,12 +43,16 @@ from app.services.errors import ServiceError
 
 __all__ = [
     "AggregateGroupRow",
+    "GroupMapping",
+    "GroupRootSpec",
     "assign_driver_role",
     "clear_driver_role",
     "create_group",
     "delete_group",
     "get_group",
+    "get_mapping",
     "list_groups",
+    "set_mapping",
     "update_group",
 ]
 
@@ -63,6 +73,35 @@ class AggregateGroupRow:
     enabled: bool
     created_at: str
     updated_at: str
+    #: 归拢目标目录 id（主盘上的目录；None = 未配置）
+    target_dir_id: str | None = None
+    #: 归拢目标目录路径（只读展示）
+    target_dir_path: str | None = None
+
+
+@dataclass(slots=True)
+class GroupRootSpec:
+    """一个副盘的缓冲根（组 ↔ 副盘 的映射项）。"""
+
+    driver_id: int
+    root_id: str
+    root_path: str | None = None
+
+
+@dataclass(slots=True)
+class GroupMapping:
+    """一个聚合组的**完整目录映射**。
+
+    语义：**从哪些副盘的哪些目录，搬到主盘的哪个目录**。
+    两端都是组级配置——不借存储源的媒体库配置。
+    """
+
+    group_id: int
+    #: 主盘上的归拢目标目录（None = 未配置）
+    target_dir_id: str | None = None
+    target_dir_path: str | None = None
+    #: 各副盘的缓冲根
+    roots: list[GroupRootSpec] = field(default_factory=list)
 
 
 def _to_group_row(row: AggregateGroup) -> AggregateGroupRow:
@@ -72,6 +111,8 @@ def _to_group_row(row: AggregateGroup) -> AggregateGroupRow:
         enabled=bool(row.enabled),
         created_at=row.created_at,
         updated_at=row.updated_at,
+        target_dir_id=row.target_dir_id,
+        target_dir_path=row.target_dir_path,
     )
 
 
@@ -160,6 +201,131 @@ async def delete_group(group_id: int) -> None:
         await db.execute(delete(SecondaryStaging).where(SecondaryStaging.group_id == group_id))
         await db.execute(delete(AggregateGroup).where(AggregateGroup.id == group_id))
         await db.commit()
+
+
+async def get_mapping(group_id: int) -> GroupMapping:
+    """取一个组的**完整目录映射**（主盘落点 + 各副盘缓冲根）。"""
+    async with session_scope() as db:
+        group = await _get_group_or_404(db, group_id)
+        roots = (
+            (
+                await db.execute(
+                    select(AggregateGroupRoot)
+                    .where(AggregateGroupRoot.group_id == group_id)
+                    .order_by(AggregateGroupRoot.driver_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return GroupMapping(
+            group_id=group.id,
+            target_dir_id=group.target_dir_id,
+            target_dir_path=group.target_dir_path,
+            roots=[
+                GroupRootSpec(
+                    driver_id=int(r.driver_id),
+                    root_id=str(r.root_id),
+                    root_path=r.root_path,
+                )
+                for r in roots
+            ],
+        )
+
+
+async def set_mapping(
+    group_id: int,
+    *,
+    target_dir_id: str | None,
+    target_dir_path: str | None = None,
+    roots: list[GroupRootSpec] | None = None,
+) -> GroupMapping:
+    """设置一个组的**目录映射**（一次提交整组映射）。
+
+    校验：
+
+    - 主盘落点：留空 = 不配置（归拢作业会**明确跳过**并把原因写进明细）
+    - 副盘缓冲根：只接受**组内副数据源**（组外的盘给了也不认）
+    - 同一副盘只能有一条（表上有 UNIQUE 约束）
+
+    Args:
+        group_id: 聚合组 id。
+        target_dir_id: 主盘上的归拢目标目录 id（None/空 = 清除）。
+        target_dir_path: 目标目录路径（只读展示）。
+        roots: 各副盘的缓冲根（None = 不改动副盘侧）。
+    """
+    async with session_scope() as db:
+        group = await _get_group_or_404(db, group_id)
+
+        # 组内成员（校验副盘身份用）
+        members = (
+            (
+                await db.execute(
+                    select(Driver).where(Driver.aggregate_group_id == group_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        secondary_ids = {
+            int(d.id) for d in members if d.role == ROLE_SECONDARY
+        }
+
+        group.target_dir_id = target_dir_id or None
+        group.target_dir_path = target_dir_path or None
+
+        if roots is not None:
+            # 全量替换该组的缓冲根（未列出的副盘 = 清掉）
+            wanted = {int(r.driver_id) for r in roots}
+            outside = wanted - secondary_ids
+            if outside:
+                raise ServiceError(
+                    f"存储源 {sorted(outside)} 不是该组的副数据源，无法设置缓冲根",
+                    status=400,
+                )
+            for r in roots:
+                if not r.root_id:
+                    continue
+                existing = (
+                    await db.execute(
+                        select(AggregateGroupRoot).where(
+                            AggregateGroupRoot.group_id == group_id,
+                            AggregateGroupRoot.driver_id == int(r.driver_id),
+                        )
+                    )
+                ).scalar_one_or_none()
+                if existing is None:
+                    db.add(
+                        AggregateGroupRoot(
+                            group_id=group_id,
+                            driver_id=int(r.driver_id),
+                            root_id=r.root_id,
+                            root_path=r.root_path,
+                        )
+                    )
+                else:
+                    existing.root_id = r.root_id
+                    existing.root_path = r.root_path
+            # 清掉没在本次提交里的旧映射
+            stale = (
+                (
+                    await db.execute(
+                        select(AggregateGroupRoot).where(
+                            AggregateGroupRoot.group_id == group_id,
+                            AggregateGroupRoot.driver_id.notin_(tuple(wanted) or (0,)),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for row in stale:
+                await db.delete(row)
+
+        await db.commit()
+        await db.refresh(group)
+
+    return await get_mapping(group_id)
 
 
 async def assign_driver_role(

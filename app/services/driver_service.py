@@ -116,8 +116,6 @@ class DriverRow:
     aggregate_group_id: int | None
     #: 组内角色（``master`` / ``secondary``；None = 不参与聚合）
     role: str | None
-    #: 副数据源的缓冲根目录 id（光鸭 fileId）
-    staging_root_id: str | None
 
 
 @dataclass(slots=True)
@@ -161,7 +159,6 @@ def to_driver_row(row: Driver) -> DriverRow:
         last_synced_count=row.last_synced_count or 0,
         aggregate_group_id=row.aggregate_group_id,
         role=row.role,
-        staging_root_id=row.staging_root_id,
     )
 
 
@@ -192,11 +189,6 @@ def mask_credential(credential: str | None) -> str:
 
 #: 「未传该参数」的哨兵——区分「不传」与「传空串」。
 #:
-#: 用于 ``staging_root_id``：配置抽屉保存时会显式传空串表示「清空」，
-#: 而不传表示「这次不动它」。
-_UNSET: Any = object()
-
-
 # ================================================================ 内部函数
 #
 # 带 ``db`` 参数——供其它 service 复用（它们自己管事务）。
@@ -460,7 +452,6 @@ async def update_driver_config(
     min_size_mb: int = 0,
     include_subdirs: bool = True,
     auto_prune: bool = False,
-    staging_root_id: str | Any | None = _UNSET,
 ) -> DriverRow:
     """保存媒体库配置。
 
@@ -486,9 +477,6 @@ async def update_driver_config(
         row.min_size_mb = min_size_mb
         row.include_subdirs = include_subdirs
         row.auto_prune = auto_prune
-        if staging_root_id is not _UNSET:
-            # 副数据源的缓冲根目录（光鸭 fileId）——清空 = 传空串
-            row.staging_root_id = staging_root_id or None
         row.updated_at = bj_now()
         await db.commit()
         await db.refresh(row)

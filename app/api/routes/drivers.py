@@ -78,12 +78,6 @@ class DriverConfigIn(BaseModel):
     #:
     #: 默认关——清理会**永久删除**本地 strm（不进回收站），不可逆。
     auto_prune: bool = False
-    #: 副数据源的**缓冲根目录 id**（光鸭 fileId）。
-    #:
-    #: 只对副数据源有意义：放进这个目录里的文件会被登记进归拢台账，
-    #: 随后搬到主数据源的媒体库目录下的同名相对路径。
-    #: 留空 = 不登记（该副盘不作为缓冲区）。
-    staging_root_id: str | None = Field(default=None, max_length=64)
 
 
 class DeviceTypeOut(BaseModel):
@@ -154,8 +148,6 @@ class DriverOut(BaseModel):
     aggregate_group_id: int | None = None
     #: 组内角色（``master`` / ``secondary``；None = 不参与聚合）
     role: str | None = None
-    #: 副数据源的缓冲根目录 id（光鸭 fileId）
-    staging_root_id: str | None = None
 
     # -- 测连状态（启动自动测连 / 手动测连的缓存；None = 未测连） --
     conn: DriverConnStatusOut | None = None
@@ -292,7 +284,6 @@ def _to_out(row: DriverRow, conn: CachedProbe | None = None) -> DriverOut:
         last_synced_count=row.last_synced_count or 0,
         aggregate_group_id=row.aggregate_group_id,
         role=row.role,
-        staging_root_id=row.staging_root_id,
         conn=conn_out,
     )
 
@@ -352,7 +343,6 @@ async def update_config_route(driver_id: int, payload: DriverConfigIn) -> Driver
             min_size_mb=payload.min_size_mb,
             include_subdirs=payload.include_subdirs,
             auto_prune=payload.auto_prune,
-            staging_root_id=payload.staging_root_id,
         )
     except DriverServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc

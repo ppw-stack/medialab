@@ -149,9 +149,19 @@ async def _setup(db, *, size: int = 100) -> tuple[int, int, int]:
         )
         for row in rows:
             row.credential = "master" if row.id == master.id else "secondary"
-            if row.id == master.id:
-                row.media_cid = "root"
         await db_session.commit()
+
+    # 归拢落点是**组自己的配置**（不是主盘的媒体库目录）
+    await aggregate_groups.set_mapping(
+        group.id,
+        target_dir_id="root",
+        target_dir_path="影视",
+        roots=[
+            aggregate_groups.GroupRootSpec(
+                driver_id=secondary.id, root_id="buf", root_path="影视"
+            )
+        ],
+    )
 
     async with session_scope() as db_session:
         db_session.add(

@@ -87,6 +87,33 @@
         </a-col>
 
         <a-col :span="14">
+          <div class="section">目录映射</div>
+          <a-alert
+            type="info"
+            show-icon
+            :closable="false"
+            class="hint-alert"
+            message="从副盘的缓冲根搬到主盘的归拢目标目录——两端都是组级配置"
+          />
+          <div class="mapping">
+            <div class="mapping-row">
+              <span class="mapping-label">归拢目标</span>
+              <span class="mapping-value">
+                {{ mappingOf(group.id)?.target_dir_path || "（未配置）" }}
+                <span v-if="mappingOf(group.id)?.target_dir_id" class="muted mono">
+                  （id: {{ mappingOf(group.id)?.target_dir_id }}）
+                </span>
+              </span>
+              <a-button size="small" @click="openMapping(group)">配置</a-button>
+            </div>
+            <div v-for="d in secondariesOf(group)" :key="d.id" class="mapping-row">
+              <span class="mapping-label">{{ d.name }}</span>
+              <span class="mapping-value">
+                {{ rootPathOf(group.id, d.id) || "（未配置缓冲根）" }}
+              </span>
+            </div>
+          </div>
+
           <div class="section">水位</div>
           <a-descriptions :column="2" size="small" bordered>
             <a-descriptions-item label="主数据源">
@@ -171,6 +198,57 @@
       </a-form>
     </a-modal>
 
+    <!-- 目录映射（组级） -->
+    <a-modal
+      v-model:open="mappingOpen"
+      title="目录映射"
+      :width="720"
+      :confirm-loading="saving"
+      ok-text="保存"
+      cancel-text="取消"
+      @ok="saveMapping"
+    >
+      <a-alert
+        type="info"
+        show-icon
+        :closable="false"
+        class="hint-alert"
+        message="副盘缓冲根下的相对目录结构会原样保留到主盘目标目录下"
+      />
+      <div v-if="mappingGroup" class="section">归拢目标目录（主盘）</div>
+      <DirBrowser
+        v-if="mappingGroup"
+        title="主盘归拢目标目录"
+        :stack="targetStack"
+        :dirs="targetDirs"
+        :loading="loadingTarget"
+        @open="openTargetDir"
+        @go="goTargetDir"
+      />
+      <div class="muted hint">
+        已选：{{ mappingTarget?.path || "（未选）" }}
+        <span v-if="mappingTarget" class="mono">（id: {{ mappingTarget.id }}）</span>
+      </div>
+
+      <template v-for="d in secondariesOf(mappingGroup!)" :key="d.id">
+        <div class="section">{{ d.name }} · 缓冲根目录</div>
+        <DirBrowser
+          :title="`${d.name} 缓冲根`"
+          :stack="rootStack(d.id).stack"
+          :dirs="rootStack(d.id).dirs"
+          :loading="loadingRoot[d.id]"
+          @open="(e: DirEntry) => openRootDir(d.id, e)"
+          @go="(i: number) => goRootDir(d.id, i)"
+        />
+        <div class="muted hint">
+          已选：{{ rootPicked[d.id]?.path || "（未选）" }}
+          <span v-if="rootPicked[d.id]" class="mono">
+            （id: {{ rootPicked[d.id]?.id }}）
+          </span>
+        </div>
+      </template>
+    </a-modal>
+
     <!-- 指派存储源 -->
     <a-modal
       v-model:open="assignOpen"
@@ -207,12 +285,15 @@
 import { computed, onMounted, ref } from "vue"
 import { message } from "ant-design-vue"
 import DataTable from "../../components/DataTable.vue"
+import DirBrowser from "../../components/DirBrowser.vue"
 import PageHeader from "../../components/PageHeader.vue"
 import { errMsg, mediaApi as api } from "../../api"
 import type {
   AggregateGroup,
+  AggregateGroupMapping,
   AggregateGroupStats,
   AggregateSyncJob,
+  DirEntry,
   Driver,
   StagingRow,
 } from "../../types"
@@ -224,6 +305,20 @@ const drivers = ref<Driver[]>([])
 const staging = ref<StagingRow[]>([])
 /** 服务端常量（单一真源）：光鸭云添加每日额度 */
 const dailyQuota = ref(3)
+
+/** 各组的目录映射（group_id → mapping） */
+const mappings = ref<Record<number, AggregateGroupMapping>>({})
+const mappingOpen = ref(false)
+const mappingGroup = ref<AggregateGroup | null>(null)
+/** 主盘目标目录的浏览状态 */
+const targetStack = ref<DirEntry[]>([])
+const targetDirs = ref<DirEntry[]>([])
+const loadingTarget = ref(false)
+const mappingTarget = ref<{ id: string; path: string } | null>(null)
+/** 各副盘缓冲根的浏览状态（driver_id → {stack, dirs}） */
+const rootStackState = ref<Record<number, { stack: DirEntry[]; dirs: DirEntry[] }>>({})
+const loadingRoot = ref<Record<number, boolean>>({})
+const rootPicked = ref<Record<number, { id: string; path: string } | undefined>>({})
 
 const loading = ref(false)
 const saving = ref(false)
@@ -255,6 +350,33 @@ function driversOf(group: AggregateGroup): Driver[] {
 
 /** 可指派的存储源（未入组的优先，已入组的也能换组）。 */
 const candidates = computed(() => drivers.value.filter((d) => d.type === "guangya"))
+
+/** 某组的目录映射 */
+function mappingOf(groupId: number): AggregateGroupMapping | undefined {
+  return mappings.value[groupId]
+}
+
+/** 组内的副数据源 */
+function secondariesOf(group: AggregateGroup | null): Driver[] {
+  if (!group) return []
+  return drivers.value.filter(
+    (d) => d.aggregate_group_id === group.id && d.role === "secondary",
+  )
+}
+
+/** 某副盘的缓冲根路径 */
+function rootPathOf(groupId: number, driverId: number): string {
+  const root = mappings.value[groupId]?.roots.find(
+    (r) => r.driver_id === driverId,
+  )
+  if (!root) return ""
+  return root.root_path || `id: ${root.root_id}`
+}
+
+/** 某副盘的浏览状态（不存在则给空壳） */
+function rootStack(driverId: number): { stack: DirEntry[]; dirs: DirEntry[] } {
+  return rootStackState.value[driverId] ?? { stack: [], dirs: [] }
+}
 
 function statsOf(groupId: number): AggregateGroupStats | undefined {
   return stats.value.find((s) => s.group_id === groupId)
@@ -336,6 +458,7 @@ async function loadAll() {
     stats.value = s
     drivers.value = d
     staging.value = st
+    await loadMappings(g)
     try {
       const lim = await api.get<{ daily_cloud_add_quota: number }>(
         "/aggregate/limits",
@@ -348,6 +471,166 @@ async function loadAll() {
     message.error(errMsg(e, "加载聚合数据失败"))
   } finally {
     loading.value = false
+  }
+}
+
+/** 拉取各组的目录映射（并行，失败不影响其它数据）。 */
+async function loadMappings(gs: AggregateGroup[]) {
+  const map: Record<number, AggregateGroupMapping> = {}
+  await Promise.all(
+    gs.map(async (g) => {
+      try {
+        map[g.id] = await api.get<AggregateGroupMapping>(
+          `/aggregate/groups/${g.id}/mapping`,
+        )
+      } catch {
+        // 拉不到就当没配（面板显示「未配置」）
+      }
+    }),
+  )
+  mappings.value = map
+}
+
+/** 打开「目录映射」弹框（主盘目标 + 各副盘缓冲根）。 */
+function openMapping(group: AggregateGroup) {
+  mappingGroup.value = group
+  const m = mappings.value[group.id]
+  mappingTarget.value = m?.target_dir_id
+    ? { id: m.target_dir_id, path: m.target_dir_path || "" }
+    : null
+  targetStack.value = [{ id: "", name: "网盘根目录" }]
+  targetDirs.value = []
+  rootStackState.value = {}
+  rootPicked.value = {}
+  for (const d of secondariesOf(group)) {
+    const root = m?.roots.find((r) => r.driver_id === d.id)
+    rootStackState.value[d.id] = { stack: [{ id: "", name: "网盘根目录" }], dirs: [] }
+    rootPicked.value[d.id] = root
+      ? { id: root.root_id, path: root.root_path || "" }
+      : undefined
+  }
+  mappingOpen.value = true
+  void loadTargetDirs("")
+  for (const d of secondariesOf(group)) void loadRootDirs(d.id, "")
+}
+
+/** 载入主盘某目录下的子目录。 */
+async function loadTargetDirs(parentId: string) {
+  const master = masterDriverOf(mappingGroup.value)
+  if (!master) return
+  loadingTarget.value = true
+  try {
+    const resp = await api.get<{ dirs: DirEntry[] }>(
+      `/drivers/${master.id}/browse-dirs?parent_id=${encodeURIComponent(parentId)}`,
+    )
+    targetDirs.value = resp.dirs ?? []
+  } catch (e) {
+    message.error(errMsg(e, "加载主盘目录失败"))
+  } finally {
+    loadingTarget.value = false
+  }
+}
+
+function openTargetDir(entry: DirEntry) {
+  targetStack.value = [...targetStack.value, entry]
+  mappingTarget.value = { id: entry.id, path: dirPathOf(targetStack.value) }
+  void loadTargetDirs(entry.id)
+}
+
+function goTargetDir(index: number) {
+  targetStack.value = targetStack.value.slice(0, index + 1)
+  const picked = targetStack.value[index]
+  if (!picked) return
+  mappingTarget.value = { id: picked.id, path: dirPathOf(targetStack.value) }
+  void loadTargetDirs(picked.id)
+}
+
+/** 载入某副盘某目录下的子目录。 */
+async function loadRootDirs(driverId: number, parentId: string) {
+  loadingRoot.value[driverId] = true
+  try {
+    const resp = await api.get<{ dirs: DirEntry[] }>(
+      `/drivers/${driverId}/browse-dirs?parent_id=${encodeURIComponent(parentId)}`,
+    )
+    const st = rootStackState.value[driverId] ?? {
+      stack: [{ id: "", name: "网盘根目录" }],
+      dirs: [],
+    }
+    st.dirs = resp.dirs ?? []
+    rootStackState.value[driverId] = st
+  } catch (e) {
+    message.error(errMsg(e, "加载副盘目录失败"))
+  } finally {
+    loadingRoot.value[driverId] = false
+  }
+}
+
+function openRootDir(driverId: number, entry: DirEntry) {
+  const st = rootStackState.value[driverId] ?? {
+    stack: [{ id: "", name: "网盘根目录" }],
+    dirs: [],
+  }
+  st.stack = [...st.stack, entry]
+  rootStackState.value[driverId] = st
+  rootPicked.value[driverId] = { id: entry.id, path: dirPathOf(st.stack) }
+  void loadRootDirs(driverId, entry.id)
+}
+
+function goRootDir(driverId: number, index: number) {
+  const st = rootStackState.value[driverId]
+  if (!st) return
+  st.stack = st.stack.slice(0, index + 1)
+  rootStackState.value[driverId] = st
+  const picked = st.stack[index]
+  if (!picked) return
+  rootPicked.value[driverId] = { id: picked.id, path: dirPathOf(st.stack) }
+  void loadRootDirs(driverId, picked.id)
+}
+
+/** 面包屑 → 路径字符串（根为空）。 */
+function dirPathOf(stack: DirEntry[]): string {
+  return stack
+    .slice(1)
+    .map((s) => s.name)
+    .filter(Boolean)
+    .join("/")
+}
+
+/** 组内的主数据源。 */
+function masterDriverOf(group: AggregateGroup | null): Driver | undefined {
+  if (!group) return undefined
+  return drivers.value.find(
+    (d) => d.aggregate_group_id === group.id && d.role === "master",
+  )
+}
+
+/** 保存整组映射（一次提交）。 */
+async function saveMapping() {
+  const group = mappingGroup.value
+  if (!group) return
+  saving.value = true
+  try {
+    const roots = secondariesOf(group)
+      .map((d) => {
+        const picked = rootPicked.value[d.id]
+        if (!picked) return null
+        return { driver_id: d.id, root_id: picked.id, root_path: picked.path }
+      })
+      .filter((r): r is { driver_id: number; root_id: string; root_path: string } =>
+        r !== null,
+      )
+    await api.put(`/aggregate/groups/${group.id}/mapping`, {
+      target_dir_id: mappingTarget.value?.id ?? null,
+      target_dir_path: mappingTarget.value?.path ?? null,
+      roots,
+    })
+    mappingOpen.value = false
+    message.success("目录映射已保存")
+    await loadAll()
+  } catch (e) {
+    message.error(errMsg(e, "保存目录映射失败"))
+  } finally {
+    saving.value = false
   }
 }
 
@@ -514,6 +797,37 @@ onMounted(loadAll)
   font-size: 12px;
   color: var(--muted, #888);
   margin-bottom: 6px;
+}
+
+.hint-alert {
+  margin-bottom: 8px;
+}
+
+.mapping {
+  margin-bottom: 12px;
+}
+
+.mapping-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 13px;
+}
+
+.mapping-label {
+  width: 96px;
+  flex: none;
+  color: var(--muted, #888);
+  font-size: 12px;
+}
+
+.mapping-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .member {

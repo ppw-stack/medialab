@@ -285,16 +285,22 @@ async def _sync_group_locked(group_id: int, result: AggregateSyncResult) -> None
         if master is None:
             logger.info("聚合组 %s 没有主数据源，跳过", group.name)
             return
-        if not master.enabled or not master.media_cid:
-            logger.info(
-                "聚合组 %s 的主数据源未启用或未配置媒体库目录，跳过",
-                group.name,
+        # 归拢落点是**组自己的配置**（aggregate_groups.target_dir_id）——
+        # 不是主盘的媒体库目录（那是存储源的媒体库配置，与聚合无关）
+        if not master.enabled:
+            logger.info("聚合组 %s 的主数据源未启用，跳过", group.name)
+            result.details.append(f"组「{group.name}」：主数据源未启用，跳过")
+            return
+        if not group.target_dir_id:
+            logger.info("聚合组 %s 未配置归拢目标目录，跳过", group.name)
+            result.details.append(
+                f"组「{group.name}」：未配置归拢目标目录，跳过（请在「网盘聚合」页配置）"
             )
             return
         master_id = int(master.id)
         master_credential = master.credential
         master_device_type = master.device_type
-        root_id = str(master.media_cid)
+        root_id = str(group.target_dir_id)
         group_name = group.name
 
     rows = await _load_processable_rows(group_id)

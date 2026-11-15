@@ -23,12 +23,15 @@ from app.domain.aggregate_types import (
 )
 from app.services import aggregate_jobs
 from app.services.aggregate_groups import (
+    GroupRootSpec,
     assign_driver_role,
     clear_driver_role,
     create_group,
     delete_group,
     get_group,
+    get_mapping,
     list_groups,
+    set_mapping,
     update_group,
 )
 from app.services.aggregate_staging import (
@@ -81,6 +84,52 @@ class GroupOut(BaseModel):
     enabled: bool
     created_at: str
     updated_at: str
+    #: 归拢目标目录 id（主盘上的目录；None = 未配置）
+    target_dir_id: str | None = None
+    #: 归拢目标目录路径（只读展示）
+    target_dir_path: str | None = None
+
+
+class GroupRootIn(BaseModel):
+    """一个副盘的缓冲根（组 ↔ 副盘 的映射项）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    driver_id: int = Field(..., ge=1)
+    root_id: str = Field(..., min_length=1, max_length=64)
+    root_path: str | None = Field(default=None, max_length=1024)
+
+
+class GroupMappingIn(BaseModel):
+    """整组的目录映射：**从哪些副盘的哪些目录，搬到主盘的哪个目录**。
+
+    两端都是**组级配置**——不借存储源的媒体库配置。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: 主盘上的归拢目标目录 id（留空 = 清除配置）
+    target_dir_id: str | None = Field(default=None, max_length=64)
+    target_dir_path: str | None = Field(default=None, max_length=1024)
+    #: 各副盘的缓冲根（**全量替换**：未列出的副盘会被清掉）
+    roots: list[GroupRootIn] = Field(default_factory=list)
+
+
+class GroupRootOut(BaseModel):
+    """一个副盘的缓冲根。"""
+
+    driver_id: int
+    root_id: str
+    root_path: str | None = None
+
+
+class GroupMappingOut(BaseModel):
+    """一个组的完整目录映射。"""
+
+    group_id: int
+    target_dir_id: str | None = None
+    target_dir_path: str | None = None
+    roots: list[GroupRootOut] = Field(default_factory=list)
 
 
 class GroupStatsOut(BaseModel):
@@ -260,6 +309,67 @@ async def list_roles() -> list[dict[str, str]]:
         {"value": ROLE_MASTER, "label": ROLE_LABELS[ROLE_MASTER]},
         {"value": ROLE_SECONDARY, "label": ROLE_LABELS[ROLE_SECONDARY]},
     ]
+
+
+@router.get("/groups/{group_id}/mapping", response_model=GroupMappingOut)
+async def get_mapping_route(group_id: int) -> GroupMappingOut:
+    """取一个组的**完整目录映射**（主盘落点 + 各副盘缓冲根）。"""
+    try:
+        mapping = await get_mapping(group_id)
+    except ServiceError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    return GroupMappingOut(
+        group_id=mapping.group_id,
+        target_dir_id=mapping.target_dir_id,
+        target_dir_path=mapping.target_dir_path,
+        roots=[
+            GroupRootOut(
+                driver_id=r.driver_id,
+                root_id=r.root_id,
+                root_path=r.root_path,
+            )
+            for r in mapping.roots
+        ],
+    )
+
+
+@router.put("/groups/{group_id}/mapping", response_model=GroupMappingOut)
+async def set_mapping_route(
+    group_id: int, payload: GroupMappingIn
+) -> GroupMappingOut:
+    """设置一个组的目录映射（**一次提交整组**）。
+
+    副盘缓冲根只接受**组内副数据源**（组外的盘给了也不认 → 400）。
+    """
+    try:
+        mapping = await set_mapping(
+            group_id,
+            target_dir_id=payload.target_dir_id,
+            target_dir_path=payload.target_dir_path,
+            roots=[
+                GroupRootSpec(
+                    driver_id=r.driver_id,
+                    root_id=r.root_id,
+                    root_path=r.root_path,
+                )
+                for r in payload.roots
+            ],
+        )
+    except ServiceError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    return GroupMappingOut(
+        group_id=mapping.group_id,
+        target_dir_id=mapping.target_dir_id,
+        target_dir_path=mapping.target_dir_path,
+        roots=[
+            GroupRootOut(
+                driver_id=r.driver_id,
+                root_id=r.root_id,
+                root_path=r.root_path,
+            )
+            for r in mapping.roots
+        ],
+    )
 
 
 @router.get("/groups/{group_id}/stats", response_model=GroupStatsOut)

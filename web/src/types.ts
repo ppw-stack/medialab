@@ -826,8 +826,6 @@ export interface Driver {
    * 副数据源是**缓冲**——内容不对外展示，归拢到主盘后自动清理副本。
    */
   role: string | null
-  /** 副数据源的缓冲根目录 id（光鸭 fileId）——放进这里的文件会被登记归拢 */
-  staging_root_id: string | null
   /**
    * 测连状态（启动自动测连 / 手动测连的缓存）。
    * `null` = 尚未测连。
@@ -842,6 +840,33 @@ export interface AggregateGroup {
   enabled: boolean
   created_at: string
   updated_at: string
+  /** 归拢目标目录 id（主盘上的目录；null = 未配置） */
+  target_dir_id: string | null
+  /** 归拢目标目录路径（只读展示） */
+  target_dir_path: string | null
+}
+
+/** 一个副盘的缓冲根（组 ↔ 副盘 的映射项）。 */
+export interface AggregateGroupRoot {
+  driver_id: number
+  root_id: string
+  /** 缓冲根路径（只读展示） */
+  root_path: string | null
+}
+
+/**
+ * 一个聚合组的**完整目录映射**。
+ *
+ * 两端都是**组级配置**——「从哪些副盘的哪些目录，搬到主盘的哪个目录」
+ * 是一条组与组之间的映射关系，不借存储源的媒体库配置。
+ */
+export interface AggregateGroupMapping {
+  group_id: number
+  /** 主盘上的归拢目标目录（null = 未配置） */
+  target_dir_id: string | null
+  target_dir_path: string | null
+  /** 各副盘的缓冲根 */
+  roots: AggregateGroupRoot[]
 }
 
 /** 聚合组水位（台账统计 + 主盘云添加额度）。 */
@@ -954,11 +979,6 @@ export interface DriverConfig {
   include_subdirs: boolean
   /** 扫描时是否自动清理「网盘上已消失」的条目（prune） */
   auto_prune: boolean
-  /**
-   * 副数据源的缓冲根目录 id（光鸭 fileId）。
-   * 放进这个目录里的文件会被登记成在途任务 → 归拢回主数据源。
-   */
-  staging_root_id: string
 }
 
 /** 扫描统计。 */

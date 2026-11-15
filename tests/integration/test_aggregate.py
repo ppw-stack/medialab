@@ -249,6 +249,141 @@ async def test_secondary_driver_cannot_be_scanned(
     assert "副数据源" in str(exc.value)
 
 
+# ---------------------------------------------------------------- 目录映射
+
+
+async def test_mapping_is_group_level(
+    db, group_id: int, master_id: int, secondary_id: int
+) -> None:
+    """目录映射是**组级配置**——两端都不借存储源的媒体库配置。
+
+    - 主盘落点：``aggregate_groups.target_dir_id``
+    - 副盘缓冲根：``aggregate_group_roots`` 表（每个副盘一行）
+    """
+    await aggregate_groups.assign_driver_role(
+        master_id, group_id=group_id, role="master"
+    )
+    await aggregate_groups.assign_driver_role(
+        secondary_id, group_id=group_id, role="secondary"
+    )
+    await aggregate_groups.set_mapping(
+        group_id,
+        target_dir_id="target-dir",
+        target_dir_path="影视",
+        roots=[
+            aggregate_groups.GroupRootSpec(
+                driver_id=secondary_id, root_id="buf-1", root_path="影视"
+            )
+        ],
+    )
+
+    mapping = await aggregate_groups.get_mapping(group_id)
+    assert mapping.target_dir_id == "target-dir"
+    assert mapping.target_dir_path == "影视"
+    assert len(mapping.roots) == 1
+    assert mapping.roots[0].driver_id == secondary_id
+    assert mapping.roots[0].root_id == "buf-1"
+
+    # 组信息里也带着主盘落点（面板展示用）
+    group = await aggregate_groups.get_group(group_id)
+    assert group.target_dir_id == "target-dir"
+
+
+async def test_mapping_rejects_driver_outside_group(
+    db, group_id: int, master_id: int, secondary_id: int
+) -> None:
+    """组外的盘给了缓冲根 → 400（不静默接受）。"""
+    await aggregate_groups.assign_driver_role(
+        master_id, group_id=group_id, role="master"
+    )
+    await aggregate_groups.assign_driver_role(
+        secondary_id, group_id=group_id, role="secondary"
+    )
+    outsider = await driver_service.add_driver(driver_type="guangya", name="组外的盘")
+
+    with pytest.raises(ServiceError) as exc:
+        await aggregate_groups.set_mapping(
+            group_id,
+            target_dir_id="target",
+            roots=[
+                aggregate_groups.GroupRootSpec(
+                    driver_id=outsider.id, root_id="buf"
+                )
+            ],
+        )
+    assert exc.value.status == 400
+
+
+async def test_mapping_replaces_roots(
+    db, group_id: int, master_id: int, secondary_id: int
+) -> None:
+    """重新提交映射 → **全量替换**副盘侧（未列出的副盘被清掉）。"""
+    await aggregate_groups.assign_driver_role(
+        master_id, group_id=group_id, role="master"
+    )
+    await aggregate_groups.assign_driver_role(
+        secondary_id, group_id=group_id, role="secondary"
+    )
+    await aggregate_groups.set_mapping(
+        group_id,
+        target_dir_id="target",
+        roots=[
+            aggregate_groups.GroupRootSpec(
+                driver_id=secondary_id, root_id="buf-1"
+            )
+        ],
+    )
+    await aggregate_groups.set_mapping(
+        group_id,
+        target_dir_id="target",
+        roots=[
+            aggregate_groups.GroupRootSpec(
+                driver_id=secondary_id, root_id="buf-2"
+            )
+        ],
+    )
+    mapping = await aggregate_groups.get_mapping(group_id)
+    assert len(mapping.roots) == 1
+    assert mapping.roots[0].root_id == "buf-2"
+
+
+async def test_api_mapping_roundtrip(client, db) -> None:
+    """HTTP：写映射 → 读回来。"""
+    await driver_service.add_driver(driver_type="guangya", name="主号")
+    await driver_service.add_driver(driver_type="guangya", name="副号")
+    drivers = (await client.get("/api/drivers")).json()
+    guangya = [d for d in drivers if d["type"] == "guangya"]
+    group = (await client.post("/api/aggregate/groups", json={"name": "G"})).json()
+
+    resp = await client.put(
+        f"/api/aggregate/drivers/{guangya[0]['id']}/role",
+        json={"group_id": group["id"], "role": "master"},
+    )
+    assert resp.status_code == 200
+    resp = await client.put(
+        f"/api/aggregate/drivers/{guangya[1]['id']}/role",
+        json={"group_id": group["id"], "role": "secondary"},
+    )
+    assert resp.status_code == 200
+
+    resp = await client.put(
+        f"/api/aggregate/groups/{group['id']}/mapping",
+        json={
+            "target_dir_id": "t-dir",
+            "target_dir_path": "影视",
+            "roots": [{"driver_id": guangya[1]["id"], "root_id": "buf"}],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["target_dir_id"] == "t-dir"
+    assert body["roots"][0]["root_id"] == "buf"
+
+    resp = await client.get(f"/api/aggregate/groups/{group['id']}/mapping")
+    assert resp.status_code == 200
+    assert resp.json() == body
+
+
 # ---------------------------------------------------------------- 在途台账
 
 
@@ -262,16 +397,15 @@ async def test_enqueue_is_idempotent(
     await aggregate_groups.assign_driver_role(
         secondary_id, group_id=group_id, role="secondary"
     )
-    async with session_scope() as db_session:
-        row = (
-            await db_session.execute(select(Driver).where(Driver.id == secondary_id))
-        ).scalar_one()
-        row.staging_root_id = "buf"
-        master = (
-            await db_session.execute(select(Driver).where(Driver.id == master_id))
-        ).scalar_one()
-        master.media_cid = "root"
-        await db_session.commit()
+    await aggregate_groups.set_mapping(
+        group_id,
+        target_dir_id="target",
+        roots=[
+            aggregate_groups.GroupRootSpec(
+                driver_id=secondary_id, root_id="buf", root_path="影视"
+            )
+        ],
+    )
 
     class _Fake:
         async def list_dir_by_cid(self, cid, parent_path=""):
@@ -307,24 +441,15 @@ async def test_enqueue_keeps_relative_dir_structure(
     await aggregate_groups.assign_driver_role(
         secondary_id, group_id=group_id, role="secondary"
     )
-    from app.db.models import Driver
-
-    async with session_scope() as db_session:
-        rows = (
-            (
-                await db_session.execute(
-                    select(Driver).where(Driver.id.in_([master_id, secondary_id]))
-                )
+    await aggregate_groups.set_mapping(
+        group_id,
+        target_dir_id="target",
+        roots=[
+            aggregate_groups.GroupRootSpec(
+                driver_id=secondary_id, root_id="buf", root_path="影视"
             )
-            .scalars()
-            .all()
-        )
-        for row in rows:
-            if row.id == master_id:
-                row.media_cid = "root"
-            else:
-                row.staging_root_id = "buf"
-        await db_session.commit()
+        ],
+    )
 
     class _Fake:
         async def iter_tree_by_cid(self, cid, parent_path="", include_subdirs=True):
@@ -349,17 +474,23 @@ async def test_enqueue_keeps_relative_dir_structure(
     assert rows[0].file_name == "ep1.mkv"
 
 
-async def test_enqueue_requires_master_with_media_cid(
-    db, group_id: int, secondary_id: int, monkeypatch
+async def test_enqueue_requires_group_target_dir(
+    db, group_id: int, master_id: int, secondary_id: int, monkeypatch
 ) -> None:
-    """主盘没配媒体库目录 → 归拢无处可放 → 明确报错（不静默跳过）。"""
+    """组没配**归拢目标目录** → 归拢无处可放 → 明确报错（不静默跳过）。
+
+    归拢落点是**组自己的配置**（不是主盘的媒体库目录）。
+    """
+    await aggregate_groups.assign_driver_role(
+        master_id, group_id=group_id, role="master"
+    )
     await aggregate_groups.assign_driver_role(
         secondary_id, group_id=group_id, role="secondary"
     )
     with pytest.raises(ServiceError) as exc:
         await aggregate_staging.enqueue_from_staging_root(group_id)
     assert exc.value.status == 400
-    assert "主数据源" in str(exc.value)
+    assert "归拢目标目录" in str(exc.value)
 
 
 async def test_retry_resets_failed_row(

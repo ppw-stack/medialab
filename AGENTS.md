@@ -626,10 +626,24 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
   - **中断恢复**：`syncing` 的行先查光鸭活跃任务——**还在跑就跳过**（别重复
     提交白扣额度），已消失则重置为待归拢；上一轮「已落盘但没改名」的
     `download` 残留按字节数**认领**并改名（不重复下载）
-  - **归拢目标 = 主盘的 `media_cid`（媒体库目录）**；副盘缓冲目录的**相对目录
-    结构原样保留**（媒体库按「剧名 / Season N / 集」组织，压平会认不出剧集）
-  - **副盘的缓冲根目录** = `drivers.staging_root_id`（光鸭 fileId）。放进这个
-    目录里的文件由「登记在途」扫描进台账（**幂等**，`(source_driver_id,
+  - **目录映射整组归到聚合域**（2026-11-15 用户决策）：「从副盘的哪个目录，
+    搬到主盘的哪个目录」是一条**组与组之间的映射关系**，两端都是**组级配置**
+    ——**不借存储源的媒体库配置**（那是存储源管媒体库的事：媒体库目录 /
+    本地输出目录 / 后缀 / prune）
+    - 主盘落点 = `aggregate_groups.target_dir_id`（+ `target_dir_path` 展示）
+    - 副盘缓冲根 = **新表 `aggregate_group_roots`**（group_id + driver_id +
+      root_id，UNIQUE(group_id, driver_id)）
+    - `drivers.staging_root_id` **已删**（存量全 NULL，删列安全）
+    - **归属**（`drivers.aggregate_group_id` / `drivers.role`）仍挂在盘上——
+      那是 1:1 的归属关系（一个盘一个组、组内一个角色），无处可挂
+    - 一个端点管整组映射：`PUT /api/aggregate/groups/{id}/mapping`
+      （`target_dir_id` + `roots[]`，**全量替换**副盘侧）；组外的盘给了
+      缓冲根 → 400
+    - 未配置目标目录 → 归拢作业**明确跳过并把原因写进作业明细**（不是
+      静默跳过）；「登记在途」则报 400
+  - **副盘缓冲根下的相对目录结构原样保留**到主盘目标目录下（媒体库按
+    「剧名 / Season N / 集」组织，压平会认不出剧集）
+  - 「登记在途」扫描副盘缓冲根 → 进台账（**幂等**，`(source_driver_id,
     remote_id)` 唯一约束——重复登记 = 白扣两次额度）
   - **调度作业 `aggregate_sync`**（cron `29 * * * *`）：归拢速度受额度限制而
     非调度频率，跑得再勤也不会超过当日额度
