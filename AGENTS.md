@@ -344,8 +344,11 @@
   - **只剥离属于该存储源 `video_exts` 的后缀**（用户配什么剥什么），不硬编码后缀表；后缀 >5 字符按 `split_name` 的既有语义**不算扩展名**（`movie.2020.1080p` 不被剥成 `movie.2020`）
   - **改名必留旧文件清理**：`_upsert_media` 用 `stale_paths` 收集旧路径，扫描 / 增量**写完新文件再删旧**（写锁之外，`asyncio.to_thread`）——不删就变成无主文件（Emby 重复条目 + `health` 报 orphan）。存量库靠**重扫一次**完成改名
   - **同名不同扩展名冲突**（去后缀后新增的风险）：同目录 `x.mp4` 与 `x.mkv` 会映射到同一个 `x.strm` → 两份是**不同压制版本**（内容不同、体积常差几倍），不是冗余拷贝。规则是「**保留大的**」（对齐数据同步的 `conflict_policy=1`）——小的那个**不落库**（DB 里只留一条），大的落库并重写 strm。**确定性规则**，不靠遍历顺序碰运气（生产实测 30 集全是《伟大的长征》mkv+mp4 两版）
+    - ⚠️ **败者的存量行与遗留 strm 必须一并清掉**（2026-11-14 审查修复）：去重只在**新命名**路径上查得到冲突方，败者在存量库里可能还挂在**旧命名**路径（`x.mkv.strm`）——不清理则磁盘留孤儿 strm（Emby 重复条目），且下一轮仍命中同样冲突 → **每轮都去重、永远不收敛**。`_drop_loser_entry` 按 `remote_id` 复查并删行 + 收集旧路径（**写锁之外**才 unlink）
+    - ⚠️ **只有「本轮网盘上还活着」的冲突方才参与「保留大的」竞争**（判据 `seen_remote_ids`，与 prune 判「源端已消失」同一信号）：拿**源端已消失**的陈旧行比大小，会把**活着的那份**误淘汰。冲突方若稍后才被遍历到，竞赛推迟到那时——**最终恒留最大的那份，与遍历顺序无关**
+    - ⚠️ **冲突方可能有多条**（存量库里两份共用同一 strm 路径）：`find_strm_conflict` 返回**列表**（用 `scalars().all()`）——用 `scalar_one_or_none()` 会抛 `MultipleResultsFound` **把整个扫描任务打挂**
   - ⚠️ **prune 必须按「strm 路径引用计数」删文件**（`media.py:_prune_orphans`）：共用同一路径的两条记录，先删的那行若顺手把文件删了，胜者的 strm 就会凭空消失（Emby 里整集不见）。只有**最后一个引用者**被清理时才删文件
-  - 契约由 `tests/unit/test_strm_naming.py` + `tests/integration/test_scan.py`（保留大的 / 幂等 / prune 不误删共用路径）+ `tests/unit/test_incremental.py` 固化
+  - 契约由 `tests/unit/test_strm_naming.py` + `tests/integration/test_scan.py`（保留大的 / 幂等 / prune 不误删共用路径 / 败者遗留清理 / 源端已消失不参与竞争 / 多行共用不崩）+ `tests/unit/test_incremental.py` 固化
 
 - **扫描统计的各计数**互不混用（2026-11-14 修正，`app/services/media.py:ScanStats`）：
   - `skipped_unknown` = **后缀不认识**的文件（不在 video/image/data 三个配置里）→ 被忽略，不生成 strm 也不下附件
@@ -353,7 +356,8 @@
   - `deduped` = 同名不同扩展名被合并的条数（**保留大的**）——**不是错误**，不进 `failed`
   - `pruned` = prune 清理的「网盘上已消失」的旧条目数
   - ⚠️ **prune 的清理数以前被写成 `stats.skipped_unknown += _prune_orphans(...)`** → 把「源端消失」混进「未知后缀」，生产实测虚高 52 条（179 → 231），用户会以为有文件没被识别。**两类计数必须分开**
-  - 前端「扫描进度」弹框分三行展示：跳过（未知/太小）/ 去重 / 清理
+  - ⚠️ **去重明细走独立通道 `dedup_details`，不塞进 `errors`**（2026-11-14 审查修复）：去重是**正常业务结果**，而 `errors` 上限 20 且**只放真正的失败**——混进去会把真正的失败挤掉。明细经 `ScanStats.to_dict()` → `ScanJob` → API 透出，前端「展开去重明细」默认折叠展示
+  - 前端「扫描进度」弹框分三行展示：跳过（未知/太小）/ 去重 / 清理；去重明细**默认折叠**（展开会撑高详情面板）
   - 契约由 `tests/integration/test_scan.py::TestPrune::test_prune_count_not_polluting_skipped_unknown` 固化
 
 - **prune 是存储源级配置**（2026-11-14 加入，`drivers.auto_prune`）：

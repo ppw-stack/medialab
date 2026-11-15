@@ -74,6 +74,9 @@ class ScanJob:
     failed: int = 0
     #: 已遍历的目录数
     dirs: int = 0
+    #: 去重明细（点名两个源文件 + 谁胜出）——**不是错误**，
+    #: 单独一条通道（``errors`` 只放真正的失败）
+    dedup_details: list[str] = field(default_factory=list)
 
     #: 实时日志（环形，最多 MAX_LOGS 条）
     logs: list[str] = field(default_factory=list)
@@ -112,6 +115,7 @@ class ScanJob:
             "deduped": self.deduped,
             "pruned": self.pruned,
             "failed": self.failed,
+            "dedup_details": self.dedup_details[:20],
             "logs": self.logs[-MAX_LOGS:],
             "error": self.error,
         }

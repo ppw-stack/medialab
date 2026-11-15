@@ -410,6 +410,168 @@ class TestIncrementalFlow:
         assert not old_strm.exists()
         assert (tmp_path / "movie.strm").exists()
 
+    async def test_dedup_drops_loser_legacy_entry_and_strm(
+        self, db_session, settings, driver_row, fake_driver, tmp_path
+    ):
+        """**去重要把败者的存量行与遗留 strm 一并清掉**（2026-11-14 回归）。
+
+        增量事件说「``x.mkv`` 变了」，但库里已有更大的 ``x.mp4`` 占着同一个
+        strm 路径 → ``x.mkv`` 是败者。它自己的**存量行**与**旧 strm 文件**
+        必须一起消失，否则磁盘上留下孤儿 strm（Emby 重复条目）。
+        """
+        await self._setup(db_session, driver_row, tmp_path)
+
+        from app.db.models import MediaFile
+        from sqlalchemy import select
+
+        # 存量：x.mp4（4000 字节）已占着共享的 strm 路径
+        shared = tmp_path / "movie.strm"
+        shared.write_text("http://localhost:8080/302/1/sig\n", encoding="utf-8")
+        db_session.add(
+            MediaFile(
+                driver_id=driver_row.id,
+                remote_id="pc-mp4",
+                path="/影视/movie.mp4",
+                name="movie.mp4",
+                size=4000,
+                strm_path=str(shared),
+                signature="sig",
+                mtime=None,
+                created_at="2026-01-01 00:00:00",
+                updated_at="2026-01-01 00:00:00",
+            )
+        )
+        # 败者 x.mkv 的存量行：挂在**旧命名**路径上
+        loser_strm = tmp_path / "movie.mkv.strm"
+        loser_strm.write_text("http://localhost:8080/302/2/sig\n", encoding="utf-8")
+        db_session.add(
+            MediaFile(
+                driver_id=driver_row.id,
+                remote_id="pc-mkv",
+                path="/影视/movie.mkv",
+                name="movie.mkv",
+                size=1000,
+                strm_path=str(loser_strm),
+                signature="sig",
+                mtime=None,
+                created_at="2026-01-01 00:00:00",
+                updated_at="2026-01-01 00:00:00",
+            )
+        )
+        await db_session.commit()
+
+        client = FakeClient(
+            {
+                "*": {
+                    "count": 1,
+                    "next_page": False,
+                    "list": [
+                        _event(
+                            id=800,
+                            file_name="movie.mkv",
+                            pick_code="pc-mkv",
+                            parent_id="cid-parent",
+                            parent_name="影视",
+                        )
+                    ],
+                }
+            }
+        )
+        _patch_driver(fake_driver, client, {"/影视": "cid-parent"})
+
+        stats = await incremental.run_incremental(
+            db_session, settings, driver_row, driver_impl=_FakeDriverImpl(client)
+        )
+
+        assert stats.deduped == 1
+        # 败者的行被删、它的旧 strm 文件被删（不留孤儿文件）
+        rows = (await db_session.execute(select(MediaFile))).scalars().all()
+        assert [r.remote_id for r in rows] == ["pc-mp4"]
+        assert not loser_strm.exists()
+        # 去重明细走**独立通道**，不塞进 errors（那个只放真正的失败）
+        assert stats.errors == []
+        assert "movie.mkv" in stats.dedup_details[0]
+
+    async def test_dedup_skipped_loser_legacy_entry_cleaned(
+        self, db_session, settings, driver_row, fake_driver, tmp_path
+    ):
+        """**当前这份是败者时**（库里那份更大），它自己的存量行与旧 strm 也要清。
+
+        与上一个用例互为镜像：增量事件说「``x.mkv`` 变了」，但库里那份
+        ``x.mp4`` 更大 → ``x.mkv`` 被淘汰。它挂着**旧命名**的存量行与文件，
+        不清就会在磁盘上留下孤儿 strm。
+        """
+        await self._setup(db_session, driver_row, tmp_path)
+
+        from app.db.models import MediaFile
+        from sqlalchemy import select
+
+        # 存量：x.mp4 更大（8000 字节），已占着共享的 strm 路径
+        shared = tmp_path / "movie.strm"
+        shared.write_text("http://localhost:8080/302/1/sig\n", encoding="utf-8")
+        db_session.add(
+            MediaFile(
+                driver_id=driver_row.id,
+                remote_id="pc-mp4",
+                path="/影视/movie.mp4",
+                name="movie.mp4",
+                size=8000,
+                strm_path=str(shared),
+                signature="sig",
+                mtime=None,
+                created_at="2026-01-01 00:00:00",
+                updated_at="2026-01-01 00:00:00",
+            )
+        )
+        # 败者 x.mkv 的存量行：挂在**旧命名**路径上
+        loser_strm = tmp_path / "movie.mkv.strm"
+        loser_strm.write_text("http://localhost:8080/302/2/sig\n", encoding="utf-8")
+        db_session.add(
+            MediaFile(
+                driver_id=driver_row.id,
+                remote_id="pc-mkv",
+                path="/影视/movie.mkv",
+                name="movie.mkv",
+                size=1000,
+                strm_path=str(loser_strm),
+                signature="sig",
+                mtime=None,
+                created_at="2026-01-01 00:00:00",
+                updated_at="2026-01-01 00:00:00",
+            )
+        )
+        await db_session.commit()
+
+        client = FakeClient(
+            {
+                "*": {
+                    "count": 1,
+                    "next_page": False,
+                    "list": [
+                        _event(
+                            id=801,
+                            file_name="movie.mkv",
+                            pick_code="pc-mkv",
+                            parent_id="cid-parent",
+                            parent_name="影视",
+                        )
+                    ],
+                }
+            }
+        )
+        _patch_driver(fake_driver, client, {"/影视": "cid-parent"})
+
+        stats = await incremental.run_incremental(
+            db_session, settings, driver_row, driver_impl=_FakeDriverImpl(client)
+        )
+
+        assert stats.deduped == 1
+        # 败者被淘汰：它的行与旧 strm 文件都没了；胜者的行保留
+        rows = (await db_session.execute(select(MediaFile))).scalars().all()
+        assert [r.remote_id for r in rows] == ["pc-mp4"]
+        assert not loser_strm.exists()
+        assert shared.exists()
+
     async def test_skips_out_of_scope(
         self, db_session, settings, driver_row, fake_driver, tmp_path
     ):

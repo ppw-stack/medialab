@@ -90,7 +90,12 @@ class ScanStats:
     #: ``skipped_unknown``，那是两回事，混了会让统计误导人）
     pruned: int = 0
     failed: int = 0
+    #: **失败**明细（附件下载失败等）——只放真正的错误
     errors: list[str] = field(default_factory=list)
+    #: **去重明细**（点名两个源文件 + 谁胜出）——去重是正常业务结果，
+    #: **不是错误**，不能塞进 ``errors``：那个列表上限 20 且只放失败，
+    #: 混进去会把真正的失败挤掉。单独一条通道。
+    dedup_details: list[str] = field(default_factory=list)
 
     @property
     def skipped(self) -> int:
@@ -127,6 +132,7 @@ class ScanStats:
             "failed": self.failed,
             "total": self.total,
             "errors": self.errors[:20],
+            "dedup_details": self.dedup_details[:20],
         }
 
 
@@ -437,7 +443,7 @@ async def find_strm_conflict(
     driver: Driver,
     cloud_file: CloudFile,
     strm_path: Path,
-) -> MediaFile | None:
+) -> list[MediaFile]:
     """查「同一个 strm 路径已被别的条目占用」——同名不同扩展名的冲突。
 
     **去掉视频扩展名后新增的风险**：同目录的 ``x.mp4`` 与 ``x.mkv``
@@ -447,15 +453,45 @@ async def find_strm_conflict(
     ——所以调用方按「保留大的」决策（对齐数据同步的 ``conflict_policy=1``：
     同名不同大小保留大文件），而不是随便挑一个。
 
+    ⚠️ **查的是「已占用该路径的条目」**——存量库里被淘汰的那份可能
+    还挂在**旧命名**路径上（``x.mkv.strm``），查不到它。所以调用方
+    还得按 remote_id 复查一遍（见 :func:`find_media_by_remote`）。
+
+    ⚠️ **可能不止一条**：存量库里同名不同扩展名的两份**共用**同一个
+    strm 路径（见 :func:`_prune_orphans` 的引用计数）。所以这里用
+    ``scalars().all()`` 取全部，**不能**用 ``scalar_one_or_none()``
+    ——那会抛 ``MultipleResultsFound`` 把整个扫描任务打挂。
+
     Returns:
-        占用该路径的**其它**条目；无冲突返回 ``None``。
+        占用该路径的**其它**条目（可能多条）；无冲突返回空列表。
+    """
+    return list(
+        (
+            await db.execute(
+                select(MediaFile).where(
+                    MediaFile.driver_id == driver.id,
+                    MediaFile.strm_path == str(strm_path),
+                    MediaFile.remote_id != cloud_file.remote_id,
+                )
+            )
+        ).scalars().all()
+    )
+
+
+async def find_media_by_remote(
+    db: AsyncSession, driver: Driver, cloud_file: CloudFile
+) -> MediaFile | None:
+    """按 ``remote_id`` 查该源文件的**存量条目**（不论它挂在哪条 strm 路径）。
+
+    去重时需要它：被淘汰的那份在存量库里可能还指向**旧命名**的 strm
+    （``x.mkv.strm``），那条文件必须一并清掉——否则磁盘上留下孤儿
+    strm，Emby 里出现重复条目。
     """
     return (
         await db.execute(
             select(MediaFile).where(
                 MediaFile.driver_id == driver.id,
-                MediaFile.strm_path == str(strm_path),
-                MediaFile.remote_id != cloud_file.remote_id,
+                MediaFile.remote_id == cloud_file.remote_id,
             )
         )
     ).scalar_one_or_none()
@@ -476,8 +512,8 @@ def note_dedup(
     stats.deduped += 1
     winner = cloud_file if keep_current else conflict
     loser = conflict if keep_current else cloud_file
-    if len(stats.errors) < 20:
-        stats.errors.append(
+    if len(stats.dedup_details) < 20:
+        stats.dedup_details.append(
             f"同名不同扩展名去重：{loser.path}（{loser.size} 字节）与 "
             f"{winner.path}（{winner.size} 字节）映射到同一 strm，保留较大的"
         )
@@ -488,6 +524,40 @@ def note_dedup(
         loser.path,
         loser.size,
     )
+
+
+async def _drop_loser_entry(
+    db: AsyncSession,
+    driver: Driver,
+    cloud_file: CloudFile,
+    strm_path: Path,
+) -> Path | None:
+    """清理「被淘汰那份」的存量条目，返回它遗留的旧 strm 路径。
+
+    **为什么必须有这一步**：去重是「同一 strm 路径只留一份」，但存量库
+    里被淘汰的那份可能挂在**旧命名**路径上（``x.mkv.strm``）。
+    :func:`find_strm_conflict` 查的是「占用**新**路径的条目」，查不到
+    它——于是它的行与它的旧 strm 文件双双留下：
+
+    - 磁盘上留下孤儿 strm → Emby 里出现重复条目（正是本次改动要消灭的）
+    - 下一轮扫描仍然命中同样的冲突 → **每轮都去重、永远不收敛**
+
+    只删**行 + 旧路径文件**，不动本次要写的 ``strm_path``——那个文件
+    由胜者覆盖。
+
+    Returns:
+        待删的旧 strm 路径；没有遗留文件则 ``None``。**由调用方在写锁
+        之外删除**（CIFS unlink 卡住会挡住别人的写事务——2026-11-12
+        prod 事故的同款教训）。
+    """
+    own = await find_media_by_remote(db, driver, cloud_file)
+    if own is None:
+        return None
+    old_path: Path | None = None
+    if own.strm_path and own.strm_path != str(strm_path):
+        old_path = Path(own.strm_path)
+    await db.delete(own)
+    return old_path
 
 
 def _build_driver(driver: Driver) -> Any:
@@ -748,17 +818,42 @@ async def scan_driver(
             # 同名不同扩展名的冲突：``x.mp4`` 与 ``x.mkv`` 去掉扩展名后
             # 映射到同一个 ``x.strm``。两份是**不同版本**（内容不同），
             # 规则是「保留大的」（对齐 conflict_policy=1）。
-            conflict = await find_strm_conflict(db, driver, cloud_file, strm_path)
-            if conflict is not None:
-                if conflict.size >= cloud_file.size:
+            #
+            # 冲突方**可能有多条**（存量库里两份共用同一 strm 路径）。
+            # ⚠️ **只有「本轮网盘上还活着」的那份才参与「保留大的」竞争**——
+            # 存量库里可能留着**源端已消失**的条目（网盘删了 mp4 只剩 mkv，
+            # 但 DB 里 mp4 那行还在，且它也指向同一个 strm 路径）。拿这种
+            # 陈旧条目比大小，会把**活着的那份**误判成「小的」淘汰掉
+            # （2026-11-14 回归）。判据用 ``seen_remote_ids``——与 prune
+            # 判「源端已消失」是**同一个信号**，语义一致。
+            #
+            # 冲突方若**稍后**才被遍历到，竞赛推迟到那时再判定：那时它已
+            # 在 ``seen_remote_ids`` 里，规则照常生效 → 最终留下最大的那份，
+            # 与遍历顺序无关。
+            conflicts = await find_strm_conflict(db, driver, cloud_file, strm_path)
+            alive = [c for c in conflicts if c.remote_id in seen_remote_ids]
+            if alive:
+                # 竞争者里最大的那个说了算
+                biggest = max(alive, key=lambda c: c.size)
+                if biggest.size >= cloud_file.size:
                     # 库里那份不小（含相等——相等时保留先遇到的，行为稳定）
-                    note_dedup(stats, conflict, cloud_file, keep_current=False)
+                    note_dedup(stats, biggest, cloud_file, keep_current=False)
+                    # ⚠️ **当前这份被淘汰**——但它可能还有**存量条目**
+                    # （挂在旧命名路径上，如 ``x.mkv.strm``）。不清理的话：
+                    # 磁盘上留下那个孤儿 strm，Emby 里多出一条重复条目，
+                    # 且下一轮扫描仍然命中同样的冲突 → **永不收敛**。
+                    old_path = await _drop_loser_entry(
+                        db, driver, cloud_file, strm_path
+                    )
+                    if old_path is not None:
+                        pending_stale.append(old_path)
                     continue  # 小的这份不落库、不写文件
-                # 当前这份更大 → 淘汰库里的小的。
+                # 当前这份更大 → 淘汰所有竞争者。
                 # ⚠️ **不能删 strm 文件**——它与当前这份共用同一路径，
                 # 当前会重写它（URL 的 media_id 变了）。
-                await db.delete(conflict)
-                note_dedup(stats, conflict, cloud_file, keep_current=True)
+                for c in alive:
+                    await db.delete(c)
+                note_dedup(stats, biggest, cloud_file, keep_current=True)
 
             media = await _upsert_media(
                 db,

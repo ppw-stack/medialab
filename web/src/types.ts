@@ -898,6 +898,8 @@ export interface ScanStats {
   failed: number
   total: number
   errors: string[]
+  /** 去重明细（点名两个源文件 + 谁胜出）——去重不是错误，单独一条通道 */
+  dedup_details?: string[]
 }
 
 /** 增量同步任务（115 生活事件流）。 */
@@ -928,6 +930,8 @@ export interface IncrementalJob {
   conflicts: number
   /** 同名不同扩展名的去重数（保留大的，小的不落库） */
   deduped: number
+  /** 去重明细（点名两个源文件 + 谁胜出）——去重不是错误，单独一条通道 */
+  dedup_details?: string[]
   skipped_unknown: number
   skipped_deleted: number
   failed: number
@@ -964,6 +968,8 @@ export interface ScanJob {
   /** prune 清理的「源端已消失」条目数（与「未知后缀」是两回事） */
   pruned: number
   failed: number
+  /** 去重明细（点名两个源文件 + 谁胜出）——去重不是错误，单独一条通道 */
+  dedup_details?: string[]
   /** 实时日志（环形，最多 500 条） */
   logs: string[]
   error: string | null

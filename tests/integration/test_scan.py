@@ -200,8 +200,11 @@ class TestScanDriver:
         strms = list(tmp_path.rglob("*.strm"))
         assert [p.name for p in strms] == ["movie.strm"]
         # 明细点名两个源文件
-        assert "movie.mp4" in stats.errors[0]
-        assert "movie.mkv" in stats.errors[0]
+        # ⚠️ 去重**不是错误**——走独立通道 ``dedup_details``，
+        # 不塞进 ``errors``（那个列表只放真正的失败，且上限 20）
+        assert stats.errors == []
+        assert "movie.mp4" in stats.dedup_details[0]
+        assert "movie.mkv" in stats.dedup_details[0]
 
     async def test_same_stem_different_ext_keeps_existing_when_larger(
         self, db_session, settings, driver_row, fake_driver, tmp_path
@@ -241,6 +244,155 @@ class TestScanDriver:
         assert len(rows) == 1
         assert rows[0].remote_id == "pc2"
         assert len(list(tmp_path.rglob("*.strm"))) == 1
+
+    async def test_dedup_drops_loser_legacy_entry_and_strm(
+        self, db_session, settings, driver_row, fake_driver, tmp_path
+    ):
+        """**去重要把败者的存量行与遗留 strm 一并清掉**（2026-11-14 回归）。
+
+        存量库里同名不同扩展名的两份各有各的行（老命名时路径不同 → 不冲突）。
+        改成「去扩展名」后两份映射到同一个 strm，去重只留一份——**败者那条
+        行和它的旧 strm 文件必须一起消失**：
+
+        - 行残留 → DB 里两条记录指向同一集
+        - 文件残留 → 磁盘上多一个孤儿 strm，Emby 里出现重复条目
+        - 且下一轮扫描仍命中同样的冲突 → **每轮都去重、永远不收敛**
+        """
+        driver_row.output_dir = str(tmp_path)
+        await db_session.commit()
+
+        # 存量：两条老命名的行，各自一个旧 strm 文件
+        for rid, name, size in (("pc1", "movie.mp4", 100), ("pc2", "movie.mkv", 200)):
+            old = tmp_path / f"{name}.strm"
+            old.write_text(f"http://localhost:8080/302/OLD-{rid}\n", encoding="utf-8")
+            db_session.add(
+                MediaFile(
+                    driver_id=driver_row.id,
+                    remote_id=rid,
+                    path=f"/影视/{name}",
+                    name=name,
+                    size=size,
+                    strm_path=str(old),
+                    signature="sig",
+                    mtime=None,
+                    created_at="2026-01-01 00:00:00",
+                    updated_at="2026-01-01 00:00:00",
+                )
+            )
+        await db_session.commit()
+
+        fake_driver.add_file("pc1", "movie.mp4", path="/影视/movie.mp4", size=100)
+        fake_driver.add_file("pc2", "movie.mkv", path="/影视/movie.mkv", size=200)
+
+        stats = await scan_driver(db_session, settings, driver_row)
+
+        assert stats.deduped == 1
+        # 大的那份留下，败者的行被删
+        rows = (await db_session.execute(select(MediaFile))).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].remote_id == "pc2"
+        # 磁盘上只剩新命名的 strm——两个旧文件（败者的 + 改名遗留的）都没了
+        assert [p.name for p in tmp_path.rglob("*.strm")] == ["movie.strm"]
+
+        # **收敛**：再扫一轮结果不变，不残留、不重复
+        second = await scan_driver(db_session, settings, driver_row)
+        assert second.deduped == 1
+        rows = (await db_session.execute(select(MediaFile))).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].remote_id == "pc2"
+        assert [p.name for p in tmp_path.rglob("*.strm")] == ["movie.strm"]
+
+    async def test_dedup_ignores_vanished_source(
+        self, db_session, settings, driver_row, fake_driver, tmp_path
+    ):
+        """**源端已消失的那份不参与「保留大的」竞争**（2026-11-14 回归）。
+
+        存量库里留着 ``x.mp4`` 的行，但网盘上它已经没了（只剩 ``x.mkv``），
+        两行又指向同一个 strm 路径。拿这条**陈旧**行比大小，会把**活着**
+        的 ``x.mkv`` 误判成「小的」淘汰掉——源端明明只有它了。
+
+        判据用 ``seen_remote_ids``（与 prune 判「源端已消失」同一信号）。
+        """
+        driver_row.output_dir = str(tmp_path)
+        await db_session.commit()
+
+        shared = tmp_path / "movie.strm"
+        shared.write_text("http://localhost:8080/302/2/sig\n", encoding="utf-8")
+        for rid, name in (("pc1", "movie.mp4"), ("pc2", "movie.mkv")):
+            db_session.add(
+                MediaFile(
+                    driver_id=driver_row.id,
+                    remote_id=rid,
+                    path=f"/影视/{name}",
+                    name=name,
+                    size=100,
+                    strm_path=str(shared),
+                    signature="sig",
+                    mtime=None,
+                    created_at="2026-01-01 00:00:00",
+                    updated_at="2026-01-01 00:00:00",
+                )
+            )
+        await db_session.commit()
+
+        # 网盘上只剩 x.mkv（x.mp4 已删除）
+        fake_driver.add_file("pc2", "movie.mkv", path="/影视/movie.mkv", size=100)
+
+        await scan_driver(db_session, settings, driver_row, prune=True)
+
+        # 活着的 x.mkv 留下；陈旧的 x.mp4 行被 prune 清掉
+        rows = (await db_session.execute(select(MediaFile))).scalars().all()
+        assert [r.remote_id for r in rows] == ["pc2"]
+        assert shared.exists()
+
+    async def test_dedup_handles_multiple_rows_sharing_one_strm(
+        self, db_session, settings, driver_row, fake_driver, tmp_path
+    ):
+        """**多条记录共用一个 strm 路径时不能崩**（2026-11-14 回归）。
+
+        存量库里同名不同扩展名的几份**共用**同一个 strm 路径（见
+        ``_prune_orphans`` 的引用计数）。查冲突时若用
+        ``scalar_one_or_none()``，命中多行会抛 ``MultipleResultsFound``
+        ——整个扫描任务直接失败。
+        """
+        driver_row.output_dir = str(tmp_path)
+        await db_session.commit()
+
+        shared = tmp_path / "movie.strm"
+        shared.write_text("http://localhost:8080/302/2/sig\n", encoding="utf-8")
+        for rid, name, size in (
+            ("pc1", "movie.mp4", 100),
+            ("pc2", "movie.mkv", 200),
+            ("pc3", "movie.avi", 300),
+        ):
+            db_session.add(
+                MediaFile(
+                    driver_id=driver_row.id,
+                    remote_id=rid,
+                    path=f"/影视/{name}",
+                    name=name,
+                    size=size,
+                    strm_path=str(shared),
+                    signature="sig",
+                    mtime=None,
+                    created_at="2026-01-01 00:00:00",
+                    updated_at="2026-01-01 00:00:00",
+                )
+            )
+        await db_session.commit()
+
+        # 网盘上有两份（都映射到同一个 strm 路径）：
+        #   pc2（movie.mkv，200 字节）先被遍历
+        #   pc4（movie.mp4，50 字节）后被遍历 → 撞上那三条共用路径
+        fake_driver.add_file("pc2", "movie.mkv", path="/影视/movie.mkv", size=200)
+        fake_driver.add_file("pc4", "movie.mp4", path="/影视/movie.mp4", size=50)
+
+        stats = await scan_driver(db_session, settings, driver_row)
+
+        # 没崩（多行命中时不再抛 MultipleResultsFound），且最小的 pc4 被淘汰
+        assert stats.deduped == 1
+        rows = (await db_session.execute(select(MediaFile))).scalars().all()
+        assert "pc4" not in [r.remote_id for r in rows]
 
     async def test_subdir_structure_preserved(
         self, db_session, settings, driver_row, fake_driver, tmp_path

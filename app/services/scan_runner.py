@@ -80,6 +80,8 @@ async def _run_job(job: scan_jobs.ScanJob, *, prune: bool) -> None:
                 job.attachment_failed = stats.attachment_failed
                 job.skipped_unknown = stats.skipped_unknown
                 job.skipped_small = stats.skipped_small
+                job.deduped = stats.deduped
+                job.pruned = stats.pruned
                 # 每 10 个记一行日志，避免刷屏
                 if processed % 10 == 0:
                     job.log(f"已处理 {processed} 个文件：{path}")
@@ -108,6 +110,7 @@ async def _run_job(job: scan_jobs.ScanJob, *, prune: bool) -> None:
         job.deduped = stats.deduped
         job.pruned = stats.pruned
         job.failed = stats.failed
+        job.dedup_details = list(stats.dedup_details)
         job.current_path = ""
 
         job.state = scan_jobs.STATE_SUCCESS

@@ -51,6 +51,7 @@ from app.services.attachments import (
     sync_attachment,
 )
 from app.services.media import (
+    _drop_loser_entry,
     _upsert_media,
     find_strm_conflict,
     target_attachment_path,
@@ -108,8 +109,12 @@ class IncrementalStats:
     #: 游标（日期 ``YYYY-MM-DD``）：旧 → 新
     cursor_old: str = ""
     cursor_new: str = ""
-    #: 错误信息（限长）
+    #: 错误信息（限长）——只放真正的失败
     errors: list[str] = field(default_factory=list)
+    #: **去重明细**（点名两个源文件 + 谁胜出）——去重是正常业务结果，
+    #: **不是错误**，不能塞进 ``errors``（那个列表上限 20 且只放失败，
+    #: 混进去会把真正的失败挤掉）。单独一条通道。
+    dedup_details: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -124,6 +129,7 @@ class IncrementalStats:
             "attachment_failed": self.attachment_failed,
             "conflicts": self.conflicts,
             "deduped": self.deduped,
+            "dedup_details": self.dedup_details[:20],
             "skipped_unknown": self.skipped_unknown,
             "skipped_deleted": self.skipped_deleted,
             "failed": self.failed,
@@ -391,39 +397,50 @@ async def _handle_video(
         return
 
     # 同名不同扩展名的冲突（去掉视频扩展名后新增的风险）：保留大的
-    conflict = await find_strm_conflict(db, driver, cloud_file, strm_path)
-    if conflict is not None:
-        if conflict.size >= cloud_file.size:
+    # 冲突方**可能有多条**（存量库里两份共用同一 strm 路径）
+    conflicts = await find_strm_conflict(db, driver, cloud_file, strm_path)
+    if conflicts:
+        biggest = max(conflicts, key=lambda c: c.size)
+        if biggest.size >= cloud_file.size:
             # 库里那份不小（含相等——相等时保留先遇到的，行为稳定）
             stats.deduped += 1
-            if len(stats.errors) < 20:
-                stats.errors.append(
-                    f"同名不同扩展名去重：{cloud_file.path} 与 {conflict.path} "
-                    f"映射到同一 strm，保留较大的（{conflict.path}）"
+            if len(stats.dedup_details) < 20:
+                stats.dedup_details.append(
+                    f"同名不同扩展名去重：{cloud_file.path} 与 {biggest.path} "
+                    f"映射到同一 strm，保留较大的（{biggest.path}）"
                 )
             logger.warning(
                 "同名不同扩展名去重：保留 %s（%d 字节），跳过 %s（%d 字节）",
-                conflict.path,
-                conflict.size,
+                biggest.path,
+                biggest.size,
                 cloud_file.path,
                 cloud_file.size,
             )
+            # ⚠️ **当前这份被淘汰**——清掉它的存量条目与遗留 strm 文件，
+            # 否则磁盘上留下孤儿 strm（Emby 重复条目），且下一轮仍命中
+            # 同样的冲突 → 永不收敛（与 media.py 同款处理）。
+            old_path = await _drop_loser_entry(db, driver, cloud_file, strm_path)
+            await db.commit()
+            if old_path is not None:
+                # ⚠️ 删文件放线程池（CIFS 卡死时同步 unlink 会卡住事件循环）
+                await asyncio.to_thread(delete_strm, old_path)
             return
-        # 当前这份更大 → 淘汰库里的小的。
+        # 当前这份更大 → 淘汰库里所有竞争者。
         # ⚠️ **不能删 strm 文件**——它与当前这份共用同一路径，当前会重写它。
-        await db.delete(conflict)
+        for c in conflicts:
+            await db.delete(c)
         stats.deduped += 1
-        if len(stats.errors) < 20:
-            stats.errors.append(
-                f"同名不同扩展名去重：{conflict.path} 与 {cloud_file.path} "
+        if len(stats.dedup_details) < 20:
+            stats.dedup_details.append(
+                f"同名不同扩展名去重：{biggest.path} 与 {cloud_file.path} "
                 f"映射到同一 strm，保留较大的（{cloud_file.path}）"
             )
         logger.warning(
             "同名不同扩展名去重：保留 %s（%d 字节），淘汰 %s（%d 字节）",
             cloud_file.path,
             cloud_file.size,
-            conflict.path,
-            conflict.size,
+            biggest.path,
+            biggest.size,
         )
 
     # 改名遗留的旧 strm 路径（命名规则变更时才有）

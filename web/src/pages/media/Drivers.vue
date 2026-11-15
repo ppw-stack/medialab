@@ -440,6 +440,24 @@
           </a-descriptions-item>
         </a-descriptions>
 
+        <!-- 去重明细：默认折叠（点开才看，避免详情面板被撑爆） -->
+        <div v-if="scanJob.dedup_details?.length" class="dedup-details">
+          <a-button type="link" size="small" @click="dedupOpen = !dedupOpen">
+            {{ dedupOpen ? "收起" : "展开" }}去重明细（{{
+              scanJob.dedup_details.length
+            }}）
+          </a-button>
+          <div v-if="dedupOpen" class="dedup-list">
+            <div
+              v-for="(line, i) in scanJob.dedup_details"
+              :key="i"
+              class="dedup-line mono"
+            >
+              {{ line }}
+            </div>
+          </div>
+        </div>
+
         <a-alert
           v-if="scanJob.state === 'failed'"
           type="error"
@@ -1150,6 +1168,8 @@ function scanDisabledTip(record: Driver): string {
 /** 扫描进度弹窗 */
 const scanOpen = ref(false)
 const scanJob = ref<ScanJob | null>(null)
+/** 去重明细是否展开（默认折叠——展开会撑高详情面板） */
+const dedupOpen = ref(false)
 let scanTimer: number | undefined
 
 async function onScan(driver: Driver): Promise<void> {
@@ -1158,6 +1178,7 @@ async function onScan(driver: Driver): Promise<void> {
     const res = await api.post<{ job_id: string }>(`/drivers/${driver.id}/scan`)
     scanOpen.value = true
     scanJob.value = null
+    dedupOpen.value = false
     startScanPolling(res.job_id)
   } catch (e) {
     // 409 = 该存储源已有任务在跑 → 直接接管那个任务，而不是报错
@@ -1611,6 +1632,28 @@ onBeforeUnmount(() => {
 }
 
 .log-line {
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* 去重明细：默认折叠，展开后限高滚动 */
+.dedup-details {
+  margin-top: 8px;
+}
+
+.dedup-list {
+  margin-top: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  border-radius: 4px;
+  padding: 8px 10px;
+}
+
+.dedup-line {
   font-size: 12px;
   line-height: 1.6;
   white-space: pre-wrap;
