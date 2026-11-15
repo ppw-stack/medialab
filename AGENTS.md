@@ -656,6 +656,9 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
       `POST /groups/{id}/sync` **立即返回 job_id**，前端轮询
       `GET /sync-jobs/{id}`——单文件传输几分钟，同步 HTTP 会被网关 60s
       超时掐断；同组已有任务在跑 → 409
+    - **job 的计数就地更新**（`job.result` 是同一个 `AggregateSyncResult`
+      对象）→ 面板每次轮询拿到的都是**实时进度**（原来跑完才一次性更新，
+      面板干等几分钟看不到动静）
     - **云下载等待有上限**（`TASK_MAX_WAIT_SEC` = 2h）：光鸭会把任务卡在
       活跃列表不结束（实测），无超时 = run 永不结束 = **其它组也饿死**。
       超时记 `failed`（`cloud_task_id` 保留，人工重试时认领残留能接住

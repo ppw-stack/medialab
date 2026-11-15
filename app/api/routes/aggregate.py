@@ -227,6 +227,8 @@ async def list_groups_route() -> list[GroupOut]:
             enabled=r.enabled,
             created_at=r.created_at,
             updated_at=r.updated_at,
+            target_dir_id=r.target_dir_id,
+            target_dir_path=r.target_dir_path,
         )
         for r in rows
     ]
@@ -245,6 +247,8 @@ async def create_group_route(payload: GroupIn) -> GroupOut:
         enabled=row.enabled,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        target_dir_id=row.target_dir_id,
+        target_dir_path=row.target_dir_path,
     )
 
 
@@ -263,6 +267,8 @@ async def update_group_route(group_id: int, payload: GroupUpdate) -> GroupOut:
         enabled=row.enabled,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        target_dir_id=row.target_dir_id,
+        target_dir_path=row.target_dir_path,
     )
 
 

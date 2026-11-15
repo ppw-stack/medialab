@@ -574,6 +574,8 @@ async def test_api_group_lifecycle(client) -> None:
     resp = await client.get("/api/aggregate/groups")
     assert resp.status_code == 200
     assert len(resp.json()) == 1
+    # 组列表也要带「归拢目标目录」（面板在卡片上显示）
+    assert "target_dir_id" in resp.json()[0]
 
     resp = await client.delete(f"/api/aggregate/groups/{group['id']}")
     assert resp.status_code == 200

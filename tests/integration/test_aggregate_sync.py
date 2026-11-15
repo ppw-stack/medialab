@@ -348,13 +348,15 @@ async def test_manual_sync_runs_in_background(db, fast_watcher, fake_drivers) ->
         if job.done:
             break
     assert job.state == "success", job.logs
-    assert job.synced == 1 and job.cleaned == 1
+    assert job.result.synced == 1 and job.result.cleaned == 1
     assert any("已归拢" in line for line in job.logs)
 
     # 任务表可查
     found = await aggregate_jobs.get_job(job.id)
     assert found is not None and found.id == job.id
     assert (await aggregate_jobs.find_running(group_id)) is None
+    # 结果对象**就地更新** → 面板每次轮询拿到的都是实时进度
+    assert job.to_dict()["synced"] == 1
 
 
 async def test_sync_pauses_group_when_hitting_quota_wall(

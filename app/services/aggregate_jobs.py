@@ -53,12 +53,10 @@ class AggregateSyncJob:
     finished_at: int | None = None
 
     # -- 归拢结果（与 AggregateSyncResult 同构）--
-    synced: int = 0
-    cleaned: int = 0
-    paused: int = 0
-    failed: int = 0
-    skipped: int = 0
-    details: list[str] = field(default_factory=list)
+    #:
+    #: 结果对象**就地更新**——后台跑的过程中计数就在变，前端每次轮询
+    #: 拿到的都是**实时进度**（不是「跑完才有数」）。
+    result: Any = field(default_factory=lambda: _new_result())
 
     #: 实时日志（环形，最多 MAX_LOGS 条）
     logs: list[str] = field(default_factory=list)
@@ -74,7 +72,8 @@ class AggregateSyncJob:
             del self.logs[: len(self.logs) - MAX_LOGS]
 
     def to_dict(self) -> dict[str, Any]:
-        """序列化给 API。"""
+        """序列化给 API（**读实时结果**）。"""
+        r = self.result
         return {
             "id": self.id,
             "group_id": self.group_id,
@@ -83,12 +82,12 @@ class AggregateSyncJob:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "elapsed_sec": (self.finished_at or int(time.time())) - self.started_at,
-            "synced": self.synced,
-            "cleaned": self.cleaned,
-            "paused": self.paused,
-            "failed": self.failed,
-            "skipped": self.skipped,
-            "details": list(self.details),
+            "synced": r.synced,
+            "cleaned": r.cleaned,
+            "paused": r.paused,
+            "failed": r.failed,
+            "skipped": r.skipped,
+            "details": list(r.details),
             "logs": list(self.logs),
             "error": self.error,
         }
@@ -96,6 +95,13 @@ class AggregateSyncJob:
     @property
     def done(self) -> bool:
         return self.state != STATE_RUNNING
+
+
+def _new_result() -> Any:
+    """新建一个归拢结果对象（**延迟 import** 避免模块循环）。"""
+    from app.services.aggregate_sync import AggregateSyncResult
+
+    return AggregateSyncResult()
 
 
 #: 任务表（job_id → AggregateSyncJob）
@@ -189,7 +195,9 @@ async def start_sync_job(group_id: int, group_name: str) -> AggregateSyncJob:
     async def _run() -> None:
         try:
             job.log(f"开始归拢组「{group_name}」")
-            result = await sync_group_now(group_id)
+            # 传入 job 自己的结果对象 → **就地更新** → 面板每次轮询拿到的
+            # 都是实时进度（原来只在跑完时一次性更新 → 面板干等几分钟）
+            await sync_group_now(group_id, job.result)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -199,12 +207,7 @@ async def start_sync_job(group_id: int, group_name: str) -> AggregateSyncJob:
             job.log(f"❌ 归拢失败：{exc}")
             logger.exception("聚合归拢任务失败 group=%s", group_name)
             return
-        job.synced = result.synced
-        job.cleaned = result.cleaned
-        job.paused = result.paused
-        job.failed = result.failed
-        job.skipped = result.skipped
-        job.details = list(result.details)
+        result = job.result
         for line in result.details:
             job.log(line)
         job.state = STATE_SUCCESS

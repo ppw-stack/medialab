@@ -719,7 +719,8 @@ async def _mark(
             row.cloud_task_id = task_id or None
         if bump_attempts:
             row.attempts = int(row.attempts) + 1
-        if state == STAGING_VERIFIED:
+        if state in (STAGING_VERIFIED, STAGING_DONE):
+            # done = 已归拢且副盘副本已清理——「归拢完成时间」对它同样有意义
             row.synced_at = bj_now()
         if cleaned:
             row.cleaned_at = bj_now()
@@ -761,8 +762,16 @@ async def _build_source_driver(row: _Row) -> Any:
 # --------------------------------------------------------------------------
 
 
-async def sync_group_now(group_id: int) -> AggregateSyncResult:
-    """手动跑一轮某个组的归拢（API 触发，**持组级锁**）。"""
+async def sync_group_now(
+    group_id: int, result: AggregateSyncResult | None = None
+) -> AggregateSyncResult:
+    """手动跑一轮某个组的归拢（API 触发，**持组级锁**）。
+
+    Args:
+        group_id: 聚合组 id。
+        result: 外部传入的结果对象——**就地更新**，调用方可实时读到进度
+            （后台 job 靠它把计数透给面板）。
+    """
     async with session_scope() as db:
         exists = (
             await db.execute(
@@ -771,6 +780,6 @@ async def sync_group_now(group_id: int) -> AggregateSyncResult:
         ).scalar_one_or_none()
     if exists is None:
         raise ServiceError(f"聚合组不存在：{group_id}", status=404)
-    result = AggregateSyncResult(groups=1)
+    result = result if result is not None else AggregateSyncResult(groups=1)
     await _sync_group(group_id, result)
     return result
