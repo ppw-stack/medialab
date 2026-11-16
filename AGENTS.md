@@ -713,6 +713,10 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
   - **前端（`web/src/pages/media/Aggregate.vue`）**：组卡片（成员 / 目录映射 /
     水位）+ 在途台账表格 + 「登记在途」「立即归拢」（都是后台 job，2s 轮询）
     + 「目录映射」弹框（主盘目标目录 + 各副盘缓冲根，各一个 `DirBrowser`）
+    - **归拢实时进度**：组卡片内嵌进度卡（状态 + 成功/清理/暂停/失败/跳过
+      计数 + 日志尾部 + 取消按钮），2s 轮询 `GET /sync-jobs/{id}`；页面加载
+      时恢复「正在跑」的 job（`GET /sync-jobs?group_id=` 找 running）——
+      手动与定时（在跑的那轮）都能看到。job 表是**内存态**，容器重启即清空
     - ⚠️ **禁用条件与 tooltip 文案必须分成两个函数**（2026-11-16 踩过）：
       曾把 tooltip 文案（非空串）直接当禁用条件 `:disabled="!!tip(group)"`，
       而**配置齐全时文案也是非空的** → 按钮**永远点不动**。现为
