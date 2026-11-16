@@ -68,6 +68,8 @@ class StagingRow:
     target_dir: str
     size_bytes: int
     state: str
+    #: 搬运通道（``cloud_download`` / ``share_transfer``；None = 未搬）
+    transfer_mode: str | None
     attempts: int
     last_error: str | None
     created_at: str
@@ -114,6 +116,7 @@ def _to_row(row: SecondaryStaging) -> StagingRow:
         target_dir=row.target_dir,
         size_bytes=int(row.size_bytes),
         state=row.state,
+        transfer_mode=row.transfer_mode,
         attempts=int(row.attempts),
         last_error=row.last_error,
         created_at=row.created_at,

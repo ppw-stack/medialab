@@ -169,6 +169,8 @@ class RuntimeParamsUpdateIn(BaseModel):
     scrape_original_image: int | None = None
     #: 聚合归拢的单轮提交上限（0 = 不限）
     aggregate_max_submissions: int | None = None
+    #: 小文件走「分享转存」的体积上限（0 = 关闭该通道）
+    aggregate_share_threshold_bytes: int | None = None
 
 
 def _assert_params_model_covers_specs() -> None:

@@ -115,6 +115,17 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         "手动触发始终不限",
     ),
     ParamSpec(
+        key="aggregate_share_threshold_bytes",
+        label="小文件走分享转存的体积上限（字节）",
+        default=10 * 1024 * 1024,
+        min=0,
+        max=1024 * 1024 * 1024,
+        job="aggregate_sync",
+        note="小于等于此值的文件走「分享转存」（服务端内部复制，**不消耗云添加"
+        "额度**）；0 = 全部走离线下载。附件（nfo/jpg）占文件数的大头却几乎不"
+        "占体积，走离线下载纯属浪费额度",
+    ),
+    ParamSpec(
         key="disk_rotation_threshold_pct",
         label="磁盘使用率阈值(%)",
         default=90,

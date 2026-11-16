@@ -36,6 +36,7 @@ import base64
 import json
 import time
 from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -140,6 +141,53 @@ def _api_base_url() -> str:
         get_settings().guangya_api_base_url.strip().rstrip("/")
         or DEFAULT_API_BASE_URL
     )
+
+
+def share_url_id(share_url: str, share_id: str) -> str:
+    """从 ``shareUrl`` 解析出**URL 形态**的分享 id。
+
+    光鸭的公开接口（``share_summary`` / ``share_access_token``）只认
+    ``{shareId}_{账号分享key}``——裸 ``shareId`` 一律 code=112「参数错误」。
+
+    ⚠️ **必须剥掉查询串**：``shareUrl`` 形如::
+
+        https://www.guangyapan.com/s/{shareId}_{key}?code=xxxx
+
+    查询串里带着提取码，不剥掉会让 id 变成「…_key?code=xxxx」→
+    取 token 报「分享链接错误」（2026-11-16 本地真机联调踩到）。
+
+    Args:
+        share_url: 创建分享时返回的 ``shareUrl``。
+        share_id: 创建分享时返回的 ``shareId``（URL 异常时的兜底）。
+
+    Returns:
+        URL 形态的分享 id。
+    """
+    if "/" not in share_url:
+        return share_id
+    tail = share_url.rsplit("/", 1)[-1].split("?", 1)[0]
+    if "_" not in tail:
+        return share_id
+    return tail
+
+
+@dataclass(frozen=True, slots=True)
+class ShareInfo:
+    """一次分享创建的结果。
+
+    ⚠️ **``url_id`` 才是公开接口认的 id**（``{shareId}_{账号分享key}``）——
+    裸 ``share_id`` 调 ``share_summary`` / ``share_access_token`` 一律
+    code=112「参数错误」（2026-11-16 生产实测）。
+    """
+
+    #: 分享 id（``share_delete`` 用它）
+    share_id: str
+    #: **URL 形态**的分享 id（公开接口用）
+    url_id: str
+    #: 提取码（转存取 token 时必需）
+    code: str
+    #: 分享标题
+    title: str
 
 
 class GuangyaDriver:
@@ -637,6 +685,123 @@ class GuangyaDriver:
         await self.delete_files([file_id])
 
     # -- 离线下载任务 --
+
+    # -- 分享 / 转存（小文件归拢通道）--
+
+    async def create_share(self, file_ids: list[str], title: str) -> ShareInfo:
+        """创建分享（**小文件归拢通道**用）。
+
+        分享是**服务端内部复制**的另一种搬运方式：源账号建分享 → 目标账号
+        「转存」到指定目录。与 ``cloud_create_task``（URL 离线下载）是**不同
+        的接口与配额**——转存不消耗云添加额度（2026-11-16 生产实测：小文件
+        nfo 建分享 → 转存 → 目标目录出现同名同大小文件，全流程零云添加）。
+
+        Args:
+            file_ids: 要分享的文件 id（列表）。
+            title: 分享标题（用户可见）。
+
+        Returns:
+            :class:`ShareInfo`（含 ``share_id`` / 提取码 / **URL 形态 id**）。
+
+        Raises:
+            DriverError: 建分享失败（含分享审核拒绝）。
+        """
+        payload = await self._call(
+            "share_create",
+            [str(fid) for fid in file_ids],
+            title,
+            0,  # validate_duration=0 → 永久有效
+            1,  # share_type=1
+            "",  # code（空 → 服务端自动生成）
+            True,  # auto_fill_code：提取码是**必需的**（转存要带）
+            "0",  # traffic_limit 不限
+            0,  # max_restore_count 不限
+            1,  # download_type
+        )
+        code = payload.get("code")
+        if code not in (None, 0):
+            raise DriverError(
+                f"光鸭创建分享失败：{payload.get('msg') or payload}",
+                kind=_map_code(code),
+            )
+        data = payload.get("data") or {}
+        share_id = str(data.get("shareId") or "")
+        if not share_id:
+            raise DriverError(f"光鸭创建分享未返回 shareId：{payload}")
+        url_id = share_url_id(str(data.get("shareUrl") or ""), share_id)
+        return ShareInfo(
+            share_id=share_id,
+            url_id=url_id,
+            code=str(data.get("code") or ""),
+            title=title,
+        )
+
+    async def share_access_token(self, url_id: str, code: str) -> str:
+        """取分享的 access token（**公开接口**，无需登录）。
+
+        Args:
+            url_id: **URL 形态**的分享 id（``{shareId}_{key}``）。
+            code: 提取码（分享带码时必需，否则 code=209「提取码错误」）。
+
+        Raises:
+            DriverError: 取 token 失败（id/码不对 → 112 / 209）。
+        """
+        try:
+            resp = await asyncio_to_thread(
+                self.client.share_access_token, url_id, code
+            )
+        except Exception as exc:
+            raise DriverError(f"光鸭取分享访问令牌失败：{exc}") from exc
+        payload = resp if isinstance(resp, dict) else {}
+        biz = payload.get("code")
+        if biz not in (None, 0):
+            raise DriverError(
+                f"光鸭取分享访问令牌失败：{payload.get('msg') or payload}",
+                kind="unknown",
+            )
+        data = payload.get("data") or {}
+        if isinstance(data, str):
+            return data
+        token = str(data.get("accessToken") or data.get("token") or "")
+        if not token:
+            raise DriverError(f"光鸭取分享访问令牌未返回 token：{payload}")
+        return token
+
+    async def restore_share(
+        self, access_token: str, file_ids: list[str], parent_id: str
+    ) -> str:
+        """把分享内容**转存**到指定目录（服务端内部复制）。
+
+        Args:
+            access_token: 分享访问令牌。
+            file_ids: 要转存的文件 id（分享里的那些）。
+            parent_id: 目标目录 id（**可以精确指定**——不像分享落地那样只能
+                进「来自：分享」）。
+
+        Returns:
+            转存任务 id（异步任务，完成与否靠列目录确认）。
+        """
+        payload = await self._call(
+            "share_restore", access_token, [str(fid) for fid in file_ids], parent_id
+        )
+        code = payload.get("code")
+        if code not in (None, 0):
+            raise DriverError(
+                f"光鸭转存分享失败：{payload.get('msg') or payload}",
+                kind=_map_code(code),
+            )
+        data = payload.get("data") or {}
+        return str(data.get("taskId") or "")
+
+    async def delete_share(self, share_ids: list[str]) -> None:
+        """删除分享（转存完成后清理，别在账号里堆分享）。"""
+        payload = await self._call("share_delete", [str(sid) for sid in share_ids])
+        code = payload.get("code")
+        if code not in (None, 0):
+            raise DriverError(
+                f"光鸭删除分享失败：{payload.get('msg') or payload}",
+                kind=_map_code(code),
+            )
 
     async def create_offline_task(self, url: str, parent_id: str = "") -> str:
         """提交一个离线下载任务，返回 taskId。

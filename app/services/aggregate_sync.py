@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -92,6 +93,24 @@ MAX_SUBMISSIONS_PER_RUN = 20
 
 #: 运行时参数 key（单轮提交上限；0 = 不限）
 MAX_SUBMISSIONS_PARAM = "aggregate_max_submissions"
+
+#: 运行时参数 key（小文件走「分享转存」的体积上限；0 = 关闭该通道）
+SHARE_THRESHOLD_PARAM = "aggregate_share_threshold_bytes"
+
+#: 小文件通道的默认体积上限（10 MB）。
+#:
+#: 附件（nfo/jpg/png）是 KB 级、视频是 GB 级 → 10 MB 分界余量充足。
+SHARE_THRESHOLD_DEFAULT = 10 * 1024 * 1024
+
+#: 分享转存通道：等文件出现在目标目录的上限（秒）。
+#:
+#: 转存是**异步任务**（返回 taskId），但**没有可靠的完成查询接口**
+#: （``get_task_status`` 是上传任务的接口，查云下载任务返回 145）→ 只能
+#: **列目录轮询**（与「校验落盘」同一条判据）。
+SHARE_TRANSFER_WAIT_SEC = 600.0
+
+#: 分享转存通道：列目录轮询间隔（秒）
+SHARE_TRANSFER_POLL_SEC = 3.0
 
 #: ⚠️ **失败的文件不自动重试**（2026-11-15 决策）
 #:
@@ -280,6 +299,16 @@ async def run_aggregate_sync() -> dict[str, Any]:
             result.failed += 1
             result.details.append(f"组「{group_name}」失败：{exc}")
     return result.to_dict()
+
+
+def _share_threshold_bytes() -> int:
+    """小文件走「分享转存」的体积上限（**运行时参数**，0 = 关闭该通道）。"""
+    try:
+        from app.services.runtime_params import get_runtime_params
+
+        return get_runtime_params().get_int(SHARE_THRESHOLD_PARAM)
+    except Exception:
+        return SHARE_THRESHOLD_DEFAULT
 
 
 def _scheduled_max_submissions() -> int | None:
@@ -562,7 +591,43 @@ async def _sync_one(
         result.details.append(f"{row.file_name}：认领上一轮残留（已落盘未改名）")
         return False
 
-    # ③ 取直链（光鸭直链不绑 UA）
+    # ③ **按体积分流**：
+    #    - 小文件（≤ 阈值）→ **分享转存**通道（服务端内部复制，**不消耗
+    #      云添加额度**）——附件类文件（nfo/jpg/png）占 76% 的文件数却只有
+    #      ~0% 体积，走离线下载纯属浪费额度
+    #    - 大文件 → 离线下载（云下载）通道（现状）
+    threshold = _share_threshold_bytes()
+    if threshold > 0 and row.size_bytes <= threshold:
+        try:
+            transferred = await _transfer_by_share(
+                row,
+                master_driver=master_driver,
+                source=source,
+                index=index,
+                target_dir_id=target_dir_id,
+            )
+        except Exception as exc:
+            # 分享通道失败 → **回退离线下载**（保底：吃额度但不死）
+            logger.warning(
+                "分享转存通道失败，回退离线下载：%s（%s）", row.file_name, exc
+            )
+            result.details.append(
+                f"{row.file_name}：分享转存失败，回退离线下载（{exc}）"
+            )
+        else:
+            if transferred:
+                # ⚠️ **先写通道、再清理**：反过来会用**过期快照**（row.state
+                # 还是处理前的 pending）把刚写好的 done 覆盖回 pending →
+                # 行永远回不到完成态 → 下一轮又归拢一遍。
+                await _mark(row.id, STAGING_SYNCING, transfer_mode="share_transfer")
+                await _cleanup_source(row, source, result)
+                result.synced += 1
+                result.details.append(
+                    f"{row.file_name}：已归拢（分享转存，不消耗云添加额度）"
+                )
+                return False
+
+    # ④ 取直链（光鸭直链不绑 UA）
     link = await source.get_direct_link(row.remote_id, "")
     if not link.url:
         raise DriverError("副盘返回空直链", kind="not_found")
@@ -586,7 +651,13 @@ async def _sync_one(
             raise _QuotaExceeded(f"云添加额度耗尽：{exc}") from exc
         raise
     await index.note_submitted(row.target_dir, row.file_name, row.size_bytes)
-    await _mark(row.id, STAGING_SYNCING, task_id=task_id, error=None)
+    await _mark(
+        row.id,
+        STAGING_SYNCING,
+        task_id=task_id,
+        error=None,
+        transfer_mode="cloud_download",
+    )
 
     # ⑥ 等任务结束（从活跃列表消失）——**有上限**：光鸭会把任务卡在活跃
     #    列表不结束（实测），无超时 = run 永不结束 = 其它组全部饿死。
@@ -634,6 +705,57 @@ async def _sync_one(
     raise DriverError(
         reason or "云下载已结束，但主盘目录未出现同名同大小文件", kind="unknown"
     )
+
+
+async def _transfer_by_share(
+    row: _Row,
+    *,
+    master_driver: Any,
+    source: Any,
+    index: TargetIndex,
+    target_dir_id: str,
+) -> bool:
+    """用「分享 → 转存」把小文件搬到主盘（**不消耗云添加额度**）。
+
+    链路（2026-11-16 生产实测）::
+
+        源账号 share_create → 取 access_token → 目标账号 share_restore
+        → 轮询目标目录直到出现同名同大小文件
+
+    ⚠️ **要点**：
+
+    - 公开接口只认 **URL 形态**的分享 id（``{shareId}_{账号分享key}``），
+      裸 shareId → code=112「参数错误」
+    - 提取码**必需**（``needCode: true``），否则 209「提取码错误」
+    - 转存落地的文件**直接就是原名**（不像云下载要落成 ``download`` 再改名）
+    - 转存是**异步任务**且没有可靠的完成查询接口 → 靠**列目录轮询**判定
+    - 转存的**配额体系与云添加不同** → 不消耗云添加额度
+
+    Returns:
+        True = 已落地（同名同大小）；False = 尚未出现（调用方据此回退）。
+    """
+    share = await source.create_share([row.remote_id], title=row.file_name)
+    try:
+        token = await source.share_access_token(share.url_id, share.code)
+        await master_driver.restore_share(token, [row.remote_id], target_dir_id)
+
+        deadline = time.monotonic() + SHARE_TRANSFER_WAIT_SEC
+        while time.monotonic() < deadline:
+            await asyncio.sleep(SHARE_TRANSFER_POLL_SEC)
+            files = await index.refresh(row.target_dir)
+            hit = files.get(row.file_name)
+            if hit == row.size_bytes:
+                return True
+        # 超时：**再列一次**——转存可能刚好落地（只是慢）。确认确实没有，
+        # 才让调用方回退离线下载（否则主盘会出现两个同名文件）。
+        files = await index.refresh(row.target_dir)
+        return files.get(row.file_name) == row.size_bytes
+    finally:
+        # 分享用完即删（别在账号里堆分享）
+        try:
+            await source.delete_share([share.share_id])
+        except Exception as exc:  # 清理失败不影响归拢结果
+            logger.warning("删除分享失败 %s：%s", share.share_id, exc)
 
 
 async def _cleanup_source(
@@ -829,6 +951,7 @@ async def _mark(
     task_id: str | None = None,
     cleaned: bool = False,
     bump_attempts: bool = False,
+    transfer_mode: str | None = None,
 ) -> None:
     """更新台账行状态（**短事务**，不跨网络 IO）。"""
     async with session_scope() as db:
@@ -845,6 +968,8 @@ async def _mark(
             row.cloud_task_id = task_id or None
         if bump_attempts:
             row.attempts = int(row.attempts) + 1
+        if transfer_mode is not None:
+            row.transfer_mode = transfer_mode
         if state in (STAGING_VERIFIED, STAGING_DONE):
             # done = 已归拢且副盘副本已清理——「归拢完成时间」对它同样有意义
             row.synced_at = bj_now()

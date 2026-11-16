@@ -713,6 +713,28 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
       而**配置齐全时文案也是非空的** → 按钮**永远点不动**。现为
       `enqueueDisabled()` / `enqueueTip()` 分离。契约（e2e）：
       `aggregate.spec.ts` 的「配置齐全时可点」+「缺映射时禁用」
+  - **小文件走「分享转存」通道**（2026-11-16 加入，实测可行）：
+    - **为什么**：附件（nfo/jpg/png）占**文件数的 76%** 却只占 ~0% 体积，
+      每个都要花一次**云添加额度** → 纯浪费。转存是**服务端内部复制**，
+      **不消耗云添加额度**
+    - **链路**：源账号 `share_create` → 取 `access_token` → 目标账号
+      `share_restore(… , parent_id=目标目录)` → **轮询目标目录**直到出现
+      同名同大小 → 清副盘副本 → 删分享
+    - ⚠️ **实测坑**（本地真机联调踩到）：
+      - 公开接口只认 **URL 形态**的分享 id（`{shareId}_{账号分享key}`）——
+        裸 shareId → code=112「参数错误」
+      - **必须剥掉查询串**：`shareUrl` 形如 `…/s/{id}_{key}?code=xxxx`，
+        不剥 → id 变成「…_key?code=xxxx」→ 取 token 报「分享链接错误」
+      - **提取码必需**（`needCode: true`），否则 209「提取码错误」
+      - 转存是**异步任务**且没有可靠的完成查询接口 → 只能**列目录轮询**
+      - 转存落地**保持原名**（不像云下载要落成 `download` 再改名）
+      - 分享用完即删（`share_delete`），别在账号里堆分享
+    - **分流规则**：体积阈值（运行时参数 `aggregate_share_threshold_bytes`，
+      默认 10MB，**0 = 关闭该通道**）；失败 → **回退离线下载**（保底）
+    - 台账记 `transfer_mode`（`cloud_download` / `share_transfer`）
+    - 探针：`scripts/probe_guangya_share.py`（生产容器内）、
+      `scripts/probe_guangya_share_local.py`（**本地真机**，用
+      `.env.probe` 里的生产凭据——gitignored，测完即删）
   - **待办（用户明确暂缓）**：写入入口形态（上传任务目标是「选组」还是
     「选具体盘」+ planner 自动溢出）——阶段 1、2 落地后结合实际使用再定
   - 契约由 `tests/unit/test_aggregate.py` + `tests/integration/test_aggregate.py`

@@ -275,6 +275,7 @@ class DbBootstrap:
         """
         await self._migrate_driver_config()
         await self._migrate_aggregate_groups()
+        await self._migrate_secondary_staging()
         await self._migrate_upload_tasks()
         await self._migrate_scrape_tables()
         await self._drop_obsolete_columns()
@@ -349,6 +350,17 @@ class DbBootstrap:
                 ("target_dir_id", "VARCHAR(64)", None),
                 ("target_dir_path", "TEXT", None),
             ),
+        )
+
+    async def _migrate_secondary_staging(self) -> None:
+        """给 ``secondary_staging`` 补「搬运通道」列（幂等）。
+
+        ``cloud_download`` / ``share_transfer``——小文件走分享转存时**不消耗
+        云添加额度**，看板要能分开统计两条通道各搬了多少。
+        """
+        await self._add_columns(
+            "secondary_staging",
+            (("transfer_mode", "VARCHAR(24)", None),),
         )
 
     async def _migrate_scrape_tables(self) -> None:

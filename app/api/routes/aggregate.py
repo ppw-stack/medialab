@@ -418,6 +418,7 @@ async def list_staging_route(
             target_dir=r.target_dir,
             size_bytes=r.size_bytes,
             state=r.state,
+            transfer_mode=r.transfer_mode,
             attempts=r.attempts,
             last_error=r.last_error,
             created_at=r.created_at,

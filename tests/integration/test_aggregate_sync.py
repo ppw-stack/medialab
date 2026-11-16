@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from app.adapters.drivers.base import DirectLink, DriverError
@@ -39,11 +41,53 @@ class _FakeMaster:
         self.renamed: list[tuple[str, str]] = []
         #: 落地文件的自增序号（fileId / taskId 都用它 → **保证唯一**）
         self._seq = 0
+        # -- 分享/转存 的记录与故障注入 --
+        self.shares_created: list[tuple[list[str], str]] = []
+        self.shares_deleted: list[list[str]] = []
+        self.access_tokens: list[tuple[str, str]] = []
+        self.restored: list[tuple[list[str], str]] = []
+        #: 副盘文件 id → 文件名（转存时用来还原原名）
+        self.source_names: dict[str, str] = {}
+        self.share_token_error: str | None = None
+        self.restore_error: str | None = None
 
     async def create_dir(self, name: str, parent_id: str = "") -> tuple[str, bool]:
         dir_id = f"dir-{name}"
         self.dirs[name] = dir_id
         return dir_id, True
+
+    # -- 分享 / 转存（小文件通道）--
+
+    async def create_share(self, file_ids: list[str], title: str) -> Any:
+        """建分享（假实现）。"""
+        self.shares_created.append((list(file_ids), title))
+        return SimpleNamespace(
+            share_id="share-1",
+            url_id="share-1_key",
+            code="abcd",
+            title=title,
+        )
+
+    async def share_access_token(self, url_id: str, code: str) -> str:
+        self.access_tokens.append((url_id, code))
+        if self.share_token_error:
+            raise DriverError(self.share_token_error, kind="unknown")
+        return "token-1"
+
+    async def restore_share(
+        self, access_token: str, file_ids: list[str], parent_id: str
+    ) -> str:
+        """转存（假实现）：把文件**直接以原名**放进目标目录。"""
+        self.restored.append((list(file_ids), parent_id))
+        if self.restore_error:
+            raise DriverError(self.restore_error, kind="unknown")
+        for fid in file_ids:
+            name = self.source_names.get(fid, f"file-{fid}")
+            self.files[name] = (self.landed_size, f"restored-{fid}")
+        return "restore-task-1"
+
+    async def delete_share(self, share_ids: list[str]) -> None:
+        self.shares_deleted.append(list(share_ids))
 
     async def list_files(self, dir_id: str) -> dict[str, int]:
         return {name: size for name, (size, _fid) in self.files.items()}
@@ -86,11 +130,14 @@ class _FakeMaster:
 
 
 class _FakeSource:
-    """假副盘驱动：只提供直链与删除。"""
+    """假副盘驱动：直链 / 删除 / 分享（源账号侧）。"""
 
     def __init__(self) -> None:
         self.deleted: list[str] = []
         self.links: list[str] = []
+        self.shares_created: list[tuple[list[str], str]] = []
+        self.shares_deleted: list[list[str]] = []
+        self.access_tokens: list[tuple[str, str]] = []
 
     async def get_direct_link(self, remote_id: str, user_agent: str) -> DirectLink:
         self.links.append(remote_id)
@@ -101,6 +148,53 @@ class _FakeSource:
 
     async def delete_file(self, file_id: str) -> None:
         self.deleted.append(file_id)
+
+    # -- 分享（源账号侧）--
+
+    async def create_share(self, file_ids: list[str], title: str) -> Any:
+        self.shares_created.append((list(file_ids), title))
+        return SimpleNamespace(
+            share_id="share-1",
+            url_id="share-1_key",
+            code="abcd",
+            title=title,
+        )
+
+    async def share_access_token(self, url_id: str, code: str) -> str:
+        self.access_tokens.append((url_id, code))
+        return "token-1"
+
+    async def delete_share(self, share_ids: list[str]) -> None:
+        self.shares_deleted.append(list(share_ids))
+
+
+@pytest.fixture(autouse=True)
+def _default_offline_channel(monkeypatch: pytest.MonkeyPatch):
+    """默认**关掉**「分享转存」通道——只有专门测它的用例才打开。
+
+    不关的话，多数用例会走分享通道，而假主盘的转存落地名与校验期望名不
+    匹配 → 每个文件轮询满 600 秒 → 整个测试文件跑到天荒地老。
+    """
+    monkeypatch.setattr(aggregate_sync, "_share_threshold_bytes", lambda: 0)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_driver(monkeypatch: pytest.MonkeyPatch):
+    """把「登记在途」用的驱动换成假的——**不许真连光鸭**。
+
+    登记在途会真去列副盘的目录（生产 16 个请求/盘）；测试里连真网盘会
+    又慢又不稳（还会撞真实频率限制）。
+    """
+
+    class _Empty:
+        async def list_dir_by_cid(self, cid, parent_path=""):
+            return []
+
+        async def iter_tree_by_cid(self, cid, parent_path="", include_subdirs=True):
+            return
+            yield  # pragma: no cover - 空迭代器
+
+    monkeypatch.setattr(aggregate_staging, "build_driver", lambda *a, **k: _Empty())
 
 
 @pytest.fixture(autouse=True)
@@ -599,6 +693,83 @@ async def test_scheduled_sync_skips_group_when_locked(
         lock.release()
     assert result["synced"] == 0
     assert any("另一轮归拢在跑" in d for d in result["details"])
+
+
+async def test_small_file_uses_share_transfer_channel(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """小文件走「分享转存」通道——**不消耗云添加额度**（不提交云下载）。"""
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "_share_threshold_bytes", lambda: 1024)
+    master, source = fake_drivers
+    group_id, _master_id, _secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+    # 副盘上那个文件的原名（转存落地时用）
+    master.source_names["f1"] = "a.mkv"
+
+    result = await aggregate_sync.sync_group_now(group_id)
+    # 走了转存：**没有**提交云下载
+    assert master.submitted == [], "小文件不该走离线下载（那要消耗额度）"
+    assert master.restored, "应发生转存"
+    assert result.synced == 1 and result.failed == 0
+    # 副盘副本被清理
+    assert source.deleted == ["f1"]
+    # 台账记下通道
+    rows = await aggregate_staging.list_staging(group_id=group_id)
+    assert rows[0].transfer_mode == "share_transfer"
+    assert rows[0].state == "done"
+
+
+async def test_big_file_still_uses_cloud_download(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """大文件照旧走离线下载（云下载）——转存只用于小文件。"""
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "_share_threshold_bytes", lambda: 10)
+    master, _source = fake_drivers
+    group_id, _master_id, _secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+
+    result = await aggregate_sync.sync_group_now(group_id)
+    assert master.restored == [], "大文件不该走转存"
+    assert len(master.submitted) == 1, "大文件应提交云下载"
+    assert result.synced == 1
+    rows = await aggregate_staging.list_staging(group_id=group_id)
+    assert rows[0].transfer_mode == "cloud_download"
+
+
+async def test_share_transfer_failure_falls_back_to_cloud_download(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """分享通道失败 → **回退离线下载**（保底：吃额度但不死）。"""
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "_share_threshold_bytes", lambda: 1024)
+    master, source = fake_drivers
+    group_id, _master_id, _secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+    master.restore_error = "转存失败（模拟）"
+
+    result = await aggregate_sync.sync_group_now(group_id)
+    assert len(master.submitted) == 1, "应回退到离线下载"
+    assert result.synced == 1 and result.failed == 0
+    assert any("回退离线下载" in d for d in result.details)
+    # 副盘副本仍被清理
+    assert source.deleted == ["f1"]
+
+
+async def test_share_channel_can_be_disabled(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """阈值设 0 → 关闭分享通道，全部走离线下载。"""
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "_share_threshold_bytes", lambda: 0)
+    master, _source = fake_drivers
+    group_id, _master_id, _secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+
+    await aggregate_sync.sync_group_now(group_id)
+    assert master.restored == []
+    assert len(master.submitted) == 1
 
 
 async def test_sync_pauses_group_when_hitting_quota_wall(

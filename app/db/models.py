@@ -715,6 +715,11 @@ class SecondaryStaging(Base):
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     #: 状态（见 :mod:`app.domain.aggregate_types`）
     state: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    #: 搬运通道（``cloud_download`` / ``share_transfer``）。
+    #:
+    #: 小文件走「分享转存」（服务端内部复制，**不消耗云添加额度**），
+    #: 大文件走「离线下载」（云下载，消耗额度）——看板要能分开统计。
+    transfer_mode: Mapped[str | None] = mapped_column(String(24), nullable=True)
     #: 已尝试次数
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     #: 最近一次失败原因（用户可见）
