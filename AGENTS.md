@@ -674,6 +674,11 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
       而台账里没有它们的行 → **永远不会被归拢**。故每轮先扫描登记（幂等）
       再归拢。契约：`test_scheduled_sync_registers_new_files_first`、
       `test_manual_sync_also_registers_new_files`
+    - ⚠️ **测试隔离**（autouse fixture）：`_share_threshold_bytes` 默认
+      patch 成 0（关分享通道）——不关的话多数用例走分享通道，假驱动的
+      转存落地名与校验期望名不匹配 → **每文件轮询满超时**（600s），
+      测试文件跑到天荒地老；`SHARE_TRANSFER_WAIT_SEC` 也要压短
+      （回退类用例 1s）
   - **调度作业 `aggregate_sync`**（cron `29 * * * *`）：**单轮限 20 次提交**
     （无人值守的运行时保护），其余留到下一轮；**手动触发不限**（用户盯着，
     要搬到台账清空，只有服务端的额度墙才会停）
@@ -731,6 +736,15 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
       - 分享用完即删（`share_delete`），别在账号里堆分享
     - **分流规则**：体积阈值（运行时参数 `aggregate_share_threshold_bytes`，
       默认 10MB，**0 = 关闭该通道**）；失败 → **回退离线下载**（保底）
+    - **批量打包**（2026-11-16 加入，吞吐的最大杠杆）：同 (源账号, 目标目录)
+      的小文件**打包成一个分享**（`share_create(file_ids)` 原生支持列表）、
+      一次转存整批（`SHARE_BATCH_SIZE=50`）→ N 个附件从「N×(4 请求+轮询)」
+      变成「1 次分享+1 次转存」。转存只能落**一个目录** → 跨目录/跨账号
+      的行各自成批。整批超时（未全部落地）→ 已落地的标 done、没落地的
+      **回退云下载**
+    - **完成判定已从「等任务结束」改为「列目录等文件出现」**（两条通道
+      统一）：云下载的「2 次缺席确认」+ 提交间隔曾是每文件 ~15s 的纯开销
+      （提交间隔 5s→1s：额度按天计，间隔不影响额度；轮询 5s→2s）
     - 台账记 `transfer_mode`（`cloud_download` / `share_transfer`）
     - 探针：`scripts/probe_guangya_share.py`（生产容器内）、
       `scripts/probe_guangya_share_local.py`（**本地真机**，用

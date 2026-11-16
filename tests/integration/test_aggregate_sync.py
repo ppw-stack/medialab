@@ -772,6 +772,119 @@ async def test_share_channel_can_be_disabled(
     assert len(master.submitted) == 1
 
 
+async def test_small_files_batch_into_one_share(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """同目录的小文件**打包成一个分享、一次转存**（吞吐的最大杠杆）。"""
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "_share_threshold_bytes", lambda: 1024)
+    master, source = fake_drivers
+    group_id, master_id, secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+    # 转存落地的文件名（按副盘 fileId 还原原名）
+    master.source_names = {
+        "f1": "a.mkv",
+        "b0": "ep00.mkv",
+        "b1": "ep01.mkv",
+        "b2": "ep02.mkv",
+    }
+
+    # 3 个同目录的小文件（+_setup 的 1 个 = 4 行）
+    async with session_scope() as db_session:
+        for i in range(3):
+            db_session.add(
+                SecondaryStaging(
+                    group_id=group_id,
+                    source_driver_id=secondary_id,
+                    target_driver_id=master_id,
+                    remote_id=f"b{i}",
+                    file_name=f"ep{i:02d}.mkv",
+                    size_bytes=100,
+                    state="pending",
+                )
+            )
+        await db_session.commit()
+
+    result = await aggregate_sync.sync_group_now(group_id)
+    assert result.synced == 4
+    # **一次分享**打包全部 4 个文件（不是逐文件建分享）
+    assert len(source.shares_created) == 1
+    assert len(source.shares_created[0][0]) == 4
+    # 一次转存
+    assert len(master.restored) == 1
+    # 全部 done + 副盘副本清理
+    rows = await aggregate_staging.list_staging(group_id=group_id)
+    assert all(r.state == "done" and r.transfer_mode == "share_transfer" for r in rows)
+    assert len(source.deleted) == 4
+
+
+async def test_small_files_in_different_dirs_get_separate_shares(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """不同目标目录的小文件**各自成批**（转存只能落一个目录）。
+
+    ``_setup`` 的行在根目录（target_dir=""）→ 三个目录 = 三次分享。
+    """
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "_share_threshold_bytes", lambda: 1024)
+    master, source = fake_drivers
+    group_id, master_id, secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+    # 转存落地的文件名（按副盘 fileId 还原原名）
+    master.source_names = {
+        "f1": "a.mkv",
+        "c0": "ep0.nfo",
+        "c1": "ep1.nfo",
+    }
+
+    async with session_scope() as db_session:
+        for i, dir_name in enumerate(("剧A (2026)/Season 1", "剧B (2026)/Season 1")):
+            db_session.add(
+                SecondaryStaging(
+                    group_id=group_id,
+                    source_driver_id=secondary_id,
+                    target_driver_id=master_id,
+                    remote_id=f"c{i}",
+                    file_name=f"ep{i}.nfo",
+                    source_dir=dir_name,
+                    target_dir=dir_name,
+                    size_bytes=100,
+                    state="pending",
+                )
+            )
+        await db_session.commit()
+
+    result = await aggregate_sync.sync_group_now(group_id)
+    assert result.synced == 3
+    # 三个目录 → 三次分享（每次一批；同目录的才打包）
+    assert len(source.shares_created) == 3
+    rows = await aggregate_staging.list_staging(group_id=group_id)
+    done = [r for r in rows if r.transfer_mode == "share_transfer"]
+    assert len(done) == 3
+
+
+async def test_batch_timeout_falls_back_to_cloud_download(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """批量转存超时（文件没出现）→ 整批**回退云下载**（不会卡死）。"""
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "_share_threshold_bytes", lambda: 1024)
+    # 超时压短（真实 600s；测试里 1s 就够判定）
+    monkeypatch.setattr(aggregate_sync, "SHARE_TRANSFER_WAIT_SEC", 1.0)
+    monkeypatch.setattr(aggregate_sync, "SHARE_TRANSFER_POLL_SEC", 0.2)
+    master, _source = fake_drivers
+    group_id, _master_id, _secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+    # **不设 source_names** → 转存落地名（file-f1）≠ 期望名（a.mkv）
+    # → 轮询永远等不到 → 超时 → 回退
+
+    await aggregate_sync.sync_group_now(group_id)
+    assert len(master.submitted) == 1, "超时后应回退云下载"
+    rows = await aggregate_staging.list_staging(group_id=group_id)
+    assert rows[0].state == "done"
+    assert rows[0].transfer_mode == "cloud_download"
+
+
 async def test_sync_pauses_group_when_hitting_quota_wall(
     db, fast_watcher, fake_drivers, monkeypatch
 ) -> None:
