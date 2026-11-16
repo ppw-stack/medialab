@@ -904,16 +904,20 @@ async def _batch_share_transfer(
                 )
 
                 # 轮询：整批出现（同名同大小）或超时
+                # ⚠️ **refresh 传的是「相对路径」（row.target_dir），不是目录
+                #   id**——曾把 fileId 当路径传进去 → TargetIndex 把它当目录名
+                #   在归拢根下建了一堆垃圾目录并列空的 → 轮询永不命中 →
+                #   每批烧满超时（生产踩到，13 个空垃圾目录）。
                 deadline = time.monotonic() + SHARE_TRANSFER_WAIT_SEC
                 pending = {r.file_name: r for r in chunk}
                 while pending and time.monotonic() < deadline:
                     await asyncio.sleep(SHARE_TRANSFER_POLL_SEC)
-                    files = await index.refresh(chunk[0].target_dir_id)
+                    files = await index.refresh(chunk[0].target_dir)
                     for r in list(pending.values()):
                         if files.get(r.file_name) == r.size_bytes:
                             del pending[r.file_name]
                 # 超时后再确认一次（转存可能刚好落地）
-                files = await index.refresh(chunk[0].target_dir_id)
+                files = await index.refresh(chunk[0].target_dir)
                 for r in list(pending.values()):
                     if files.get(r.file_name) == r.size_bytes:
                         del pending[r.file_name]
