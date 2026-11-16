@@ -90,6 +90,14 @@
   - 探针 `scripts/probe_guangya_migration.py`（`probe` = 单文件端到端；`engine` = 跑真实引擎 + 幂等复跑；未部署时可用 `MEDIALAB_APP_PATH` 指向注入的新代码，不动生产镜像）
 - **Bearer 长期凭据只用 `WEB_TOKEN`**（2026-10-30 加入）：`verify_bearer` 同时接受 API Token（`WEB_TOKEN`）与 session cookie 值两种口径，但 session cookie 值 24h 过期（`SESSION_MAX_AGE`）。CLI / 脚本长期使用应存 `WEB_TOKEN`，不可把 session cookie 值当长期 token 存储——后者会突然 401。session 值口径仅为面板/CLI 同源便利，非长期凭据。
 - **站点适配层保持 9 站独立文件**（2026-10-21 决定）：不抽公共基类，各站独立实现。重复代码接受现状。
+- **hdwing 站点的免费判定（2026-11-16 实测改版，重要）**：
+  - **列表页优惠标记是空占位** `<td class="discount"><span class="sp_state_placeholder" id="{tid}"></span></td>` —— FREE 徽章与倒计时由页面 JS 异步填充，**列表 HTML 里没有**。别再指望从列表行解析 `pro_*`（其它 8 站可以）
+  - ⚠️ **填充它的 `ajax_promotion.php` 被 Cloudflare Turnstile 闸保护**：页面 JS 必须先 `POST ajax_turnstile.php` 带 `cf-turnstile-response` token。**未过闸的请求对任意 id 都返回兜底的 `pro_free` + 空 timeout**——实测连**根本不存在的 id（999999999）**都回「免费」。照它解析会把「限免 6 小时」误判成「永久免费」（`window_parser` 收到 `free_classes=['free']` + 无剩余时间 → 判 `PERMANENT`，窗口永不到期）
+  - ✅ **权威源是 `GET /promotion.php?id={tid}`**（SSR 优惠历史表：优惠类型 / 开始时间 / 截止时间 / 操作人）。判定 = 有 `Free` 记录 **且 截止时间 > 现在**；**截止时间为空 = 永久免费**。实测窗口形态：6h / 24h / 48h / 30 天
+  - **种子抓取不带任何筛选参数**（`GET /torrents.php?page=N`）：① 站点筛选参数语义随版本漂移（各站 `spstate` 含义都不同）② `spstate=2` 按「免费剩余时长」倒序，会把 2022 年老种（重开 30 天促销）顶到前面，**按发布时间排序的全量列表反而不含它们** ③ 筛选后的结果**仍然没有**每个种子的真实窗口
+  - **代价与增量**：`promotion.php` 是**逐种子**请求（无批量入口，`promotion.php` 不带 id → 404；单条 ~0.25s）→ 由 service 层做**增量判定**：只复查「新增」与「判定已过期/缺失」的条目，其余沿用库里旧判定（回填成等效 free_payload，upsert 后值不变）。适配器用 `supports_promotion_lookup = True` 声明该能力（`app/services/jobs.py:_resolve_promotions`），并发 5、单轮上限 200
+  - ⚠️ **404 = 种子不存在**（NexusPHP 标准 404 页）→ 当「无优惠记录」处理，不算故障；429 → 熔断；其它 4xx/5xx → `SiteFetchError`
+  - fixture 抓取：`scripts/capture_hdwing_promotion_fixtures.py`（裁剪 + 自校验；4 种真实形态：生效中 / 生效+过期混合 / 有表头无记录 / 已过期）
 - **FR-1.6 站点用户数据契约**（2026-10-18 加入，2026-10-18 精简为单方法，2026-10-22 加时魔）：
   - 不抽 9 站 user_data 基类；NexusPHP 7 站共用 `app/adapters/sites/parsers/nexus_php.py` module-level helper（`parse_user_snapshot` / `parse_hourly_bonus`）
   - `SiteUserData` 表是**当前快照**（UNIQUE site_id），不做历史；如需时间序列需先建 `site_user_data_history` 表再迁

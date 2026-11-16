@@ -12,17 +12,20 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import timedelta
 
+import httpx
 from sqlalchemy import select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from app.adapters.sites.base import FeedItem
+from app.adapters.sites.base import BreakerTripped, FeedItem, SiteAdapter, SiteFetchError
 from app.core.logging import get_logger
 from app.core.metrics import feed_pulls, stage_duration
 from app.core.timeutils import bj_now, bj_now_dt, format_bj, parse_bj
 from app.db.models import Site, TorrentIndex
 from app.db.session import session_scope
+from app.domain.enums import FreeType
 from app.services.factory import AdapterFactory
 from app.services.feed_fetcher import FeedFetcher, PullStatus
 from app.services.scheduler import JobStep, JobStepItem, build_items
@@ -35,6 +38,13 @@ _BREAKER_MINUTES_429 = 60
 #: 403 → 熔断时长（分钟）。403 可能是 cookie 失效而非限流，
 #: 熔断 1 小时会让「改完 cookie 仍被跳过」，故减半。
 _BREAKER_MINUTES_403 = 30
+
+#: 「优惠复查」的并发数。优惠历史是**逐种子**请求（``promotion.php``），
+#: 并发太高会被站点限流；5 路 × 单条约 0.25s，够用且不压站点。
+_PROMO_LOOKUP_CONCURRENCY = 5
+#: 单站单轮复查上限。首轮上线时库里几百个条目全是「新增」→ 分几轮补齐
+#: （没查到的下轮仍算新增，自然续查）。
+_PROMO_LOOKUP_MAX = 200
 
 
 async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
@@ -84,7 +94,32 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
             )
             continue
 
-        feed_items, pull_error, breaker_until = await _pull_site_items(factory, row)
+        adapter: SiteAdapter | None = None
+        try:
+            adapter = factory.site(row)
+        except Exception as exc:
+            logger.warning("站点 %s 适配器创建失败：%s", row.name, exc)
+            feed_items: list[FeedItem] = []
+            pull_error: str | None = f"适配器创建失败：{exc}"
+            breaker_until: str | None = None
+        else:
+            feed_items, pull_error, breaker_until = await _pull_site_items(
+                adapter, row
+            )
+        if feed_items and breaker_until is None and adapter is not None:
+            # 免费判定（仅 hdwing 这类「优惠标记是 AJAX 占位符」的站）：
+            # 增量复查新增 / 已过期的条目，其余沿用旧判定
+            feed_items, promo_breaker = await _resolve_promotions(
+                adapter, row, feed_items
+            )
+            if promo_breaker is not None:
+                breaker_until = await _open_breaker(row, promo_breaker)
+                logger.warning(
+                    "站点 %s 优惠判定触发熔断，暂停拉取至 %s：%s",
+                    row.name,
+                    breaker_until,
+                    promo_breaker,
+                )
         ok, ko = await _upsert_site_items(row, feed_items)
         total_written += ok
         summary.append((row.id, row.name, ok + ko, ok, ko, pull_error))
@@ -187,7 +222,7 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
 
 
 async def _pull_site_items(
-    factory: AdapterFactory, row: Site
+    adapter: SiteAdapter, row: Site
 ) -> tuple[list[FeedItem], str | None, str | None]:
     """拉取单站种子列表（网络 IO，不持写事务）。
 
@@ -207,12 +242,6 @@ async def _pull_site_items(
     写 ``sites.breaker_until`` 并**立即放弃**该站——继续请求只会加速
     账号暴露。此时本站算「熔断跳过」而非「拉取失败」。
     """
-    try:
-        adapter = factory.site(row)
-    except Exception as exc:
-        logger.warning("站点 %s 适配器创建失败：%s", row.name, exc)
-        return ([], f"适配器创建失败：{exc}", None)
-
     # 分页拉取 + 指数退避重试（FR-2.2）。
     # 重试让 DNS 抖动 / 连接重置这类**瞬态**故障有机会自愈，
     # 而不必每次都记成失败站。
@@ -253,6 +282,153 @@ def _is_breaker_open(breaker_until: str | None) -> bool:
     if until is None:
         return False
     return until > bj_now_dt()
+
+
+# ---------------------------------------------------------------- 优惠（免费判定）
+
+async def _known_free_states(
+    site_id: int,
+) -> dict[str, tuple[str | None, str | None]]:
+    """库里已有的免费判定：``{item_id: (free_type, free_end_at)}``。"""
+    async with session_scope() as session:
+        rows = await session.execute(
+            select(
+                TorrentIndex.item_id,
+                TorrentIndex.free_type,
+                TorrentIndex.free_end_at,
+            ).where(TorrentIndex.site_id == site_id)
+        )
+        return {
+            (item_id or ""): (free_type, free_end_at)
+            for item_id, free_type, free_end_at in rows.all()
+        }
+
+
+def _needs_recheck(state: tuple[str | None, str | None]) -> bool:
+    """旧判定是否需要重新查站点。
+
+    - 没有 free_type（UNKNOWN / NULL）→ 该种可能新开了促销 → 复查
+    - TIMED 且窗口**已过** → 复查（可能不再免费，或又开了新窗口）
+    - TIMED 且窗口未过 → 不复查（判定仍然有效）
+    - PERMANENT（无截止）→ 不复查
+    """
+    free_type, free_end_at = state
+    if not free_type or free_type == FreeType.UNKNOWN:
+        return True
+    if free_type == FreeType.TIMED:
+        if not free_end_at:
+            return True
+        end = parse_bj(free_end_at)
+        return end is None or end <= bj_now_dt()
+    return False
+
+
+def _payload_from_state(state: tuple[str | None, str | None]) -> dict[str, object] | None:
+    """把库里的旧判定回填成**等效** free_payload。
+
+    upsert 会用 :meth:`WindowParser.parse` 重算 free_type / free_end_at——
+    本轮没复查的条目若不带旧值，会被算成 UNKNOWN，**把正确的判定抹掉**。
+    """
+    free_type, free_end_at = state
+    if free_type in (FreeType.PERMANENT, FreeType.TIMED):
+        payload: dict[str, object] = {"free_classes": ["free"]}
+        if free_end_at:
+            payload["remaining_abs"] = free_end_at
+        return payload
+    return None
+
+
+def _payload_from_promotion(promo: object) -> dict[str, object] | None:
+    """站点的当前生效优惠 → 等效 free_payload。
+
+    ``None`` = 当前不免费 → payload 为空（upsert 会把 free_type 清成 UNKNOWN）。
+    """
+    if promo is None:
+        return None
+    end_at = getattr(promo, "end_at", None)
+    if str(getattr(promo, "kind", "")).lower() != "free":
+        return None
+    payload: dict[str, object] = {"free_classes": ["free"]}
+    if end_at:
+        payload["remaining_abs"] = str(end_at)
+    return payload
+
+
+async def _resolve_promotions(
+    adapter: SiteAdapter, row: Site, feed_items: list[FeedItem]
+) -> tuple[list[FeedItem], str | None]:
+    """给 feed_items 补上**真实**的免费判定（返回带 free_payload 的新列表）。
+
+    只有支持优惠查询的适配器（``supports_promotion_lookup``）走这条路：
+    多数 NexusPHP 站把 ``pro_*`` 优惠标记直接 SSR 在列表 HTML 里，adapter
+    解析列表时就拿到了；hdwing 的优惠标记是 AJAX 占位符，只能逐种子查
+    服务端渲染的优惠历史表（``promotion.php``）——**那个 AJAX 接口不可用**
+    （Cloudflare Turnstile 闸，未过闸时对任意 id 都返回兜底的「免费」）。
+
+    **增量**：只复查「新增条目」与「判定已过期/缺失的条目」，其余沿用库里
+    的旧判定（回填成等效 free_payload，upsert 后值不变）。否则每轮都要对
+    几百个种子逐个请求站点——既慢又会被限流。
+
+    Returns: ``(新列表, 熔断原因)``——熔断原因非 None = 站点被限流，
+    本轮复查已中止。
+    """
+    if not feed_items:
+        return (feed_items, None)
+    if not getattr(adapter, "supports_promotion_lookup", False):
+        return (feed_items, None)
+
+    known = await _known_free_states(row.id)
+    payloads: dict[int, dict[str, object] | None] = {}
+    pending: list[tuple[int, FeedItem]] = []
+    for idx, fi in enumerate(feed_items):
+        item_id = (fi.item_id or "").strip()
+        if not item_id:
+            continue
+        old = known.get(item_id)
+        if old is not None and not _needs_recheck(old):
+            payloads[idx] = _payload_from_state(old)
+            continue
+        pending.append((idx, fi))
+    if not pending:
+        return (feed_items, None)
+
+    limited = pending[:_PROMO_LOOKUP_MAX]
+    if len(pending) > len(limited):
+        logger.info(
+            "站点 %s 本轮复查优惠 %d/%d 条（超上限，剩余下轮继续）",
+            row.name,
+            len(limited),
+            len(pending),
+        )
+
+    semaphore = asyncio.Semaphore(_PROMO_LOOKUP_CONCURRENCY)
+
+    async def _one(idx: int, fi: FeedItem) -> None:
+        async with semaphore:
+            try:
+                promo = await adapter.get_promotion(fi.item_id or "")
+            except BreakerTripped:
+                raise
+            except (SiteFetchError, httpx.HTTPError) as exc:
+                # 单条查失败不影响其它条目：该条目本轮不写免费判定
+                logger.warning(
+                    "站点 %s 优惠判定失败 item_id=%s：%s", row.name, fi.item_id, exc
+                )
+                return
+            payloads[idx] = _payload_from_promotion(promo)
+
+    breaker: str | None = None
+    try:
+        await asyncio.gather(*(_one(idx, fi) for idx, fi in limited))
+    except BreakerTripped as exc:
+        logger.warning("站点 %s 优惠判定触发熔断：%s", row.name, exc)
+        breaker = str(exc)
+
+    resolved = [
+        replace(fi, free_payload=payloads[idx]) if idx in payloads else fi
+        for idx, fi in enumerate(feed_items)
+    ]
+    return (resolved, breaker)
 
 
 async def _open_breaker(row: Site, reason: str) -> str:

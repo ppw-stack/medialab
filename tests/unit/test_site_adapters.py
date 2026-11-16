@@ -757,34 +757,43 @@ async def test_hdsky_already_on_submit_stops_retrying(fake_reader: None) -> None
 
 # ------------------------------------------------------------------ hdwing
 
-#: hdwing 列表/优惠 fixture（真实页面脱敏裁剪，见 scripts/capture_mybonus_fixtures.py
+#: hdwing 列表 fixture（真实页面脱敏裁剪，见 scripts/capture_mybonus_fixtures.py
 #: 与 docs/merge-strmmanger.md 同款「真实页面固化」方法论）
 _HDWING_TORRENTS = (pathlib.Path(__file__).resolve().parents[1] / "fixtures" / "hdwing_torrents.html").read_text(encoding="utf-8")
-_HDWING_PROMOTION = (pathlib.Path(__file__).resolve().parents[1] / "fixtures" / "hdwing_promotion.json").read_text(encoding="utf-8")
 
 
-def _mock_hdwing_list(
-    router: respx.MockRouter, *, promotion_status: int = 200
-) -> None:
-    """铺 hdwing 列表页 + 优惠接口路由。"""
-    router.get("https://example.com/torrents.php?spstate=2&page=0").mock(
+def _hdwing_fixture(name: str) -> str:
+    """读 hdwing 优惠历史 fixture（真实页面裁剪，见
+    scripts/capture_hdwing_promotion_fixtures.py）。"""
+    path = pathlib.Path(__file__).resolve().parents[1] / "fixtures" / name
+    return path.read_text(encoding="utf-8")
+
+
+def _mock_hdwing_list(router: respx.MockRouter) -> None:
+    """铺 hdwing 列表页路由（**不带任何筛选参数**）。"""
+    router.get("https://example.com/torrents.php?page=0").mock(
         return_value=httpx.Response(200, text=_HDWING_TORRENTS)
     )
-    router.post("https://example.com/ajax_promotion.php").mock(
-        return_value=httpx.Response(promotion_status, text=_HDWING_PROMOTION)
-    )
 
 
-async def test_hdwing_search_parses_list_and_merges_promotion() -> None:
-    """列表行 + AJAX 优惠状态合并成 free_payload。
+async def test_hdwing_search_parses_list_without_filter() -> None:
+    """列表解析：**不带筛选参数**、**不请求优惠接口**、不产 free_payload。
 
-    hdwing 的优惠标记不在列表 HTML 里（空占位符 + ajax_promotion.php），
-    适配器必须把两路数据拼起来——这是它与其它 NexusPHP 站的核心差异。
+    hdwing 的优惠标记不在列表 HTML 里（只有空占位
+    ``span.sp_state_placeholder``），而填充它的 ``ajax_promotion.php`` 被
+    Cloudflare Turnstile 闸保护——未过闸时对**任意 id**（含不存在的种子）都
+    返回兜底的 ``pro_free``。照它解析会把「限免 6 小时」误判成「永久免费」。
+
+    所以列表抓取**不碰**优惠接口，免费判定走
+    :meth:`HdwingAdapter.get_promotion`（服务端渲染的优惠历史表）。
     """
     adapter = _make("hdwing")
     try:
         with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
             _mock_hdwing_list(router)
+            promo = router.post("https://example.com/ajax_promotion.php").mock(
+                return_value=httpx.Response(200, text="{}")
+            )
             items = await adapter.search_torrents({}, page_number=1)
         assert len(items) == 2
         first = items[0]
@@ -793,63 +802,190 @@ async def test_hdwing_search_parses_list_and_merges_promotion() -> None:
         assert first.size == int(25.26 * 1024**3)
         assert first.published_at == "2026-10-05 21:59:21"
         assert first.category == "4K UltraHD"
-        # 优惠状态来自 promotion 接口，不是列表页
-        assert first.free_payload == {
-            "free_classes": ["free"],
-            "remaining_abs": None,
-        }
+        # 免费判定不来自列表页 → 不带 free_payload
+        assert first.free_payload is None
         assert items[1].item_id == "837150"
+        # 假数据源一次都不能碰
+        assert not promo.called
     finally:
         await adapter.close()
 
 
-async def test_hdwing_search_raises_when_promotion_fails() -> None:
-    """优惠接口故障必须抛 SiteFetchError。
+async def test_hdwing_search_page_number_maps_to_zero_based() -> None:
+    """``page`` 从 0 起：第 1 页 → ``page=0``，第 2 页 → ``page=1``。"""
+    adapter = _make("hdwing")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            router.get("https://example.com/torrents.php?page=0").mock(
+                return_value=httpx.Response(200, text=_HDWING_TORRENTS)
+            )
+            router.get("https://example.com/torrents.php?page=1").mock(
+                return_value=httpx.Response(200, text=_HDWING_TORRENTS)
+            )
+            await adapter.search_torrents({}, page_number=1)
+            await adapter.search_torrents({}, page_number=2)
+    finally:
+        await adapter.close()
 
-    spstate=2 列表的价值就在免费标记；没有优惠状态的数据对业务无用——
-    如实报故障让 feed_fetcher 重试，而不是静默丢标记。
+
+async def test_hdwing_search_empty_page_returns_empty() -> None:
+    """空列表（页面结构还在）→ ``[]``，不算失败。"""
+    adapter = _make("hdwing")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            router.get("https://example.com/torrents.php?page=0").mock(
+                return_value=httpx.Response(
+                    200, text='<html><table class="torrent_list"></table></html>'
+                )
+            )
+            items = await adapter.search_torrents({}, page_number=1)
+            assert items == []
+    finally:
+        await adapter.close()
+
+
+async def test_hdwing_search_raises_when_list_structure_changed() -> None:
+    """页面结构变了（``torrent_list`` 表消失）→ SiteFetchError。
+
+    不报错的话会被当成「站点确实没有种子」静默停摆——与「拉取失败必须抛」
+    同一个道理（2026-10-21 prod 事故的教训）。判定靠「页面确实是站点页面
+    （导航还在）却没有列表表」——空白页仍按通用契约返回 ``[]``。
     """
     adapter = _make("hdwing")
     try:
         with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
-            _mock_hdwing_list(router, promotion_status=500)
-            with pytest.raises(SiteFetchError, match="优惠状态"):
+            router.get("https://example.com/torrents.php?page=0").mock(
+                return_value=httpx.Response(
+                    200,
+                    text=(
+                        '<html><head><title>HDWinG :: 种子列表</title></head>'
+                        '<body><a href="torrents.php">种子</a>全新布局</body></html>'
+                    ),
+                )
+            )
+            with pytest.raises(SiteFetchError, match="结构变化"):
                 await adapter.search_torrents({}, page_number=1)
     finally:
         await adapter.close()
 
 
-async def test_hdwing_search_empty_page_skips_promotion() -> None:
-    """空列表 → []，且**不发**优惠请求（页面都没有，查什么都不对）。"""
+async def test_hdwing_get_promotion_parses_active_free() -> None:
+    """优惠历史表 → 当前生效的 Free（含起止时间）。
+
+    真实页面固化：``promotion.php?id=840093`` 的「种子优惠日志」区块。
+    """
     adapter = _make("hdwing")
     try:
         with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
-            router.get("https://example.com/torrents.php?spstate=2&page=0").mock(
-                return_value=httpx.Response(200, text="<html>没有种子</html>")
+            router.get("https://example.com/promotion.php?id=840093").mock(
+                return_value=httpx.Response(
+                    200, text=_hdwing_fixture("hdwing_promotion_active.html")
+                )
             )
-            promo = router.post("https://example.com/ajax_promotion.php").mock(
-                return_value=httpx.Response(200, text="{}")
-            )
-            items = await adapter.search_torrents({}, page_number=1)
-            assert items == []
-            assert not promo.called
+            promo = await adapter.get_promotion("840093")
+        assert promo is not None
+        assert promo.kind == "Free"
+        assert promo.start_at == "2026-11-16 15:29:40"
+        assert promo.end_at == "2026-11-16 21:29:40"
     finally:
         await adapter.close()
 
 
-async def test_hdwing_search_missing_csrf_raises() -> None:
-    """列表页有数据但没有 x-csrf → SiteFetchError（改版信号，不能静默）。"""
+async def test_hdwing_get_promotion_skips_expired_and_non_free_rows() -> None:
+    """过期记录 + 非 Free 类型（50%）都不算数。
+
+    真实页面（``id=840065``）有两行：生效中的 Free + 已过期的 50%
+    （过期行带删除线样式，但**不依赖**那个样式判定）。
+    """
     adapter = _make("hdwing")
     try:
-        html = _HDWING_TORRENTS.replace(
-            '<meta name="x-csrf" content="' + "a" * 42 + '"/>', ""
-        )
         with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
-            router.get("https://example.com/torrents.php?spstate=2&page=0").mock(
-                return_value=httpx.Response(200, text=html)
+            router.get("https://example.com/promotion.php?id=840065").mock(
+                return_value=httpx.Response(
+                    200, text=_hdwing_fixture("hdwing_promotion_mixed.html")
+                )
             )
-            with pytest.raises(SiteFetchError, match="x-csrf"):
-                await adapter.search_torrents({}, page_number=1)
+            promo = await adapter.get_promotion("840065")
+        assert promo is not None
+        assert promo.kind == "Free"
+        assert promo.end_at == "2026-11-18 17:52:34"
+    finally:
+        await adapter.close()
+
+
+async def test_hdwing_get_promotion_returns_none_without_records() -> None:
+    """有表头但无数据行 → ``None``（当前不是免费种，不是故障）。"""
+    adapter = _make("hdwing")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            router.get("https://example.com/promotion.php?id=840080").mock(
+                return_value=httpx.Response(
+                    200, text=_hdwing_fixture("hdwing_promotion_empty.html")
+                )
+            )
+            promo = await adapter.get_promotion("840080")
+        assert promo is None
+    finally:
+        await adapter.close()
+
+
+async def test_hdwing_get_promotion_expired_record_is_not_current() -> None:
+    """Free 记录存在但**已过期** → 当前不免费（``None``）。
+
+    这是「限时免费」的核心语义：窗口过了就不是免费种了。
+    """
+    adapter = _make("hdwing")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            router.get("https://example.com/promotion.php?id=839486").mock(
+                return_value=httpx.Response(
+                    200, text=_hdwing_fixture("hdwing_promotion_expired.html")
+                )
+            )
+            promo = await adapter.get_promotion("839486")
+        assert promo is None
+    finally:
+        await adapter.close()
+
+
+async def test_hdwing_get_promotion_404_returns_none() -> None:
+    """404 = 种子不存在 → ``None``（不该炸掉整批判定）。"""
+    adapter = _make("hdwing")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            router.get("https://example.com/promotion.php?id=999999999").mock(
+                return_value=httpx.Response(404, text="哎呀…您访问的页面不存在")
+            )
+            promo = await adapter.get_promotion("999999999")
+        assert promo is None
+    finally:
+        await adapter.close()
+
+
+async def test_hdwing_get_promotion_429_trips_breaker() -> None:
+    """429 = 限流 → BreakerTripped（熔断保护账号）。"""
+    adapter = _make("hdwing")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            router.get("https://example.com/promotion.php?id=840093").mock(
+                return_value=httpx.Response(429, text="too many")
+            )
+            with pytest.raises(BreakerTripped):
+                await adapter.get_promotion("840093")
+    finally:
+        await adapter.close()
+
+
+async def test_hdwing_get_promotion_500_raises_fetch_error() -> None:
+    """500 = 故障 → SiteFetchError（如实报障，不静默当「不是免费」）。"""
+    adapter = _make("hdwing")
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+            router.get("https://example.com/promotion.php?id=840093").mock(
+                return_value=httpx.Response(500, text="boom")
+            )
+            with pytest.raises(SiteFetchError, match="优惠历史"):
+                await adapter.get_promotion("840093")
     finally:
         await adapter.close()
 

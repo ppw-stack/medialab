@@ -5,31 +5,33 @@ cookie 鉴权，简体中文界面（账号语言设定）。
 
 实测 DOM 与标准 NexusPHP 模板差异大（2026-11-07，dev 真实 cookie）：
 
-- **列表页**：``GET /torrents.php?spstate=2&page=N``（``page`` 从 0 起）。
+- **列表页**：``GET /torrents.php?page=N``（``page`` 从 0 起，**不带任何筛选参数**）。
   ``table.torrent_list`` 下每行 ``<tr>`` 的列 class 依次：
   ``t_cat``（``img.catchs[title]``）/ ``t_name``（嵌套 ``table.tbname``，
   标题在 ``h3 > a``，**无 title 属性**，副标题在 ``h4``）/ ``t_comment`` /
   ``t_time``（``span[title=绝对时刻]``）/ ``t_size`` / ``t_torrents``（做种）/
   ``t_leech`` / ``t_completed`` / ``t_uploader``。
 
-  **本适配器只拉 spstate=2（仅免费）**：业务目标是免费种推送，每轮
-  ``max_pages=3`` 页 × 每页 100 条 = 最新 300 个免费种（官种永久免费 +
-  限时免费都含），与 soulvoice「默认页 = 仅 free 种」同一语义。
-  拉全量（spstate=0）的话 3 页全是普通种，免费种会被淹没
-  （该站免费种 2 万+）。
+  **刻意不拉 ``spstate=2``（站点侧「仅免费」筛选）**：① 站点筛选参数语义随
+  版本漂移（其它站实测 ``spstate`` 含义各不相同）；② 筛选页按「免费剩余时长」
+  倒序，把 2022 年老种（重开 30 天促销）顶到前面，**按发布时间排序的全量
+  列表反而不含它们**；③ 最重要：筛选后的结果**仍然没有**每个种子的真实
+  免费窗口（见下）。
 
-- **优惠状态是 AJAX 的**：列表/详情页 HTML 里只有空占位
-  ``<span class="sp_state_placeholder" id="<tid>"></span>``，真实优惠标记由
-  ``POST /ajax_promotion.php``（form：``csrf`` + ``ids[]``，csrf 取自页面
-  ``<meta name="x-csrf">``）返回 JSON::
+- **优惠状态走 ``promotion.php?id={tid}``**，**不是** ``ajax_promotion.php``：
+  实测 2026-11-16（真实 cookie）——``ajax_promotion.php`` 被 **Cloudflare
+  Turnstile 闸**保护（页面 JS 必须先 ``POST ajax_turnstile.php`` 带
+  ``cf-turnstile-response`` token），未过闸的请求对**任意 id**（含根本不存在的
+  ``999999999``）都返回**兜底的** ``pro_free`` + 空 ``timeout``。照它解析会把
+  「限免 6 小时」误判成「永久免费」——``window_parser`` 收到
+  ``free_classes=['free']`` + 无剩余时间 → 判 ``PERMANENT``，窗口永不到期。
 
-      {"status": 200, "message": {"<tid>": {
-          "sp_state": " <img class=\"pro_free\" ... title=\"免费\" />",
-          "timeout": "..."}}}
+  ``promotion.php`` 是**服务端渲染的权威数据**（表：优惠类型 / 开始时间 /
+  截止时间 / 操作人）。判定规则：存在 ``Free`` 记录 **且 截止时间 > 现在**；
+  **截止时间为空 = 永久免费**。实测样本：限时 6h / 24h / 48h / 30 天均有。
 
-  ``sp_state`` 里的 ``pro_*`` class 与标准 NexusPHP 相同；
-  ``timeout`` 是限时种的剩余时间 HTML（当前免费种池全为永久免费，
-  无真实样本，按标准 ``span[title=绝对时刻]`` 宽容解析）。
+  代价：每种子 1 请求（无批量入口——``promotion.php`` 不带 id → 404），
+  故由 service 层做**增量判定**（只复查新增 / 已过期的条目）。
 
 - **下载 URL 必须带 ``&uid=<自己>``**：``download.php?hash=<base64+签名>``
   不带 ``uid`` 会返回「下载提示」确认页（HTML，分享率门槛），带上才返回
@@ -58,19 +60,20 @@ cookie 鉴权，简体中文界面（账号语言设定）。
 """
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass
-from urllib.parse import urlencode, urljoin
+from urllib.parse import urljoin
 
 import httpx
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 
 from app.adapters.sites.base import (
     BreakerTripped,
     CheckinResult,
     CheckinStatus,
     FeedItem,
+    Promotion,
     SiteAdapter,
     SiteFetchError,
     SiteHealth,
@@ -83,6 +86,7 @@ from app.adapters.sites.base import (
 from app.adapters.sites.parsers import attendance, nexus_php
 from app.adapters.sites.user_data import SiteUserSnapshot
 from app.core.logging import get_logger
+from app.core.timeutils import bj_now_dt, parse_bj
 
 logger = get_logger(__name__)
 
@@ -95,31 +99,8 @@ class _TorrentDownloadError(RuntimeError):
     """
 
 
-#: ``pro_*`` img class → 标准 free class（sp_state HTML 里出现）。
-#: 覆盖站点筛选器全部档位：免费 / 2X / 2X免费 / 50% / 2X 50% / 30%
-_PRO_IMG_MAP: dict[str, str] = {
-    "pro_free": "free",
-    "pro_free2up": "twoupfree",
-    "pro_2upfree": "twoupfree",
-    "pro_2up": "2up",
-    "pro_halfdown": "halfdown",
-    "pro_50pctdown": "halfdown",
-    "pro_2uphalfdown": "twouphalfdown",
-    "pro_50pctdown2up": "twouphalfdown",
-    "pro_30pctdown": "thirtypercent",
-}
-
 #: 列表页详情链接（``details.php?id=836813&hit=1``）
 _DETAILS_ID_RE = re.compile(r"details\.php\?id=(\d+)")
-
-#: sp_state HTML 里的优惠 class（``<img class="pro_free" ...>``）
-_PROMO_CLASS_RE = re.compile(r'class="(pro_[\w]+)"')
-
-#: timeout HTML 里的剩余时刻（标准 NexusPHP ``span[title]`` 形态；无真实
-#: 样本，按标准格式宽容解析——站点改版后用真实页面修正）
-_PROMO_TIMEOUT_RE = re.compile(
-    r'title="(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"'
-)
 
 #: 页面 csrf（``<meta name="x-csrf" content="<42hex>">``）
 _CSRF_RE = re.compile(r'<meta\s+name="x-csrf"\s+content="([0-9a-fA-F]+)"')
@@ -145,8 +126,10 @@ _DELETED_MARKER = "没有该ID的种子"
 #: 页面 ``<title>``（判登录页用）
 _TITLE_RE = re.compile(r"<title>(.*?)</title>", re.DOTALL | re.IGNORECASE)
 
-#: 每次优惠查询的最大批量（一页 100 条，一次 POST 足够）
-_PROMO_BATCH = 100
+#: 「这是站点页面」的标志（导航链接 / 站点标识 / 框架标识）。
+#: 用来区分「站点没有种子」与「页面结构变了」——改版后列表表会消失，
+#: 但导航与站点标识还在。
+_SITE_PAGE_MARKER = re.compile(r"torrents\.php|HDWinG|NexusPHP", re.IGNORECASE)
 
 
 def _is_login_page(url: str, html: str) -> bool:
@@ -181,7 +164,7 @@ def _parse_cookies(raw: str | None) -> dict[str, str]:
 
 @dataclass(frozen=True, slots=True)
 class _ListRow:
-    """列表页单行解析结果（free_payload 由优惠接口补齐）。"""
+    """列表页单行解析结果（免费判定由 service 层按需查 ``promotion.php``）。"""
 
     item_id: str
     title: str
@@ -190,24 +173,80 @@ class _ListRow:
     published_at: str | None
 
 
-def _parse_free_state(sp_state_html: str, timeout_html: str) -> tuple[list[str], str | None]:
-    """优惠接口的单条返回 → ``(free_classes, remaining_abs)``。"""
-    classes: list[str] = []
-    for cls in _PROMO_CLASS_RE.findall(sp_state_html):
-        mapped = _PRO_IMG_MAP.get(cls)
-        if mapped is not None and mapped not in classes:
-            classes.append(mapped)
-    remaining: str | None = None
-    m = _PROMO_TIMEOUT_RE.search(timeout_html)
-    if m is not None:
-        remaining = parse_abs_datetime(m.group(1))
-    return classes, remaining
+def _cell_text(td: Tag) -> str:
+    """表格单元格文本（空白折叠）。"""
+    return re.sub(r"\s+", " ", td.get_text(" ", strip=True))
+
+
+def _parse_promotion_records(html: str) -> list[Promotion]:
+    """解析 ``promotion.php`` 优惠历史表 → 全部 ``Free`` 记录（**不做过期过滤**）。
+
+    表结构（实测 2026-11-16）：``优惠类型 / 开始时间 / 截止时间 / 操作人``。
+
+    分两层是为了可测：fixture 里的「生效中」样本到了截止时间就会变成过期，
+    纯解析层不受时间影响，过期判定交给 :func:`_current_promotion`。
+    """
+    soup = BeautifulSoup(html, "lxml")
+    records: list[Promotion] = []
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        if not rows:
+            continue
+        header = [_cell_text(td) for td in rows[0].find_all(["td", "th"])]
+        if "优惠类型" not in header:
+            continue
+        try:
+            kind_i = header.index("优惠类型")
+            start_i = header.index("开始时间")
+            end_i = header.index("截止时间")
+        except ValueError:
+            continue
+        for tr in rows[1:]:
+            cells = [_cell_text(td) for td in tr.find_all(["td", "th"])]
+            if len(cells) <= max(kind_i, start_i, end_i):
+                continue
+            kind = cells[kind_i].strip()
+            if kind.lower() != "free":
+                continue
+            start_at = parse_abs_datetime(cells[start_i])
+            end_raw = cells[end_i].strip()
+            end_at = parse_abs_datetime(end_raw) if end_raw else None
+            records.append(
+                Promotion(kind=kind, start_at=start_at, end_at=end_at)
+            )
+    return records
+
+
+def _current_promotion(records: list[Promotion]) -> Promotion | None:
+    """从记录里挑出**当前生效**的那条优惠。
+
+    判定：截止时间为空 = **永久**；否则截止时间必须 > 现在（已过期的不算）。
+    多条同时生效时取**截止最晚**的一条；没有生效的 → ``None``
+    （= 该种子当前不是免费种，不是「查失败」）。
+    """
+    now = bj_now_dt()
+    best: Promotion | None = None
+    for rec in records:
+        if rec.end_at is not None:
+            end_dt = parse_bj(rec.end_at)
+            if end_dt is None or end_dt <= now:
+                continue  # 已过期 → 当前不生效
+        if best is None or rec.end_at is None:
+            # 首条，或遇到「永久优惠」（永久 > 任何限时）
+            best = rec
+        elif best.end_at is None:
+            continue  # 已有永久优惠，更晚的限时不必替换
+        elif rec.end_at is not None and rec.end_at > best.end_at:
+            best = rec
+    return best
 
 
 class HdwingAdapter(SiteAdapter):
     """HDWinG (hdwing.org) NexusPHP cookie 适配器。"""
 
     adapter_type = "hdwing"
+    #: 优惠标记是 AJAX 占位符 → 免费判定需逐种子查 ``promotion.php``
+    supports_promotion_lookup = True
 
     def __init__(
         self,
@@ -293,60 +332,42 @@ class HdwingAdapter(SiteAdapter):
             )
         return rows
 
-    async def _fetch_promotions(
-        self, ids: list[str], csrf: str
-    ) -> dict[str, tuple[list[str], str | None]]:
-        """批量查优惠状态（``POST /ajax_promotion.php``）。
+    # ------------------------------------------------------------ 优惠（promotion.php）
+    async def get_promotion(self, item_id: str) -> Promotion | None:
+        """查单个种子的优惠历史，返回**当前生效**的那条优惠。
 
-        失败抛 :class:`SiteFetchError`：spstate=2 列表的价值就在免费标记，
-        没有优惠状态的数据对业务无用——如实报故障让 feed_fetcher 重试。
+        数据源是 ``GET /promotion.php?id={tid}``（服务端渲染的优惠历史表：
+        优惠类型 / 开始时间 / 截止时间 / 操作人）——**不是** ``ajax_promotion.php``：
+        后者被 Cloudflare Turnstile 闸保护，未过闸时对任意 id 都返回兜底的
+        ``pro_free``（实测连不存在的 id 都回「免费」），照它解析会把限时免费
+        误判成永久免费。
+
+        返回 ``None`` = 该种子当前**没有生效的优惠**（不是免费种；不是查失败）。
+        失败抛 :class:`SiteFetchError` / :class:`BreakerTripped`（403/429 限流）。
+
+        **404 = 该种子不存在**（种子被删 / id 不存在）→ 也返回 ``None``：
+        列表页里刚拿到的 id 可能在查询前被删，一个 404 不该炸掉整批判定。
         """
-        out: dict[str, tuple[list[str], str | None]] = {}
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self._base_url()}/torrents.php",
-        }
-        for start in range(0, len(ids), _PROMO_BATCH):
-            batch = ids[start : start + _PROMO_BATCH]
-            pairs: list[tuple[str, str]] = [("csrf", csrf)]
-            pairs.extend(("ids[]", tid) for tid in batch)
-            try:
-                resp = await self._client.post(
-                    f"{self._base_url()}/ajax_promotion.php",
-                    content=urlencode(pairs),
-                    headers=headers,
-                )
-            except httpx.HTTPError as exc:
-                raise SiteFetchError(f"HDWinG 优惠状态查询失败：{exc}") from exc
-            if resp.status_code in (403, 429):
-                raise BreakerTripped(
-                    f"HDWinG 优惠状态查询返回 {resp.status_code}，需熔断"
-                )
-            if resp.status_code >= 400:
-                raise SiteFetchError(
-                    f"HDWinG 优惠状态查询返回 HTTP {resp.status_code}"
-                )
-            try:
-                payload = json.loads(resp.text)
-            except ValueError as exc:
-                raise SiteFetchError(
-                    f"HDWinG 优惠状态响应不是 JSON：{exc}"
-                ) from exc
-            if payload.get("status") != 200:
-                raise SiteFetchError(
-                    f"HDWinG 优惠状态接口返回 status={payload.get('status')!r}"
-                )
-            message = payload.get("message")
-            if not isinstance(message, dict):
-                raise SiteFetchError("HDWinG 优惠状态响应缺少 message")
-            for tid, val in message.items():
-                if not isinstance(val, dict):
-                    continue
-                sp_state = str(val.get("sp_state") or "")
-                timeout = str(val.get("timeout") or "")
-                out[str(tid)] = _parse_free_state(sp_state, timeout)
-        return out
+        if not item_id:
+            raise ValueError("item_id 不能为空")
+        url = f"{self._base_url()}/promotion.php?id={item_id}"
+        try:
+            resp = await self._client.get(url)
+        except httpx.HTTPError as exc:
+            raise SiteFetchError(f"HDWinG 优惠历史拉取失败 id={item_id}: {exc}") from exc
+        if resp.status_code in (403, 429):
+            raise BreakerTripped(
+                f"HDWinG 优惠历史返回 {resp.status_code}，需熔断"
+            )
+        if resp.status_code == 404:
+            # 种子不存在（NexusPHP 标准 404 页）→ 没有优惠记录
+            logger.debug("HDWinG 优惠历史 404（种子不存在）id=%s", item_id)
+            return None
+        if resp.status_code >= 400:
+            raise SiteFetchError(
+                f"HDWinG 优惠历史返回 HTTP {resp.status_code} id={item_id}"
+            )
+        return _current_promotion(_parse_promotion_records(resp.text))
 
     def _extract_download_url(self, html: str, base_url: str) -> str | None:
         """从页面 HTML 提取下载 URL（绝对化 + 追加自身 uid）。
@@ -404,12 +425,21 @@ class HdwingAdapter(SiteAdapter):
         page_size: int = 100,
         page_number: int = 1,
     ) -> list[FeedItem]:
-        """拉免费种列表（``spstate=2``，page 从 0 起）+ 批量查优惠状态。"""
+        """拉种子列表（**不带任何筛选参数**，page 从 0 起）。
+
+        刻意不拉 ``spstate=2``（站点侧「仅免费」筛选）：① 站点筛选参数语义随
+        版本漂移（其它站实测 ``spstate`` 含义各不相同）；② 筛选页按「免费剩余
+        时长」倒序，把 2022 年老种（重开 30 天促销）顶到前面，**按发布时间
+        排序的全量列表反而不含它们**；③ 筛选后的结果**仍然没有**每个种子的
+        真实免费窗口。
+
+        本方法**不产出 free_payload**：优惠标记不在列表 HTML 里（只有空占位
+        ``span.sp_state_placeholder``），而那个 AJAX 接口未过 Turnstile 时会
+        返回兜底的假标记。免费判定由 service 层按需调
+        :meth:`get_promotion` 做（增量复查）。
+        """
         _ = query, page_size  # HTML 站每页固定 100 条，page_size 不生效
-        url = (
-            f"{self._base_url()}/torrents.php"
-            f"?spstate=2&page={max(0, page_number - 1)}"
-        )
+        url = f"{self._base_url()}/torrents.php?page={max(0, page_number - 1)}"
         try:
             resp = await self._client.get(url)
         except httpx.HTTPError as exc:
@@ -435,40 +465,29 @@ class HdwingAdapter(SiteAdapter):
         html = resp.text
         rows = self._parse_list_rows(html)
         if not rows:
+            # 空列表有两种可能：站点确实没有种子 / 页面结构变了（改版）。
+            # 后者若不报错，会被当成「没有种子」静默停摆——用「页面确实是站点
+            # 页面（导航里有 torrents.php / 站点标识），却没有 torrent_list
+            # 表」来区分（改版后表格 class 会变，导航还在）。
+            if _SITE_PAGE_MARKER.search(html) and "torrent_list" not in html:
+                raise SiteFetchError(
+                    "HDWinG 列表页结构变化（未找到 torrent_list 表）"
+                )
             return []
 
-        csrf_m = _CSRF_RE.search(html)
-        if csrf_m is None:
-            raise SiteFetchError("HDWinG 列表页缺少 x-csrf（页面改版？）")
-        promotions = await self._fetch_promotions(
-            [r.item_id for r in rows], csrf_m.group(1)
-        )
-
-        items: list[FeedItem] = []
-        for row in rows:
-            free_payload: dict[str, object] | None = None
-            state = promotions.get(row.item_id)
-            if state is not None:
-                free_classes, remaining_abs = state
-                if free_classes or remaining_abs:
-                    free_payload = {
-                        "free_classes": free_classes,
-                        "remaining_abs": remaining_abs,
-                    }
-            items.append(
-                FeedItem(
-                    title=row.title,
-                    item_id=row.item_id,
-                    info_hash=None,  # 列表页不直接给 hash
-                    size=row.size,
-                    category=row.category,
-                    published_at=row.published_at,
-                    description="",  # 副标题可能含「免费/剩余」字样，
-                    # 会污染 window_parser 的 str 兜底路径，不放
-                    free_payload=free_payload,
-                )
+        return [
+            FeedItem(
+                title=row.title,
+                item_id=row.item_id,
+                info_hash=None,  # 列表页不直接给 hash
+                size=row.size,
+                category=row.category,
+                published_at=row.published_at,
+                description="",  # 副标题可能含「免费/剩余」字样，
+                # 会污染 window_parser 的 str 兜底路径，不放
             )
-        return items
+            for row in rows
+        ]
 
     # ------------------------------------------------------------ 3. download_torrent
     async def download_torrent(self, item_id: str) -> bytes:
