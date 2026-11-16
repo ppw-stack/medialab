@@ -916,6 +916,11 @@ export interface StagingRow {
   size_bytes: number
   /** pending / syncing / verified / done / failed / paused */
   state: string
+  /**
+   * 搬运通道（`cloud_download` / `share_transfer`；null = 还没搬）。
+   * `share_transfer` = 分享转存（服务端内部复制，**不消耗云添加额度**）。
+   */
+  transfer_mode: string | null
   attempts: number
   last_error: string | null
   created_at: string

@@ -181,6 +181,18 @@
 
           <template v-else-if="column.key === 'state'">
             <a-tag :color="stateColor(record.state)">{{ stateLabel(record.state) }}</a-tag>
+            <a-tooltip
+              v-if="record.transfer_mode === 'share_transfer'"
+              title="分享转存：服务端内部复制，不消耗云添加额度"
+            >
+              <a-tag color="cyan" class="mode-tag">分享</a-tag>
+            </a-tooltip>
+            <a-tooltip
+              v-else-if="record.transfer_mode === 'cloud_download'"
+              title="离线下载（云下载）：消耗 1 次云添加额度"
+            >
+              <a-tag color="purple" class="mode-tag">云下载</a-tag>
+            </a-tooltip>
           </template>
 
           <template v-else-if="column.key === 'action'">
@@ -854,6 +866,10 @@ onMounted(loadAll)
 
 .hint-alert {
   margin-bottom: 8px;
+}
+
+.mode-tag {
+  margin-left: 4px;
 }
 
 .mapping {
