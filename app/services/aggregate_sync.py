@@ -850,6 +850,103 @@ async def _transfer_by_share(
             logger.warning("删除分享失败 %s：%s", share.share_id, exc)
 
 
+#: 分享转存通道：**同时在途的批次上限**。
+#:
+#: 分享通道**没有**云下载的那两条串行约束（落盘名撞车 / 额度按次）——
+#: 转存落地保持原名、不消耗额度 → 多批可以并行。服务端的转存任务落地
+#: 延迟实测 ~10 分钟/批 → 串行时吞吐被延迟卡死（20 个/10 分钟），
+#: 3–5 批并行可放大 3–5 倍。
+SHARE_MAX_IN_FLIGHT = 3
+
+
+async def _transfer_one_batch(
+    chunk: list[_Row],
+    *,
+    source: Any,
+    master_driver: Any,
+    index: TargetIndex,
+    result: AggregateSyncResult,
+) -> list[_Row]:
+    """跑**一个**分享批次：建分享 → 转存 → 轮询 → 清理。
+
+    Returns:
+        **未落地**的行（调用方回退到云下载通道）。
+    """
+    for row in chunk:
+        await _mark(
+            row.id,
+            STAGING_SYNCING,
+            error=None,
+            bump_attempts=True,
+            transfer_mode="share_transfer",
+        )
+    share: Any = None
+    try:
+        share = await source.create_share(
+            [r.remote_id for r in chunk],
+            title=f"{chunk[0].file_name} 等 {len(chunk)} 个",
+        )
+        token = await source.share_access_token(share.url_id, share.code)
+        await master_driver.restore_share(
+            token, [r.remote_id for r in chunk], chunk[0].target_dir_id
+        )
+
+        # 轮询：整批出现（同名同大小）或超时
+        deadline = time.monotonic() + SHARE_TRANSFER_WAIT_SEC
+        pending = {r.file_name: r for r in chunk}
+        while pending and time.monotonic() < deadline:
+            await asyncio.sleep(SHARE_TRANSFER_POLL_SEC)
+            files = await index.refresh(chunk[0].target_dir)
+            for r in list(pending.values()):
+                if files.get(r.file_name) == r.size_bytes:
+                    del pending[r.file_name]
+        # 超时后再确认一次（转存可能刚好落地）
+        files = await index.refresh(chunk[0].target_dir)
+        for r in list(pending.values()):
+            if files.get(r.file_name) == r.size_bytes:
+                del pending[r.file_name]
+
+        landed = [r for r in chunk if r.file_name not in pending]
+        if landed:
+            # **批量清理**副盘副本（一批一次请求；失败逐个兜底）
+            try:
+                await source.delete_files([r.remote_id for r in landed])
+                for r in landed:
+                    await _mark(r.id, STAGING_DONE, error=None, cleaned=True)
+                result.cleaned += len(landed)
+                result.synced += len(landed)
+                logger.warning(
+                    "聚合归拢已清理副盘副本：%d 个（分享转存批次，%s 等）",
+                    len(landed),
+                    landed[0].file_name,
+                )
+            except Exception as exc:
+                logger.warning("批量清理副盘副本失败，逐个重试：%s", exc)
+                for r in landed:
+                    await _cleanup_source(r, source, result)
+        not_landed = [r for r in chunk if r.file_name in pending]
+        if landed and not_landed:
+            result.details.append(
+                f"批量转存超时：{len(landed)} 个落地、"
+                f"{len(not_landed)} 个未落地 → 未落地的回退云下载"
+            )
+        return not_landed
+    except Exception as exc:
+        # ⚠️ **整批失败也要把行交给回退**——曾漏掉（not_landed 只在
+        #   try 块里赋值）→ 回退列表为空 → 云下载循环空转。
+        logger.warning("分享转存批次失败（%d 个文件）：%s", len(chunk), exc)
+        result.details.append(
+            f"批量转存失败（{len(chunk)} 个文件）：{exc} → 逐个回退"
+        )
+        return list(chunk)
+    finally:
+        if share is not None:
+            try:
+                await source.delete_share([share.share_id])
+            except Exception as exc:  # 清理失败不影响归拢
+                logger.warning("删除分享失败 %s：%s", share.share_id, exc)
+
+
 async def _batch_share_transfer(
     rows: list[_Row],
     *,
@@ -858,14 +955,13 @@ async def _batch_share_transfer(
     result: AggregateSyncResult,
     source_drivers: dict[int, Any],
 ) -> list[_Row]:
-    """批量转存（rows 已过预检：``target_dir_id`` 已解析、无同名冲突）。
+    """小文件**批量打包转存**（rows 已过预检：无同名冲突、目标目录已解析）。
 
     分组规则：**(源账号, 目标目录)**——分享必须建在文件自己的账号上，
     转存只能落到一个目录 → 跨目录/跨账号的行各自成批。
 
-    ⚠️ **本批完成即入账**（已落地的逐行清理副盘副本并标 done）——
-    原先把结果攒到整轮结束才入账 → 面板 15 分钟显示「成功=0」，
-    实际早就在搬（观测缺口）。
+    **批次并行**（``SHARE_MAX_IN_FLIGHT``）：分享通道没有云下载的两条串行
+    约束（落盘名撞车 / 按次额度）→ 多批可以同时转存，吞吐 ×3–5。
 
     Returns:
         **未落地**的行（调用方回退到云下载通道）。
@@ -875,88 +971,50 @@ async def _batch_share_transfer(
     for row in rows:
         groups.setdefault((row.source_driver_id, row.target_dir_id), []).append(row)
 
+    # 分组 → 批次（(源账号, 批次行) 列表）
+    batches: list[tuple[int, list[_Row]]] = []
     for (source_driver_id, _target_dir), chunk_rows in groups.items():
         for chunk_start in range(0, len(chunk_rows), SHARE_BATCH_SIZE):
-            chunk = chunk_rows[chunk_start : chunk_start + SHARE_BATCH_SIZE]
-            for row in chunk:
-                await _mark(
-                    row.id,
-                    STAGING_SYNCING,
-                    error=None,
-                    bump_attempts=True,
-                    transfer_mode="share_transfer",
-                )
-            source: Any = None
-            share: Any = None
-            try:
-                source = source_drivers.get(source_driver_id)
-                if source is None:
-                    source = await _build_source_driver(chunk[0])
-                    source_drivers[source_driver_id] = source
+            batches.append(
+                (source_driver_id, chunk_rows[chunk_start : chunk_start + SHARE_BATCH_SIZE])
+            )
 
-                share = await source.create_share(
-                    [r.remote_id for r in chunk],
-                    title=f"{chunk[0].file_name} 等 {len(chunk)} 个",
-                )
-                token = await source.share_access_token(share.url_id, share.code)
-                await master_driver.restore_share(
-                    token, [r.remote_id for r in chunk], chunk[0].target_dir_id
-                )
+    async def _run(batch: tuple[int, list[_Row]]) -> list[_Row]:
+        source_driver_id, chunk = batch
+        async with await _semaphore():
+            source = source_drivers.get(source_driver_id)
+            if source is None:
+                source = await _build_source_driver(chunk[0])
+                source_drivers[source_driver_id] = source
+            return await _transfer_one_batch(
+                chunk,
+                source=source,
+                master_driver=master_driver,
+                index=index,
+                result=result,
+            )
 
-                # 轮询：整批出现（同名同大小）或超时
-                # ⚠️ **refresh 传的是「相对路径」（row.target_dir），不是目录
-                #   id**——曾把 fileId 当路径传进去 → TargetIndex 把它当目录名
-                #   在归拢根下建了一堆垃圾目录并列空的 → 轮询永不命中 →
-                #   每批烧满超时（生产踩到，13 个空垃圾目录）。
-                deadline = time.monotonic() + SHARE_TRANSFER_WAIT_SEC
-                pending = {r.file_name: r for r in chunk}
-                while pending and time.monotonic() < deadline:
-                    await asyncio.sleep(SHARE_TRANSFER_POLL_SEC)
-                    files = await index.refresh(chunk[0].target_dir)
-                    for r in list(pending.values()):
-                        if files.get(r.file_name) == r.size_bytes:
-                            del pending[r.file_name]
-                # 超时后再确认一次（转存可能刚好落地）
-                files = await index.refresh(chunk[0].target_dir)
-                for r in list(pending.values()):
-                    if files.get(r.file_name) == r.size_bytes:
-                        del pending[r.file_name]
-
-                landed = [r for r in chunk if r.file_name not in pending]
-                for r in landed:
-                    if source is not None:
-                        await _cleanup_source(r, source, result)
-                    await _mark(r.id, STAGING_DONE, error=None, cleaned=True)
-                    result.synced += 1
-                not_landed.extend(r for r in chunk if r.file_name in pending)
-                if not_landed and landed:
-                    result.details.append(
-                        f"批量转存超时：{len(landed)} 个落地、"
-                        f"{len(pending)} 个未落地 → 未落地的回退云下载"
-                    )
-            except Exception as exc:
-                # ⚠️ **整批失败也要把行交给回退**——曾漏掉（not_landed 只在
-                #   try 块里赋值）→ 回退列表为空 → 云下载循环空转 → 啥也
-                #   搬不动（本地真机联调踩到）。
-                logger.warning(
-                    "批量分享转存失败（%s/%s，%d 个文件）：%s",
-                    source_driver_id,
-                    chunk[0].target_dir_id,
-                    len(chunk),
-                    exc,
-                )
-                result.details.append(
-                    f"批量转存失败（{len(chunk)} 个文件）：{exc} → 逐个回退"
-                )
-                not_landed.extend(chunk)
-            finally:
-                if source is not None and share is not None:
-                    try:
-                        await source.delete_share([share.share_id])
-                    except Exception as exc:  # 清理失败不影响归拢
-                        logger.warning("删除分享失败 %s：%s", share.share_id, exc)
-
+    gathered = await asyncio.gather(
+        *(_run(b) for b in batches), return_exceptions=True
+    )
+    for item in gathered:
+        if isinstance(item, BaseException):
+            logger.warning("分享转存批次异常：%s", item)
+            continue
+        not_landed.extend(item)
     return not_landed
+
+
+#: 批次并发的信号量（进程级，跨组共用）
+_SHARE_SEMAPHORE: asyncio.Semaphore | None = None
+
+
+async def _semaphore() -> asyncio.Semaphore:
+    """取批次并发信号量（惰性创建，绑定当前事件循环）。"""
+    global _SHARE_SEMAPHORE
+    if _SHARE_SEMAPHORE is None:
+        _SHARE_SEMAPHORE = asyncio.Semaphore(SHARE_MAX_IN_FLIGHT)
+    return _SHARE_SEMAPHORE
 
 
 async def _cleanup_source(

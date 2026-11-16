@@ -151,6 +151,10 @@ class _FakeSource:
     async def delete_file(self, file_id: str) -> None:
         self.deleted.append(file_id)
 
+    async def delete_files(self, file_ids: list[str]) -> None:
+        """批量删除（真实光鸭驱动有此方法；一次请求删 N 个）。"""
+        self.deleted.extend(file_ids)
+
     # -- 分享（源账号侧）--
 
     async def create_share(self, file_ids: list[str], title: str) -> Any:
