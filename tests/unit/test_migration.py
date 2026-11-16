@@ -170,9 +170,16 @@ class _FakeGuangya:
             raise DriverError(self.submit_error, kind="unknown")
         key = url.rsplit("=", 1)[-1] if "=" in url else url.removeprefix("fake://")
         name, size = self._info[key]
-        landed = self._landed_name or name
+        base = self._landed_name or name
         target_dir = parent_id or "root"
-        self._files.setdefault(target_dir, {})[landed] = size
+        files = self._files.setdefault(target_dir, {})
+        # 撞名 → 服务端自动改名 download(1)、download(2)…（真实光鸭行为）
+        landed = base
+        n = 1
+        while landed in files:
+            landed = f"{base}({n})"
+            n += 1
+        files[landed] = size
         self._file_id_of(target_dir, landed)
         task_id = f"task-{key}"
         self._submitted.add(task_id)
@@ -696,6 +703,47 @@ async def test_migration_is_strictly_serial(
 
     assert job.success == 3, job.logs
     assert gyp.max_inflight == 1, f"并发没收敛：{gyp.max_inflight}"
+
+
+async def test_existing_download_file_is_not_renamed(
+    db_session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """迁移也不该改**用户原有的** ``download`` 文件。
+
+    用户在目标目录放了个叫 ``download`` 的文件 → 服务端把我们的落地文件
+    自动改名成 ``download(1)`` → 改名时**跳过**用户那份，只改我们那份
+    （与聚合归拢同款保护，2026-11-15 对齐）。
+    """
+    await _seed_guangya_drivers(db_session)
+
+    files = [_entry("/影视/电影/A (2020)/A.mkv", 1_000_000, "f1")]
+    src = _FakeGuangyaSource(files)
+    gyp = _FakeGuangya({"f1": ("A.mkv", 1_000_000)}, landed_name="download")
+    # 目标目录里用户原有的 download（大小不同 → 认领时按大小就匹配不上）
+    gyp.seed_file("A (2020)", "download", 500)
+
+    monkeypatch.setattr(migration, "build_driver", _guangya_build(src, gyp))
+
+    params = migration_jobs.MigrationParams(
+        source_driver_id=201,
+        source_cid="1962124234139361322",
+        source_path="/影视/电影",
+        target_driver_id=202,
+        target_file_id="root",
+        target_path="/影视",
+    )
+    job = migration_jobs.MigrationJob(id="protect-job", params=params)
+
+    await migration.run_migration(job)
+
+    assert job.success == 1, job.logs
+    # 我们的那份（download(1)）被改成原名
+    assert ("download(1)", "A.mkv") in gyp.renamed
+    # 用户原有的 download 分毫未动
+    assert ("download", "A.mkv") not in gyp.renamed, "误改了用户的文件！"
+    show_id = gyp._dirs["root"]["A (2020)"]
+    assert gyp._files[show_id]["download"] == 500, "用户的文件被动了"
+    assert gyp._files[show_id]["A.mkv"] == 1_000_000
 
 
 async def test_quota_exhausted_pauses_job(db_session, monkeypatch: pytest.MonkeyPatch) -> None:

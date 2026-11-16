@@ -582,10 +582,19 @@ async def _migrate_one(
         job.untrack_task(task_id)
 
     # ⑤ 光鸭源：落盘名是 URL 末段（download）→ 改名回原名
+    #
+    # ⚠️ **跳过目录里原有的同名文件**（与聚合归拢同款保护）：用户在目标目录
+    # 放了个叫 ``download`` 的文件时，服务端会把我们的落地文件自动改名成
+    # ``download(1)`` → 跳过 ``download`` 后只改**我们那份**。
+    # ``existing`` 是**提交前**的目录快照（含用户原有文件，不含本次落地）。
     if needs_rename:
         landed_names = (_landed_name_from_url(link.url), GUANGYA_LANDED_NAME)
         renamed = await index.rename_landed(
-            rel_dir, tuple(n for n in landed_names if n), entry.size, entry.name
+            rel_dir,
+            tuple(n for n in landed_names if n),
+            entry.size,
+            entry.name,
+            exclude_names=set(existing),
         )
         if renamed:
             job.log(f"✏️ 已改名：{renamed} → {entry.name}")
