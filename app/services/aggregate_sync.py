@@ -488,40 +488,57 @@ async def _sync_group_locked(
     #: （每建一次都要走一遍 token 刷新，白费请求）。
     source_drivers: dict[int, Any] = {}
 
-    # ① **小文件批量打包转存**（不消耗额度）——先于大文件循环处理。
-    #    大文件仍恒串行走云下载（落盘名撞车 + 额度），小文件批量（一个
-    #    分享打包 N 个附件，一次转存整批）——附件占文件数的大头，这是
-    #    归拢吞吐的最大杠杆。
+    # ① **逐行预检**（两条通道共用）：主盘已有同名文件的处理 + 分流
     threshold = _share_threshold_bytes()
-    if threshold > 0:
-        small = [r for r in rows if r.size_bytes <= threshold]
-        big = [r for r in rows if r.size_bytes > threshold]
-        if small:
-            result.details.append(
-                f"组「{group_name}」：{len(small)} 个小文件走分享转存（批量），"
-                f"{len(big)} 个大文件走云下载"
+    transfer_rows: list[_Row] = []  # 可批量转存（小文件、无同名冲突）
+    cloud_rows: list[_Row] = []     # 走云下载（大文件 / replace / 阈值关闭）
+    for row in rows:
+        source = source_drivers.get(row.source_driver_id)
+        if source is None:
+            source = await _build_source_driver(row)
+            source_drivers[row.source_driver_id] = source
+        try:
+            action, dir_id, _existing = await _precheck_target(
+                row, index=index, source=source, result=result
             )
-            transferred = await _batch_share_transfer(
-                small,
-                master_driver=master_driver,
-                index=index,
-                result=result,
-                source_drivers=source_drivers,
-            )
-            done_ids = {r.id for r in transferred}
-            # 没落地的（转存失败）→ 回退云下载（吃额度但保底）
-            fallback = [r for r in small if r.id not in done_ids]
-            if fallback:
-                result.details.append(
-                    f"组「{group_name}」：{len(fallback)} 个小文件转存未落地，"
-                    "回退云下载"
-                )
-            rows = big + fallback
-    else:
-        big = rows
+            row.target_dir_id = dir_id
+        except Exception as exc:
+            # 预检失败（网络 / 同名文件已变化）→ 保守走云下载（现有判定兜底）
+            logger.warning("预检失败 %s：%s", row.file_name, exc)
+            cloud_rows.append(row)
+            continue
+        if action == "skip":
+            continue  # 已清理副盘副本并标 done
+        if action == "replace" or threshold <= 0 or row.size_bytes > threshold:
+            cloud_rows.append(row)
+        else:
+            transfer_rows.append(row)
 
+    # ② **小文件批量打包转存**（不消耗额度）——附件占文件数的大头，
+    #    一个分享打包 N 个附件、一次转存整批，是吞吐的最大杠杆。
+    if transfer_rows:
+        result.details.append(
+            f"组「{group_name}」：{len(transfer_rows)} 个小文件走分享转存（批量），"
+            f"{len(cloud_rows)} 个走云下载"
+        )
+        # 未落地的（转存失败 / 超时）→ 回退云下载（吃额度但保底）
+        fallback = await _batch_share_transfer(
+            transfer_rows,
+            master_driver=master_driver,
+            index=index,
+            result=result,
+            source_drivers=source_drivers,
+        )
+        if fallback:
+            result.details.append(
+                f"组「{group_name}」：{len(fallback)} 个小文件转存未落地，"
+                "回退云下载"
+            )
+        cloud_rows = fallback + cloud_rows
+
+    # ③ 大文件（+回退的）恒串行云下载
     try:
-        for row in rows:
+        for row in cloud_rows:
             if max_submissions is not None and submissions >= max_submissions:
                 result.details.append(
                     f"组「{group_name}」：本轮已达最大提交数（{max_submissions}），"
@@ -569,6 +586,53 @@ async def _sync_group_locked(
 # --------------------------------------------------------------------------
 
 
+async def _precheck_target(
+    row: _Row,
+    *,
+    index: TargetIndex,
+    source: Any,
+    result: AggregateSyncResult,
+) -> tuple[str, str, dict[str, int]]:
+    """目标目录预检（**两条通道共用**）：主盘已有同名文件的处理。
+
+    **为什么必须共用**：批量转存曾漏掉这一步 → 转存撞上「主盘已有同名文件」
+    → 光鸭失败或自动改名 ``xxx(1)`` → 轮询条件「原名+副盘大小」永远不命中
+    → **每批烧满超时**（600s×N），啥也搬不动（2026-11-16 生产实测）。
+
+    Returns:
+        ``(action, target_dir_id, existing)``：
+
+        - ``action="skip"`` —— 主盘已有同名同大小 / 更大版本 → 副盘是冗余
+          副本，**已清理并标 done**（0 额度），调用方跳过该行
+        - ``action="replace"`` —— 主盘同名更小，**已删主盘侧旧文件** →
+          走云下载重传（转存遇同名会失败/改名，不能走转存）
+        - ``action="transfer"`` —— 无同名 → 可走任意通道（批量转存优先）
+        - ``existing`` —— 预检时的目录快照（改名时排除用户原有文件用）
+    """
+    target_dir_id, existing = await index.resolve(row.target_dir)
+    remote_size = existing.get(row.file_name)
+    if remote_size is None:
+        return "transfer", target_dir_id, existing
+    if remote_size == row.size_bytes:
+        # 主盘已有同名同大小 → 副盘那份是冗余副本（0 额度）
+        await _cleanup_source(row, source, result)
+        result.skipped += 1
+        result.details.append(f"{row.file_name}：主盘已有同名同大小，直接清理副盘")
+        return "skip", target_dir_id, existing
+    if remote_size > row.size_bytes:
+        # 保留大的（主盘那份更大）→ 副盘冗余（0 额度）
+        await _cleanup_source(row, source, result)
+        result.skipped += 1
+        result.details.append(f"{row.file_name}：主盘已有更大版本，直接清理副盘")
+        return "skip", target_dir_id, existing
+    # 源更大 → 删主盘侧的小文件，然后重传（保留大的）
+    # ⚠️ 只能走**云下载**：转存遇目标同名会失败/被服务端改名
+    removed = await index.delete_replaced(row.target_dir, row.file_name, remote_size)
+    if not removed:
+        raise DriverError("主盘同名文件已变化，未覆盖（不误删）", kind="unknown")
+    return "replace", target_dir_id, existing
+
+
 async def _sync_one(
     row: _Row,
     *,
@@ -583,30 +647,12 @@ async def _sync_one(
     """归拢一个文件。返回是否真的提交了云下载（用于统计本轮提交数）。"""
     await _mark(row.id, STAGING_SYNCING, error=None, bump_attempts=True)
 
-    # ① 目标目录 + 预检
-    target_dir_id, existing = await index.resolve(row.target_dir)
-    remote_size = existing.get(row.file_name)
-    if remote_size is not None:
-        if remote_size == row.size_bytes:
-            # 主盘已有同名同大小 → 副盘那份是冗余副本
-            await _cleanup_source(row, source, result)
-            result.skipped += 1
-            result.details.append(f"{row.file_name}：主盘已有同名同大小，直接清理副盘")
-            return False
-        if remote_size > row.size_bytes:
-            # 保留大的（主盘那份更大）
-            await _cleanup_source(row, source, result)
-            result.skipped += 1
-            result.details.append(f"{row.file_name}：主盘已有更大版本，直接清理副盘")
-            return False
-        # 源更大 → 删主盘侧的小文件，然后正常传（保留大的）
-        removed = await index.delete_replaced(
-            row.target_dir, row.file_name, remote_size
-        )
-        if not removed:
-            raise DriverError(
-                "主盘同名文件已变化，未覆盖（不误删）", kind="unknown"
-            )
+    # ① 目标目录预检（**与批量转存共用**）：主盘已有同名文件的处理
+    action, target_dir_id, existing = await _precheck_target(
+        row, index=index, source=source, result=result
+    )
+    if action == "skip":
+        return False
 
     # ② 认领残留：上一轮已落盘但没改名（中断 / 被取消）
     #
@@ -812,26 +858,24 @@ async def _batch_share_transfer(
     result: AggregateSyncResult,
     source_drivers: dict[int, Any],
 ) -> list[_Row]:
-    """小文件**批量打包转存**：同目录的行打包成一个分享，一次转存整批。
-
-    **为什么批量**：分享可以带一个文件列表（``share_create(file_ids)``）、
-    一次 ``share_restore`` 转存整批 → N 个附件从「N 次（4 请求 + 轮询）」
-    变成「1 次分享 + 1 次转存」。附件占文件数的大头（76%），这一步是归拢
-    吞吐的最大杠杆。
+    """批量转存（rows 已过预检：``target_dir_id`` 已解析、无同名冲突）。
 
     分组规则：**(源账号, 目标目录)**——分享必须建在文件自己的账号上，
     转存只能落到一个目录 → 跨目录/跨账号的行各自成批。
 
+    ⚠️ **本批完成即入账**（已落地的逐行清理副盘副本并标 done）——
+    原先把结果攒到整轮结束才入账 → 面板 15 分钟显示「成功=0」，
+    实际早就在搬（观测缺口）。
+
     Returns:
-        **已成功落地**的行；没落地的由调用方回退到云下载通道。
+        **未落地**的行（调用方回退到云下载通道）。
     """
-    transferred: list[_Row] = []
-    # 按 (源账号, 目标目录) 分组
+    not_landed: list[_Row] = []
     groups: dict[tuple[int, str], list[_Row]] = {}
     for row in rows:
-        groups.setdefault((row.source_driver_id, row.target_dir), []).append(row)
+        groups.setdefault((row.source_driver_id, row.target_dir_id), []).append(row)
 
-    for (source_driver_id, target_dir), chunk_rows in groups.items():
+    for (source_driver_id, _target_dir), chunk_rows in groups.items():
         for chunk_start in range(0, len(chunk_rows), SHARE_BATCH_SIZE):
             chunk = chunk_rows[chunk_start : chunk_start + SHARE_BATCH_SIZE]
             for row in chunk:
@@ -842,6 +886,7 @@ async def _batch_share_transfer(
                     bump_attempts=True,
                     transfer_mode="share_transfer",
                 )
+            source: Any = None
             share: Any = None
             try:
                 source = source_drivers.get(source_driver_id)
@@ -854,9 +899,8 @@ async def _batch_share_transfer(
                     title=f"{chunk[0].file_name} 等 {len(chunk)} 个",
                 )
                 token = await source.share_access_token(share.url_id, share.code)
-                dir_id, _files = await index.resolve(target_dir)
                 await master_driver.restore_share(
-                    token, [r.remote_id for r in chunk], dir_id
+                    token, [r.remote_id for r in chunk], chunk[0].target_dir_id
                 )
 
                 # 轮询：整批出现（同名同大小）或超时
@@ -864,28 +908,43 @@ async def _batch_share_transfer(
                 pending = {r.file_name: r for r in chunk}
                 while pending and time.monotonic() < deadline:
                     await asyncio.sleep(SHARE_TRANSFER_POLL_SEC)
-                    files = await index.refresh(target_dir)
+                    files = await index.refresh(chunk[0].target_dir_id)
                     for r in list(pending.values()):
                         if files.get(r.file_name) == r.size_bytes:
-                            transferred.append(r)
                             del pending[r.file_name]
                 # 超时后再确认一次（转存可能刚好落地）
-                files = await index.refresh(target_dir)
+                files = await index.refresh(chunk[0].target_dir_id)
                 for r in list(pending.values()):
                     if files.get(r.file_name) == r.size_bytes:
-                        transferred.append(r)
                         del pending[r.file_name]
+
+                landed = [r for r in chunk if r.file_name not in pending]
+                for r in landed:
+                    if source is not None:
+                        await _cleanup_source(r, source, result)
+                    await _mark(r.id, STAGING_DONE, error=None, cleaned=True)
+                    result.synced += 1
+                not_landed.extend(r for r in chunk if r.file_name in pending)
+                if not_landed and landed:
+                    result.details.append(
+                        f"批量转存超时：{len(landed)} 个落地、"
+                        f"{len(pending)} 个未落地 → 未落地的回退云下载"
+                    )
             except Exception as exc:
+                # ⚠️ **整批失败也要把行交给回退**——曾漏掉（not_landed 只在
+                #   try 块里赋值）→ 回退列表为空 → 云下载循环空转 → 啥也
+                #   搬不动（本地真机联调踩到）。
                 logger.warning(
                     "批量分享转存失败（%s/%s，%d 个文件）：%s",
                     source_driver_id,
-                    target_dir,
+                    chunk[0].target_dir_id,
                     len(chunk),
                     exc,
                 )
                 result.details.append(
                     f"批量转存失败（{len(chunk)} 个文件）：{exc} → 逐个回退"
                 )
+                not_landed.extend(chunk)
             finally:
                 if source is not None and share is not None:
                     try:
@@ -893,14 +952,7 @@ async def _batch_share_transfer(
                     except Exception as exc:  # 清理失败不影响归拢
                         logger.warning("删除分享失败 %s：%s", share.share_id, exc)
 
-    # 已落地的行：清副盘副本 + 标 done
-    for row in transferred:
-        source = source_drivers.get(row.source_driver_id)
-        if source is not None:
-            await _cleanup_source(row, source, result)
-        await _mark(row.id, STAGING_DONE, error=None, cleaned=True)
-        result.synced += 1
-    return transferred
+    return not_landed
 
 
 async def _cleanup_source(
@@ -947,6 +999,8 @@ class _Row:
     attempts: int
     last_error: str | None
     cloud_task_id: str | None
+    #: 预检时解析出的**目标目录 id**（主盘侧；批量转存直接用，不再二次解析）
+    target_dir_id: str = ""
 
 
 async def _load_processable_rows(group_id: int) -> list[_Row]:
@@ -989,6 +1043,7 @@ async def _load_processable_rows(group_id: int) -> list[_Row]:
                 attempts=int(r.attempts),
                 last_error=r.last_error,
                 cloud_task_id=r.cloud_task_id,
+                target_dir_id="",
             )
             for r in rows
         ]

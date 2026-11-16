@@ -52,7 +52,9 @@ class _FakeMaster:
         self.restore_error: str | None = None
 
     async def create_dir(self, name: str, parent_id: str = "") -> tuple[str, bool]:
-        dir_id = f"dir-{name}"
+        # ⚠️ id 必须含父目录——不同剧的同名 Season 目录要拿到不同 id
+        #   （真实光鸭的 fileId 全局唯一）
+        dir_id = f"dir-{parent_id}-{name}"
         self.dirs[name] = dir_id
         return dir_id, True
 
@@ -750,6 +752,7 @@ async def test_share_transfer_failure_falls_back_to_cloud_download(
     master.restore_error = "转存失败（模拟）"
 
     result = await aggregate_sync.sync_group_now(group_id)
+    print("DBG details:", result.details)
     assert len(master.submitted) == 1, "应回退到离线下载"
     assert result.synced == 1 and result.failed == 0
     assert any("回退离线下载" in d for d in result.details)
