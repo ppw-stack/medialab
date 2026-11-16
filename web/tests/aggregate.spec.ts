@@ -106,6 +106,18 @@ test('聚合页 - 展示组 / 水位 / 额度 / 在途台账', async ({ page }) 
       body: JSON.stringify([stats]),
     })
   })
+  await page.route('**/api/aggregate/groups/1/mapping', async (route: any) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        group_id: 1,
+        target_dir_id: 'target-1',
+        target_dir_path: '影视',
+        roots: [{ driver_id: 2, root_id: 'buf-1', root_path: '影视' }],
+      }),
+    })
+  })
   await page.route('**/api/aggregate/limits', async (route: any) => {
     await route.fulfill({
       status: 200,
@@ -154,6 +166,66 @@ test('聚合页 - 展示组 / 水位 / 额度 / 在途台账', async ({ page }) 
   // 在途台账（副盘文件只在台账里出现）
   await expect(page.getByText('ep1.mkv')).toBeVisible()
   await expect(page.getByText('待归拢')).toBeVisible()
+
+  // ⚠️ **配置齐全时「登记在途」「立即归拢」必须可点**——
+  //   回归（2026-11-16）：曾把 tooltip 文案（非空串）直接当禁用条件，
+  //   而配置齐全时文案也是非空的 → 按钮**永远点不动**。
+  await expect(page.getByRole('button', { name: '登记在途' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: '立即归拢' })).toBeEnabled()
+})
+
+test('聚合页 - 缺目录映射时按钮禁用并点名缺什么', async ({ page }) => {
+  await login(page)
+
+  await page.route('**/api/aggregate/groups', async (route: any) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([group]),
+    })
+  })
+  await page.route('**/api/aggregate/stats', async (route: any) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([]),
+    })
+  })
+  // 映射为空 → 缺归拢目标目录
+  await page.route('**/api/aggregate/groups/1/mapping', async (route: any) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ group_id: 1, target_dir_id: null, target_dir_path: null, roots: [] }),
+    })
+  })
+  await page.route('**/api/aggregate/staging', async (route: any) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([]),
+    })
+  })
+  await page.route('**/api/aggregate/limits', async (route: any) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ daily_cloud_add_quota: 3 }),
+    })
+  })
+  await page.route('**/api/drivers', async (route: any) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([driver()]),
+    })
+  })
+
+  await page.goto('/aggregate')
+  await page.waitForTimeout(800)
+
+  await expect(page.getByRole('button', { name: '登记在途' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: '立即归拢' })).toBeDisabled()
 })
 
 test('存储源页 - 副数据源有徽章且不参与扫描', async ({ page }) => {

@@ -52,7 +52,7 @@
             <span>
               <a-button
                 size="small"
-                :disabled="!!enqueueTip(group)"
+                :disabled="enqueueDisabled(group)"
                 :loading="busyGroupId === group.id"
                 @click="enqueue(group.id)"
               >
@@ -64,7 +64,7 @@
             <span>
               <a-button
                 size="small"
-                :disabled="!!syncTip(group)"
+                :disabled="syncDisabled(group)"
                 :loading="syncingGroupId === group.id"
                 @click="syncNow(group.id)"
               >
@@ -374,23 +374,38 @@ function mappingOf(groupId: number): AggregateGroupMapping | undefined {
   return mappings.value[groupId]
 }
 
-/** 「登记在途」的禁用原因（空串 = 可用）。 */
+/**
+ * 「登记在途」是否不可用（**缺配置时**）。
+ *
+ * ⚠️ **禁用条件与 tooltip 文案必须分开**——曾经把 tooltip 文案（非空串）
+ * 直接当禁用条件用 → 按钮**永远点不动**（配置齐全时文案也是非空的）。
+ */
+function enqueueDisabled(group: AggregateGroup): boolean {
+  const m = mappingOf(group.id)
+  if (!m?.target_dir_id) return true
+  return !secondariesOf(group).some((d) =>
+    (m?.roots ?? []).some((r) => r.driver_id === d.id),
+  )
+}
+
+/** 「登记在途」的 tooltip（缺配置时点名缺什么，否则说功能）。 */
 function enqueueTip(group: AggregateGroup): string {
   const m = mappingOf(group.id)
   if (!m?.target_dir_id) return "缺少归拢目标目录——请先「配置」目录映射"
-  const withRoot = secondariesOf(group).filter((d) =>
-    (m?.roots ?? []).some((r) => r.driver_id === d.id),
-  )
-  if (withRoot.length === 0) {
+  if (!secondariesOf(group).some((d) => (m?.roots ?? []).some((r) => r.driver_id === d.id))) {
     return "副盘都没配缓冲根目录——请先「配置」目录映射"
   }
   return "扫描副盘缓冲目录，把里面的文件登记成在途任务（幂等）"
 }
 
-/** 「立即归拢」的禁用原因（空串 = 可用）。 */
+/** 「立即归拢」是否不可用（缺归拢目标目录时）。 */
+function syncDisabled(group: AggregateGroup): boolean {
+  return !mappingOf(group.id)?.target_dir_id
+}
+
+/** 「立即归拢」的 tooltip。 */
 function syncTip(group: AggregateGroup): string {
-  const m = mappingOf(group.id)
-  if (!m?.target_dir_id) return "缺少归拢目标目录——请先「配置」目录映射"
+  if (syncDisabled(group)) return "缺少归拢目标目录——请先「配置」目录映射"
   return "全量归拢：一直搬到台账清空（只有云添加额度墙会停）"
 }
 

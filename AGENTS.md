@@ -703,6 +703,14 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
       （绝不能返回空集冒充「都不在跑」——那会把在途任务重置为待归拢并
       重新提交，白扣额度）。128 容器 DNS 偶发故障是已知触发源。
       契约：`test_active_task_query_failure_skips_syncing_rows`
+  - **前端（`web/src/pages/media/Aggregate.vue`）**：组卡片（成员 / 目录映射 /
+    水位）+ 在途台账表格 + 「登记在途」「立即归拢」（都是后台 job，2s 轮询）
+    + 「目录映射」弹框（主盘目标目录 + 各副盘缓冲根，各一个 `DirBrowser`）
+    - ⚠️ **禁用条件与 tooltip 文案必须分成两个函数**（2026-11-16 踩过）：
+      曾把 tooltip 文案（非空串）直接当禁用条件 `:disabled="!!tip(group)"`，
+      而**配置齐全时文案也是非空的** → 按钮**永远点不动**。现为
+      `enqueueDisabled()` / `enqueueTip()` 分离。契约（e2e）：
+      `aggregate.spec.ts` 的「配置齐全时可点」+「缺映射时禁用」
   - **待办（用户明确暂缓）**：写入入口形态（上传任务目标是「选组」还是
     「选具体盘」+ planner 自动溢出）——阶段 1、2 落地后结合实际使用再定
   - 契约由 `tests/unit/test_aggregate.py` + `tests/integration/test_aggregate.py`
