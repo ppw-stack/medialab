@@ -95,6 +95,23 @@ def test_enum_specs_are_the_zero_one_ones() -> None:
     }
 
 
+def test_aggregate_max_submissions_spec() -> None:
+    """聚合归拢的「单轮提交上限」参数规格。
+
+    - 归属 ``aggregate_sync``（只出现在该作业的「配置」弹框里）
+    - 默认 20（无人值守的运行时保护）
+    - **0 = 不限**（与仓库「0 = 不限」的惯例一致）
+    """
+    spec = lookup_spec("aggregate_max_submissions")
+    assert spec is not None
+    assert spec.job == "aggregate_sync"
+    assert spec.default == 20
+    assert spec.min == 0
+    assert spec.max == 200
+    assert spec.options is None  # 连续数值 → 数字输入框
+    assert spec.note and "0 = 不限" in spec.note
+
+
 def test_monitor_delete_expired_options() -> None:
     """删种子的枚举：0=仅暂停（默认）/ 1=删除任务+删数据。"""
     spec = lookup_spec("monitor_delete_expired")

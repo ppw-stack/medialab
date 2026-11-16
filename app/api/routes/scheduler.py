@@ -167,6 +167,8 @@ class RuntimeParamsUpdateIn(BaseModel):
     organize_conflict_policy: int | None = None
     scrape_season_image_to_root: int | None = None
     scrape_original_image: int | None = None
+    #: 聚合归拢的单轮提交上限（0 = 不限）
+    aggregate_max_submissions: int | None = None
 
 
 def _assert_params_model_covers_specs() -> None:

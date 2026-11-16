@@ -70,6 +70,24 @@ DEFAULT_CRON: dict[str, str] = {
 }
 
 
+def _current_max_submissions() -> str:
+    """聚合归拢的**单轮提交上限**（运行时参数，0 = 不限）。
+
+    注册日志要打**生效值**——写死默认值会在用户改过参数后与实际行为矛盾
+    （同 ``_current_pre_pause_minutes`` 的坑）。
+    """
+    from app.services.runtime_params import lookup_spec
+
+    try:
+        from app.services.runtime_params import get_runtime_params
+
+        value = get_runtime_params().get_int("aggregate_max_submissions")
+    except Exception:
+        spec = lookup_spec("aggregate_max_submissions")
+        value = spec.default if spec is not None else 20
+    return "不限" if value <= 0 else str(value)
+
+
 def _current_pre_pause_minutes() -> int:
     """当前生效的"提前暂停分钟数"（DB 运行时参数优先，回退到默认值）。
 
@@ -110,6 +128,11 @@ class JobMeta:
     make_func: Callable[[AdapterFactory], Callable[[], Awaitable[object]]]
     #: 追加到注册日志末尾的补充说明（如参数回显）
     log_extra: str = ""
+    #: 动态补充说明（**注册时求值**）——参数类回显要用它：
+    #: 运行时参数在 lifespan 里先于 register_jobs 初始化，注册时能读到
+    #: **DB 里的生效值**（写死在 log_extra 里的话，用户改过参数后日志会
+    #: 与实际行为矛盾）。
+    log_extra_fn: Callable[[], str] | None = None
 
 
 #: 全部作业的元数据（**新增作业只需在这里加一行**）。
@@ -198,6 +221,7 @@ JOB_META: tuple[JobMeta, ...] = (
             "主盘确认落盘后自动清理副盘副本"
         ),
         make_func=lambda f: _job_fn(_run_aggregate_sync),
+        log_extra_fn=lambda: f" (单轮上限={_current_max_submissions()})",
     ),
 )
 
@@ -234,7 +258,8 @@ def _register(meta: JobMeta, factory: AdapterFactory) -> None:
         )
     )
     effective = scheduler_center.list_job_cron(meta.name)
-    logger.info("已注册作业：%s cron=%r%s", meta.title, effective, meta.log_extra)
+    extra = meta.log_extra_fn() if meta.log_extra_fn is not None else meta.log_extra
+    logger.info("已注册作业：%s cron=%r%s", meta.title, effective, extra)
 
 
 # ============================================================ 作业模块预热

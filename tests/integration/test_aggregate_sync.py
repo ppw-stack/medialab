@@ -413,6 +413,78 @@ async def test_manual_sync_has_no_round_cap(
     assert all(r.state == "done" for r in rows), "不该有 pending 残留"
 
 
+async def test_scheduled_sync_cap_comes_from_runtime_param(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """定时作业的单轮上限 = **运行时参数**（面板可调，改完下一轮生效）。"""
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    master, _source = fake_drivers
+    group_id, master_id, secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+
+    async with session_scope() as db_session:
+        for i in range(8):
+            db_session.add(
+                SecondaryStaging(
+                    group_id=group_id,
+                    source_driver_id=secondary_id,
+                    target_driver_id=master_id,
+                    remote_id=f"y{i}",
+                    file_name=f"ep{i:02d}.mkv",
+                    size_bytes=100,
+                    state="pending",
+                )
+            )
+        await db_session.commit()
+
+    # 参数设为 3 → 本轮只搬 3 个
+    monkeypatch.setattr(
+        aggregate_sync, "_scheduled_max_submissions", lambda: 3
+    )
+    result = await aggregate_sync.run_aggregate_sync()
+    assert result["synced"] == 3
+    assert any("已达最大提交数（3）" in d for d in result["details"])
+
+    # 参数设为 0（不限）→ 剩下的全搬完
+    monkeypatch.setattr(
+        aggregate_sync, "_scheduled_max_submissions", lambda: None
+    )
+    result = await aggregate_sync.run_aggregate_sync()
+    assert result["synced"] == 6  # _setup 的 1 个 + 8 个里的其余
+
+
+async def test_manual_sync_ignores_runtime_cap(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """**手动触发不受参数限制**——用户盯着，要搬到台账清空。"""
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    master, _source = fake_drivers
+    group_id, master_id, secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+
+    async with session_scope() as db_session:
+        for i in range(8):
+            db_session.add(
+                SecondaryStaging(
+                    group_id=group_id,
+                    source_driver_id=secondary_id,
+                    target_driver_id=master_id,
+                    remote_id=f"z{i}",
+                    file_name=f"ep{i:02d}.mkv",
+                    size_bytes=100,
+                    state="pending",
+                )
+            )
+        await db_session.commit()
+
+    # 参数上限很小，但手动触发照旧全量
+    monkeypatch.setattr(
+        aggregate_sync, "_scheduled_max_submissions", lambda: 1
+    )
+    result = await aggregate_sync.sync_group_now(group_id)
+    assert result.synced == 9  # _setup 的 1 个 + 新增 8 个
+
+
 async def test_scheduled_sync_keeps_round_cap(
     db, fast_watcher, fake_drivers, monkeypatch
 ) -> None:

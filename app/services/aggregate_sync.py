@@ -83,9 +83,15 @@ SUBMIT_INTERVAL_SEC = 5.0
 #: 同一轮的**最大提交数**——**纯运行时保护**（一轮跑太久会占着事件循环不放）。
 #:
 #: ⚠️ **它不是额度限制**：额度由**服务端**说了算（撞墙即停），这里只防单轮
-#: 跑飞。原先按「3 次/天」设成 3 是因为当时有额度账本；改成撞墙探测后
-#: 放开到 20——账号实际额度更大时（如 VIP 1000 次/天）能用满。
+#: 跑飞。
+#:
+#: **可调**：运行时参数 ``aggregate_max_submissions``（默认 20，0 = 不限）。
+#: ⚠️ 这是**兜底默认值**——参数读不到时用它；正常路径读 DB 里的值
+#: （作业每次执行前读最新值，无缓存 / 即时一致）。
 MAX_SUBMISSIONS_PER_RUN = 20
+
+#: 运行时参数 key（单轮提交上限；0 = 不限）
+MAX_SUBMISSIONS_PARAM = "aggregate_max_submissions"
 
 #: ⚠️ **失败的文件不自动重试**（2026-11-15 决策）
 #:
@@ -246,6 +252,8 @@ async def run_aggregate_sync() -> dict[str, Any]:
     反而让单次作业的耗时不可预测。组内更必须串行（落盘名撞车）。
     """
     result = AggregateSyncResult()
+    # 单轮提交上限 = **运行时参数**（DB 持久化、面板可调；0 = 不限）
+    max_submissions = _scheduled_max_submissions()
     async with session_scope() as db:
         groups = (
             (await db.execute(select(AggregateGroup).order_by(AggregateGroup.id)))
@@ -264,7 +272,7 @@ async def run_aggregate_sync() -> dict[str, Any]:
             await run_group(
                 group_id,
                 result,
-                max_submissions=MAX_SUBMISSIONS_PER_RUN,
+                max_submissions=max_submissions,
                 wait_for_lock=False,
             )
         except Exception as exc:  # 单组失败不影响其它组
@@ -272,6 +280,21 @@ async def run_aggregate_sync() -> dict[str, Any]:
             result.failed += 1
             result.details.append(f"组「{group_name}」失败：{exc}")
     return result.to_dict()
+
+
+def _scheduled_max_submissions() -> int | None:
+    """定时作业的单轮提交上限（**运行时参数**，0 = 不限 → None）。
+
+    读不到参数（未初始化 / 规格缺失）时回退到兜底默认值
+    :data:`MAX_SUBMISSIONS_PER_RUN`。
+    """
+    try:
+        from app.services.runtime_params import get_runtime_params
+
+        value = get_runtime_params().get_int(MAX_SUBMISSIONS_PARAM)
+    except Exception:
+        return MAX_SUBMISSIONS_PER_RUN
+    return value if value > 0 else None
 
 
 async def run_group(

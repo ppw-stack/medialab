@@ -1129,6 +1129,49 @@ async def test_runtime_params_exposes_enum_options(
     assert specs["monitor_pre_pause_minutes"]["options"] is None
 
 
+async def test_runtime_params_aggregate_max_submissions_roundtrip(
+    client: httpx.AsyncClient,
+) -> None:
+    """aggregate_max_submissions：归属正确 → 可改 → 持久化 → 越界被拒。
+
+    0 = 不限（与仓库「0 = 不限」的惯例一致）。
+    """
+    resp = await client.get("/api/v1/scheduler/runtime-params")
+    assert resp.status_code == 200
+    specs = {s["key"]: s for s in resp.json()["specs"]}
+    spec = specs["aggregate_max_submissions"]
+    assert spec["default"] == 20
+    assert spec["min"] == 0 and spec["max"] == 200
+    assert spec["options"] is None
+    assert spec["note"] and "0 = 不限" in spec["note"]
+    # 归属 aggregate_sync 由 unit 测试断言（spec.job）——这里不查
+    # /scheduler/{job}/config：测试环境没跑 register_jobs，作业没注册 → 404
+
+    # 改成 0（不限）→ 往返一致
+    resp = await client.put(
+        "/api/v1/scheduler/runtime-params",
+        json={"aggregate_max_submissions": 0},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["params"]["aggregate_max_submissions"] == 0
+    resp = await client.get("/api/v1/scheduler/runtime-params")
+    assert resp.json()["params"]["aggregate_max_submissions"] == 0
+
+    # 越界被拒（> max）
+    resp = await client.put(
+        "/api/v1/scheduler/runtime-params",
+        json={"aggregate_max_submissions": 9999},
+    )
+    assert resp.status_code == 400
+
+    # 还原默认，避免影响后续用例
+    resp = await client.put(
+        "/api/v1/scheduler/runtime-params",
+        json={"aggregate_max_submissions": 20},
+    )
+    assert resp.status_code == 200
+
+
 async def test_runtime_params_monitor_delete_expired_roundtrip(
     client: httpx.AsyncClient,
 ) -> None:

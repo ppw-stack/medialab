@@ -105,6 +105,16 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         note="档位（未封顶/无信号/已封顶）始终是主排序，本项只决定同档内怎么排",
     ),
     ParamSpec(
+        key="aggregate_max_submissions",
+        label="单轮提交上限（个）",
+        default=20,
+        min=0,
+        max=200,
+        job="aggregate_sync",
+        note="无人值守的运行时保护：0 = 不限（只有服务端云添加额度墙会停）；"
+        "手动触发始终不限",
+    ),
+    ParamSpec(
         key="disk_rotation_threshold_pct",
         label="磁盘使用率阈值(%)",
         default=90,
