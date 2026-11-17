@@ -3,8 +3,13 @@
 依赖矩阵必须是**单向链**：
 
 ```
-domain → core → db → adapters → services → api
+domain → core → db → adapters → services → webdav → api
 ```
+
+``webdav`` 是协议适配层（ASGI 守卫 + wsgidav 挂载），位于 services 与
+api 之间：它可以依赖 services / db / core，但 services 不得反向依赖它。
+DAV 根配置的实现因此放在 ``app/services/dav_root.py``，
+``app/webdav/paths.py`` 只做兼容转发。
 
 任何逆向依赖都是架构腐化——比如之前 ``app/core/windows.py`` 从
 ``app.db.models`` 导入领域枚举（core 不该依赖 db），导致 core 层
@@ -32,19 +37,28 @@ LAYER_ORDER: dict[str, int] = {
     "db": 2,
     "adapters": 3,
     "services": 4,
-    "api": 5,
+    "webdav": 5,
+    "api": 6,
 }
 
 
 def _is_allowed(src: str, dst: str) -> bool:
     """src 层能否依赖 dst 层。
 
-    层号越小越靠底层（domain=0 最底，api=5 最上）。
+    层号越小越靠底层（domain=0 最底，api=6 最上）。
     依赖「同层或更底层」是正常的（services → core、services → db）；
-    依赖「更上层」才是逆向（core → db、adapters → services）。
+    依赖「更上层」才是逆向（core → db、services → webdav）。
+
+    ``app`` 是应用装配根（``app/main.py`` / ``app/__init__.py``），
+    负责把所有层接起来，故允许依赖任意层。
+
+    **未登记的层不再放行**——新增 ``app/<pkg>`` 必须显式加入
+    :data:`LAYER_ORDER`，否则这里会拒绝，避免新包绕过分层约束。
     """
-    if src not in LAYER_ORDER or dst not in LAYER_ORDER:
+    if src == "app":
         return True
+    if src not in LAYER_ORDER or dst not in LAYER_ORDER:
+        return False
     return LAYER_ORDER[dst] <= LAYER_ORDER[src]
 
 
@@ -202,10 +216,43 @@ def test_services_do_not_raise_http_exception() -> None:
 
 def test_layer_order_is_sane() -> None:
     """层级顺序本身要合理（防止有人改坏了这张表）。"""
-    assert list(LAYER_ORDER) == ["domain", "core", "db", "adapters", "services", "api"]
+    assert list(LAYER_ORDER) == [
+        "domain", "core", "db", "adapters", "services", "webdav", "api"
+    ]
     assert LAYER_ORDER["domain"] < LAYER_ORDER["core"] < LAYER_ORDER["db"]
     assert LAYER_ORDER["db"] < LAYER_ORDER["adapters"] < LAYER_ORDER["services"]
-    assert LAYER_ORDER["services"] < LAYER_ORDER["api"]
+    assert LAYER_ORDER["services"] < LAYER_ORDER["webdav"] < LAYER_ORDER["api"]
+
+
+def test_all_app_packages_are_registered() -> None:
+    """新增 app 子包必须登记层级，否则会绕过逆向依赖检查。"""
+    packages = {
+        p.relative_to("app").parts[0]
+        for p in Path("app").iterdir()
+        if p.is_dir() and (p / "__init__.py").exists()
+    }
+    unregistered = packages - set(LAYER_ORDER)
+    assert not unregistered, f"未登记到 LAYER_ORDER 的 app 子包：{sorted(unregistered)}"
+
+
+def test_services_do_not_depend_on_webdav() -> None:
+    """services 不得反向依赖 webdav——DAV 根实现放在 services 层。"""
+    offenders = [
+        path
+        for src, dst, path in _collect_layer_edges()
+        if src == "services" and dst == "webdav"
+    ]
+    assert not offenders, f"services 反向依赖 webdav：{offenders}"
+
+
+def test_webdav_does_not_use_session_scope() -> None:
+    """webdav 是协议层，DB 访问一律走 services。"""
+    offenders = [
+        str(path)
+        for path in sorted(Path("app/webdav").rglob("*.py"))
+        if "session_scope" in path.read_text(encoding="utf-8")
+    ]
+    assert not offenders, f"webdav 不该直接用 session_scope：{offenders}"
 
 
 def test_all_layers_have_files() -> None:

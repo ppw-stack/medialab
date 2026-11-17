@@ -75,9 +75,16 @@ def settings(tmp_path_factory: pytest.TempPathFactory) -> AppSettings:
 
 @pytest.fixture
 def app_settings(settings: AppSettings) -> Iterator[AppSettings]:
-    """把测试 settings 注入为全局 override，用例结束后撤销。"""
-    set_settings(settings)
-    yield settings
+    """把测试 settings 注入为全局 override，用例结束后撤销。
+
+    **注入深拷贝而不是 session 级原对象**：多个用例就地改过
+    ``dav_rate_limit_per_min`` / ``dav_enabled`` / ``web_password`` 等字段，
+    改在共享对象上会泄漏到后续用例 → 随机 403/429 的顺序依赖。
+    每个用例拿到自己的副本，改动随用例结束消失。
+    """
+    isolated = settings.model_copy(deep=True)
+    set_settings(isolated)
+    yield isolated
     set_settings(None)
 
 

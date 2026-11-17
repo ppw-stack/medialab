@@ -19,13 +19,27 @@
 ## 工作准则
 - **分层约束是硬性的**（`tests/unit/test_layering.py` 固化）：
   ```
-  domain → core → db → adapters → services → api
+  domain → core → db → adapters → services → webdav → api
   ```
   - `api` 层**不碰 DB、不碰适配层**——业务逻辑全在 service 层
+  - `webdav` 是协议适配层（ASGI 守卫 + wsgidav 挂载）：可依赖 services / db / core，
+    但 services 不得反向依赖它。DAV 根配置的实现在 `app/services/dav_root.py`，
+    `app/webdav/paths.py` 只做兼容转发
+  - 新增 `app/<pkg>` 必须显式登记到 `LAYER_ORDER`——未登记的层现在会被直接拒绝
+    （不再静默放行）
   - `services` 层**不 import fastapi**，抛 `ServiceError` 由 API 层翻译成 HTTP 状态码
   - `adapters` 层可独立单测（不依赖 db / services）
   - `domain` 层是业务概念与常量（如 `DeviceType` / `FreeType`），不依赖任何层
   - 改完跑 `uv run pytest tests/unit/test_layering.py` 验证
+- **应用只能单实例运行**（2026-11-17 加固）：`app/services/instance_lease.py`
+  在 lifespan 里抢 DB 租约（TTL 60s + 心跳），第二个 worker / 副本直接启动失败。
+  调度中心、四套 `*_jobs` 内存表、`watch_manager` 的 10 组全局字典、QR session
+  都是进程内状态，**没有跨进程方案**——不要改 Dockerfile 的 `--workers 1`，
+  也不要用多副本共享同一个 DB 卷。测试环境（`env="test"`）跳过租约。
+- **启动降级必须登记**：以前「只记日志继续启动」的失败路径（监听器加载 /
+  单任务启动、驱动测连、密码升级、探活目录读取）现在要写
+  `app/services/startup_status.py` 的台账，`/readyz` 会把它显示在
+  `degradations` 里并把 `status` 标成 `degraded`（HTTP 仍 200，不触发容器重启）。
 - **时间口径已统一为北京时间字符串**（2026-10-30 修订，原「两个域的时间列口径不同，勿顺手统一」段废止）：
   - 两域所有「DB 记录时刻」类列（`created_at` / `updated_at` / `last_*_at` / `probed_at` / `mtime` 等）一律 `String(32)` 北京时间字符串
   - **协议侧时刻**保留 unix 秒（`Integer`）——它们与 `time.time()` 直接比较，语义是「绝对时刻/时间差」而非「DB 记录时刻」：
@@ -155,8 +169,7 @@
     行高从 49px 撑到 69px，看起来像半个词被撕开
   - **约束 td 本身而非 span**：span 是 inline 元素，父级可用宽不足时照样溢出
   - 「错误」列靠 `ellipsis` 单行截断（tooltip 看全文）
-  - 契约由 `web/tests/scheduler-config.spec.ts` 固化（表头不截断 / 单元格不换行 /
-    行高 ≤ 55px）
+  - 表头不截断 / 单元格不换行 / 行高 ≤ 55px（原 e2e 契约已随 e2e 移除，靠人工核对）
 - **作业执行日志**（2026-11-03 加入，`app/core/job_log.py`）：
   - `job_runs.result_json.logs` = 作业执行期间的 Python 日志（结构化 `{ts, level, logger, message}`），**不加列**（免 DB 迁移）
   - 与逐项明细**互补**：明细回答「**是哪些**」，日志回答「**什么时候 / 多慢**」
@@ -207,7 +220,7 @@
   - API 写入路径：DB 先 → 内存后（commit 失败时内存未变，作业不会拿到一个重启后就消失的值）
   - API 路由 `app/api/routes/env_settings.py`：`GET/PUT /api/v1/env-settings`
   - 前端「设置 → 环境变量」tab（`web/src/pages/settings/EnvTab.vue`）——直接表单（不弹框），字段少 + 改后立即生效，弹框徒增一次点击
-  - 契约由 `tests/unit/test_env_settings.py` + `tests/integration/test_api.py` + `tests/integration/test_db_models.py` + `web/tests/env-settings.spec.ts` 固化
+  - 契约由 `tests/unit/test_env_settings.py` + `tests/integration/test_api.py` + `tests/integration/test_db_models.py` 固化
 - **FR-3.6 AI 读码**（2026-10-22 加入，`app/core/ai.py`）：
   - 用于 hdsky 的 6 位图形验证码。**必须先放大 6 倍**再送模型：站点原图仅 150×40，同一模型直接读 0/8、放大后 8/8
   - 放大是**无损**的（只 resize，不二值化 / 不裁剪 / 不去噪）——按面积阈值去噪会删掉细笔画（实测 0/5）
@@ -229,7 +242,7 @@
   - **辅种页是两层 Tab**（2026-10-26）：外层 = **下载器**（数据维度），内层 = **内容分区**（概览 / 分组 / 异常 / 孤儿，功能维度）
     - 为什么是两层而不是二级菜单：用户的真实心智是「我要看 tr-172 这个下载器怎么样」——那是数据维度，不该被功能维度打散。若按功能拆成独立页面，每个页面都得重放一遍下载器 Tab
     - 为什么内层要拆：原本 4 块内容纵向堆叠，实测 **3727 px / 4.1 屏**，其中 2 屏是 2237 行的分组表。拆分后概览 **921 px（1 屏）**，分组 3069 px / 异常 1950 px / 孤儿 720 px ——各块互不干扰（异常与孤儿各有独立空间，不会互相误点删除按钮）
-    - 内层 Tab 在**每个**下载器 pane 里各渲染一份（Ant Design 隐藏 inactive pane）——e2e 定位必须用 `:visible` 过滤，否则会点到隐藏那份
+    - 内层 Tab 在**每个**下载器 pane 里各渲染一份（Ant Design 隐藏 inactive pane）——注意定位时过滤 `:visible`，否则会点到隐藏那份
     - 异常 / 孤儿明细不再用折叠面板（独立 Tab 本身就是展开态）
   - **抓取失败保留上一次的快照**（不写 0 兜底）+ 计入 failed **并点名**——写 0 等于把故障伪装成"没有种子"
   - **异常种子批量暂停**：按 100 个一批调 `set_pause([...])`（不是逐个发——477 个异常 = 477 次 API 往返）；**已暂停的跳过**（上一轮已暂停过，不重复发指令）
@@ -261,14 +274,14 @@
   - hash 必须是 40 位 hex（拒绝 `all` / 通配）——复用既有 `validate_hashes`
   - 删磁盘数据走既有审计路径（`delete_data=True` → 记 warning 日志，含 hash 列表）
   - 前端：异常明细表格加勾选 + 「全选（N）」快捷键 + 「删除选中（N）」，确认弹框与「任务」页一致（仅删任务 / 删任务+磁盘数据）
-  - 契约由 `tests/integration/test_services.py` + `tests/integration/test_api.py` + `web/tests/cross-seed.spec.ts` 固化
+  - 契约由 `tests/integration/test_services.py` + `tests/integration/test_api.py` 固化
 - **统计卡片的分组删除**（2026-10-24 加入）：
   - 统计表一行 = 一个 (name, size) 分组，可能代表**多个**种子（`count=13` 就是 13 个）——删该行 = 删该组**全部**种子
   - **数据前提**：快照的每组必须存**完整 40 位** hash 列表（`StatsRow.hashes`）。`sample_hash` 是 **12 位截断**的，只作展示用——**不能**用于删除（适配器会拒绝非 40 位 hash）
   - 旧快照行没有 `hashes` → 前端删除按钮**置灰** + tooltip「需重新抓取」（不静默失败）
   - 快照体积：辅种站 2257 组 / 4600+ 种子 → stats 从 356KB 涨到约 590KB（SQLite 无压力）
   - 弹框必须写清「将删除 N 个种子（同名同大小）」+ 警告「这些是**正常做种**的种子」+ 提示「仅删任务会留下不再做种的孤儿数据」
-  - 契约由 `tests/integration/test_cross_seed_job.py` + `test_api.py` + `web/tests/cross-seed.spec.ts` 固化
+  - 契约由 `tests/integration/test_cross_seed_job.py` + `test_api.py` 固化
 - **辅种孤儿文件统计**（2026-10-24 加入，`app/services/orphan_scanner.py`）：
   - 孤儿 = **磁盘有、任务没了**（典型来源：用「仅删任务」清理种子时磁盘文件留下，不再做种却一直占空间）
   - **必须挂载磁盘**：下载器**没有**浏览文件系统的接口（TR 的 RPC spec 不提供 filesystem 浏览，qB 也没有列目录 API）→ 只能把辅种站的下载目录**挂载**进容器，扫盘 + 顶层名匹配（权限 **rw**——删除孤儿文件需要写权限）
@@ -315,7 +328,7 @@
   - **删除存储源必须清缓存**：SQLite 的 `id` 无 AUTOINCREMENT → **删掉最大的 id 后会被复用**。不清缓存 → 新建的存储源继承上一个的测连状态（账号 id / 容量 / 「直链正常」）
   - **启动测连任务在停机时必须取消**（`app/main.py` 的 `lifespan` finally，**在 `dispose_db()` 之前**）——否则任务跑到落库那一步时 session factory 已置 None，而 `except Exception` 会把异常吞掉 → 表现为「探测历史偶尔少一条」的静默故障
   - `probe_results` 表有 **30 天保留期**，清理挂在 `drain_task_queue`（与 `job_runs` 同款语义，勿单开作业）
-  - 契约由 `tests/integration/test_driver_probe_cache.py`（17 例）+ `web/tests/drivers-probe.spec.ts` 固化
+  - 契约由 `tests/integration/test_driver_probe_cache.py`（17 例）固化
 
 - **媒体库目录用目录浏览器选，不手填 id**（2026-11-11 加入，`app/services/driver_service.py:browse_driver_dirs`）：
   - **起因**：光鸭的 fileId 是 19 位数字（115 的 cid 同理），让用户照着网盘网页手抄——抄错一位扫描就扫不到东西，且无从核对。生产上就出现过「光鸭盘扫描按钮点不动」——**按钮禁用条件是 `!media_cid || !output_dir`，与驱动类型无关**，用户只看到一个灰按钮，不知道缺什么
@@ -327,7 +340,7 @@
   - **`media_cid` 的叫法也是单一真源**：`app/domain/driver_types.py:MEDIA_CID_LABELS`（115 叫 cid、光鸭叫 fileId）+ `DriverOut.media_cid_label` 随接口下发——**前端不写 `if type === "guangya"`**，后端报错文案也用它
   - **前端复用现成的 `DirBrowser`**（`web/src/components/DirBrowser.vue`，面包屑 + 逐层懒加载，状态由父组件持有）——与「数据同步 / 迁移 / 离线下载」三处同一交互模式，**项目不用 `a-tree`**
   - **语义：进入子目录即选中它**（正在看哪个目录 = 要用哪个目录），面包屑回退即改选；回到根 = 取消选择
-  - 契约由 `tests/unit/test_driver_types.py` + `tests/integration/test_driver_browse.py`（11 例）+ `web/tests/drivers-media-pick.spec.ts` 固化
+  - 契约由 `tests/unit/test_driver_types.py` + `tests/integration/test_driver_browse.py`（11 例）固化
 
 - **媒体后缀默认清单收敛到 domain 层单一真源**（2026-11-11 加入，`app/domain/media_exts.py`）：
   - **起因**：「媒体图片后缀 / 媒体数据后缀」此前默认**空串**（placeholder 是唯一提示）——用户不知道该填什么，附件（海报 / nfo / 字幕）静默不同步。用户要求补默认值
@@ -336,7 +349,7 @@
   - ⚠️ **不在 `DriverOut` 层兜底**（`or 默认`）——清空保存的行（`image_exts=""` = 关闭附件同步，合法配置）会被改写回默认，用户清空后重开抽屉会以为没存上。预填只发生在**打开抽屉**这一刻，保存后以 DB 为准
   - ⚠️ **bootstrap 的老库加列默认仍用 `''`**（`bootstrap.py:("image_exts","TEXT","''")`）——改它等于对全部存量库静默变更数据；存量行由用户下一次保存配置时自然获得默认值（必然重配 `media_cid`，一定会走一次保存）
   - **「当前忽略」的注释是过时的**：图片 / 数据后缀**实际生效**——扫描时**附件同步**（`attachment_*`，下载到本地与 strm 同目录），`models.py` / `types.ts` 注释已修正
-  - 契约由 `tests/unit/test_media_exts.py`（格式规范 + `parse_ext_list` 往返 + 单一真源断言）+ `test_db_models.py` 列默认值 + `drivers-media-pick.spec.ts`（预填 + 随保存落库）固化
+  - 契约由 `tests/unit/test_media_exts.py`（格式规范 + `parse_ext_list` 往返 + 单一真源断言）+ `test_db_models.py` 列默认值固化；抽屉打开预填 + 随保存落库靠人工核对
 
 - **strm 文件名去掉视频扩展名**（2026-11-14 加入，`app/services/naming.py:strm_filename`）：
   - `x.mkv` → `x.strm`——**目录与标题沿用网盘原样**，只多这一个扩展名
@@ -518,8 +531,7 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
     `collapsedWidth: 0`：那只是把宽度收成 0，侧栏自身 `overflow: visible`，
     菜单内容仍会溢出到页面左上角（Ant 为此配的 `zeroWidthTrigger` 黑色
     浮标又会和 header 汉堡重复）。导航走 `<a-drawer>`
-  - 契约由 `web/tests/responsive.spec.ts` 固化（13 页 × 无横向溢出 /
-    侧栏隐藏 + 抽屉可开 / 桌面端不溢出 / 每页都有统一标题）
+  - 13 页 × 无横向溢出 / 侧栏隐藏 + 抽屉可开 / 桌面端不溢出 / 每页都有统一标题（原 e2e 契约已随 e2e 移除，靠人工核对）
 
 - **整理 + 刮削（2026-11-11 迁移自 MoviePilot）**：
   - **输入是「源目录」不是「下载器任务」**——整理与下载器**彻底解耦**：
@@ -720,8 +732,7 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
     - ⚠️ **禁用条件与 tooltip 文案必须分成两个函数**（2026-11-16 踩过）：
       曾把 tooltip 文案（非空串）直接当禁用条件 `:disabled="!!tip(group)"`，
       而**配置齐全时文案也是非空的** → 按钮**永远点不动**。现为
-      `enqueueDisabled()` / `enqueueTip()` 分离。契约（e2e）：
-      `aggregate.spec.ts` 的「配置齐全时可点」+「缺映射时禁用」
+      `enqueueDisabled()` / `enqueueTip()` 分离（配置齐全时可点 / 缺映射时禁用，原 e2e 契约已随 e2e 移除）
   - **小文件走「分享转存」通道**（2026-11-16 加入，实测可行）：
     - **为什么**：附件（nfo/jpg/png）占**文件数的 76%** 却只占 ~0% 体积，
       每个都要花一次**云添加额度** → 纯浪费。转存是**服务端内部复制**，
@@ -786,6 +797,23 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
     「选具体盘」+ planner 自动溢出）——阶段 1、2 落地后结合实际使用再定
   - 契约由 `tests/unit/test_aggregate.py` + `tests/integration/test_aggregate.py`
     + `tests/integration/test_aggregate_sync.py` 固化
+- **启动期密钥闸门（2026-11-17，P0）**：`WEB_TOKEN` 与 `SIGNING_SECRET` 都是
+  必填，lifespan 缺任一即 `RuntimeError` 拒绝启动；配置层拒绝 `change-me*`
+  占位符，prod 还要求二者 ≥32 字符。`/metrics` 不再公开，抓取端要带
+  `Authorization: Bearer <WEB_TOKEN>`（或反代内网放行）。
+  - 库健康检查：`SIGNING_SECRET` 为空时报告 `configuration_error`，**跳过**
+    签名校验而不是把全库判成「签名无效」——绝不能据此诱导批量重签。
+  - 健康检查的磁盘扫描（CIFS 网络挂载）必须先关 DB 事务、再走线程池，
+    不允许在 async 请求路径里同步 `rglob` / `stat`。
+- **启动期 DDL 与删表的硬规则（2026-11-17，P0）**：
+  - `_run_alter` / `_EXTRA_INDEXES` 的真失败（非「列已存在」）一律抛错阻断
+    启动，不再只记 error 让服务带半迁移状态对外提供。
+  - 废弃表（`scan_rules` / `dav_acl` / `quota_ledger`）删除走
+    `app/db/migrations.py:drop_obsolete_tables_once`，由 `user_version >= 3`
+    守卫；删前在同事务备份为 `medialab_bak_v3_<表名>`。旧库 `user_version`
+    可能是 2（合并前 seedhelper），所以版本号选 3 而不是 2。
+  - 任何新的一次性、不天然幂等的迁移都必须用 `user_version` 维护版本号，
+    且版本号只增不减；不要在「每次启动都跑」的路径上做不可逆操作。
 
 
 ## 后端测试
@@ -793,7 +821,7 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
 uv run pytest                        # 全部
 uv run pytest tests/unit             # 只跑单元
 uv run pytest -k "site_adapters"     # 按名字过滤
-uv run pytest --cov=app              # 带覆盖率（当前基线 58%）
+uv run pytest --cov=app              # 带覆盖率（门槛 65，阻断；实测约 69%）
 ```
 
 - 目录：`tests/unit/`（纯函数、无 IO）+ `tests/integration/`（DB / 作业 / API）
@@ -808,12 +836,12 @@ uv run pytest --cov=app              # 带覆盖率（当前基线 58%）
 ## 提交信息格式
 Conventional Commits，作用域示例：`feat(crypto)` / `fix(free-seed)` / `docs(req)` / `refactor(sites)` / `feat(sites)` (FR-1.6 站点 userdata) / `feat(db)` (SiteUserData 表) / `feat(api)` (user_data 端点) / `feat(web)` (UserData.vue) / `feat(scheduler)` (调度作业/配置/历史) / `feat(cross-seed)` (辅种下载器巡查 + 快照落库) / `feat(checkin)` (FR-3.6 站点每日签到) / `feat(bonus)` (站点时魔抓取)。
 
-## 前端测试
+## 前端检查
 ```bash
-cd web && npx playwright test    # 需先起 dev 容器 (localhost:8080)
+cd web && npm run build                          # vue-tsc 类型检查 + vite 构建
+cd web && npm run lint                           # oxlint
+cd web && node scripts/check-types-placement.mjs # 类型放置约束
+cd web && node scripts/check-css-classes.mjs      # CSS class 定义检查
 ```
-新增页面/交互改动必须补 `web/tests/*.spec.ts` 用例。
-
-**注意**：Playwright e2e 连的是**真实下载器与真实站点**，CI 上跑不了也不跑
-（CI 跑 vue-tsc + oxlint + types-placement；不含 Playwright）。e2e 需在本机起 dev 容器后跑。
+项目**不保留 e2e 测试**（原 Playwright e2e 连真实下载器与真实站点，CI 上无法运行，已整体移除）。前端正确性靠上述静态检查 + 构建 + 人工核对。
 

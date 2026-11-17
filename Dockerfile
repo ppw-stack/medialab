@@ -1,8 +1,9 @@
 # 多阶段构建：前端 → Python 依赖 → 运行时
 #
 # 网络受限时用本地镜像覆盖：
-#   docker build --build-arg PY_IMAGE=python:3.13-bookworm
-ARG PY_IMAGE=python:3.13-slim
+#   docker build --build-arg PY_IMAGE=python:3.12-bookworm
+# 默认与 pyproject.toml / .python-version / uv.lock / CI 一致（3.12）。
+ARG PY_IMAGE=python:3.12-slim
 ARG NODE_IMAGE=node:22-slim
 
 # ---- Frontend builder ----
@@ -27,7 +28,9 @@ ENV PIP_NO_CACHE_DIR=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/opt/venv
 
-RUN pip install --no-cache-dir uv
+# 固定 uv 版本：与 CI 的 setup-uv 保持一致；uv 升级可能改变 lock 解释方式。
+ARG UV_VERSION=0.13.9
+RUN pip install --no-cache-dir uv==${UV_VERSION}
 
 WORKDIR /build
 
@@ -35,9 +38,11 @@ WORKDIR /build
 # --extra p115：115 驱动依赖（p115client / qrcode 等）。
 # --extra guangya：光鸭盘驱动依赖（guangyaclient）。
 # **两个都必须装**——否则镜像里没有对应驱动，扫码登录用不了。
-COPY pyproject.toml uv.lock* ./
+# uv.lock 必须存在（不加 glob）：缺 lock 时 --frozen 会显式失败，而不是
+# 静默重新解析依赖，导致本地构建与 CI 用的版本不一致。
+COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-dev --extra p115 --extra guangya --no-install-project --no-editable
+    uv sync --frozen --no-dev --extra p115 --extra guangya --no-install-project --no-editable
 
 # 拷贝 README + app，build（hatchling 需要 readme）
 COPY README.md ./
@@ -45,11 +50,11 @@ COPY app ./app
 # --reinstall：强制重装 app，绕开 uv 缓存的旧 wheel
 # （uv sync 只哈希 pyproject.toml/uv.lock，不感知 app/ 源码变化）
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-dev --extra p115 --extra guangya --no-editable --reinstall \
+    uv sync --frozen --no-dev --extra p115 --extra guangya --no-editable --reinstall \
     && /opt/venv/bin/python -c "import app, app.main; print('import ok:', app.__version__)" \
     && /opt/venv/bin/python -c "from p115client import P115Client, tool; print('p115client ok')" \
     && /opt/venv/bin/python -c "from guangyaclient import GuangyaClient; print('guangyaclient ok')" \
-    && uv pip install --no-cache --python /opt/venv/bin/python py-spy \
+    && uv pip install --no-cache --python /opt/venv/bin/python py-spy==0.4.3 \
     && /opt/venv/bin/py-spy --version
 
 # ---- Runtime ----

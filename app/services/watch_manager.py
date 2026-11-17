@@ -289,8 +289,11 @@ async def start_all() -> None:
                 )
                 for row in rows
             ]
-    except Exception:
+    except Exception as exc:
         logger.exception("加载上传任务失败")
+        from app.services.startup_status import record
+
+        record("watch_manager_load", exc)
         return
 
     for params in tasks:
@@ -308,6 +311,9 @@ async def start_all() -> None:
             )
         except Exception as exc:
             logger.exception("启动上传任务失败：%s（%s）", params.name, exc)
+            from app.services.startup_status import record
+
+            record(f"watch_manager_start:{params.name}", exc)
 
 
 async def stop_all() -> None:

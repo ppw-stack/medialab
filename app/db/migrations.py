@@ -23,11 +23,11 @@ from __future__ import annotations
 
 from typing import cast
 
-from sqlalchemy import CursorResult
+from sqlalchemy import CursorResult, text
 
 from app.core.logging import get_logger
 from app.db.models import TorrentIndex
-from app.db.session import get_session_factory
+from app.db.session import get_engine, get_session_factory
 from app.domain.enums import FreeType
 from app.domain.upload_types import DEFAULT_UPLOAD_CONCURRENCY
 
@@ -35,9 +35,12 @@ logger = get_logger(__name__)
 
 __all__ = [
     "ADAPTER_VALUE_MIGRATIONS",
+    "OBSOLETE_TABLES",
     "backfill_discount_pct",
     "backfill_upload_concurrency",
+    "backup_and_drop_table",
     "delete_offline_env_settings",
+    "drop_obsolete_tables_once",
     "migrate_adapter_values",
 ]
 
@@ -46,8 +49,82 @@ __all__ = [
 #: SQLite 官方的 schema 版本槽——**不占任何业务表**（曾考虑写
 #: ``app_env_settings`` kv 表，被「校验失败时 env 表必须零行」的
 #: 既有契约挡住；user_version 就是为一次性迁移而生的，且随 DB 文件
-#: 持久、对应用完全透明）。迁移按版本号递增：下一个一次性迁移用 2。
+#: 持久、对应用完全透明）。迁移按版本号递增，只增不减（现已用到 3）。
 _CONCURRENCY_BACKFILL_VERSION = 1
+
+#: 「废弃表删除」完成后的 user_version。
+#:
+#: 用 **3** 而不是 2：合并前的辅种域旧库 ``user_version`` 已经是 2
+#: （见 ``scripts/migrate_legacy_db.py``），若用 2 会把那批库判成「已迁移」
+#: 而永远不删废弃表。版本号只增不减。
+_OBSOLETE_TABLES_DROP_VERSION = 3
+
+#: 启动删表的完整白名单——表名只能来自这里，绝不拼外部输入。
+OBSOLETE_TABLES: tuple[str, ...] = ("scan_rules", "dav_acl", "quota_ledger")
+#: 允许被备份后重建的表（旧结构的 organize_history，判重模型改过）
+_BACKUP_DROP_WHITELIST: frozenset[str] = frozenset((*OBSOLETE_TABLES, "organize_history"))
+_BACKUP_PREFIX = "medialab_bak_v3"
+
+
+async def backup_and_drop_table(conn: object, name: str) -> bool:
+    """在**同一事务**里先备份再删除一张废弃表；返回是否真的删了。
+
+    删表不可逆，故：
+    - ``name`` 必须在白名单里（防注入 / 防误删现役表）
+    - 备份表名固定（``medialab_bak_v3_<name>``），已存在则不覆盖
+    - 备份失败 → 抛异常 → 事务回滚 → 表不会被删
+
+    ``conn`` 是 SQLAlchemy AsyncConnection（用 ``object`` 标注以避开
+    mypy 对 engine.begin() 返回类型的严格检查）。
+    """
+    if name not in _BACKUP_DROP_WHITELIST:
+        raise ValueError(f"拒绝删除未登记的废弃表：{name}")
+
+    async def _exists(table: str) -> bool:
+        row = (
+            await conn.execute(  # type: ignore[attr-defined]
+                text(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND name=:name"
+                ),
+                {"name": table},
+            )
+        ).first()
+        return row is not None
+
+    if not await _exists(name):
+        return False
+    backup_name = f"{_BACKUP_PREFIX}_{name}"
+    if not await _exists(backup_name):
+        await conn.execute(  # type: ignore[attr-defined]
+            text(f"CREATE TABLE {backup_name} AS SELECT * FROM {name}")
+        )
+        logger.info("已备份废弃表 %s → %s", name, backup_name)
+    await conn.execute(text(f"DROP TABLE {name}"))  # type: ignore[attr-defined]
+    logger.info("已删除废弃表 %s", name)
+    return True
+
+
+async def drop_obsolete_tables_once() -> None:
+    """一次性删除废弃表（``PRAGMA user_version`` 版本门槛 + 先备份）。
+
+    旧实现在**每次启动**都执行 ``DROP TABLE``：一旦表名被新功能复用，
+    或从备份恢复出同名业务数据，启动即永久删除。现在只在
+    ``user_version < 3`` 时执行一次，之后即使有人重建了同名表也不碰。
+    """
+    engine = get_engine()
+    async with engine.begin() as conn:
+        version = (await conn.execute(text("PRAGMA user_version"))).scalar()
+        if version is not None and int(version) >= _OBSOLETE_TABLES_DROP_VERSION:
+            return
+        for name in OBSOLETE_TABLES:
+            await backup_and_drop_table(conn, name)
+        await conn.execute(
+            text(f"PRAGMA user_version = {_OBSOLETE_TABLES_DROP_VERSION}")
+        )
+        logger.info(
+            "一次性删表迁移完成：user_version=%d", _OBSOLETE_TABLES_DROP_VERSION
+        )
 
 
 # ---------------------------------------------------------------- 值迁移

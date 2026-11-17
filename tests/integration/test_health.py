@@ -136,6 +136,24 @@ class TestHealthCheck:
 
         assert len(report.stale) == 1
 
+    async def test_missing_secret_reports_config_error_not_invalid_signature(
+        self, db_session, settings_copy, driver_row, fake_driver, tmp_path
+    ):
+        """空密钥 ≠ 全库签名失效——不能诱导运维批量重签。"""
+        fake_driver.add_file("pc1", "movie.mkv", path="/media/movie.mkv")
+        driver = await _driver(db_session, tmp_path)
+        await scan_driver(db_session, settings_copy, driver)
+
+        settings_copy.signing_secret = None
+        report = await check_library(db_session, settings_copy)
+
+        assert report.configuration_error
+        assert "SIGNING_SECRET" in report.configuration_error
+        assert report.invalid_signature == []
+        assert report.stale == []
+        assert not report.healthy
+        assert "configuration_error" in report.to_dict()
+
     async def test_rotation_fixes_stale(
         self, db_session, settings_copy, driver_row, fake_driver, tmp_path
     ):
@@ -154,6 +172,34 @@ class TestHealthCheck:
 
         report = await check_library(db_session, settings_copy)
         assert report.healthy
+
+
+async def test_library_report_scans_in_worker_thread(db, app_settings, monkeypatch):
+    """磁盘扫描必须离开事件循环（CIFS 上同步 rglob 会冻结整个服务）。"""
+    import asyncio
+    import threading
+
+    from app.services import health as health_mod
+
+    main_thread = threading.current_thread()
+    seen: list[threading.Thread] = []
+    real_to_thread = asyncio.to_thread
+
+    async def spy(func, /, *args, **kwargs):
+        # 记录「函数真正执行的线程」，不是调用 to_thread 的主线程
+        def in_worker():
+            seen.append(threading.current_thread())
+            return func(*args, **kwargs)
+
+        return await real_to_thread(in_worker)
+
+    monkeypatch.setattr(health_mod, "_to_thread", spy)
+
+    report = await health_mod.library_health_report()
+
+    assert len(seen) == 1, "扫盘没有走线程池"
+    assert seen[0] is not main_thread
+    assert report.checked_at > 0
 
 
 def _select_media():

@@ -320,12 +320,12 @@ async def test_purge_all_cache(db_engine, settings: AppSettings):
     assert auth.stats()["cached_credentials"] == 0
 
 
-async def test_cache_expires(db_engine, settings: AppSettings):
+async def test_cache_expires(db_engine, app_settings: AppSettings):
     """缓存过期后重新校验。"""
     await _make_user("alice", "secret")
-    settings.dav_auth_cache_sec = 0.05
+    app_settings.dav_auth_cache_sec = 0.05
     auth = DavAuthenticator()
-    await auth.authenticate(settings, _basic("alice", "secret"), "1.2.3.4")
+    await auth.authenticate(app_settings, _basic("alice", "secret"), "1.2.3.4")
     await asyncio.sleep(0.1)
 
     assert auth.purge_expired() == 1
@@ -345,3 +345,77 @@ async def test_concurrent_auth_same_user(db_engine, settings: AppSettings):
         *[auth.authenticate(settings, _basic("alice", "secret"), "1.2.3.4") for _ in range(5)]
     )
     assert all(r.status == AUTH_OK for r in results)
+
+
+# --------------------------------------------------------------------------
+# 事务边界（PBKDF2 不得在事务内跑）
+# --------------------------------------------------------------------------
+
+
+async def test_pbkdf2_runs_outside_db_transaction(
+    db_engine, settings: AppSettings, monkeypatch
+):
+    """验密码时不得持有 DB 事务（旧实现全程持有 ~42ms 写锁）。"""
+    import contextlib
+
+    from app.services import dav_auth as mod
+
+    await _make_user("alice", "secret")
+    active = {"count": 0}
+    real_scope = mod.session_scope
+
+    @contextlib.asynccontextmanager
+    async def tracking_scope():
+        active["count"] += 1
+        try:
+            async with real_scope() as scope:
+                yield scope
+        finally:
+            active["count"] -= 1
+
+    seen_active: list[int] = []
+    real_verify = mod.verify_password
+
+    def tracking_verify(pwd: str, hashed: str) -> bool:
+        seen_active.append(active["count"])
+        return real_verify(pwd, hashed)
+
+    monkeypatch.setattr(mod, "session_scope", tracking_scope)
+    monkeypatch.setattr(mod, "verify_password", tracking_verify)
+
+    auth = DavAuthenticator()
+    result = await auth.authenticate(settings, _basic("alice", "secret"), "9.9.9.9")
+    assert result.status == AUTH_OK
+    assert seen_active == [0], "PBKDF2 必须在事务外执行"
+
+
+async def test_last_login_write_failure_still_authenticates(
+    db_engine, settings: AppSettings, monkeypatch
+):
+    """last_login_at 是统计字段——写失败不能把成功认证变成 401。"""
+    import contextlib
+
+    from app.services import dav_auth as mod
+
+    user_id = await _make_user("alice", "secret")
+    real_scope = mod.session_scope
+    calls: list[int] = []
+
+    @contextlib.asynccontextmanager
+    async def fail_second_scope():
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("模拟 last_login_at 写失败")
+        async with real_scope() as scope:
+            yield scope
+
+    monkeypatch.setattr(mod, "session_scope", fail_second_scope)
+
+    auth = DavAuthenticator()
+    result = await auth.authenticate(settings, _basic("alice", "secret"), "8.8.8.8")
+    assert result.status == AUTH_OK
+    assert len(calls) == 2  # 一次读 + 一次写
+
+    async with real_scope() as db:
+        row = await db.get(DavUser, user_id)
+        assert row is not None and row.last_login_at is None

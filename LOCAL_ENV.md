@@ -501,9 +501,6 @@ uv run mypy app/
 cd web && npx vue-tsc -b
 cd web && npx vite build
 
-# 前端测试（需先起 dev 容器 localhost:8092）
-cd web && npx playwright test
-
 # 部署（脚本只管 dev；prod 见下方「真实部署链路」）
 ./scripts/deploy.sh                 # dev：build + up + healthcheck（本机 8092）
 ./scripts/deploy.sh status          # 查状态
@@ -595,7 +592,7 @@ push main ──→ ci（ruff+mypy+pytest / vue-tsc+oxlint）──全绿──�
 
 - 触发：`push` 到 `main` 或 `v*` tag；`pull_request` 也触发
 - 闸门：backend（ruff + mypy + pytest）+ frontend（vue-tsc + types-placement + oxlint）
-- 刻意不含 Playwright e2e：连的是真实下载器与真实站点，CI 上跑不了
+- 不保留 Playwright e2e（依赖真实下载器与站点，已整体移除）
 - 不上传 coverage artifact（无 codecov 等消费者，纯堆积）
 
 `.github/workflows/docker-image.yml`（构建推送）

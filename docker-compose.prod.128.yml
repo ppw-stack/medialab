@@ -8,9 +8,9 @@
 #
 # **两个业务域合并在同一个容器里**（辅种域 + 媒体库域）。
 #
-# 用法（在服务器 /mnt/user/appdata/medialab 下）：
+# 用法（在服务器 /mnt/user/appdata/medialab/app 下，与 DEPLOY.md 一致）：
 #
-#     docker compose -f docker-compose.yml --env-file .env.prod up -d
+#     docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d
 #
 # ⚠️ TAG 默认 latest。若要用某个确定版本，显式传 TAG=sha-xxxxxxx。
 #    （CI 会同时推 latest / main / sha-<7位> 三个 tag）

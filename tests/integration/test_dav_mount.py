@@ -28,7 +28,7 @@ def _basic(user: str, pwd: str) -> dict[str, str]:
 
 
 @pytest.fixture
-async def mounted_app(settings: AppSettings, db_engine, tmp_path: Path, monkeypatch):
+async def mounted_app(app_settings: AppSettings, db_engine, tmp_path: Path, monkeypatch):
     """构造一个挂了 DAV 的完整应用（含 SPA 兜底）。"""
     from app.main import create_app
     from app.webdav import paths
@@ -52,7 +52,7 @@ async def mounted_app(settings: AppSettings, db_engine, tmp_path: Path, monkeypa
     # DAV 根指向测试库
     paths._root_cache.set(str(library))
 
-    settings.dav_enabled = True
+    app_settings.dav_enabled = True
     app = create_app()
 
     transport = ASGITransport(app=app)
@@ -114,11 +114,11 @@ async def test_spa_still_works(mounted_app):
     assert resp.status_code in (200, 404)
 
 
-async def test_dav_disabled_not_mounted(settings: AppSettings, db_engine):
+async def test_dav_disabled_not_mounted(app_settings: AppSettings, db_engine):
     """DAV 未启用时不挂载。"""
     from app.main import create_app
 
-    settings.dav_enabled = False
+    app_settings.dav_enabled = False
     app = create_app()
     routes = [getattr(r, "path", "") for r in app.routes]
     assert not any(r.startswith("/dav") for r in routes)

@@ -14,8 +14,12 @@ npm run dev
 npm run build
 ```
 
-## E2E
+## Check
 
 ```bash
-npm run build && npx playwright test
+npm run lint
+node scripts/check-types-placement.mjs
+node scripts/check-css-classes.mjs
 ```
+
+本项目不保留 e2e 测试（原 Playwright e2e 依赖真实下载器与站点，已移除）。

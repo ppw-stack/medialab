@@ -1277,6 +1277,8 @@ export interface HealthReport {
   missing_files: number[]
   orphan_files: string[]
   invalid_signature: number[]
+  // 配置缺失导致签名无法校验（不是「签名失效」，别据此批量重签）
+  configuration_error: string | null
 }
 
 // ---- 作业 ----

@@ -13,7 +13,7 @@
  *   ② `web/src/styles/global.css` 里
  * 有对应定义。否则视为「样式丢失」。
  *
- * 独立 node 脚本（不依赖 Playwright / 容器）——CI 里能直接跑。
+ * 独立 node 脚本（不依赖浏览器 / 容器）——CI 里能直接跑。
  *
  * 用法：node web/scripts/check-css-classes.mjs
  */

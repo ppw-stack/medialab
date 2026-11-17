@@ -12,8 +12,18 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+#: 模板里自带的占位密钥——`cp .env.example .env` 后不改就能启动，等于
+#: 把管理面板 / 媒体中转开放给所有人。按前缀与精确值双重拒绝。
+_PLACEHOLDER_SECRET_PREFIXES: tuple[str, ...] = ("change-me", "changeme", "change_me")
+_PLACEHOLDER_SECRETS: frozenset[str] = frozenset(
+    {"your-token-here", "replace-me", "todo", "secret", "password"}
+)
+
+#: 生产环境密钥最小长度（`openssl rand -hex 32` 生成 64 字符）
+_PROD_SECRET_MIN_LEN = 32
 
 
 class AppSettings(BaseSettings):
@@ -313,6 +323,38 @@ class AppSettings(BaseSettings):
         if v == "admin":
             logging.getLogger(__name__).warning(
                 "WEB_USERNAME 使用默认值 'admin'，建议在生产环境改为唯一值"
+            )
+        return v
+
+    @field_validator("web_password", "web_token", "signing_secret")
+    @classmethod
+    def _reject_placeholder_secrets(
+        cls, v: SecretStr | None, info: ValidationInfo
+    ) -> SecretStr | None:
+        """拒绝模板占位符（任何环境）——防止原样复制 .env.example 就上线。"""
+        if v is None:
+            return v
+        raw = v.get_secret_value().strip()
+        lowered = raw.lower()
+        if lowered.startswith(_PLACEHOLDER_SECRET_PREFIXES) or lowered in _PLACEHOLDER_SECRETS:
+            raise ValueError(
+                f"{info.field_name} 仍是模板占位符，请换成随机密钥"
+                "（如 openssl rand -hex 32）"
+            )
+        return v
+
+    @field_validator("web_token", "signing_secret")
+    @classmethod
+    def _require_strong_secret_in_prod(
+        cls, v: SecretStr | None, info: ValidationInfo
+    ) -> SecretStr | None:
+        """生产环境强制密钥长度；test/dev 允许短值（测试固件大量使用）。"""
+        if info.data.get("env") != "prod" or v is None:
+            return v
+        if len(v.get_secret_value()) < _PROD_SECRET_MIN_LEN:
+            raise ValueError(
+                f"{info.field_name} 至少 {_PROD_SECRET_MIN_LEN} 字符"
+                "（生产环境请用 openssl rand -hex 32 生成）"
             )
         return v
 

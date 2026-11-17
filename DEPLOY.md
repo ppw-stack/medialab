@@ -137,8 +137,8 @@ ssh mp "cd /mnt/user/appdata/medialab/app && TAG=latest docker compose -f docker
 > 闸门红 → **不产出镜像**，第 2 步拉到的还是旧镜像（不会拉到半成品）。
 > 所以第 2 步前先确认 `docker-image` workflow 是 success。
 >
-> ⚠️ **`TAG=latest` 必须显式指定**：compose 里默认值是 `0.1.0`，
-> 而 Docker Hub 上只有 `latest` 和 `main`，`0.1.0` 不存在，直接 `up -d` 会拉取失败。
+> ℹ️ compose 里 `TAG` 默认 `latest`（CI 会推 `latest` / `main` / `sha-<7位>` 三个 tag），
+> 直接 `up -d` 即可。要锁定确定版本时显式传 `TAG=sha-xxxxxxx`。
 >
 > ⚠️ 若容器是旧版本手动创建的（没有 compose label），`up -d` 不会替换它，
 > 需先 `docker stop -t 60 medialab && docker rm medialab`。
@@ -165,8 +165,8 @@ curl -fsS http://localhost:8092/healthz
 # prod（远端）
 ssh mp "curl -fsS http://localhost:8092/healthz"
 
-# 指标端点
-curl -fsS http://localhost:8092/metrics | head
+# 指标端点（需登录：Bearer WEB_TOKEN，或从反代内网放行）
+curl -fsS -H "Authorization: Bearer <WEB_TOKEN>" http://localhost:8092/metrics | head
 
 # Web UI
 open http://localhost:8092          # dev
@@ -204,7 +204,7 @@ SQLite 数据文件在各自的数据目录，**升级不会丢数据**。
 | 推送失败 | UI 设置 → 调度作业 → 立即执行 `push_free_torrents`；查容器日志 |
 | 容器内存超限被 kill | `docker stats medialab-dev`；`deploy.resources.limits.memory` 调到 1G |
 | `git push` 报 HTTP2 framing error | 不是网络问题，`git config http.version HTTP/1.1` 后重试 |
-| prod 拉不到镜像 | compose 默认 tag `0.1.0` 不存在，必须显式 `TAG=latest` |
+| prod 拉不到镜像 | 检查 `IMAGE` / `TAG` 环境变量： compose 默认 `latest`，若 env 文件里写了不存在的 tag 会拉取失败 |
 | push 后没有新镜像 | 闸门红了就不构建镜像（2026-10-23 起 CI 有依赖链）。看 `ci` workflow 是否红；或 `docker-image` 被 `workflow_run` 的 job 级 `if` 跳过了（PR 分支不构建） |
 | 镜像 tag 指向错误的 commit | `workflow_run` 下 `github.sha` 是默认分支 HEAD 而非被测 commit。checkout 必须用 `ref: ${{ github.event.workflow_run.head_sha }}`，tag 计算必须自己来（metadata-action 的 `context.sha` 同样不可信） |
 
@@ -256,7 +256,7 @@ ssh mp "cd /mnt/user/appdata/medialab/app && docker compose -f docker-compose.pr
 ├── Dockerfile
 ├── data-dev/           # dev SQLite（git 忽略）
 ├── logs-dev/           # dev 日志（git 忽略）
-├── config/             # 配置文件预留（dev compose 挂载点）
+├── config/             # 配置文件预留目录（当前 compose 未挂载）
 ├── backups/            # 用户自备份（git 忽略）
 └── scripts/
     └── deploy.sh       # 仅 dev
@@ -287,9 +287,9 @@ ssh mp "cd /mnt/user/appdata/medialab/app && docker compose -f docker-compose.pr
 
 | 资源 | dev | prod |
 |---|---|---|
-| Memory limit | 512 MB | 1 GB |
-| Memory reserved | 128 MB | 256 MB |
-| CPU limit | 1.0 核 | 2.0 核 |
+| Memory limit | 1 GB | 1536 MB |
+| Memory reserved | 256 MB | 256 MB |
+| CPU limit | 2.0 核 | 2.0 核 |
 | 日志 | 20 MB × 5 = 100 MB | 20 MB × 10 = 200 MB |
 
 实测空闲 ~120 MB RSS、CPU < 3%（非功能 §6）。如需更高并发 / 更大 SQLite 连接池，可调高。

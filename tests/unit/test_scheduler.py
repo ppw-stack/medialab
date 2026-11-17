@@ -148,6 +148,8 @@ def test_default_cron_covers_all_registered_jobs() -> None:
         "scrape_metadata",
         "organize_files",
         "aggregate_sync",
+        "cleanup_link_cache",
+        "purge_dav_auth_cache",
     }
 
 
