@@ -892,6 +892,76 @@ async def test_batch_timeout_falls_back_to_cloud_download(
     assert rows[0].transfer_mode == "cloud_download"
 
 
+async def test_quota_wall_only_pauses_cloud_channel_rows(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """额度墙**只暂停云下载通道的行**——分享转存通道不受额度影响。
+
+    早前是整组连坐暂停 → 附件也被拖到次日（附件本来 0 额度可搬）。
+    """
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "_share_threshold_bytes", lambda: 1024)
+    master, _source = fake_drivers
+    group_id, master_id, secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+    master.source_names = {"f1": "a.mkv"}
+
+    # 一个大文件（走云下载）+ 一个小文件（走转存）
+    async with session_scope() as db_session:
+        db_session.add(
+            SecondaryStaging(
+                group_id=group_id,
+                source_driver_id=secondary_id,
+                target_driver_id=master_id,
+                remote_id="big",
+                file_name="big.mkv",
+                size_bytes=5_000_000,  # > 阈值 → 云下载
+                state="pending",
+            )
+        )
+        await db_session.commit()
+
+    # 大文件的云下载撞额度墙
+    async def _wall(url: str, parent_id: str = "") -> str:
+        raise DriverError("云添加次数超限，下个自然日刷新", kind="unknown")
+
+    monkeypatch.setattr(master, "create_offline_task", _wall)
+
+    await aggregate_sync.sync_group_now(group_id)
+    rows = {r.file_name: r for r in await aggregate_staging.list_staging(group_id=group_id)}
+    # 大文件 → paused（撞墙）
+    assert rows["big.mkv"].state == "paused"
+    # 小文件 → 走转存，不受额度影响 → done
+    assert rows["a.mkv"].state == "done"
+    assert rows["a.mkv"].transfer_mode == "share_transfer"
+
+
+async def test_transfer_fallback_rows_pause_directly_when_wall_hit(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """转存未落地 + 额度已耗尽 → 回退行**直接暂停**（不再白撞一次额度）。"""
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "_share_threshold_bytes", lambda: 1024)
+    monkeypatch.setattr(aggregate_sync, "SHARE_TRANSFER_WAIT_SEC", 1.0)
+    monkeypatch.setattr(aggregate_sync, "SHARE_TRANSFER_POLL_SEC", 0.2)
+    master, _source = fake_drivers
+    group_id, _master_id, _secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+    # **不设 source_names** → 转存落地名不匹配 → 超时未落地
+
+    # 同时让云下载撞墙
+    async def _wall(url: str, parent_id: str = "") -> str:
+        raise DriverError("云添加次数超限，下个自然日刷新", kind="unknown")
+
+    monkeypatch.setattr(master, "create_offline_task", _wall)
+
+    await aggregate_sync.sync_group_now(group_id)
+    rows = await aggregate_staging.list_staging(group_id=group_id)
+    # 转存未落地 → 回退；额度已耗尽 → 直接 paused（不重复提交）
+    assert rows[0].state == "paused"
+    assert master.submitted == [], "额度耗尽后不该再提交云下载"
+
+
 async def test_sync_pauses_group_when_hitting_quota_wall(
     db, fast_watcher, fake_drivers, monkeypatch
 ) -> None:

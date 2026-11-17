@@ -36,7 +36,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 
 from app.adapters.drivers.base import DriverError
 from app.core.logging import get_logger
@@ -483,7 +483,6 @@ async def _sync_group_locked(
     #    是串行归拢最大的固定开销）。限速由全局限速器兜底，2s 很安全。
     watcher = TaskWatcher(master_driver, log=logger.info, poll_interval=2.0)
     gate = SubmitGate(SUBMIT_INTERVAL_SEC)
-    submissions = 0
     #: 副盘驱动按 ``source_driver_id`` 缓存——同一副盘 N 行只建 1 个实例
     #: （每建一次都要走一遍 token 刷新，白费请求）。
     source_drivers: dict[int, Any] = {}
@@ -516,67 +515,81 @@ async def _sync_group_locked(
 
     # ② **小文件批量打包转存**（不消耗额度）——附件占文件数的大头，
     #    一个分享打包 N 个附件、一次转存整批，是吞吐的最大杠杆。
+    #    **与云下载通道并行**（见 ③）。
+    share_task: asyncio.Task[list[_Row]] | None = None
     if transfer_rows:
         result.details.append(
             f"组「{group_name}」：{len(transfer_rows)} 个小文件走分享转存（批量），"
-            f"{len(cloud_rows)} 个走云下载"
+            f"{len(cloud_rows)} 个走云下载（两条通道并行）"
         )
-        # 未落地的（转存失败 / 超时）→ 回退云下载（吃额度但保底）
-        fallback = await _batch_share_transfer(
-            transfer_rows,
+        share_task = asyncio.create_task(
+            _batch_share_transfer(
+                transfer_rows,
+                master_driver=master_driver,
+                index=index,
+                result=result,
+                source_drivers=source_drivers,
+            )
+        )
+
+    # ③ **两条通道并行**：
+    #    - 云下载通道（大文件 / replace / 回退）：恒串行（落盘名撞车 + 额度）
+    #    - 分享转存通道（小文件）：批量 + 多批并行（不占额度、不撞名）
+    #    两条通道的瓶颈不同（云下载=额度与提交间隔；转存=服务端落地延迟）→
+    #    并行时互不抢资源，附件批次在等落地的时间正好让视频跑起来。
+    #
+    #    额度墙只暂停**云下载通道**的行——转存通道不受额度影响，不该被连坐。
+    budget = _CloudBudget(max_submissions)
+    cloud_task = asyncio.create_task(
+        _run_cloud_rows(
+            cloud_rows,
             master_driver=master_driver,
             index=index,
+            watcher=watcher,
+            gate=gate,
             result=result,
+            group_name=group_name,
+            budget=budget,
             source_drivers=source_drivers,
         )
-        if fallback:
-            result.details.append(
-                f"组「{group_name}」：{len(fallback)} 个小文件转存未落地，"
-                "回退云下载"
-            )
-        cloud_rows = fallback + cloud_rows
-
-    # ③ 大文件（+回退的）恒串行云下载
+    )
     try:
-        for row in cloud_rows:
-            if max_submissions is not None and submissions >= max_submissions:
+        cloud_remaining, wall_hit = await cloud_task
+        # 转存通道收尾（可能早已结束）
+        fallback: list[_Row] = []
+        if share_task is not None:
+            fallback = await share_task
+        if fallback:
+            if wall_hit:
+                # 额度已耗尽 → 回退行直接暂停（次日续传），不再白撞
+                paused = await _pause_rows(fallback, "云添加额度耗尽")
+                result.paused += paused
                 result.details.append(
-                    f"组「{group_name}」：本轮已达最大提交数（{max_submissions}），"
-                    "其余留到下一轮"
+                    f"组「{group_name}」：{len(fallback)} 个小文件转存未落地，"
+                    f"且云添加额度已耗尽 → {paused} 个转暂停（次日续传）"
                 )
-                break
-            source = source_drivers.get(row.source_driver_id)
-            if source is None:
-                source = await _build_source_driver(row)
-                source_drivers[row.source_driver_id] = source
-            try:
-                need_submit = await _sync_one(
-                    row,
+            else:
+                # 额度还有 → 回退行再走一轮云下载
+                result.details.append(
+                    f"组「{group_name}」：{len(fallback)} 个小文件转存未落地，回退云下载"
+                )
+                more, wall_hit2 = await _run_cloud_rows(
+                    fallback,
                     master_driver=master_driver,
-                    source=source,
                     index=index,
                     watcher=watcher,
                     gate=gate,
                     result=result,
                     group_name=group_name,
+                    budget=budget,
+                    source_drivers=source_drivers,
                 )
-                if need_submit:
-                    submissions += 1
-            except _QuotaExceeded as exc:
-                # **撞墙 = 当天的门关了** → 整组剩余行一次转暂停 + 停手，
-                # 不再「一行撞一次」（每次撞墙都是一次白费的服务端请求）。
-                # 暂停的行**次日自动续传**（作业把 paused 行捡起来继续）。
-                paused = await _pause_group(group_id, str(exc))
-                result.paused += paused
-                result.details.append(
-                    f"组「{group_name}」：{exc}（剩余 {paused} 个文件转暂停，次日自动续传）"
-                )
-                break
-            except Exception as exc:
-                await _mark(row.id, STAGING_FAILED, error=f"{type(exc).__name__}: {exc}")
-                result.failed += 1
-                result.details.append(f"{row.file_name}：失败 {exc}")
-                logger.warning("归拢失败 %s：%s", row.file_name, exc)
+                cloud_remaining = more + cloud_remaining
+                wall_hit = wall_hit or wall_hit2
+        if cloud_remaining and not wall_hit:
+            result.details.append(
+                f"组「{group_name}」：{len(cloud_remaining)} 个文件留到下一轮"
+            )
     finally:
         await watcher.close()
 
@@ -631,6 +644,83 @@ async def _precheck_target(
     if not removed:
         raise DriverError("主盘同名文件已变化，未覆盖（不误删）", kind="unknown")
     return "replace", target_dir_id, existing
+
+
+class _CloudBudget:
+    """云下载通道的**提交预算**（单轮共享，两条通道并行时也一起算）。
+
+    上限来自运行时参数（``aggregate_max_submissions``；``None`` = 不限）。
+    分享转存通道**不占**这个预算（它不吃云添加额度）。
+    """
+
+    def __init__(self, limit: int | None) -> None:
+        self.limit = limit
+        self.used = 0
+
+    @property
+    def exhausted(self) -> bool:
+        return self.limit is not None and self.used >= self.limit
+
+
+async def _run_cloud_rows(
+    rows: list[_Row],
+    *,
+    master_driver: Any,
+    index: TargetIndex,
+    watcher: TaskWatcher,
+    gate: SubmitGate,
+    result: AggregateSyncResult,
+    group_name: str,
+    budget: _CloudBudget,
+    source_drivers: dict[int, Any],
+) -> tuple[list[_Row], bool]:
+    """云下载通道：恒串行搬一批行（大文件 / replace / 转存回退）。
+
+    Returns:
+        ``(未处理的行, 是否撞了额度墙)``。
+    """
+    for idx, row in enumerate(rows):
+        if budget.exhausted:
+            result.details.append(
+                f"组「{group_name}」：本轮已达最大提交数（{budget.limit}），"
+                "其余留到下一轮"
+            )
+            return rows[idx:], False
+        source = source_drivers.get(row.source_driver_id)
+        if source is None:
+            source = await _build_source_driver(row)
+            source_drivers[row.source_driver_id] = source
+        try:
+            need_submit = await _sync_one(
+                row,
+                master_driver=master_driver,
+                source=source,
+                index=index,
+                watcher=watcher,
+                gate=gate,
+                result=result,
+                group_name=group_name,
+            )
+            if need_submit:
+                budget.used += 1
+        except _QuotaExceeded as exc:
+            # **撞墙 = 当天的门关了** → 剩余行一次转暂停 + 停手，
+            # 不再「一行撞一次」（每次撞墙都是一次白费的服务端请求）。
+            # ⚠️ **只暂停云下载通道的行**——分享转存通道不受额度影响，
+            # 早前整组连坐暂停会把附件也拖到次日。
+            # 暂停的行**次日自动续传**（作业把 paused 行捡起来继续）。
+            paused = await _pause_rows(rows[idx:], str(exc))
+            result.paused += paused
+            result.details.append(
+                f"组「{group_name}」：{exc}（剩余 {paused} 个文件转暂停，次日自动续传）"
+            )
+            return [], True
+        except Exception as exc:
+            await _mark(row.id, STAGING_FAILED, error=f"{type(exc).__name__}: {exc}")
+            result.failed += 1
+            result.details.append(f"{row.file_name}：失败 {exc}")
+            logger.warning("归拢失败 %s：%s", row.file_name, exc)
+    return [], False
 
 
 async def _sync_one(
@@ -1178,31 +1268,41 @@ async def _active_task_ids(rows: list[_Row]) -> set[str] | None:
     return {str(item.get("taskId") or "") for item in items}
 
 
-async def _pause_group(group_id: int, reason: str) -> int:
-    """把组内所有待归拢行转 ``paused``（撞上额度墙）。返回转成功的条数。
+async def _pause_rows(rows: list[_Row], reason: str) -> int:
+    """把**指定**的行转 ``paused``（撞上额度墙）。返回转成功的条数。
+
+    ⚠️ **只暂停云下载通道的行**——分享转存通道**不受云添加额度影响**，
+    早前整组连坐暂停会把附件也拖到次日（2026-11-17 修）。
 
     含 ``syncing``——撞墙时**当前行**正处在 syncing（提交被拒），它也得
     一起暂停，否则下次作业会把它当「在途任务已消失」重新捡起来。
     """
+    if not rows:
+        return 0
+    ids = [int(r.id) for r in rows]
     async with session_scope() as db:
-        rows = (
-            (
-                await db.execute(
-                    select(SecondaryStaging).where(
-                        SecondaryStaging.group_id == group_id,
-                        SecondaryStaging.state.in_((STAGING_PENDING, STAGING_SYNCING)),
-                    )
+        await db.execute(
+            update(SecondaryStaging)
+            .where(
+                SecondaryStaging.id.in_(ids),
+                SecondaryStaging.state.in_((STAGING_PENDING, STAGING_SYNCING)),
+            )
+            .values(state=STAGING_PAUSED, last_error=reason, updated_at=bj_now())
+        )
+        await db.commit()
+        # 精确计数（UPDATE 的 rowcount 在 aiosqlite 上拿不到）
+        count = (
+            await db.execute(
+                select(func.count())
+                .select_from(SecondaryStaging)
+                .where(
+                    SecondaryStaging.id.in_(ids),
+                    SecondaryStaging.state == STAGING_PAUSED,
+                    SecondaryStaging.last_error == reason,
                 )
             )
-            .scalars()
-            .all()
-        )
-        for row in rows:
-            row.state = STAGING_PAUSED
-            row.last_error = reason
-            row.updated_at = bj_now()
-        await db.commit()
-        return len(rows)
+        ).scalar_one()
+        return int(count)
 
 
 async def _mark(
