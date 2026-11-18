@@ -450,8 +450,8 @@ class DbBootstrap:
 
         - ``add_column``   —— 列已存在是幂等重跑的**正常**结果（静默）；
           其它失败是真问题 → **抛错阻断启动**
-        - ``drop_column``   —— 老库可能没这列，失败无害（warning）
-        - ``rename_column`` —— 新库无 ``*_enc`` 列，失败无害（warning）
+        - ``drop_column``   —— 老库可能没这列，失败无害（debug 静默）
+        - ``rename_column`` —— 新库无 ``*_enc`` 列，失败无害（debug 静默）
         - ``create_index``  —— 用了 IF NOT EXISTS，失败是真问题 → 抛错
 
         旧实现把所有真失败都只记 error 然后继续启动，DB 可能停在
@@ -464,7 +464,11 @@ class DbBootstrap:
             if kind == "add_column" and "duplicate column name" in msg:
                 return  # 幂等重跑，预期内
             if kind in ("drop_column", "rename_column"):
-                logger.warning("删列/改名失败（老库可能无此列，可忽略）：%s → %s", stmt, exc)
+                # 全新库本就没有这些废弃列 → 每次建库都会失败 N 次。
+                # 属预期内、无害（add_column / create_index 的真失败仍会
+                # 走到下面的 raise，fail-fast 语义不变），降到 debug 避免
+                # 刷屏；保留了 stmt + exc，排查老库迁移问题时仍能开启。
+                logger.debug("删列/改名失败（老库可能无此列，可忽略）：%s → %s", stmt, exc)
                 return
             raise RuntimeError(f"数据库迁移失败（{kind}）：{stmt}") from exc
 

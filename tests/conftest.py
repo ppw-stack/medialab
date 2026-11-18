@@ -380,3 +380,37 @@ def fast_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     proxy.__dict__.update(vars(asyncio))
     proxy.sleep = _instant_sleep  # type: ignore[attr-defined]
     monkeypatch.setattr(ff, "asyncio", proxy)
+
+
+@pytest.fixture(autouse=True)
+def fast_production_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把生产级「等待常量」压到近零——测试里不该真的等 5s / 3s。
+
+    背景：:func:`fast_backoff` 只拦了 ``feed_fetcher`` 的退避 sleep，但还有
+    一批**生产级等待常量**在测试里真睡（浴盆曲线式拖慢全量）：
+
+    - 归拢落盘验证 ``VERIFY_DELAY_SEC = 5s``：慢用例跑 25 轮 → ~125s
+    - 分享转存轮询 ``SHARE_TRANSFER_POLL_SEC = 3s``
+    - 附件下载退避 ``RETRY_BACKOFF_SEC = 5s``：6 个用例各 ~15s
+    - 元数据请求退避 ``tmdb.RETRY_BACKOFF_SEC = 1.5s``
+
+    实测这四处是全量测试的主要瓶颈（单用例最高 52s，合计 >160s）。
+
+    **只 patch 常量本身，不动 ``asyncio.sleep``** —— 这样依赖真实时间的
+    测试（``test_rate_limit`` / ``test_test_infra``）完全不受影响。用例内
+    若显式 setattr 了这些常量（如归拢超时用例在测试体里设成 0.2 / 1.0），
+    测试体的值后执行、会覆盖本 fixture，语义不变。
+
+    ``SHARE_TRANSFER_WAIT_SEC`` 只压到 5s 而非 0：正常用例第一次轮询
+    （假驱动同步落地）即命中、不受影响；万一有用例故意不落地，也不会卡满
+    生产的 600s。显式设过该值的用例同样会覆盖本 fixture。
+    """
+    from app.adapters.metadata import tmdb
+    from app.services import aggregate_sync, attachments, migration
+
+    monkeypatch.setattr(aggregate_sync, "VERIFY_DELAY_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "SHARE_TRANSFER_POLL_SEC", 0.01)
+    monkeypatch.setattr(aggregate_sync, "SHARE_TRANSFER_WAIT_SEC", 5.0)
+    monkeypatch.setattr(migration, "VERIFY_DELAY_SEC", 0.0)
+    monkeypatch.setattr(attachments, "RETRY_BACKOFF_SEC", 0.0)
+    monkeypatch.setattr(tmdb, "RETRY_BACKOFF_SEC", 0.0)
