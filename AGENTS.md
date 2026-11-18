@@ -628,9 +628,13 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
       - ⚠️ **判据要确定性**：转存前用 `share_files_list`（驱动方法
         `share_files`）确认文件**确实在分享里**，别白撞转存接口（分享里
         的 fileId 与台账 `remote_id` **是同一个**）
-      - ⚠️ **一个被拒的文件不能连坐整批**：分享审核逐文件 → 整批失败时
-        **逐个重试**（`_transfer_rows_one_by_one`），只让真正搬不动的回退
-        云下载
+      - ⚠️ **一个被拒的文件不能连坐整批**：分享审核逐文件 → 批次里**只转存
+        分享里有的文件**，被拒的直接交给回退通道（`_restore_share_with_retry`
+        返回 `dropped_ids`）——整批失败时再**逐个重试**
+        （`_transfer_rows_one_by_one`）兜底
+      - ⚠️ **列分享内容失败 ≠ 审核拒绝**：接口抖动时按「内容齐全」继续
+        （`_share_content_ids`）——宁可让转存接口自己报错（那个错有信息量），
+        也不要一次列表失败把整批当成「审核拒绝」
       - 故新增运行时参数 **`aggregate_transfer_mode`**（0=按体积分流 /
         1=**转存优先**，默认 1）：转存优先 = 所有文件走分享转存，转存失败才
         回退云下载（保底）。`aggregate_share_threshold_bytes` 的体积上限

@@ -804,6 +804,10 @@ class GuangyaDriver:
         Returns:
             分享里的 fileId 列表（**空 = 分享内容为空**）。
         """
+        await self._ensure_token()
+        # ⚠️ **限速不能省**：`_call` 走限速器，这里直接调库方法——不限制
+        # 的话，扫描分享内容（一轮几十个文件）会打出突发请求
+        await rate_limiter.acquire(PROVIDER)
         payload = await asyncio_to_thread(
             self.client.share_files_list, access_token, "", 1, 100
         )
