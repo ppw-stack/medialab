@@ -32,12 +32,17 @@ jobs:
     # 闸门红 → 整个 job 跳过（不构建、不推送）。
     #
     # · conclusion != success：ci 任一 job 失败/被取消 → 不构建
-    # · event != pull_request：PR 的 ci 通过了也不构建——镜像只发 main
-    #   与 v* tag。**这一条同时是安全边界**：PR 代码不可信，不该在持有
-    #   Docker Hub 凭据的 job 里被 checkout + 执行。
+    # · **只对 v* tag 的 ci 绿构建**（2026-11-17 改）：main push 的 ci 绿
+    #   **不再出镜像**——镜像只在「发布」（tag v*）时打包。日常合并到 main
+    #   的代码只过闸门，不出镜像；要部署就发布一个版本。
+    # · event == push：PR 的 ci 通过了也不构建。**这一条同时是安全边界**：
+    #   PR 代码不可信，不该在持有 Docker Hub 凭据的 job 里被 checkout + 执行。
+    # · head_branch 判定：tag push 的 workflow_run.head_branch = tag 名
+    #   （如 ``v1.2.3``），startsWith('v') 即「发布」。
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event != 'pull_request'
+      github.event.workflow_run.event == 'push' &&
+      startsWith(github.event.workflow_run.head_branch, 'v')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -62,7 +67,6 @@ jobs:
           IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
         run: |
           set -euo pipefail
-          SHORT="${HEAD_SHA:0:7}"
           # v* semver tag → 额外产出版本号 tag（v1.2.3 → 1.2.3 与 1.2）
           # 仅当该 commit 上确实挂着 v* tag 时才有。
           #
@@ -70,11 +74,11 @@ jobs:
           #    一个镜像 tag，多写一行提示语就会被当成 tag 推给 Docker Hub。
           SEMVER=$(git tag --points-at "$HEAD_SHA" \
             | grep -E '^v[0-9]+\.[0-9]+' | head -1 | sed 's/^v//' || true)
+          # 2026-11-17 改：镜像只在发布（tag v*）时构建 → tag 只有
+          # latest + semver（main / sha-* 随「main push 出镜像」一并移除）
           {
             echo "tags<<TAGS_EOF"
             echo "${IMAGE}:latest"
-            echo "${IMAGE}:main"
-            echo "${IMAGE}:sha-${SHORT}"
             if [ -n "$SEMVER" ]; then
               echo "${IMAGE}:${SEMVER}"
               echo "${IMAGE}:$(echo "$SEMVER" | cut -d. -f1,2)"

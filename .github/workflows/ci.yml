@@ -13,14 +13,16 @@ name: ci
 # CI 上跑不了，已整体移除）。
 
 on:
-  push:
-    branches: [main]
-    # v* tag 也要跑闸门：docker-image 改为 workflow_run 依赖链后，
-    # 版本发布镜像由「tag push 触发的 ci」通过后才构建（见
-    # docker-image.yml 的 Compute image tags 步骤）。
-    tags: ['v*']
+  # 2026-11-17 改为 PR 流程：main 不再直推（分支保护）——改动走
+  # feature 分支 + PR，闸门在 PR 上跑，绿了才能合并。
   pull_request:
     branches: [main]
+  # main push 保留为兜底（万一绕过保护直推，闸门仍然会跑）
+  push:
+    branches: [main]
+    # v* tag 也要跑闸门：版本发布镜像由「tag push 触发的 ci」通过后才构建
+    # （见 docker-image.yml 的 Compute image tags 步骤）。
+    tags: ['v*']
 
 concurrency:
   group: ci-${{ github.ref }}
