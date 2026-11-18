@@ -1,0 +1,23 @@
+title: 遵守仓库分层约束（domain → core → db → adapters → services → webdav → api）
+rule: |
+  本仓库有硬性分层约束，由 tests/unit/test_layering.py 固化，违反会被测试直接拒绝：
+
+      domain → core → db → adapters → services → webdav → api
+
+  - api 层不得直接访问 DB，也不得直接依赖适配层；业务逻辑一律放在 service 层。
+  - services 层不得 import fastapi；统一抛 ServiceError，由 API 层翻译成 HTTP 状态码。
+  - adapters 层必须可独立单测（不依赖 db / services）。
+  - domain 层是纯业务概念与常量（如 DeviceType / FreeType），不得依赖任何其他层。
+  - webdav 是协议适配层：可依赖 services / db / core，但 services 不得反向依赖它。
+    DAV 根配置实现在 app/services/dav_root.py，app/webdav/paths.py 只做兼容转发。
+  - 新增 app/<pkg> 必须显式登记到 LAYER_ORDER；未登记的层现在会被直接拒绝
+    （不再静默放行）。
+
+  改动触及 app/ 下的任何包时，先确认该包的 import 没有跨层反向依赖。
+severity: critical
+scope: pull-request
+path: 'app/**'
+inheritance:
+  inheritable: true
+  exclude: []
+  include: []

@@ -1,0 +1,13 @@
+title: API 层只做协议翻译，业务判断留在 service 层
+rule: |
+  - api 层不碰 DB、不碰适配层 —— 业务逻辑全在 service 层。
+  - service 层抛 ServiceError，由 API 层翻译成 HTTP 状态码；不要在 service 层
+    import fastapi，也不要在 api 层自己判断业务条件后再调 service。
+  - 写接口时检查：新增的分支是否应该下沉到 service 层？
+severity: high
+scope: file
+path: 'app/api/**'
+inheritance:
+  inheritable: true
+  exclude: []
+  include: []

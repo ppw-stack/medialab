@@ -1,0 +1,16 @@
+title: 数据库迁移/schema 变更必须评估锁表与停机风险，并给出回滚方案
+rule: |
+  审查涉及 SQL / 数据库 schema 变更（CREATE/ALTER/DROP、索引、约束、NOT NULL、
+  大批量 UPDATE）时，必须评估其锁表与停机风险，并要求：
+
+  - 大表加索引使用在线策略（Postgres: CREATE INDEX CONCURRENTLY；SQLite 场景
+    说明表规模与写入窗口，或改用「新建表 + 批量拷贝 + 改名」的 expand-contract 方案）。
+  - 加 NOT NULL 约束前先回填存量数据，不要对大表直接加约束。
+  - 长时间批量更新要分批提交，不要单事务全表扫。
+  - 每个迁移 PR 必须给出回滚方案（down 脚本或快照恢复步骤）。
+severity: critical
+scope: pull-request
+inheritance:
+  inheritable: true
+  exclude: []
+  include: []

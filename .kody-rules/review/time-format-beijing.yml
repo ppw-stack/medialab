@@ -1,0 +1,18 @@
+title: 区分「DB 记录时刻」与「协议侧时刻」，不要互相转换
+rule: |
+  时间口径已统一为北京时间字符串（2026-10-30 修订）：
+
+  - 两域所有「DB 记录时刻」类列（created_at / updated_at / last_*_at /
+    probed_at / mtime 等）一律是 String(32) 的北京时间字符串。
+  - 协议侧时刻保留 unix 秒（Integer）—— 它们与 time.time() 直接比较，
+    语义是「绝对时刻 / 时间差」而非「DB 记录时刻」。
+
+  不要把这两类时间互相转换，也不要"顺手统一"格式 —— 协议侧改成字符串会破坏
+  与 time.time() 的比较，DB 侧改成 unix 秒会让历史数据口径不一致。
+severity: high
+scope: file
+path: 'app/**'
+inheritance:
+  inheritable: true
+  exclude: []
+  include: []
