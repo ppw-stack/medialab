@@ -803,7 +803,7 @@ async def test_cross_seed_orphans_scan(
         row = DownloaderInstance(
             name="dl-scan",
             type="transmission",
-            url="http://192.168.0.172:9091",
+            url="http://192.168.0.<nas>:9091",
             is_cross_seed=True,
             enabled=True,
         )

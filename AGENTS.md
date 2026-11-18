@@ -248,7 +248,7 @@
   - `cross_seed_snapshot` 表是**当前快照**（`downloader_id` UNIQUE），不做历史；FK **不带** `ON DELETE CASCADE`（当守卫：漏删会 IntegrityError，宁可失败也不留孤儿行）——删下载器 / 取消辅种标记时必须显式删快照
   - **前端读快照，不打下载器接口**：辅种页与仪表盘「在途任务」都读快照；实时端点 `GET /cross-seed-monitor/downloaders/{id}/scan` 保留作调试用
   - **辅种页是两层 Tab**（2026-10-26）：外层 = **下载器**（数据维度），内层 = **内容分区**（概览 / 分组 / 异常 / 孤儿，功能维度）
-    - 为什么是两层而不是二级菜单：用户的真实心智是「我要看 tr-172 这个下载器怎么样」——那是数据维度，不该被功能维度打散。若按功能拆成独立页面，每个页面都得重放一遍下载器 Tab
+    - 为什么是两层而不是二级菜单：用户的真实心智是「我要看 <tr-下载器> 这个下载器怎么样」——那是数据维度，不该被功能维度打散。若按功能拆成独立页面，每个页面都得重放一遍下载器 Tab
     - 为什么内层要拆：原本 4 块内容纵向堆叠，实测 **3727 px / 4.1 屏**，其中 2 屏是 2237 行的分组表。拆分后概览 **921 px（1 屏）**，分组 3069 px / 异常 1950 px / 孤儿 720 px ——各块互不干扰（异常与孤儿各有独立空间，不会互相误点删除按钮）
     - 内层 Tab 在**每个**下载器 pane 里各渲染一份（Ant Design 隐藏 inactive pane）——注意定位时过滤 `:visible`，否则会点到隐藏那份
     - 异常 / 孤儿明细不再用折叠面板（独立 Tab 本身就是展开态）
@@ -293,8 +293,8 @@
 - **辅种孤儿文件统计**（2026-10-24 加入，`app/services/orphan_scanner.py`）：
   - 孤儿 = **磁盘有、任务没了**（典型来源：用「仅删任务」清理种子时磁盘文件留下，不再做种却一直占空间）
   - **必须挂载磁盘**：下载器**没有**浏览文件系统的接口（TR 的 RPC spec 不提供 filesystem 浏览，qB 也没有列目录 API）→ 只能把辅种站的下载目录**挂载**进容器，扫盘 + 顶层名匹配（权限 **rw**——删除孤儿文件需要写权限）
-  - 128 上 Unraid **已自动挂好** CIFS（`/mnt/remotes/192.168.0.172_Public`）→ 只需一行 compose 挂载，无需 NAS 配置
-  - **挂载路径必须与下载器的 `downloadDir` 完全一致**（辅种站 = `/share/Public/home/downloads/辅种`）——孤儿判定把任务按 downloadDir 分组，路径不一致就分不对组
+  - <生产机> 上 Unraid **已自动挂好** CIFS（`/mnt/remotes/<nasIP>_Public`）→ 只需一行 compose 挂载，无需 NAS 配置
+  - **挂载路径必须与下载器的 `downloadDir` 完全一致**（辅种站 = `<辅种下载目录>/辅种`）——孤儿判定把任务按 downloadDir 分组，路径不一致就分不对组
   - **多路径配置**：`cross_seed_scan_dirs`（逗号分隔多目录），每个目录独立扫描 + 独立统计（`scanned_dirs` 列）。辅种站实测 3 种 downloadDir：`辅种`(4639) / 父目录(5) / `game`(1)
   - **按 downloadDir 分组**：扫描目录 D 时**只把 downloadDir == D 的任务**算作「有主」——顶层名（`files[].name` 相对 downloadDir）只在同一 downloadDir 内才有意义，混在一起判会误认有主
   - **路径用完全相等匹配**（忽略尾部斜杠），**不做前缀匹配**——前缀匹配会把 `/downloads` 与 `/downloads/辅种` 混为一谈
@@ -431,7 +431,7 @@
   - `fs_files` 支持 `parent_id="*"`（全账号）+ `res_type` 过滤，条目带 **`fullParentIds`**（从账号根到父目录的完整 fileId 链，`/` 分隔）——一次目录翻页（`res_type=2`，生产 726 目录 = 1 请求）建 fileId→目录名映射 + 一次文件翻页（`res_type=1`）按链首过滤 `media_cid` 子树，`relative_dir` 由链上 fileId 换算目录名拼出
   - **收益**：生产 970 目录 ≈ 1100+ 请求（0.2s 限速下 5-9 分钟）→ ≈16 请求（≈10 秒）；`page_size` 实测支持 1000+（200/500/1000 全生效，无 code=112）
   - **附件下载并发 3 路**（同日生产实测，`media.py` 的 `_sync_attachment_counted`）：串行时首次全量附件 ~18s/个（CDN 掐连接 → 3 次重试 × 60s 超时的长尾），几千个附件 = 十几小时。换直链走全局限速器天然安全，并发只摊掉 CDN 等待；`ATTACHMENT_CONCURRENCY` 从 4 调到 **3**（并发 4 失败率 17%：`peer closed connection without sending complete message body`；并发 2 对比实测成功率 91%、41 个/分钟），`ATTACHMENT_WINDOW=64` 做背压；扫描取消时终止剩余附件任务，正常结束等全部收尾（统计才完整）
-  - **附件失败的三种模式与对策**（同日实测）：① 光鸭直链是**一次性**的——同一个 URL 第二次访问必然失败（故每次重试都换新链 ✅）② **网络抖动**：128 容器 DNS 偶发 `Temporary failure in name resolution`、CDN `ConnectTimeout` → 退避从 1s 提到 **5s**（5/10/15s，跨过抖动窗口）+ 重试次数 3→**4** ③ **附件超时是敏感参数**：共享 client 的 60s 会让卡死连接占住 worker 60s（长尾毒瘤），但**压到 15s 更糟**——实测失败率从 0.24%（60s）飙到 12~17%（光鸭部分 CDN 节点首次 GET 无缓存，15s 不够）。折中 **45s**：给慢节点留够时间，又短一截
+  - **附件失败的三种模式与对策**（同日实测）：① 光鸭直链是**一次性**的——同一个 URL 第二次访问必然失败（故每次重试都换新链 ✅）② **网络抖动**：<生产机> 容器 DNS 偶发 `Temporary failure in name resolution`、CDN `ConnectTimeout` → 退避从 1s 提到 **5s**（5/10/15s，跨过抖动窗口）+ 重试次数 3→**4** ③ **附件超时是敏感参数**：共享 client 的 60s 会让卡死连接占住 worker 60s（长尾毒瘤），但**压到 15s 更糟**——实测失败率从 0.24%（60s）飙到 12~17%（光鸭部分 CDN 节点首次 GET 无缓存，15s 不够）。折中 **45s**：给慢节点留够时间，又短一截
   - **换直链要对齐官方限频**（同日实测）：官方是 5 次/秒（列目录）/ **2 次/秒（换直链）**，但限速器只有一个光鸭桶（0.2s = 5/s）→ 并发 4 时换直链超限 2.5 倍 → 光鸭软限频 → 扫描速率从 45 掉到 21 个/分钟、30 分钟 96 次重试。修法：`get_direct_link` 走独立桶 `guangya_link`（`guangya_link_rate_limit_interval_sec`，默认 0.5s）；播放换直链同样受益（账号级配额本就该共享）
   - **条目缺 `fullParentIds` / 目录映射缺失 >10 → 报错不静默**——静默跳过会把故障伪装成「媒体库为空」，且 prune 会把「源端还在」的文件当孤儿删掉；少量缺失用 fileId 占位（路径可复现，不产出错路径）
   - **目录 `utime` 不可靠，别想做剪枝**（实测）：建子目录会变，**改名/删除都不变**——用它跳过子树必漏文件
@@ -456,18 +456,18 @@
 
 - **光鸭分享目录归置流程**（2026-11-13 加入，`scripts/organize_guangya_share.py`）：
   - 把主号（driver 2）根下的 `来自：分享` 按**路径映射**并进 `影视`：剥掉前导的 `来自：分享`/`影视` 段即得目标相对路径（`来自：分享/影视/电影/外语电影/X/poster.jpg` → `影视/电影/外语电影/X/poster.jpg`）
-  - 跑法：`ssh unraid 'docker exec -i medialab /opt/venv/bin/python - --dry-run' < scripts/organize_guangya_share.py`（只出统计）/ `--conflict keep-larger`（实跑，默认）/ `--keep-share-root`（保留空分享根目录，平台会重建）
+  - 跑法：`ssh <别名> 'docker exec -i medialab /opt/venv/bin/python - --dry-run' < scripts/organize_guangya_share.py`（只出统计）/ `--conflict keep-larger`（实跑，默认）/ `--keep-share-root`（保留空分享根目录，平台会重建）
   - **盘点走全账号批量列表**（`fs_files(parent_id="*")` + `fullParentIds` 链）：788 目录 / 15107 文件 ≈ 16 个请求出全量索引，比逐目录爬快两个数量级
   - 逐目录：建目标目录 → 批量 copy（20/批）→ 等落地 → 校验（**全部比字节数，≥1 MB 再比 gcid**）→ 批量 delete（50/批）→ 重列确认文件消失 → 最后自底向上清空目录
   - **删除只走 `fs_delete`（进回收站），绝不碰 `fs_clear_recycle_bin`**
-  - ⚠️ **128 容器 DNS 偶发 `Temporary failure in name resolution`**（已知问题）→ 驱动层 `_call` **不重试网络失败**，脚本必须自带重试（4 次、3/6/9/12 s 退避）
+  - ⚠️ **<生产机> 容器 DNS 偶发 `Temporary failure in name resolution`**（已知问题）→ 驱动层 `_call` **不重试网络失败**，脚本必须自带重试（4 次、3/6/9/12 s 退避）
   - 实测战绩：2026-11-13 三轮共归置 **508 个文件 / 9.56 GB**，失败 0
 
-- **172 NAS 上三个目录的分工**（2026-11-13 摸清，别搞混）：
-  - `strmmangerLibrary` = 容器 `/app/library`（compose 的 `LIBRARY_DIR`）——**STRM 与附件的真实输出目录，应用直接写**
-  - `movietmp` = compose 的 `WATCH_DIR`——「数据同步」上传任务的监听目录，文件放这里会被传到目标存储源（**跨账号合并只能走这条路**：光鸭「云下载」实测 3 次/账号/天，批量搬不动）
-  - `strmtmp` = **不在容器挂载里**的独立目录（外部产物）；2026-11-14 按「只删与库同路径同字节的真重复」清到 1618 个，再由人工移入 `movietmp` 走上传任务完成合并
-  - ⚠️ **NAS 没有回收站** → 删除必须**先留清单**（`strmtmp_rm_manifest.tsv`），恢复靠从库里拷同名同大小那份
+- **<nas> NAS 上三个目录的分工**（2026-11-13 摸清，别搞混）：
+  - `<媒体库>` = 容器 `/app/library`（compose 的 `LIBRARY_DIR`）——**STRM 与附件的真实输出目录，应用直接写**
+  - `<暂存区>` = compose 的 `WATCH_DIR`——「数据同步」上传任务的监听目录，文件放这里会被传到目标存储源（**跨账号合并只能走这条路**：光鸭「云下载」实测 3 次/账号/天，批量搬不动）
+  - `<临时区>` = **不在容器挂载里**的独立目录（外部产物）；2026-11-14 按「只删与库同路径同字节的真重复」清到 1618 个，再由人工移入 `<暂存区>` 走上传任务完成合并
+  - ⚠️ **NAS 没有回收站** → 删除必须**先留清单**（`<临时区>_rm_manifest.tsv`），恢复靠从库里拷同名同大小那份
   - ⚠️ **QNAP 是 BusyBox**：`find -printf` 不支持、无 `comm`/`join`；`stat -c`/`md5sum`/`sort`/`awk`/`find -exec … +` 可用 → NAS 侧脚本按这个约束写
 
 - **媒体库扫描不落地音频**（2026-11-13 现状）：驱动的 `video_exts`/`image_exts`/`data_exts` 里**没有 flac** → 音乐文件只在光鸭盘上、**Emby 听不到**（扫描判成未知后缀跳过）。要让 Emby 支持音乐得另加一条「音频附件」通道（功能开发，非整理可解）
@@ -736,7 +736,7 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
       已落盘的情况）。契约：`test_stuck_task_times_out_and_marks_failed`
     - **在途任务查询失败 → 本轮跳过 syncing 行**：查询失败返回 `None`
       （绝不能返回空集冒充「都不在跑」——那会把在途任务重置为待归拢并
-      重新提交，白扣额度）。128 容器 DNS 偶发故障是已知触发源。
+      重新提交，白扣额度）。<生产机> 容器 DNS 偶发故障是已知触发源。
       契约：`test_active_task_query_failure_skips_syncing_rows`
   - **前端（`web/src/pages/media/Aggregate.vue`）**：组卡片（成员 / 目录映射 /
     水位）+ 在途台账表格 + 「登记在途」「立即归拢」（都是后台 job，2s 轮询）

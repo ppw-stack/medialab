@@ -15,7 +15,7 @@
 | 操作系统 | macOS 27.0.1 (Darwin 26A434) |
 | 架构 | `arm64` (Apple Silicon) |
 | 主机名 | 本机开发机 |
-| LAN IP | `192.168.0.92` (en0) |
+| LAN IP | `<本机IP>` (en0) |
 | 仓库路径 | `/Users/pw/工作/pt/medialab` |
 | 分支 | `main` |
 | 远端 | `https://github.com/ppw-stack/medialab.git` |
@@ -40,28 +40,28 @@
 
 | | dev | prod |
 |---|---|---|
-| 位置 | 本机（192.168.0.92） | 远端 `192.168.0.128`（Unraid Tower, x86_64） |
+| 位置 | 本机（<本机IP>） | 远端 `<生产机IP>`（Unraid Tower, x86_64） |
 | 端口 | **8092** | **8092** |
 | 容器名 | `medialab-dev` | `medialab` |
 | 镜像 | `medialab:dev-arm64`（本地构建） | `ppw111/medialab:latest`（Docker Hub） |
 | 数据目录 | `./data-dev/` | `/mnt/user/appdata/medialab/data` |
 | 日志目录 | `./logs-dev/` | `/mnt/user/appdata/medialab/logs` |
 | 凭据文件 | `.env` | `.env.prod` |
-| Compose | `docker-compose.yml` | `docker-compose.prod.128.yml` |
+| Compose | `docker-compose.yml` | `docker-compose.prod.yml` |
 | 用途 | 开发调试 | 生产运行 |
 
-**SSH 访问 prod**：`ssh unraid`（`~/.ssh/config` 中的别名 → `root@192.168.0.128`；旧别名 `mp` 已失效）
+**SSH 访问 prod**：`ssh <别名>`（`~/.ssh/config` 中的别名 → `root@<生产机>`；旧别名 `mp` 已失效）
 
 > ✅ **只有两个 compose 文件**（2026-10-21 起删掉了重复的本机 prod）：
 >
 > | 文件 | 目标 | 端口 | 数据 | 启动方式 |
 > |---|---|---|---|---|
 > | `docker-compose.yml` | dev（本机） | 8092 | `./data-dev` | `build` 本地构建 |
-> | `docker-compose.prod.128.yml` | **远端** prod（128） | 8092 | `/mnt/user/appdata/medialab/data` | 拉 Docker Hub 镜像，无 `build` |
+> | `docker-compose.prod.yml` | **远端** prod（<生产机>） | 8092 | `/mnt/user/appdata/medialab/data` | 拉 Docker Hub 镜像，无 `build` |
 >
 > `scripts/deploy.sh` **只管 dev**（原来还有 `prod` / `all` 分支指向已删除的
 > 本机 prod compose，那个分支会把人引到错误的地方）。
-> 部署到 128 要手动走 `docker-compose.prod.128.yml`（见 §9）。
+> 部署到 <生产机> 要手动走 `docker-compose.prod.yml`（见 §9）。
 
 ## 4. 常用地址与端点
 
@@ -113,36 +113,36 @@
 
 | 服务 | 地址 | 备注 |
 |---|---|---|
-| qBittorrent（容器） | `http://192.168.0.92:8081` | 本机 qB 容器，宿主 8081 → 容器 8080 |
-| Transmission | `http://192.168.0.92:9092` | `tr-local`，仪表盘日志显示**当前不可达** |
-| Transmission | `http://192.168.0.172:9091` | `tr-172`，**间歇性超时**（已知现象） |
+| qBittorrent（容器） | `http://<本机IP>:8081` | 本机 qB 容器，宿主 8081 → 容器 8080 |
+| Transmission | `http://<本机IP>:9092` | `tr-local`，仪表盘日志显示**当前不可达** |
+| Transmission | `http://<nasIP>:9091` | `tr-<nas>`，**间歇性超时**（已知现象） |
 | dev medialab | http://localhost:8092 | |
-| prod medialab | http://192.168.0.128:8092 | |
+| prod medialab | http://<生产机IP>:8092 | |
 
 下载器实例存在 DB 表 `downloader_instances`（字段 `id` / `name` / `type` / `url` / `username` / `password` / `save_path` / `is_default` / `enabled` / `verify_tls` / `is_cross_seed`），
-共 4 条：`qb-local`(qbittorrent) / `tr-local`(transmission) / `mock-cs` / `tr-172`(transmission)。
+共 4 条：`qb-local`(qbittorrent) / `tr-local`(transmission) / `mock-cs` / `tr-<下载器>`(transmission)。
 
-> `192.168.0.172:9090` 是 prod 视角下 qB 的地址（compose 注释所述），
-> 与 dev 库里的 `192.168.0.92:8081` 是不同环境的两套配置。
+> `<nasIP>:9090` 是 prod 视角下 qB 的地址（compose 注释所述），
+> 与 dev 库里的 `<本机IP>:8081` 是不同环境的两套配置。
 
 ### 辅种站的 NAS 挂载（孤儿文件统计用）
 
-辅种数据在 **192.168.0.172**（NAS）上，medialab 容器看不到它——
+辅种数据在 **<nasIP>**（NAS）上，medialab 容器看不到它——
 除非把目录**只读挂载**进来。下载器本身**没有**浏览文件系统的接口
 （TR 的 RPC spec 不提供 filesystem 浏览，qB 也没有列目录 API）。
 
-128 上 Unraid **已自动挂好** CIFS：
+<生产机> 上 Unraid **已自动挂好** CIFS：
 
 ```
-//192.168.0.172/Public on /mnt/remotes/192.168.0.172_Public type cifs (rw,...)
+//<nasIP>/Public on /mnt/remotes/<nasIP>_Public type cifs (rw,...)
 ```
 
 故 prod 只需一行 compose 挂载（已加）：
 
 ```yaml
-- /mnt/remotes/192.168.0.172_Public/home/downloads:/share/Public/home/downloads:rw
+- /mnt/remotes/<nasIP>_Public/home/downloads:<辅种下载目录>:rw
 environment:
-  CROSS_SEED_SCAN_DIRS: ${CROSS_SEED_SCAN_DIRS:-/share/Public/home/downloads/辅种}
+  CROSS_SEED_SCAN_DIRS: ${CROSS_SEED_SCAN_DIRS:-<辅种下载目录>/辅种}
 ```
 
 > ✅ **`CROSS_SEED_SCAN_DIRS` 已落库**（2026-10-26 起）：
@@ -157,8 +157,8 @@ environment:
 > 删除有三重安全闸（只删扫描目录的直接子项 / 删除前二次复核 /
 > 审计日志），见 `app/services/orphan_deleter.py`。
 >
-> **路径必须与下载器里的 `downloadDir` 完全一致**（172 上辅种站的
-> `downloadDir` 就是 `/share/Public/home/downloads/辅种`）。孤儿判定把
+> **路径必须与下载器里的 `downloadDir` 完全一致**（辅种下载器的
+> `downloadDir` 就是 `<辅种下载目录>/辅种`）。孤儿判定把
 > 任务按 `downloadDir` 分组，路径不一致就分不对组。
 >
 > **可以配多个路径**（逗号分隔），每个目录独立扫描 + 独立统计。
@@ -171,7 +171,7 @@ environment:
 > 只看辅种下载器会把那 6 个 qB 任务的数据误判成孤儿（实测误判 480 GB，
 > 占「孤儿」总量的 78%）。
 >
-> **dev（本机 92）无法挂**：172 的 NFS 只导出给 `192.168.0.128`。
+> **dev（本机 92）无法挂**：<nas> 的 NFS 只导出给 `<生产机IP>`。
 > 故 dev 的孤儿统计会降级（记 error「未配置扫描目录」），不影响其他功能。
 >
 > 全量扫 1696 个顶层条目 / 3.6 万文件：CIFS **约 40 秒**（NFS 57 秒）。
@@ -264,7 +264,7 @@ cron 与运行参数**都不再走 env**：
 >
 > 排查小技巧：disable 的请求会出现在容器访问日志里，形如
 > `POST /api/v1/scheduler/push_free_torrents/toggle?enabled=false`，
-> 来源 IP 即操作者（本机是 `192.168.0.253`）。
+> 来源 IP 即操作者（本机是 `<内网尾段-253>`）。
 
 ## 7. 站点适配器（10 站）
 
@@ -507,21 +507,21 @@ cd web && npx vite build
 ./scripts/deploy.sh logs            # 跟日志
 
 # 远端操作
-ssh unraid "docker ps --filter name=medialab"
-ssh unraid "docker logs -f medialab --tail 100"
+ssh <别名> "docker ps --filter name=medialab"
+ssh <别名> "docker logs -f medialab --tail 100"
 ```
 
 ### 本机构建镜像给 prod 用
 
-本机是 arm64，prod（128）是 x86_64，**不能直接 `docker save` 搬运**。需要跨架构时用 buildx：
+本机是 arm64，prod（<生产机>）是 x86_64，**不能直接 `docker save` 搬运**。需要跨架构时用 buildx：
 
 ```bash
 docker buildx build --platform linux/amd64 -t ppw111/medialab:latest --push .
 ```
 
-通常走 CI 即可：push 到 `main` → GitHub Actions 自动构建并推 Docker Hub → 128 上 `docker pull` 后重建。
+通常走 CI 即可：push 到 `main` → GitHub Actions 自动构建并推 Docker Hub → <生产机> 上 `docker pull` 后重建。
 
-### prod（128）的真实部署链路
+### prod（<生产机>）的真实部署链路
 
 CI **只构建推送镜像，不部署**（无 ssh/deploy job）。实际链路是手动三步：
 
@@ -529,15 +529,15 @@ CI **只构建推送镜像，不部署**（无 ssh/deploy job）。实际链路�
 # 1) 本机 push 触发 CI 构建（等 CI 绿）
 git push origin main
 
-# 2) 128 上拉新镜像
-ssh unraid "docker pull ppw111/medialab:latest"
+# 2) <生产机> 上拉新镜像
+ssh <别名> "docker pull ppw111/medialab:latest"
 
-# 3) 128 上重建容器（注意用 .128.yml 那个文件 + TAG=latest）
-ssh unraid "cd /mnt/user/appdata/medialab/app && TAG=latest docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d"
+# 3) <生产机> 上重建容器（注意用 .<生产机>.yml 那个文件 + TAG=latest）
+ssh <别名> "cd /mnt/user/appdata/medialab/app && TAG=latest docker compose -f docker-compose.prod.yml --env-file .env.prod up -d"
 ```
 
 > ⚠️ **第 3 步必须带 `TAG=latest`**（2026-10-22 实测确认）。
-> `docker-compose.prod.128.yml` 里写的是 `image: docker.io/ppw111/medialab:${TAG:-0.1.0}`，
+> `docker-compose.prod.yml` 里写的是 `image: docker.io/ppw111/medialab:${TAG:-0.1.0}`，
 > 而 `.env.prod` **没有** `TAG` 键 → compose 会解析成 `0.1.0`，
 > 部署的是**旧镜像**（`0.1.0` 标签自 10 月起就没更新过），
 > 容器却会显示"重建成功"，**极易误判成部署成功**。
@@ -547,7 +547,7 @@ ssh unraid "cd /mnt/user/appdata/medialab/app && TAG=latest docker compose -f do
 > `PUBLIC_BASE_URL` 是写进 STRM 的中转 URL 前缀，必须与 `HOST_PORT` 一致
 > （compose 里还有 `ports: "${HOST_PORT}:8080"`）。prod 曾在合并迁移时
 > 容器端口从 8099 改为 8092，但 `.env.prod` 的
-> `PUBLIC_BASE_URL=http://192.168.0.128:8099` 没跟着改 → **1176 个 STRM
+> `PUBLIC_BASE_URL=http://<生产机IP>:8099` 没跟着改 → **1176 个 STRM
 > 全部指向死端口 8099，播放全挂**，且「容器重建成功」的表象完全掩盖了它。
 > 排查入口：`cat 一个 .strm 看 URL 端口` → `ss -tln | grep <端口>`；
 > 修复 = 改 `.env.prod` → 重建容器 → **批量修正存量 STRM**
@@ -557,7 +557,7 @@ ssh unraid "cd /mnt/user/appdata/medialab/app && TAG=latest docker compose -f do
 >
 > ⚠️ **部署前先备份 DB**（手工，见 DEPLOY.md §8）：
 > ```bash
-> ssh unraid "cd /mnt/user/appdata/medialab/data && sqlite3 medialab.db \".backup './medialab.db.bak.\$(date +%Y%m%d_%H%M%S)'\""
+> ssh <别名> "cd /mnt/user/appdata/medialab/data && sqlite3 medialab.db \".backup './medialab.db.bak.\$(date +%Y%m%d_%H%M%S)'\""
 > ```
 > 备份后用 `PRAGMA integrity_check;` 确认（损坏的副本没有抢救价值）。
 >
@@ -565,18 +565,18 @@ ssh unraid "cd /mnt/user/appdata/medialab/app && TAG=latest docker compose -f do
 > "Set Docker Hub repo visibility to public" 步骤去 PATCH Docker Hub API，
 > 但那个接口现在对 JWT 认证返回 **403**（连续 3 次 CI 全 403，从未成功过），
 > 已删除。改成只读的 "Verify image is publicly pullable"——用**匿名** token
-> 拉 manifest，200 = public 可拉（128 主机没有 Docker Hub 凭据，靠 public 拉）。
+> 拉 manifest，200 = public 可拉（<生产机> 主机没有 Docker Hub 凭据，靠 public 拉）。
 > 该步骤失败 = 镜像真拉不动，此时 workflow 会变红，是真问题。
 >
 > 判断镜像有没有推上去仍要看 Docker Hub 的 tag `last_updated`，
 > 不要只看 workflow 的红绿灯。
 
-> ⚠️ 128 上的 `/mnt/user/appdata/medialab/app/` **不是 git 仓库**，且代码副本已陈旧
+> ⚠️ <生产机> 上的 `/mnt/user/appdata/medialab/app/` **不是 git 仓库**，且代码副本已陈旧
 > （仍是 10 月 14 日的版本）。容器真正跑的是 Docker Hub 镜像里的代码，
 > 挂载到容器的只有 `config/` `data/` `logs/` 三个目录。
-> **不要以为改 128 上的 `app/` 目录就能生效** —— 改 compose 文件需同步在 128 上落地。
+> **不要以为改 <生产机> 上的 `app/` 目录就能生效** —— 改 compose 文件需同步在 <生产机> 上落地。
 >
-> ⚠️ compose 文件改了也要同步到 128（它不是 git 仓库，不会自动更新）。
+> ⚠️ compose 文件改了也要同步到 <生产机>（它不是 git 仓库，不会自动更新）。
 
 ## 10. CI
 

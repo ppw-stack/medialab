@@ -2,8 +2,8 @@
 
 两套环境**跑在两台不同的机器上**：
 
-- **dev** — 本机（192.168.0.92，arm64），本地 `build` 镜像，端口 8092
-- **prod** — 远端 128（192.168.0.128，Unraid Tower，x86_64），拉 Docker Hub 镜像，端口 8092
+- **dev** — 本机（<本机IP>，arm64），本地 `build` 镜像，端口 8092
+- **prod** — 远端 <生产机>（<生产机IP>，Unraid Tower，x86_64），拉 Docker Hub 镜像，端口 8092
 
 镜像由 GitHub Actions 构建并推送到 Docker Hub（`docker.io/ppw111/medialab`，public）。
 **CI 只构建推送，不部署** —— 部署是手动两步（见 §4）。
@@ -27,11 +27,11 @@
 
 | | dev | prod |
 |---|---|---|
-| 位置 | 本机 `192.168.0.92`（arm64） | 远端 `192.168.0.128`（Unraid Tower, x86_64） |
+| 位置 | 本机 `<本机IP>`（arm64） | 远端 `<生产机IP>`（Unraid Tower, x86_64） |
 | 端口 | **8092** | **8092** |
 | 容器名 | `medialab-dev` | `medialab` |
 | 镜像 | 本地 `docker compose build` | `ppw111/medialab:latest`（Docker Hub） |
-| Compose 文件 | `docker-compose.yml` | `docker-compose.prod.128.yml` |
+| Compose 文件 | `docker-compose.yml` | `docker-compose.prod.yml` |
 | 数据目录 | `./data-dev/` | `/mnt/user/appdata/medialab/data` |
 | 日志目录 | `./logs-dev/` | `/mnt/user/appdata/medialab/logs` |
 | 凭据文件 | `.env` | `.env.prod` |
@@ -40,7 +40,7 @@
 两套**完全独立**：不同机器、不同端口、不同 SQLite DB、不同 Web Token。
 数据不自动同步，需要时手工迁移（见 §7）。
 
-> ⚠️ **prod 的 compose 文件必须同步到 128**——那里不是 git 仓库，
+> ⚠️ **prod 的 compose 文件必须同步到 <生产机>**——那里不是 git 仓库，
 > `app/` 目录只是放 compose 文件的落点，容器跑的是镜像里的代码。
 
 ## 2. 前置条件
@@ -52,7 +52,7 @@
 | 主机端口 | 8092 空闲（dev） | `lsof -i :8092` |
 | 磁盘 | >= 5 GB 可用 | `df -h .` |
 
-生产机（128）另需 SSH 访问：`ssh mp`（`~/.ssh/config` 别名 → `root@192.168.0.128`）。
+生产机（<生产机>）另需 SSH 访问：`ssh <别名>`（`~/.ssh/config` 中的别名，指向生产机）。
 
 ## 3. 准备凭据
 
@@ -97,7 +97,7 @@ cp .env.example .env.prod
 # 用上面的 secrets 命令生成 2 个新值，覆盖 .env.prod 里的占位
 ```
 
-`.env.prod` 需要同步到 128 的 `/mnt/user/appdata/medialab/app/`。
+`.env.prod` 需要同步到 <生产机> 的 `/mnt/user/appdata/medialab/app/`。
 
 > `.env` 和 `.env.prod` 都已在 `.gitignore`，不会进 git。
 > 但应**额外备份到密码管理器**。
@@ -117,7 +117,7 @@ docker compose up -d
 
 > `scripts/deploy.sh` **只管 dev**。生产走下面的手动链路。
 
-### prod（128）
+### prod（<生产机>）
 
 三步：
 
@@ -125,11 +125,11 @@ docker compose up -d
 # 1) 本机 push 触发 CI（闸门绿 → 自动构建推送镜像）
 git push origin main
 
-# 2) 等 docker-image workflow 完成（确认镜像已推上去），然后 128 上拉新镜像
-ssh mp "docker pull ppw111/medialab:latest"
+# 2) 等 docker-image workflow 完成（确认镜像已推上去），然后 <生产机> 上拉新镜像
+ssh <别名> "docker pull ppw111/medialab:latest"
 
-# 3) 128 上重建容器
-ssh mp "cd /mnt/user/appdata/medialab/app && TAG=latest docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d"
+# 3) <生产机> 上重建容器
+ssh <别名> "cd /mnt/user/appdata/medialab/app && TAG=latest docker compose -f docker-compose.prod.yml --env-file .env.prod up -d"
 ```
 
 > **CI 是有依赖链的**（2026-10-23 改）：`push` → `ci`（ruff/mypy/pytest/
@@ -144,7 +144,7 @@ ssh mp "cd /mnt/user/appdata/medialab/app && TAG=latest docker compose -f docker
 > 需先 `docker stop -t 60 medialab && docker rm medialab`。
 > 60s 宽限期对应 `stop_grace_period`，让在途作业收尾。
 >
-> ⚠️ **128 上偶发「stop 不掉」**（2026-11-03 遇到一次）：应用本身已正常
+> ⚠️ **<生产机> 上偶发「stop 不掉」**（2026-11-03 遇到一次）：应用本身已正常
 > 停机（日志有「已停机」+「Application shutdown complete」），但主进程变成
 > 僵尸（`ps aux` 显示 `[uvicorn] <defunct>`），Docker 等不到退出事件，
 > 报 `cannot stop container: tried to kill container, but did not receive
@@ -163,14 +163,14 @@ curl -fsS http://localhost:8092/healthz
 # 期望：{"status":"ok","db":true,"version":"0.2.0"}
 
 # prod（远端）
-ssh mp "curl -fsS http://localhost:8092/healthz"
+ssh <别名> "curl -fsS http://localhost:8092/healthz"
 
 # 指标端点（需登录：Bearer WEB_TOKEN，或从反代内网放行）
 curl -fsS -H "Authorization: Bearer <WEB_TOKEN>" http://localhost:8092/metrics | head
 
 # Web UI
 open http://localhost:8092          # dev
-open http://192.168.0.128:8092      # prod
+open http://<生产机IP>:8092      # prod
 # 浏览器登录：用户名=WEB_USERNAME、密码=WEB_PASSWORD
 
 # 状态总览
@@ -183,9 +183,9 @@ open http://192.168.0.128:8092      # prod
 # 1) 本机提交并推送（CI 闸门绿后自动构建镜像）
 git push origin main
 
-# 2) 128 上拉镜像 + 重建
-ssh mp "docker pull ppw111/medialab:latest"
-ssh mp "cd /mnt/user/appdata/medialab/app && TAG=latest docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d"
+# 2) <生产机> 上拉镜像 + 重建
+ssh <别名> "docker pull ppw111/medialab:latest"
+ssh <别名> "cd /mnt/user/appdata/medialab/app && TAG=latest docker compose -f docker-compose.prod.yml --env-file .env.prod up -d"
 ```
 
 `stop_grace_period: 60s` 保证 SIGTERM 优雅停机（FR-8.2：等待在途作业收敛）。
@@ -221,7 +221,7 @@ sqlite3 ./data-dev/medialab.db ".backup './backups/$(date +%Y%m%d)/medialab.db'"
 ### prod（远端）
 
 ```bash
-ssh mp "cd /mnt/user/appdata/medialab/data && \
+ssh <别名> "cd /mnt/user/appdata/medialab/data && \
   sqlite3 medialab.db \".backup './medialab.db.bak.\$(date +%Y%m%d_%H%M%S)'\""
 ```
 
@@ -235,14 +235,14 @@ ssh mp "cd /mnt/user/appdata/medialab/data && \
 
 ```bash
 # 1) 停 prod 防写中
-ssh mp "cd /mnt/user/appdata/medialab/app && docker compose -f docker-compose.prod.128.yml stop"
+ssh <别名> "cd /mnt/user/appdata/medialab/app && docker compose -f docker-compose.prod.yml stop"
 
 # 2) 备份式拷贝（保持事务一致）
-ssh mp "cd /mnt/user/appdata/medialab/data && sqlite3 medialab.db \".backup './medialab.db.bak.\$(date +%Y%m%d_%H%M%S)'\""
+ssh <别名> "cd /mnt/user/appdata/medialab/data && sqlite3 medialab.db \".backup './medialab.db.bak.\$(date +%Y%m%d_%H%M%S)'\""
 scp ./data-dev/medialab.db mp:/mnt/user/appdata/medialab/data/medialab.db
 
 # 3) 起 prod
-ssh mp "cd /mnt/user/appdata/medialab/app && docker compose -f docker-compose.prod.128.yml start"
+ssh <别名> "cd /mnt/user/appdata/medialab/app && docker compose -f docker-compose.prod.yml start"
 ```
 
 ## 9. 目录约定
@@ -262,12 +262,12 @@ ssh mp "cd /mnt/user/appdata/medialab/app && docker compose -f docker-compose.pr
     └── deploy.sh       # 仅 dev
 ```
 
-### prod（128）
+### prod（<生产机>）
 
 ```
 /mnt/user/appdata/medialab/
 ├── app/
-│   ├── docker-compose.prod.128.yml   # 手工同步（不是 git 仓库）
+│   ├── docker-compose.prod.yml   # 手工同步（不是 git 仓库）
 │   └── .env.prod                     # 手工同步
 ├── config/     # → 容器 /app/config
 ├── data/       # → 容器 /app/data（SQLite）

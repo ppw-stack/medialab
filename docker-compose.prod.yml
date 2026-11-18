@@ -1,4 +1,4 @@
-# 生产环境（部署在 192.168.0.128 — Unraid Tower）部署编排。
+# 生产环境（部署在 <生产机IP> — Unraid Tower）部署编排。
 #
 # 与根目录的 docker-compose.yml 的差别：
 #   · **不 build**——服务器上只有编排文件与 .env.prod，没有源码；
@@ -10,7 +10,7 @@
 #
 # 用法（在服务器 /mnt/user/appdata/medialab/app 下，与 DEPLOY.md 一致）：
 #
-#     docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d
+#     docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
 #
 # ⚠️ TAG 默认 latest。若要用某个确定版本，显式传 TAG=sha-xxxxxxx。
 #    （CI 会同时推 latest / main / sha-<7位> 三个 tag）
@@ -35,14 +35,14 @@ services:
       - ${APPDATA_DIR:-/mnt/user/appdata/medialab}/config:/app/config
       # STRM 输出目录。刻意与 cloud-media-sync 的 embyLibrary 并列而不共用，
       # 否则两个服务会对同一部片各写一个 strm，Emby 里出现重复版本。
-      # 走 172 的 Public 共享（128 上已 CIFS 挂载），Emby 因此无需改挂载，
+      # 走 <nas> 的 Public 共享（<生产机> 上已 CIFS 挂载），Emby 因此无需改挂载，
       # 只要在 Emby 里加一个库路径即可。
       - ${LIBRARY_DIR:?LIBRARY_DIR 必须指向 STRM 输出目录}:/app/library
       # 上传任务的监听目录（可选）。容器看不到宿主机任意路径——
       # 要监听的目录必须挂进来，且**容器内外路径要一致**
       # （面板上按容器内路径选）。
       #
-      # ⚠️ 128 上的 /mnt/user 是 shfs/FUSE，**不支持 inotify**——
+      # ⚠️ <生产机> 上的 /mnt/user 是 shfs/FUSE，**不支持 inotify**——
       #    故 UPLOAD_WATCH_POLLING 必须保持 true（默认即是）。
       #
       # **读写挂载**：开了任务的「同步成功后删除本地文件」就需要容器能删
@@ -51,14 +51,14 @@ services:
       # 辅种站的下载目录——用于统计孤儿文件（只读挂载）。
       #
       # ⚠️ 挂载点必须与下载器里的 downloadDir **完全同路径**
-      # （172 上是 /share/Public/home/downloads）。这样任务的绝对路径
+      # （<nas> 上是 /share/Public/home/downloads）。这样任务的绝对路径
       # 能直接与磁盘上的绝对路径比对，不用做路径映射——映射一旦有偏差，
       # 就会把所有条目误判成孤儿。
       #
       # 权限是 **rw**（不是 ro）——孤儿文件删除功能需要写权限。
       # 删除有三重安全闸（目录范围 / 二次复核 / 审计日志），
       # 见 app/services/orphan_deleter.py。
-      - /mnt/remotes/192.168.0.172_Public/home/downloads:/share/Public/home/downloads:rw
+      - ${NAS_DOWNLOADS_ROOT:-/mnt/remotes/<nasIP>_Public/home/downloads}:/share/Public/home/downloads:rw
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
       interval: 30s
