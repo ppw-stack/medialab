@@ -1,0 +1,13 @@
+title: 直接 import 的库必须显式声明为依赖
+rule: |
+  - 不要靠传递依赖引入库。例如 uvicorn[standard] 传递引入了 watchfiles，
+    但项目直接 import 它，所以它必须显式声明在 [project].dependencies 里。
+  - 新增 import 时，同步更新 pyproject.toml 的依赖列表。
+  - 依赖管理用 uv（uv.lock），不是 pip / poetry。
+severity: medium
+scope: file
+path: 'app/**'
+inheritance:
+  inheritable: true
+  exclude: []
+  include: []

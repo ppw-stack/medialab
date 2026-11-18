@@ -1,0 +1,20 @@
+title: 不得破坏单实例运行约束
+rule: |
+  应用只能单实例运行：
+
+  - 不得修改 Dockerfile 中的 --workers 1。
+  - 不得用多副本共享同一个 DB 卷。
+  - app/services/instance_lease.py 在 lifespan 里抢 DB 租约（TTL 60s + 心跳），
+    第二个 worker / 副本会直接启动失败。
+  - 调度中心、四套 *_jobs 内存表、watch_manager 的 10 组全局字典、QR session
+    都是进程内状态，没有跨进程方案。
+
+  如果改动涉及启动参数、worker 数量、卷挂载或 lifespan，必须确认没有引入
+  多副本假设；测试环境（env="test"）会跳过租约，不要据此放宽生产约束。
+severity: critical
+scope: pull-request
+path: 'Dockerfile'
+inheritance:
+  inheritable: true
+  exclude: []
+  include: []

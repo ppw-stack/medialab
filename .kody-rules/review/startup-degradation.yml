@@ -1,0 +1,19 @@
+title: 启动降级路径必须登记到 startup_status.py
+rule: |
+  以前「只记日志继续启动」的失败路径，现在必须写 app/services/startup_status.py
+  的台账：
+
+  - 涉及监听器加载、单任务启动、驱动测连、密码升级、探活目录读取等启动期降级。
+  - /readyz 会把台账显示在 degradations 里，并把 status 标成 degraded
+    （HTTP 仍 200，不触发容器重启）。
+  - 新增或修改任何启动期的失败降级分支时，必须同步在 startup_status.py 登记，
+    否则 /readyz 不会暴露该降级，运维就看不到它。
+
+  如果本次改动新增了「捕获异常后继续启动」的分支，检查它是否已登记。
+severity: high
+scope: pull-request
+path: 'app/**'
+inheritance:
+  inheritable: true
+  exclude: []
+  include: []

@@ -1,0 +1,14 @@
+title: 测试命令与依赖管理方式
+rule: |
+  - 分层约束相关改动后必须跑：uv run pytest tests/unit/test_layering.py
+  - 依赖管理用 uv（uv.lock），不要引入 pip / poetry 的依赖文件。
+  - 改完 Dockerfile 或启动参数，确认 --workers 1 没被改（见「不得破坏单实例
+    运行约束」规则）。
+  - 必读文档：README.md（现状与命令）、docs/merge-strmmanger.md（合并方案与
+    冲突清单）、docs/upload-bandwidth.md（上传带宽实测结论：并发为何无效）。
+severity: medium
+scope: pull-request
+inheritance:
+  inheritable: true
+  exclude: []
+  include: []

@@ -1,0 +1,18 @@
+title: MediaLab 项目定位与两个业务域的 API 前缀
+rule: |
+  一个应用装下两个业务域，共用一套面板、一个 SQLite、一个 SPA：
+
+  - 辅种域（原 ptHelper）—— PT 站点拉取 / 免费种窗口看护 / 辅种巡检 / 孤儿清理
+  - 媒体库域（原 strmmanger）—— 网盘 STRM 生成 / 302 中转 / WebDAV / 数据同步
+    （本地 → 网盘）
+
+  两个域的 API 前缀天然不冲突：辅种域 /api/v1/*，媒体库域 /api/*。
+
+  审查时不要把两个域的路由、模型或服务混为一谈 —— 跨域引用通常是分层违规的
+  早期信号。技术栈：Python 3.12 + FastAPI + SQLite + Vue 3。
+severity: medium
+scope: pull-request
+inheritance:
+  inheritable: true
+  exclude: []
+  include: []

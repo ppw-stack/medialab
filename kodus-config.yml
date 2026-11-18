@@ -1,0 +1,50 @@
+# Kodus 集中式配置 —— 全局作用域（配置仓库根目录）
+#
+# 这个文件是「diff 语义」：只写你要覆盖的字段，其余继承默认值
+# （见 default-kodus-config.yml）。
+#
+# 作用域优先级：组织(本文件) → 仓库(medialab/kodus-config.yml) → 目录
+
+version: 2.0
+
+# ── 审查触发 ──────────────────────────────────────────────
+automatedReviewActive: true
+reviewMode: balanced              # balanced | heavy
+showStatusFeedback: true
+runOnDraft: true
+reviewCadence:
+    type: 'automatic'             # automatic | auto_pause | manual
+    timeWindow: 15                # 分钟
+    pushesToTrigger: 3
+
+# ── 审查范围 ──────────────────────────────────────────────
+reviewOptions:
+    bug: true
+    performance: true
+    security: true
+    business_logic: false         # 未接 Jira/Linear 等任务追踪器，关闭
+
+# ── 让 Kody 自动检查 AGENTS.md ─────────────────────────────
+# 本仓库已有 AGENTS.md（硬性分层约束 / 单实例 / 时间口径 / wsgi 弃用等）。
+# 开启后 Kody 会把本次改动与 AGENTS.md 对照，指出违反之处。
+repoInstructionsEnabled: true
+
+# ── 建议过滤 ──────────────────────────────────────────────
+suggestionControl:
+    severityLevelFilter: 'medium' # low | medium | high | critical
+    applyFiltersToKodyRules: false
+
+# ── PR 摘要 ───────────────────────────────────────────────
+summary:
+    generatePRSummary: true
+    behaviourForNewCommits: 'none'
+    behaviourForExistingDescription: 'replace'
+
+# ── Kody Rules ────────────────────────────────────────────
+kodyRulesGeneratorEnabled: true
+kodyRulesAutoPauseEnabled: false
+kodyKnowledgeApproval:
+    enabled: false                 # AI 生成的规则自动生效
+
+# ── 模型 ──────────────────────────────────────────────────
+byokModel: ''                     # 空 = 继承 BYOK 设置里的主模型

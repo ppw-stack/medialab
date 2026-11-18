@@ -1,0 +1,14 @@
+title: 不得使用 starlette.middleware.wsgi，桥接一律用 a2wsgi
+rule: |
+  - 不得使用 starlette.middleware.wsgi —— 它已废弃（StarletteDeprecationWarning），
+    官方指向 a2wsgi。
+  - WSGI → ASGI 桥接必须用 a2wsgi（已在 pyproject.toml 显式声明为直接依赖）。
+  - WebDAV 只用 wsgidav 的协议层，认证 / 限流 / 审计走本项目自己的 ASGI 中间件
+    （见 app/webdav/）。
+severity: high
+scope: file
+path: 'app/**'
+inheritance:
+  inheritable: true
+  exclude: []
+  include: []

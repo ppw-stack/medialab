@@ -1,0 +1,47 @@
+# MediaLab —— 仓库级覆盖（目录名与 Kodus 中的仓库名一致）
+#
+# 全局配置在 ../../kodus-config.yml，这里只写本仓库特有的部分。
+
+version: 2.0
+
+ignorePaths:
+    # —— Kodus 默认 ——
+    - 'yarn.lock'
+    - 'package-lock.json'
+    - 'package.json'
+    - '.env'
+    - '**/*.json'
+    - '**/*.gif'
+    - '**/*.png'
+    - '**/*.jpg'
+    - '**/*.jpeg'
+    - '**/*.pdf'
+    - '**/*.svg'
+    - '**/*.ico'
+    - '**/*.mp4'
+    - '**/*.mp3'
+    - '**/*.zip'
+    - '**/*.tar.gz'
+    - '**/*.db'
+    - '**/*.db-wal'
+    - '**/*.db-shm'
+    - '**/*.log'
+    - '**/node_modules/**'
+    - '**/dist/**'
+    - '**/build/**'
+    - '**/.venv/**'
+    - '**/__pycache__/**'
+    # —— 本项目特有 ——
+    - 'uv.lock'                     # uv 依赖锁（只读生成）
+    - 'web/node_modules/**'
+    - 'web/dist/**'
+    - '**/.pytest_cache/**'
+    - '**/.ruff_cache/**'
+    - '**/*.db'                      # SQLite 运行期数据
+
+reviewOptions:
+    business_logic: false           # 无任务追踪器
+
+suggestionControl:
+    severityLevelFilter: 'medium'
+    applyFiltersToKodyRules: false
