@@ -12,12 +12,12 @@
 #   ./scripts/deploy.sh status             # 查 dev 状态
 #   ./scripts/deploy.sh help               # 帮助
 #
-# ⚠️ 生产环境（192.168.0.128 Unraid）**不走本脚本**：
+# ⚠️ 生产环境（<生产机IP> Unraid）**不走本脚本**：
 #    - CI 只构建推送镜像，不部署（见 .github/workflows/docker-image.yml）
-#    - 128 上手动执行：
+#    - <生产机> 上手动执行：
 #      cd /mnt/user/appdata/medialab
-#      TAG=latest docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d
-#    - 完整链路见 LOCAL_ENV.md §9「prod（128）的真实部署链路」
+#      TAG=latest docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+#    - 完整链路见 LOCAL_ENV.md §9「prod（<生产机>）的真实部署链路」
 #
 # 前置：dev 的 .env 已就绪（含 WEB_PASSWORD / WEB_TOKEN）
 set -euo pipefail
@@ -131,10 +131,10 @@ command:
 
 前置：dev 的 .env 必须就绪（WEB_PASSWORD / WEB_TOKEN）
 
-⚠️ 生产环境（192.168.0.128 Unraid）不走本脚本：
-   CI 只构建推送镜像不部署；在 128 上手动执行
+⚠️ 生产环境（<生产机IP> Unraid）不走本脚本：
+   CI 只构建推送镜像不部署；在 <生产机> 上手动执行
      cd /mnt/user/appdata/medialab
-     TAG=latest docker compose -f docker-compose.prod.128.yml --env-file .env.prod up -d
+     TAG=latest docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
    完整链路见 LOCAL_ENV.md §9。
 EOF
   exit 0

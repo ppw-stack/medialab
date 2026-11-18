@@ -82,7 +82,7 @@ async def _add_downloader(name: str = "dl1") -> int:
         row = DownloaderInstance(
             name=name,
             type="transmission",
-            url="http://192.168.0.172:9091",
+            url="http://192.168.0.<nas>:9091",
             is_cross_seed=True,
             enabled=True,
         )
@@ -102,7 +102,7 @@ async def _add_non_cross_seed_downloader(name: str = "qb") -> int:
         row = DownloaderInstance(
             name=name,
             type="qbittorrent",
-            url="http://192.168.0.172:9090",
+            url="http://192.168.0.<nas>:9090",
             is_cross_seed=False,
             enabled=True,
         )

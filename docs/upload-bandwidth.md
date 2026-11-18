@@ -18,7 +18,7 @@
 
 | 项 | 值 |
 |---|---|
-| 客户端 | prod 容器（`ssh mp`，192.168.0.128） |
+| 客户端 | prod 容器（`ssh <别名>`，<生产机IP>） |
 | 网盘 | 光鸭（`guangya`），真实账号 |
 | OSS endpoint | `cn-zhangjiakou.oss.aliyuncs.com`（阿里云张家口） |
 | RTT | **31 ms** |
