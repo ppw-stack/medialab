@@ -523,7 +523,14 @@ async def _sync_group_locked(
     max_submissions: int | None = MAX_SUBMISSIONS_PER_RUN,
     include_failed: bool = False,
 ) -> None:
-    """归拢一个聚合组（调用方必须已持组级锁）。"""
+    """归拢一个聚合组（调用方必须已持组级锁）。
+
+    Args:
+        group_id: 聚合组 id。
+        result: 结果对象（**就地更新**，调用方能实时读进度）。
+        max_submissions: 单轮最多提交多少次（``None`` = 不限）。
+        include_failed: ``failed`` 行是否纳入本轮（手动 = True，定时 = False）。
+    """
     async with session_scope() as db:
         group = (
             await db.execute(
