@@ -12,8 +12,9 @@
 #
 #     docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
 #
-# ⚠️ TAG 默认 latest。若要用某个确定版本，显式传 TAG=sha-xxxxxxx。
-#    （CI 会同时推 latest / main / sha-<7位> 三个 tag）
+# ⚠️ TAG 默认 latest。镜像只在发布时构建：git tag v1.0.1 → 镜像 tag
+#    latest / 1.0.1 / 1.0（**Docker tag 不带 v 前缀**，传 TAG=v1.0.1 会
+#    manifest not found）。锁定确定版本显式传 TAG=1.0.1。
 
 name: medialab
 
