@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import pathlib
+from datetime import timedelta
 from urllib.parse import parse_qs
 
 import httpx
@@ -28,6 +29,7 @@ from app.adapters.sites._registry import list_available, list_meta
 from app.adapters.sites.base import (
     BreakerTripped,
     FeedItem,
+    Promotion,
     SiteAdapter,
     SiteFetchError,
     SiteHealth,
@@ -35,6 +37,8 @@ from app.adapters.sites.base import (
     TorrentBrief,
     TorrentDetail,
 )
+from app.adapters.sites.hdwing import _current_promotion, _parse_promotion_records
+from app.core.timeutils import bj_now_dt, format_bj
 
 #: 10 个已注册站点适配器
 ALL_ADAPTERS = (
@@ -870,25 +874,40 @@ async def test_hdwing_search_raises_when_list_structure_changed() -> None:
 
 
 async def test_hdwing_get_promotion_parses_active_free() -> None:
-    """优惠历史表 → 当前生效的 Free（含起止时间）。
+    """优惠历史表 → Free 记录（含起止时间）。
 
     真实页面固化：``promotion.php?id=840093`` 的「种子优惠日志」区块。
+
+    ⚠️ 这里断言的是**纯解析**结果（``_parse_promotion_records``），不是
+    「当前是否生效」——fixture 里的截止时间是 2026-11-16，过了那个点
+    「生效中」就变成「已过期」，断言会随时间自己变红。生效判定另有合成
+    数据的用例（``test_hdwing_current_promotion_*``）。
     """
-    adapter = _make("hdwing")
-    try:
-        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
-            router.get("https://example.com/promotion.php?id=840093").mock(
-                return_value=httpx.Response(
-                    200, text=_hdwing_fixture("hdwing_promotion_active.html")
-                )
-            )
-            promo = await adapter.get_promotion("840093")
-        assert promo is not None
-        assert promo.kind == "Free"
-        assert promo.start_at == "2026-11-16 15:29:40"
-        assert promo.end_at == "2026-11-16 21:29:40"
-    finally:
-        await adapter.close()
+    records = _parse_promotion_records(
+        _hdwing_fixture("hdwing_promotion_active.html")
+    )
+    assert len(records) == 1
+    rec = records[0]
+    assert rec.kind == "Free"
+    assert rec.start_at == "2026-11-16 15:29:40"
+    assert rec.end_at == "2026-11-16 21:29:40"
+
+
+async def test_hdwing_current_promotion_keeps_future_and_permanent() -> None:
+    """「当前生效」判定：截止在未来 → 生效；截止为空 → 永久 → 生效。"""
+    now = bj_now_dt()
+    future = format_bj(now + timedelta(days=2))
+    past = format_bj(now - timedelta(days=2))
+
+    assert _current_promotion(
+        [Promotion(kind="Free", start_at=None, end_at=future)]
+    ) is not None
+    assert _current_promotion(
+        [Promotion(kind="Free", start_at=None, end_at=None)]
+    ) is not None
+    assert _current_promotion(
+        [Promotion(kind="Free", start_at=None, end_at=past)]
+    ) is None
 
 
 async def test_hdwing_get_promotion_skips_expired_and_non_free_rows() -> None:
@@ -897,20 +916,13 @@ async def test_hdwing_get_promotion_skips_expired_and_non_free_rows() -> None:
     真实页面（``id=840065``）有两行：生效中的 Free + 已过期的 50%
     （过期行带删除线样式，但**不依赖**那个样式判定）。
     """
-    adapter = _make("hdwing")
-    try:
-        with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
-            router.get("https://example.com/promotion.php?id=840065").mock(
-                return_value=httpx.Response(
-                    200, text=_hdwing_fixture("hdwing_promotion_mixed.html")
-                )
-            )
-            promo = await adapter.get_promotion("840065")
-        assert promo is not None
-        assert promo.kind == "Free"
-        assert promo.end_at == "2026-11-18 17:52:34"
-    finally:
-        await adapter.close()
+    records = _parse_promotion_records(
+        _hdwing_fixture("hdwing_promotion_mixed.html")
+    )
+    # 只取 Free 行：50%（半价下载）不是免费种
+    assert len(records) == 1
+    assert records[0].kind == "Free"
+    assert records[0].end_at == "2026-11-18 17:52:34"
 
 
 async def test_hdwing_get_promotion_returns_none_without_records() -> None:

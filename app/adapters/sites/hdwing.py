@@ -90,6 +90,14 @@ from app.core.timeutils import bj_now_dt, parse_bj
 
 logger = get_logger(__name__)
 
+#: 暴露给测试的内部函数（避免破坏其它测试覆盖；同 window_parser 做法）。
+#: 「纯解析」与「当前生效」要分开测：fixture 里的「生效中」样本到了截止
+#: 时间就会变过期，混在一起断言会让测试随时间自己变红。
+__test_exports__ = [
+    "_current_promotion",
+    "_parse_promotion_records",
+]
+
 
 class _TorrentDownloadError(RuntimeError):
     """下载 .torrent 失败（缺 cookies / HTTP 错误 / 非法响应）。
