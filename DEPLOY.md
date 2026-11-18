@@ -122,20 +122,22 @@ docker compose up -d
 三步：
 
 ```bash
-# 1) 本机 push 触发 CI（闸门绿 → 自动构建推送镜像）
-git push origin main
+# 1) 合并到 main 后，打发布 tag 触发镜像构建（**push main 本身不出镜像**）
+git tag v1.0.2 && git push origin v1.0.2
 
-# 2) 等 docker-image workflow 完成（确认镜像已推上去），然后 <生产机> 上拉新镜像
-ssh <别名> "docker pull ppw111/medialab:latest"
+# 2) 等 CI 绿 + docker-image workflow success（确认镜像已推上去，tag 是 1.0.2 不带 v）
+ssh <别名> "docker pull ppw111/medialab:1.0.2"
 
-# 3) <生产机> 上重建容器
-ssh <别名> "cd /mnt/user/appdata/medialab/app && TAG=latest docker compose -f docker-compose.prod.yml --env-file .env.prod up -d"
+# 3) <生产机> 上重建容器（锁定该发布版本）
+ssh <别名> "cd /mnt/user/appdata/medialab/app && TAG=1.0.2 docker compose -f docker-compose.prod.yml --env-file .env.prod up -d"
 ```
 
-> **CI 是有依赖链的**（2026-10-23 改）：`push` → `ci`（ruff/mypy/pytest/
-> vue-tsc/oxlint 闸门）→ **全绿才** `docker-image`（构建推送）。
+> **CI 是有依赖链的**（2026-10-23 改）：`push`（PR 合并 / tag push）→ `ci`
+> （ruff/mypy/pytest/vue-tsc/oxlint 闸门）→ **全绿才** `docker-image`（构建推送）。
 > 闸门红 → **不产出镜像**，第 2 步拉到的还是旧镜像（不会拉到半成品）。
 > 所以第 2 步前先确认 `docker-image` workflow 是 success。
+> ⚠️ **日常合并到 main 不出镜像**——CI 绿只会干净跳过 docker-image；
+> 只 push main 就 pull，拉到的还是旧 `latest`（部署静默失效）。
 >
 > ℹ️ compose 里 `TAG` 默认 `latest`。镜像**只在发布时构建**：打 `v*` tag
 > （如 `v1.0.1`）→ CI 绿 → docker-image 推 `latest` / `1.0.1` / `1.0` 三个 tag。
