@@ -167,6 +167,25 @@ class SyncOutcome:
     cloud_kept: bool = False
     #: 本地文件是否已被删除（``delete_local`` 开启且成功时）
     local_deleted: bool = False
+    #: **组级幂等命中**：文件已在组内缓冲 / 主盘（不是本次上传的产物）。
+    #:
+    #: 命中时**不要**再登记台账——它早就在台账里了（这正是命中的原因）。
+    staged_hit: bool = False
+
+
+@dataclass(frozen=True)
+class StagedHit:
+    """**组级幂等命中**的条目（聚合模式）。
+
+    文件已在组内缓冲（另一个副盘）或已归拢到主盘 → 不必重传。
+    """
+
+    #: 云端字节数
+    size: int
+    #: 云端 fileId（清理本地前的校验依据）
+    file_id: str
+    #: 人类可读说明（如「副盘 3（pending）」）
+    note: str = ""
 
 
 @dataclass
@@ -184,6 +203,10 @@ class SyncContext:
             **默认关**——破坏性操作，需任务级显式开启。
         conflict_policy: 同名且大小不同时的冲突策略（见
             :data:`CONFLICT_KEEP_LARGER`）。默认**保留大的**。
+        staged_lookup: **组级幂等探测**（聚合模式用）。签名
+            ``(rel_dir, file_name, size) -> CloudEntry | None``（可 await）——
+            返回组内缓冲/主盘里**已存在的同名同大小**文件则不必重传。
+            ``None`` = 不用这层探测（普通存储源目标）。
     """
 
     driver: Any
@@ -194,6 +217,8 @@ class SyncContext:
     delete_delay: float = 0.5
     delete_local: bool = False
     conflict_policy: int = CONFLICT_KEEP_LARGER
+    #: 组级幂等探测（见属性说明）。普通任务为 None。
+    staged_lookup: Any = None
 
 
 async def sync_file(
@@ -230,6 +255,24 @@ async def sync_file(
     rel_dir = parent_dir(rel_path)
     file_name = base_name(rel_path)
 
+    # ⓪ **组级幂等探测**（聚合模式）：文件可能已经在**另一个副盘**的缓冲
+    # 里，或**已经归拢到主盘**——落点会换盘，不能只看当前落点目录。
+    # 命中即视为「已同步」，不重复上传（白耗上行带宽与云添加额度）。
+    if ctx.staged_lookup is not None:
+        staged = await ctx.staged_lookup(rel_dir, file_name, size)
+        if staged is not None:
+            outcome = _unchanged_outcome(
+                ctx,
+                local_path,
+                rel_path,
+                size=size,
+                cloud_size=staged.size,
+                cloud_file_id=staged.file_id,
+                reason=f"已在组内缓冲（{staged.note}）" if staged.note else "已在组内缓冲",
+            )
+            outcome.staged_hit = True
+            return outcome
+
     try:
         dir_id, existing = await ctx.index.resolve(rel_dir)
     except DriverError as exc:
@@ -244,21 +287,14 @@ async def sync_file(
     # 已确认「云端是完整副本，本地可删」，故 UNCHANGED 也走清理。
     # 校验同步做、删除异步（见下方第 ⑤ 步的说明）——不绕过校验。
     if remote is not None and remote.size == size:
-        outcome = SyncOutcome(
-            RESULT_UNCHANGED,
+        return _unchanged_outcome(
+            ctx,
+            local_path,
             rel_path,
             size=size,
-            cloud_file_id=remote.file_id,
             cloud_size=remote.size,
+            cloud_file_id=remote.file_id,
         )
-        if ctx.delete_local:
-            note = _check_cleanup_allowed(outcome)
-            if note:
-                outcome.reason = note
-            else:
-                _spawn_cleanup(local_path, ctx.root, outcome)
-                outcome.local_deleted = True
-        return outcome
 
     # ② 同名但云端是目录 → 冲突，不自动处理
     if remote is None and await _cloud_has_dir(ctx, dir_id, file_name):
@@ -368,6 +404,46 @@ async def sync_file(
             # 语义：已**安排**删除（不是「已删除」）——实际删除在后台完成。
             outcome.local_deleted = True
 
+    return outcome
+
+
+def _unchanged_outcome(
+    ctx: SyncContext,
+    local_path: Path,
+    rel_path: str,
+    *,
+    size: int,
+    cloud_size: int,
+    cloud_file_id: str,
+    reason: str = "",
+) -> SyncOutcome:
+    """「云端已有同名同大小」的结果（**含本地清理**）。
+
+    两个来源共用它：
+    - 当前落点目录里已有（普通存储源目标）
+    - **组内缓冲 / 主盘**里已有（聚合模式——落点会换盘，见
+      :attr:`SyncContext.staged_lookup`）
+
+    **开 ``delete_local`` 时也要删本地**（2026-10-31 修正）：云端已有
+    同名同大小文件 = 之前传过 = 本地是冗余。开关开着代表用户已确认
+    「云端是完整副本，本地可删」，故 UNCHANGED 也走清理。
+    校验同步做、删除异步（见 :func:`_spawn_cleanup` 的说明）——不绕过校验。
+    """
+    outcome = SyncOutcome(
+        RESULT_UNCHANGED,
+        rel_path,
+        reason=reason,
+        size=size,
+        cloud_file_id=cloud_file_id,
+        cloud_size=cloud_size,
+    )
+    if ctx.delete_local:
+        note = _check_cleanup_allowed(outcome)
+        if note:
+            outcome.reason = note
+        else:
+            _spawn_cleanup(local_path, ctx.root, outcome)
+            outcome.local_deleted = True
     return outcome
 
 

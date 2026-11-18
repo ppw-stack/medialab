@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from app.core.timeutils import bj_now
 from app.db.models import (
@@ -44,14 +45,25 @@ from app.services.errors import ServiceError
 from app.services.migration import persist_guangya_credential
 
 __all__ = [
+    "StagedEntry",
     "StagingRow",
     "StagingStats",
     "delete_staging",
     "enqueue_from_staging_root",
     "group_stats",
     "list_staging",
+    "load_staged_index",
+    "register_uploaded_file",
     "retry_staging",
 ]
+
+#: 组级幂等索引的**加载上限**（行）。
+#:
+#: 台账是「已入缓冲 / 已交付」的记录——上传路径靠它判断「这个文件是不是
+#: 已经传过了」（落点会换盘，不能只看当前落点目录）。台账会随时间增长，
+#: 故设上限；超限时**只加载最近的**（老文件的记录查不到 → 会被重传
+#: 一次并重新登记，自愈）。
+_STAGED_INDEX_LIMIT = 50000
 
 
 @dataclass(slots=True)
@@ -130,6 +142,143 @@ def _to_row(row: SecondaryStaging) -> StagingRow:
         synced_at=row.synced_at,
         cleaned_at=row.cleaned_at,
     )
+
+
+@dataclass(slots=True)
+class StagedEntry:
+    """组内「已入缓冲 / 已交付」的一条记录（幂等索引的条目）。"""
+
+    #: 字节数（登记时的文件大小）
+    size_bytes: int
+    #: 云端 fileId（缓冲盘上的）
+    file_id: str
+    #: 文件当前所在（或曾所在）的副盘 id
+    driver_id: int
+    #: 台账状态
+    state: str
+
+    @property
+    def note(self) -> str:
+        """人类可读的说明（用于日志 / 提示）。"""
+        return f"副盘 {self.driver_id}（{self.state}）"
+
+
+async def register_uploaded_file(
+    *,
+    group_id: int,
+    source_driver_id: int,
+    remote_id: str,
+    file_name: str,
+    rel_dir: str,
+    size_bytes: int,
+) -> str | None:
+    """「本地同步 → 网盘聚合」上传成功后**登记台账**（幂等）。
+
+    这是数据同步与网盘聚合之间的**联动点**：文件落到副盘缓冲根后立刻
+    进台账，归拢引擎下一轮就能把它搬回主盘——不必等每小时的兜底扫描。
+
+    幂等：``(source_driver_id, remote_id)`` 唯一约束——同一个文件重复
+    登记不会产生第二行（重复登记 = 归拢搬两次 = 白扣两次云添加额度）。
+
+    Args:
+        group_id: 聚合组 id。
+        source_driver_id: 文件所在的副盘 id。
+        remote_id: 云端 fileId。
+        file_name: 文件名（含扩展名）。
+        rel_dir: 相对缓冲根的目录（不含文件名）。
+        size_bytes: 文件字节数。
+
+    Returns:
+        ``"added"``（新登记）/ ``"exists"``（已登记过）/ ``None``
+        （组没了或没有主盘 → 不该登记）。
+
+    Raises:
+        sqlalchemy.exc.OperationalError: 撞 SQLite 写锁——**向上抛**，
+            由调用方降级（登记是可丢的：兜底扫描会补上）。
+    """
+    if not remote_id:
+        return None
+    async with session_scope() as db:
+        master_id = (
+            (
+                await db.execute(
+                    select(Driver.id).where(
+                        Driver.aggregate_group_id == group_id,
+                        Driver.role == ROLE_MASTER,
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if master_id is None:
+            return None
+        db.add(
+            SecondaryStaging(
+                group_id=group_id,
+                source_driver_id=source_driver_id,
+                target_driver_id=int(master_id),
+                remote_id=remote_id,
+                file_name=file_name,
+                source_dir=rel_dir,
+                target_dir=rel_dir,
+                size_bytes=int(size_bytes),
+                state=STAGING_PENDING,
+            )
+        )
+        try:
+            await db.commit()
+        except IntegrityError:
+            # 唯一约束冲突 = 已登记过（幂等）
+            await db.rollback()
+            return "exists"
+    return "added"
+
+
+async def load_staged_index(group_id: int) -> dict[tuple[str, str], StagedEntry]:
+    """组内「已入缓冲 / 已交付」的**幂等索引**。
+
+    键 = ``(相对目录, 文件名)``，值 = :class:`StagedEntry`。
+
+    **为什么需要**：落点会**自动换盘**（撞到月度上传限额就换下一个），
+    换盘后「当前落点目录里没有这个文件」≠「文件没传过」——它可能在
+    **另一个副盘**的缓冲里，或**已经归拢到主盘**。没有这层探测就会
+    重传（白耗本机上行带宽与云添加额度）。
+
+    包含**终态（done）**的行：done = 文件已在主盘、副盘副本已清——
+    本地那份是冗余，不该重传。
+
+    ⚠️ 副作用：文件若在主盘上被**手动删掉**，台账还在 → 不会自动重传
+    （需手动删掉对应台账行）。
+    """
+    async with session_scope() as db:
+        rows = (
+            (
+                await db.execute(
+                    select(SecondaryStaging)
+                    .where(SecondaryStaging.group_id == group_id)
+                    .order_by(SecondaryStaging.id.desc())
+                    .limit(_STAGED_INDEX_LIMIT)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    index: dict[tuple[str, str], StagedEntry] = {}
+    for row in rows:
+        key = (str(row.source_dir or ""), str(row.file_name))
+        # 同一路径可能有多行（同名不同版本的多次登记）——**保留最新的**
+        # （上面按 id 倒序取，第一个写入的就是最新的）。
+        index.setdefault(
+            key,
+            StagedEntry(
+                size_bytes=int(row.size_bytes),
+                file_id=str(row.remote_id),
+                driver_id=int(row.source_driver_id),
+                state=str(row.state),
+            ),
+        )
+    return index
 
 
 # --------------------------------------------------------------------------

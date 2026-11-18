@@ -315,6 +315,9 @@ class DbBootstrap:
             # NULL = 独立存储源，行为与引入聚合前完全一致。
             ("aggregate_group_id", "INTEGER", None),
             ("role", "VARCHAR(16)", None),
+            # 本月上传额度已耗尽的月份键（2026-11-19）：撞墙探测用。
+            # NULL = 未耗尽；跨月自动失效（键 ≠ 当前月即正常）。
+            ("upload_quota_exhausted_month", "VARCHAR(16)", None),
         )
         await self._add_columns("drivers", columns)
 
@@ -336,6 +339,9 @@ class DbBootstrap:
                 ("delete_after_upload", "INTEGER", "0"),
                 # 默认 1 = 保留大的（见 models.UploadTask.conflict_policy）
                 ("conflict_policy", "INTEGER", "1"),
+                # 目标聚合组（2026-11-19）：非空 = 「本地同步到网盘聚合」，
+                # 落点由分配器在组内副盘之间自动挑选。
+                ("aggregate_group_id", "INTEGER", None),
             ),
         )
         await self._drop_column("upload_tasks", "watch_subdir")

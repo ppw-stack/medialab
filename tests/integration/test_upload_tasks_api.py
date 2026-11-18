@@ -83,6 +83,97 @@ async def _add_driver(db_session, **kwargs) -> int:
     return row.id
 
 
+@pytest.fixture
+async def aggregate_group(db_session):
+    """一个配齐的聚合组：1 主 + 1 副（副盘带缓冲根）。"""
+    from app.services import aggregate_groups
+
+    master_id = await _add_driver(db_session, name="主号")
+    secondary_id = await _add_driver(db_session, name="副号")
+    group = await aggregate_groups.create_group("测试组")
+    await aggregate_groups.assign_driver_role(
+        master_id, group_id=group.id, role="master"
+    )
+    await aggregate_groups.assign_driver_role(
+        secondary_id, group_id=group.id, role="secondary"
+    )
+    await aggregate_groups.set_mapping(
+        group.id,
+        target_dir_id="target-dir",
+        target_dir_path="/影视",
+        roots=[
+            aggregate_groups.GroupRootSpec(
+                driver_id=secondary_id, root_id="root-1", root_path="/缓冲"
+            )
+        ],
+    )
+    return group.id
+
+
+class TestAggregateTarget:
+    async def test_创建聚合任务返回组id(
+        self, client, db_session, aggregate_group, tmp_path
+    ) -> None:
+        """目标是聚合组 → 落点由后端分配（副盘 + 缓冲根）。"""
+        watch = tmp_path / "watch"
+        watch.mkdir()
+
+        resp = await client.post(
+            "/api/upload-tasks",
+            json={
+                "name": "聚合任务",
+                "aggregate_group_id": aggregate_group,
+                "watch_root": str(watch),
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        data = resp.json()
+        assert data["aggregate_group_id"] == aggregate_group
+        assert data["target_file_id"] == "root-1"
+
+    async def test_聚合目标端点返回可用组(
+        self, client, aggregate_group
+    ) -> None:
+        """``/aggregate-targets`` 返回可用组 + 各副盘状态。"""
+        resp = await client.get("/api/upload-tasks/aggregate-targets")
+        assert resp.status_code == 200
+        groups = resp.json()["groups"]
+        assert len(groups) == 1
+        item = groups[0]
+        assert item["group_id"] == aggregate_group
+        assert item["target_dir_path"] == "/影视"
+        assert len(item["candidates"]) == 1
+        cand = item["candidates"][0]
+        assert cand["root_id"] == "root-1"
+        assert cand["exhausted"] is False
+
+    async def test_可清空聚合组退回存储源模式(
+        self, client, db_session, aggregate_group, tmp_path
+    ) -> None:
+        """显式传 ``aggregate_group_id=null`` → 退回「指定存储源」。"""
+        watch = tmp_path / "watch"
+        watch.mkdir()
+        driver_id = await _add_driver(db_session, name="普通盘")
+
+        created = await client.post(
+            "/api/upload-tasks",
+            json={
+                "name": "聚合任务",
+                "aggregate_group_id": aggregate_group,
+                "watch_root": str(watch),
+            },
+        )
+        task_id = created.json()["id"]
+
+        patched = await client.patch(
+            f"/api/upload-tasks/{task_id}",
+            json={"aggregate_group_id": None, "driver_id": driver_id},
+        )
+        assert patched.status_code == 200, patched.text
+        assert patched.json()["aggregate_group_id"] is None
+        assert patched.json()["driver_id"] == driver_id
+
+
 class TestAuth:
     async def test_列表需要登录(self, anon_client) -> None:
         """未登录 → 401。"""

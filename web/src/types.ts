@@ -1108,6 +1108,13 @@ export interface UploadTask {
    * - `1` **保留大的**（默认）：本地更小则跳过上传，保住云端那份
    */
   conflict_policy: number
+  /**
+   * 目标**聚合组**（`null` = 目标是某个具体存储源）。
+   *
+   * 非空 = 「本地同步到网盘聚合」：落点由后端在组内副盘之间自动分配
+   * （撞到月度上传限额就换下一个），上传成功后进归拢台账。
+   */
+  aggregate_group_id: number | null
   created_at: string
   updated_at: string
   /** 运行态：监听器是否在跑 */
@@ -1132,6 +1139,35 @@ export interface UploadTask {
  */
 export interface UploadCapabilities {
   uploadable_types: string[]
+}
+
+/** 聚合组的一个候选落点（组内的一个副盘 + 它的缓冲根）。 */
+export interface AggregateCandidate {
+  driver_id: number
+  driver_name: string
+  driver_type: string
+  /** 缓冲根目录 id */
+  root_id: string
+  /** 缓冲根路径（只读展示） */
+  root_path: string | null
+  /** 本月上传额度已耗尽（撞墙标记，跨月自动失效） */
+  exhausted: boolean
+  /** 测连状态：`null` = 未探测过 */
+  healthy: boolean | null
+  /** 剩余空间（字节）：`null` = 未知 */
+  free_bytes: number | null
+}
+
+/** 「本地同步到网盘聚合」的可选目标（组）。 */
+export interface AggregateTargetGroup {
+  group_id: number
+  group_name: string
+  master_driver_id: number
+  master_driver_name: string
+  /** 主盘归拢目标目录（只读展示） */
+  target_dir_path: string | null
+  /** 组内候选落点（按 driver id 升序——**不排序**） */
+  candidates: AggregateCandidate[]
 }
 
 /** 上传任务的运行态（轮询用）。 */

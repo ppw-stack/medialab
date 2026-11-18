@@ -44,11 +44,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from app.adapters.drivers.base import DriverError
 from app.core.config import get_settings
@@ -56,6 +57,8 @@ from app.core.logging import get_logger
 from app.db.models import Driver
 from app.db.models import UploadTask as UploadTaskRow
 from app.db.session import session_scope
+from app.services import aggregate_staging, aggregate_upload
+from app.services.aggregate_upload import LandingCandidate
 from app.services.cloud_index import CloudDirIndex
 from app.services.upload_filter import aiter_local_files, relative_to_root, should_skip
 from app.services.upload_paths import resolve_watch_dir
@@ -67,9 +70,12 @@ from app.services.uploader import (
     RESULT_OVERWRITTEN,
     RESULT_UNCHANGED,
     RESULT_UPLOADED,
+    StagedHit,
     SyncContext,
     SyncOutcome,
+    base_name,
     drain_cleanup_tasks,
+    parent_dir,
     sync_file,
 )
 from app.services.watcher import Watcher
@@ -239,6 +245,48 @@ _SYNC_LOCKS: dict[int, asyncio.Lock] = {}
 #: 停监听器不会停它。停用任务时必须显式取消——否则「停用」后还在传。
 _SYNC_TASKS: dict[int, asyncio.Task[None]] = {}
 
+#: 聚合任务的**落点状态**：task_id → _Landing
+#:
+#: 非空 = 这个任务的目标是**聚合组**（落点由分配器在组内副盘之间挑选）。
+_LANDINGS: dict[int, _Landing] = {}
+
+#: 聚合任务的**组级幂等索引**：task_id → {(相对目录, 文件名): StagedEntry}
+#:
+#: 落点会换盘，「当前落点目录里没有这个文件」≠「文件没传过」——文件可能
+#: 在另一个副盘的缓冲里，或已经归拢到主盘。这张表就是判据。
+_STAGED_INDEX: dict[int, dict[tuple[str, str], aggregate_staging.StagedEntry]] = {}
+
+#: 候选缓存的有效期（秒）——避免每个文件都查一次 DB
+_CANDIDATES_TTL_SEC = 60.0
+
+
+@dataclass(slots=True)
+class _Landing:
+    """聚合任务的落点状态（**进程内**）。
+
+    持久化的那份在 ``upload_tasks.driver_id`` / ``target_file_id``
+    （粘性——重启后恢复，避免已传文件被重传）。
+    """
+
+    group_id: int
+    driver_id: int
+    driver_name: str
+    root_id: str
+    root_path: str | None
+    delete_after_upload: bool
+    conflict_policy: int
+    #: 候选缓存（按 driver id 升序的固定顺序）
+    candidates: list[LandingCandidate] = field(default_factory=list)
+    #: 候选缓存的取样时刻（monotonic）
+    candidates_at: float = 0.0
+
+    def current_candidate(self) -> LandingCandidate | None:
+        """当前落点在候选表里的那一条（None = 缓存里没有）。"""
+        for cand in self.candidates:
+            if cand.driver_id == self.driver_id:
+                return cand
+        return None
+
 
 @dataclass
 class _StartParams:
@@ -253,6 +301,8 @@ class _StartParams:
     name: str
     delete_after_upload: bool
     conflict_policy: int
+    #: 目标聚合组（非空 = 「本地同步到网盘聚合」）
+    aggregate_group_id: int | None = None
 
 
 def get_watcher(task_id: int) -> Watcher | None:
@@ -286,6 +336,7 @@ async def start_all() -> None:
                     name=row.name,
                     delete_after_upload=row.delete_after_upload,
                     conflict_policy=row.conflict_policy,
+                    aggregate_group_id=row.aggregate_group_id,
                 )
                 for row in rows
             ]
@@ -308,6 +359,7 @@ async def start_all() -> None:
                 name=params.name,
                 delete_after_upload=params.delete_after_upload,
                 conflict_policy=params.conflict_policy,
+                aggregate_group_id=params.aggregate_group_id,
             )
         except Exception as exc:
             logger.exception("启动上传任务失败：%s（%s）", params.name, exc)
@@ -337,11 +389,16 @@ async def start_watcher(
     name: str = "",
     delete_after_upload: bool = False,
     conflict_policy: int = CONFLICT_KEEP_LARGER,
+    aggregate_group_id: int | None = None,
 ) -> Watcher:
     """为一个任务启动监听器 + 上传 worker（大文件 ×1 + 小文件 ×K）。
 
+    ``aggregate_group_id`` 非空 = **「本地同步到网盘聚合」**：落点不在
+    ``driver_id`` 上，而是由分配器在组内副盘之间挑选（撞到月度上传限额
+    就换下一个），上传成功后**即时登记台账**，归拢引擎接管搬运。
+
     Raises:
-        DriverError: 存储源不可用 / 凭据缺失。
+        DriverError: 存储源不可用 / 凭据缺失 / 聚合组不可用。
         ValueError: 监听目录非法。
     """
     await stop_watcher(task_id)
@@ -366,7 +423,17 @@ async def start_watcher(
             "——挂载可能无响应（NAS 离线 / CIFS 卡死）"
         ) from exc
 
-    driver, uploader = await _build_clients(driver_id)
+    landing: _Landing | None = None
+    if aggregate_group_id is not None:
+        landing = await _resolve_landing(
+            aggregate_group_id,
+            preferred_driver_id=driver_id,
+            delete_after_upload=delete_after_upload,
+            conflict_policy=conflict_policy,
+        )
+        driver, uploader = await _build_clients(landing.driver_id)
+    else:
+        driver, uploader = await _build_clients(driver_id)
 
     queue_large: asyncio.Queue[_Item] = asyncio.Queue(
         maxsize=settings.upload_queue_maxsize
@@ -414,18 +481,44 @@ async def start_watcher(
     await watcher.start()
 
     # 上传上下文
-    ctx = SyncContext(
-        driver=driver,
-        uploader=uploader,
-        index=CloudDirIndex(driver, target_file_id),
-        root=watch_dir,
-        delete_retries=settings.upload_delete_verify_retries,
-        delete_delay=settings.upload_delete_verify_delay_sec,
-        # 上传成功后清理本地文件（任务级开关，默认关）
-        delete_local=delete_after_upload,
-        # 同名且大小不同的冲突策略（任务级，默认「保留大的」）
-        conflict_policy=conflict_policy,
-    )
+    if landing is not None:
+        # 聚合模式：落点 = 分配器挑中的副盘缓冲根
+        ctx = SyncContext(
+            driver=driver,
+            uploader=uploader,
+            index=CloudDirIndex(driver, landing.root_id),
+            root=watch_dir,
+            delete_retries=settings.upload_delete_verify_retries,
+            delete_delay=settings.upload_delete_verify_delay_sec,
+            delete_local=landing.delete_after_upload,
+            conflict_policy=landing.conflict_policy,
+            # 组级幂等探测：文件可能已在别的副盘缓冲里 / 已归拢到主盘
+            staged_lookup=_make_staged_lookup(task_id),
+        )
+        _LANDINGS[task_id] = landing
+        # 组级幂等索引（台账）——载入一次，之后登记时增量维护
+        _STAGED_INDEX[task_id] = await aggregate_staging.load_staged_index(
+            landing.group_id
+        )
+        # 落点快照写回 DB（粘性——重启后恢复，避免已传文件被重传）
+        await _persist_landing(task_id, landing)
+        runtime.log(
+            f"🎯 聚合模式：组 {landing.group_id} → 副盘 {landing.driver_name}"
+            f"（{landing.root_path or landing.root_id}）"
+        )
+    else:
+        ctx = SyncContext(
+            driver=driver,
+            uploader=uploader,
+            index=CloudDirIndex(driver, target_file_id),
+            root=watch_dir,
+            delete_retries=settings.upload_delete_verify_retries,
+            delete_delay=settings.upload_delete_verify_delay_sec,
+            # 上传成功后清理本地文件（任务级开关，默认关）
+            delete_local=delete_after_upload,
+            # 同名且大小不同的冲突策略（任务级，默认「保留大的」）
+            conflict_policy=conflict_policy,
+        )
     _CONTEXTS[task_id] = ctx
 
     # 大文件通道：**恒 1 个 worker**——光鸭上传只能串行（实测见
@@ -514,6 +607,8 @@ async def stop_watcher(task_id: int) -> None:
     _QUEUES_LARGE.pop(task_id, None)
     _QUEUES_SMALL.pop(task_id, None)
     _CONTEXTS.pop(task_id, None)
+    _LANDINGS.pop(task_id, None)
+    _STAGED_INDEX.pop(task_id, None)
     _SYNC_LOCKS.pop(task_id, None)
     _INFLIGHT.pop(task_id, None)
     _OVERFLOW.pop(task_id, None)
@@ -651,6 +746,299 @@ async def _build_clients(driver_id: int) -> tuple[Any, Any]:
         device_type=device_type,
         on_token_refresh=_on_refresh,
     )
+
+
+# --------------------------------------------------------------------------
+# 聚合模式：落点分配 / 撞墙换盘 / 台账登记
+# --------------------------------------------------------------------------
+
+
+async def _resolve_landing(
+    group_id: int,
+    *,
+    preferred_driver_id: int,
+    delete_after_upload: bool,
+    conflict_policy: int,
+) -> _Landing:
+    """解析聚合任务的落点。
+
+    **粘性**：优先沿用当前落点（``preferred_driver_id``——即任务行里存的
+    快照），它失效了（移出组 / 停用 / 本月额度耗尽）才重新挑。
+
+    Raises:
+        DriverError: 组不可用（不存在 / 停用 / 无主盘 / 未配归拢目标 /
+            没有可用副盘）。
+    """
+    from app.services.errors import ServiceError
+
+    try:
+        await aggregate_upload.validate_group_target(group_id)
+    except ServiceError as exc:
+        raise DriverError(str(exc), kind="config") from exc
+
+    candidates = await aggregate_upload.list_candidates(group_id)
+    chosen: LandingCandidate | None = None
+    for cand in candidates:
+        if (
+            cand.driver_id == preferred_driver_id
+            and aggregate_upload.candidate_ok(cand, 0)
+        ):
+            chosen = cand
+            break
+    if chosen is None:
+        chosen = await aggregate_upload.pick_candidate(group_id, 0)
+    if chosen is None:
+        raise DriverError(
+            "聚合组内没有可用的副盘落点（副盘需启用、已配缓冲根、"
+            "且本月上传额度未耗尽）",
+            kind="config",
+        )
+    return _Landing(
+        group_id=group_id,
+        driver_id=chosen.driver_id,
+        driver_name=chosen.driver_name,
+        root_id=chosen.root_id,
+        root_path=chosen.root_path,
+        delete_after_upload=delete_after_upload,
+        conflict_policy=conflict_policy,
+        candidates=candidates,
+        candidates_at=time.monotonic(),
+    )
+
+
+async def _persist_landing(task_id: int, landing: _Landing) -> None:
+    """把落点快照写回任务行（**粘性**——重启后恢复）。
+
+    写失败只记日志：内存里的落点仍然正确，重启后重新解析即可。
+    """
+    try:
+        async with session_scope() as db:
+            row = (
+                await db.execute(
+                    select(UploadTaskRow).where(UploadTaskRow.id == task_id)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return
+            row.driver_id = landing.driver_id
+            row.target_file_id = landing.root_id
+            row.target_path = landing.root_path
+            await db.commit()
+    except Exception as exc:
+        logger.warning("落点快照写回失败（task_id=%s）：%s", task_id, exc)
+
+
+def _make_staged_lookup(task_id: int) -> Any:
+    """构造**组级幂等探测**回调（挂到 :attr:`SyncContext.staged_lookup`）。
+
+    落点会换盘，「当前落点目录里没有这个文件」≠「文件没传过」——
+    文件可能在**另一个副盘**的缓冲里，或**已经归拢到主盘**。台账是判据。
+    """
+
+    async def _lookup(
+        rel_dir: str, file_name: str, size: int
+    ) -> StagedHit | None:
+        index = _STAGED_INDEX.get(task_id) or {}
+        entry = index.get((rel_dir, file_name))
+        if entry is None or entry.size_bytes != size:
+            return None
+        return StagedHit(
+            size=entry.size_bytes,
+            file_id=entry.file_id,
+            note=entry.note,
+        )
+
+    return _lookup
+
+
+async def _refresh_candidates(
+    landing: _Landing, *, force: bool = False
+) -> list[LandingCandidate]:
+    """取候选列表（带 TTL 缓存——避免每个文件都查一次 DB）。"""
+    now = time.monotonic()
+    if (
+        not force
+        and landing.candidates
+        and (now - landing.candidates_at) < _CANDIDATES_TTL_SEC
+    ):
+        return landing.candidates
+    landing.candidates = await aggregate_upload.list_candidates(landing.group_id)
+    landing.candidates_at = now
+    return landing.candidates
+
+
+async def _pick_next(
+    landing: _Landing, size: int, attempted: set[int]
+) -> LandingCandidate | None:
+    """挑下一个落点（**固定顺序**，不排序）。"""
+    candidates = await _refresh_candidates(landing)
+    for cand in candidates:
+        if cand.driver_id in attempted:
+            continue
+        if aggregate_upload.candidate_ok(cand, size):
+            return cand
+    return None
+
+
+async def _switch_landing(task_id: int, candidate: LandingCandidate) -> None:
+    """换落点：重建上传上下文 + 写回快照。"""
+    landing = _LANDINGS.get(task_id)
+    ctx = _CONTEXTS.get(task_id)
+    if landing is None or ctx is None:
+        return
+    driver, uploader = await _build_clients(candidate.driver_id)
+    settings = get_settings()
+    _CONTEXTS[task_id] = SyncContext(
+        driver=driver,
+        uploader=uploader,
+        index=CloudDirIndex(driver, candidate.root_id),
+        root=ctx.root,
+        delete_retries=settings.upload_delete_verify_retries,
+        delete_delay=settings.upload_delete_verify_delay_sec,
+        delete_local=landing.delete_after_upload,
+        conflict_policy=landing.conflict_policy,
+        staged_lookup=_make_staged_lookup(task_id),
+    )
+    landing.driver_id = candidate.driver_id
+    landing.driver_name = candidate.driver_name
+    landing.root_id = candidate.root_id
+    landing.root_path = candidate.root_path
+    await _persist_landing(task_id, landing)
+    runtime = get_runtime(task_id)
+    runtime.log(
+        f"🔀 已切换落点 → {candidate.driver_name}"
+        f"（{candidate.root_path or candidate.root_id}）"
+    )
+
+
+async def _ensure_landing_ok(
+    task_id: int, landing: _Landing, size: int, attempted: set[int]
+) -> str | None:
+    """上传前确认当前落点还可用（额度 / 测连 / 空间）。
+
+    Returns:
+        ``None`` = 可用；否则是不可用原因（该文件直接判失败，不白撞墙）。
+    """
+    await _refresh_candidates(landing)
+    cand = landing.current_candidate()
+    if cand is None:
+        return None
+    if aggregate_upload.candidate_ok(cand, size):
+        return None
+    nxt = await _pick_next(landing, size, attempted)
+    if nxt is None:
+        if cand.exhausted:
+            # 本月额度已耗尽且没有别的候选 → 直接失败（不白撞一次墙）
+            return "组内副盘本月上传额度均已耗尽"
+        # 空间不足 / 测连不健康但没有别的候选 → 照传，让服务端报错
+        return None
+    await _switch_landing(task_id, nxt)
+    return None
+
+
+async def _register_after_upload(
+    task_id: int, outcome: SyncOutcome, rel_path: str, size: int
+) -> None:
+    """上传成功后**登记归拢台账**（数据同步 ↔ 网盘聚合的联动点）。
+
+    - 组级幂等命中（文件早就在台账里）→ 不重复登记
+    - 撞写锁 → **降级记日志**（兜底扫描会补上），绝不影响上传结果
+    """
+    landing = _LANDINGS.get(task_id)
+    if landing is None:
+        return
+    if outcome.staged_hit:
+        return
+    if outcome.status not in (
+        RESULT_UPLOADED,
+        RESULT_OVERWRITTEN,
+        RESULT_UNCHANGED,
+    ):
+        return
+    file_id = outcome.cloud_file_id
+    if not file_id:
+        return
+    rel_dir = parent_dir(rel_path)
+    file_name = base_name(rel_path)
+    runtime = get_runtime(task_id)
+    try:
+        result = await aggregate_staging.register_uploaded_file(
+            group_id=landing.group_id,
+            source_driver_id=landing.driver_id,
+            remote_id=file_id,
+            file_name=file_name,
+            rel_dir=rel_dir,
+            size_bytes=int(outcome.size or size),
+        )
+    except OperationalError as exc:
+        runtime.log(
+            f"⚠️ 归拢台账登记失败（写库繁忙）：{exc}"
+            "——稍后由聚合作业的兜底扫描补登记"
+        )
+        return
+    except Exception as exc:
+        logger.warning("归拢台账登记失败：%s", exc)
+        runtime.log(f"⚠️ 归拢台账登记失败：{exc}")
+        return
+    if result == "added":
+        index = _STAGED_INDEX.setdefault(task_id, {})
+        index[(rel_dir, file_name)] = aggregate_staging.StagedEntry(
+            size_bytes=int(outcome.size or size),
+            file_id=file_id,
+            driver_id=landing.driver_id,
+            state="pending",
+        )
+        runtime.log(f"📋 已登记归拢台账：{rel_path}")
+
+
+async def _upload_with_switch(
+    task_id: int,
+    ctx: SyncContext,
+    path: Path,
+    rel_path: str,
+    size: int,
+    *,
+    on_progress: Any = None,
+) -> SyncOutcome:
+    """传一个文件（聚合模式带**撞墙换盘重试**）。
+
+    普通任务就是一次 :func:`sync_file`。聚合模式：
+
+    1. 预检落点（额度 / 测连 / 空间）——不行就换盘
+    2. 传；失败且命中**限额类**文案 → 标记「本月耗尽」→ 换盘 → **重试**
+    3. 全部候选都撞墙 → 失败并点名
+
+    Args:
+        ctx: 调用方手上的上下文。**换盘后**以 ``_CONTEXTS`` 里的新上下文
+            为准（这里传的会过时）。
+    """
+    landing = _LANDINGS.get(task_id)
+    if landing is None:
+        return await sync_file(ctx, path, rel_path, on_progress=on_progress)
+
+    attempted: set[int] = set()
+    while True:
+        reason = await _ensure_landing_ok(task_id, landing, size, attempted)
+        if reason:
+            return SyncOutcome(RESULT_FAILED, rel_path, reason, size=size)
+        current = _CONTEXTS.get(task_id) or ctx
+        outcome = await sync_file(
+            current, path, rel_path, on_progress=on_progress
+        )
+        if outcome.status != RESULT_FAILED:
+            await _register_after_upload(task_id, outcome, rel_path, size)
+            return outcome
+        if not aggregate_upload.is_upload_quota_wall(outcome.reason):
+            return outcome
+        # 撞墙 → 标记「本月耗尽」→ 换盘 → 重试
+        attempted.add(landing.driver_id)
+        await aggregate_upload.mark_quota_exhausted(landing.driver_id)
+        await _refresh_candidates(landing, force=True)
+        nxt = await _pick_next(landing, size, attempted)
+        if nxt is None:
+            outcome.reason = f"{outcome.reason}｜组内副盘本月上传额度均已耗尽"
+            return outcome
+        await _switch_landing(task_id, nxt)
 
 
 async def _worker_loop(
@@ -821,17 +1209,21 @@ async def _process_one(
         lock = _SYNC_LOCKS.get(task_id) if use_lock else None
         if lock is not None:
             async with lock:
-                outcome = await sync_file(
+                outcome = await _upload_with_switch(
+                    task_id,
                     ctx,
                     path,
                     rel_path,
+                    file_size,
                     on_progress=_make_progress(runtime, rel_path, file_size),
                 )
         else:
-            outcome = await sync_file(
+            outcome = await _upload_with_switch(
+                task_id,
                 ctx,
                 path,
                 rel_path,
+                file_size,
                 on_progress=_make_progress(runtime, rel_path, file_size),
             )
 
@@ -960,17 +1352,21 @@ async def _sync_now_inner(task_id: int, runtime: Any, watcher: Any) -> dict[str,
                     file_size = 0
                 if lock is not None:
                     async with lock:
-                        outcome = await sync_file(
+                        outcome = await _upload_with_switch(
+                            task_id,
                             ctx,
                             path,
                             rel,
+                            file_size,
                             on_progress=_make_progress(runtime, rel, file_size),
                         )
                 else:
-                    outcome = await sync_file(
+                    outcome = await _upload_with_switch(
+                        task_id,
                         ctx,
                         path,
                         rel,
+                        file_size,
                         on_progress=_make_progress(runtime, rel, file_size),
                     )
             finally:
