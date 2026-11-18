@@ -924,6 +924,11 @@ async def test_share_content_list_failure_is_not_audit_rejection(
     master.source_names["f1"] = "a.mkv"
 
     async def _boom(access_token: str) -> list[str]:
+        """模拟「列分享内容接口抖动」的失败桩。
+
+        Raises:
+            RuntimeError: 总是抛出——模拟列分享内容接口抖动。
+        """
         raise RuntimeError("列分享内容接口抖动")
 
     source.share_files = _boom  # type: ignore[method-assign]
