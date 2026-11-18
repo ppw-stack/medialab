@@ -92,6 +92,7 @@ def test_enum_specs_are_the_zero_one_ones() -> None:
         "organize_conflict_policy",
         "scrape_season_image_to_root",
         "scrape_original_image",
+        "aggregate_transfer_mode",
     }
 
 

@@ -608,6 +608,42 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
       与「手动不限单轮次数」同一语义；逐行「重试」按钮（
       `aggregate_staging.retry_staging`）仍可用。契约：
       `test_generic_failure_is_failed_and_not_auto_retried`
+    - ⚠️ **非会员副盘取不到大文件直链——「转存优先」是唯一出路**（2026-11-19 实测）：
+      - **现象**：副盘账号非会员时 `get_res_download_url` 返回 code=254
+        「网页端非会员下载文件大小超过限制，请开通会员或使用客户端下载」。
+        生产实测：同一账号 11-17 还成功传过 10.2 GB 的文件，11-18 起连
+        0.56 GB 都被拒 → **会员到期**，不是代码问题
+      - **换客户端身份绕不开**（探针实测 6 种组合**全部同样被拒**）：dt=1/2/3、
+        客户端 UA、去 origin/referer、全套 `x-*` 客户端头 → **端别不由这些头
+        决定**，这条路对非会员是死的
+      - **VIP 状态探测会误导**：`get_assets` 的 `vipStatus` 与下载接口的会员
+        判定**不是同一口径**（实测三个副盘 `vipStatus=3`、剩余 0.9~2.9 天，
+        仍被判「非会员」）→ **别用 `vipStatus` 判断能不能搬**
+      - ✅ **分享转存不受影响**（服务端内部复制，**不取直链**）：实测
+        **7.74 GB 单文件 11 秒落地**（同名同大小）、**不消耗云添加额度**
+      - ⚠️ **但能分享是「逐文件」审核决定的**（实测 58 个失败行：**14 个
+        / 59.6 GB 能进分享，44 个 / 93.7 GB 的分享内容为空**）→ 表现为转存报
+        **「未选择转存文件」**。这不是竞态（等 2.5 s 重试、重建分享再试，
+        同样失败）——是**服务端把文件排除在分享之外**
+      - ⚠️ **判据要确定性**：转存前用 `share_files_list`（驱动方法
+        `share_files`）确认文件**确实在分享里**，别白撞转存接口（分享里
+        的 fileId 与台账 `remote_id` **是同一个**）
+      - ⚠️ **一个被拒的文件不能连坐整批**：分享审核逐文件 → 整批失败时
+        **逐个重试**（`_transfer_rows_one_by_one`），只让真正搬不动的回退
+        云下载
+      - 故新增运行时参数 **`aggregate_transfer_mode`**（0=按体积分流 /
+        1=**转存优先**，默认 1）：转存优先 = 所有文件走分享转存，转存失败才
+        回退云下载（保底）。`aggregate_share_threshold_bytes` 的体积上限
+        **只在按体积分流模式下生效**（存量配置语义零变化）
+      - ⚠️ **replace 场景（主盘已有更小的同名文件）仍走云下载**——转存落地
+        同名文件的覆盖语义未验证，保守不碰
+      - ⚠️ **分享批次要同时管数量与体积**：光鸭限制 20 个/分享（实测），
+        再加**单批 ≤10 GB**（`SHARE_BATCH_MAX_BYTES`）——数量管不住体积，
+        20×5 GB 的分享服务端很可能拒收；大文件自动单独成批
+      - 契约：`test_share_first_mode_sends_big_file_to_share_transfer`、
+        `test_share_batches_split_by_total_bytes`、
+        `test_share_transfer_retries_when_content_not_ready`、
+        `test_share_content_rejected_file_falls_back_alone`
     - 契约：`test_sync_pauses_group_when_hitting_quota_wall`（撞墙 → 整组
       paused + 停手）、`test_paused_rows_resume_after_quota_resets`（次日续传）
   - **归拢链路 = 手动迁移同一条**（`app/services/migration_pipeline.py`

@@ -50,6 +50,8 @@ class _FakeMaster:
         self.source_names: dict[str, str] = {}
         self.share_token_error: str | None = None
         self.restore_error: str | None = None
+        #: 第一次转存报「未选择转存文件」（分享内容还没索引完的竞态）
+        self.restore_not_ready_once = False
 
     async def create_dir(self, name: str, parent_id: str = "") -> tuple[str, bool]:
         # ⚠️ id 必须含父目录——不同剧的同名 Season 目录要拿到不同 id
@@ -81,6 +83,12 @@ class _FakeMaster:
     ) -> str:
         """转存（假实现）：把文件**直接以原名**放进目标目录。"""
         self.restored.append((list(file_ids), parent_id))
+        if self.restore_not_ready_once:
+            # 分享内容还没索引完 → 服务端报这个错（2026-11-19 生产实测）
+            self.restore_not_ready_once = False
+            raise DriverError(
+                "光鸭转存分享失败：未选择转存文件", kind="unknown"
+            )
         if self.restore_error:
             raise DriverError(self.restore_error, kind="unknown")
         for fid in file_ids:
@@ -140,6 +148,8 @@ class _FakeSource:
         self.shares_created: list[tuple[list[str], str]] = []
         self.shares_deleted: list[list[str]] = []
         self.access_tokens: list[tuple[str, str]] = []
+        #: 分享内容被**审核拒绝**（服务端把文件排除在分享之外）
+        self.share_content_rejected = False
 
     async def get_direct_link(self, remote_id: str, user_agent: str) -> DirectLink:
         self.links.append(remote_id)
@@ -170,6 +180,14 @@ class _FakeSource:
         self.access_tokens.append((url_id, code))
         return "token-1"
 
+    async def share_files(self, access_token: str) -> list[str]:
+        """分享里的文件 id（默认 = 刚建分享时带的那些；可注入「审核拒绝」）。"""
+        if self.share_content_rejected:
+            return []
+        if self.shares_created:
+            return list(self.shares_created[-1][0])
+        return []
+
     async def delete_share(self, share_ids: list[str]) -> None:
         self.shares_deleted.append(list(share_ids))
 
@@ -180,8 +198,14 @@ def _default_offline_channel(monkeypatch: pytest.MonkeyPatch):
 
     不关的话，多数用例会走分享通道，而假主盘的转存落地名与校验期望名不
     匹配 → 每个文件轮询满 600 秒 → 整个测试文件跑到天荒地老。
+
+    ``_transfer_mode`` 也要关：**转存优先**是默认模式（生产默认），不关
+    的话连大文件都走转存通道 → 同上的 600 秒轮询。
     """
     monkeypatch.setattr(aggregate_sync, "_share_threshold_bytes", lambda: 0)
+    monkeypatch.setattr(
+        aggregate_sync, "_transfer_mode", lambda: aggregate_sync.TRANSFER_MODE_SIZE_SPLIT
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -729,7 +753,11 @@ async def test_small_file_uses_share_transfer_channel(
 async def test_big_file_still_uses_cloud_download(
     db, fast_watcher, fake_drivers, monkeypatch
 ) -> None:
-    """大文件照旧走离线下载（云下载）——转存只用于小文件。"""
+    """**按体积分流**模式下：大文件走离线下载（转存只用于小文件）。
+
+    （「转存优先」模式下大文件也走转存——见
+    :func:`test_share_first_mode_sends_big_file_to_share_transfer`）
+    """
     monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
     monkeypatch.setattr(aggregate_sync, "_share_threshold_bytes", lambda: 10)
     master, _source = fake_drivers
@@ -742,6 +770,140 @@ async def test_big_file_still_uses_cloud_download(
     assert result.synced == 1
     rows = await aggregate_staging.list_staging(group_id=group_id)
     assert rows[0].transfer_mode == "cloud_download"
+
+
+async def test_share_first_mode_sends_big_file_to_share_transfer(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """**转存优先**模式：大文件也走「分享转存」（不取直链、不耗云添加额度）。
+
+    非会员副盘取不到大文件直链——服务端 code=254「网页端非会员下载文件大小
+    超过限制」，实测换 6 种客户端身份头组合也全部被拒 → **转存是唯一能搬
+    的路**（2026-11-19 生产实测：7.74 GB 单文件 11 秒落地）。
+    """
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(
+        aggregate_sync,
+        "_transfer_mode",
+        lambda: aggregate_sync.TRANSFER_MODE_SHARE_FIRST,
+    )
+    master, source = fake_drivers
+    group_id, _master_id, _secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+    master.source_names["f1"] = "a.mkv"
+
+    result = await aggregate_sync.sync_group_now(group_id)
+    assert master.submitted == [], "转存优先不该提交云下载（要吃云添加额度）"
+    assert master.restored, "应发生转存"
+    assert result.synced == 1 and result.failed == 0
+    assert source.deleted == ["f1"], "副盘副本应被清理"
+    rows = await aggregate_staging.list_staging(group_id=group_id)
+    assert rows[0].transfer_mode == "share_transfer"
+    assert rows[0].state == "done"
+
+
+async def test_share_batches_split_by_total_bytes() -> None:
+    """分享批次**两个上限都管**：文件数（20）与**总字节**（10 GB）。
+
+    数量上限管不住体积——20 个 5 GB 的剧集 = 100 GB 的一个分享，服务端很可能
+    拒收。大文件必须单独成批（实测单文件 7.74 GB 的分享可用）。
+    """
+
+    def _row(remote_id: str, size: int) -> Any:
+        return SimpleNamespace(remote_id=remote_id, size_bytes=size)
+
+    gb = 1024 * 1024 * 1024
+    rows = [_row(f"f{i}", 6 * gb) for i in range(4)]
+    batches = aggregate_sync._split_share_batches(rows)
+    # 每个 6 GB 的文件单独成批（两个凑一起就超 10 GB）
+    assert [len(b) for b in batches] == [1, 1, 1, 1]
+
+    # 小文件照旧打包（20 个一批）
+    small = [_row(f"s{i}", 1024) for i in range(25)]
+    batches = aggregate_sync._split_share_batches(small)
+    assert [len(b) for b in batches] == [20, 5]
+
+
+async def test_share_transfer_retries_when_content_not_ready(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """转存报「未选择转存文件」→ **等一下重试**（分享内容还没索引完的竞态）。
+
+    2026-11-19 生产实测：刚建好的分享立刻转存报这个错，同样的代码
+    2 分钟后成功落地 7.74 GB → 是竞态，不是「这文件不能转存」。
+    """
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "SHARE_SETTLE_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "_share_threshold_bytes", lambda: 1024)
+    master, _source = fake_drivers
+    group_id, _master_id, _secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+    master.source_names["f1"] = "a.mkv"
+    master.restore_not_ready_once = True
+
+    result = await aggregate_sync.sync_group_now(group_id)
+    assert result.synced == 1, "重试后应归拢成功"
+    assert result.failed == 0
+    rows = await aggregate_staging.list_staging(group_id=group_id)
+    assert rows[0].state == "done"
+
+
+async def test_share_content_rejected_file_falls_back_alone(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """**审核拒绝**（分享内容为空）的文件 → 不连坐整批，逐个重试。
+
+    光鸭**逐文件**判定能不能分享（2026-11-19 实测：58 个失败行里 14 个
+    能进分享、44 个进不去）。一个被拒的文件若把整批拖下水，能搬的那些
+    就白搬不成 → 必须逐个重试。
+    """
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "SHARE_SETTLE_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "_share_threshold_bytes", lambda: 1024)
+    master, source = fake_drivers
+    group_id, master_id, secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+    master.source_names["f1"] = "a.mkv"
+    master.source_names["b0"] = "ep00.mkv"
+
+    # 第二个文件（b0）审核被拒：分享里只有 f1
+    original_share_files = source.share_files
+
+    async def _share_files(access_token: str) -> list[str]:
+        ids = await original_share_files(access_token)
+        return [fid for fid in ids if fid != "b0"]
+
+    source.share_files = _share_files  # type: ignore[method-assign]
+
+    # 再加一行 b0（与 f1 同目录 → 会被打包进同一个分享批次）
+    async with session_scope() as db_session:
+        db_session.add(
+            SecondaryStaging(
+                group_id=group_id,
+                source_driver_id=secondary_id,
+                target_driver_id=master_id,
+                remote_id="b0",
+                file_name="ep00.mkv",
+                size_bytes=100,
+                state="pending",
+            )
+        )
+        await db_session.commit()
+
+    result = await aggregate_sync.sync_group_now(group_id)
+    # 两个都归拢了：f1 走转存、b0 被拒后回退云下载
+    assert result.synced == 2, "f1 走转存 + b0 回退云下载"
+    rows = await aggregate_staging.list_staging(group_id=group_id)
+    states = {r.file_name: r.state for r in rows}
+    # f1 能搬（逐个重试把它救回来了）→ done
+    assert states.get("a.mkv") == "done", "能进分享的文件不该被连累"
+    # ⚠️ **f1 必须走的是「分享转存」**——若没有逐个重试，它会跟 b0 一起
+    # 落进云下载通道（假源能取直链，一样会 done → 断言就废了）
+    assert any(
+        ids == ["f1"] for ids, _parent in master.restored
+    ), "f1 应通过分享转存落地（不能被 b0 连累进云下载）"
+    # 只有 b0 回退了云下载
+    assert len(master.submitted) == 1, "应只有被拒的 b0 回退云下载"
 
 
 async def test_share_transfer_failure_falls_back_to_cloud_download(
