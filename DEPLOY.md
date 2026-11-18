@@ -137,8 +137,12 @@ ssh <别名> "cd /mnt/user/appdata/medialab/app && TAG=latest docker compose -f 
 > 闸门红 → **不产出镜像**，第 2 步拉到的还是旧镜像（不会拉到半成品）。
 > 所以第 2 步前先确认 `docker-image` workflow 是 success。
 >
-> ℹ️ compose 里 `TAG` 默认 `latest`（CI 会推 `latest` / `main` / `sha-<7位>` 三个 tag），
-> 直接 `up -d` 即可。要锁定确定版本时显式传 `TAG=sha-xxxxxxx`。
+> ℹ️ compose 里 `TAG` 默认 `latest`。镜像**只在发布时构建**：打 `v*` tag
+> （如 `v1.0.1`）→ CI 绿 → docker-image 推 `latest` / `1.0.1` / `1.0` 三个 tag。
+> ⚠️ **Docker tag 不带 `v` 前缀**（Docker 官方惯例）：git tag `v1.0.1` →
+> 镜像 tag 是 **`1.0.1`**——部署时 `TAG=1.0.1`（传 `TAG=v1.0.1` 会
+> manifest not found，2026-11-19 发布 v1.0.1 时踩过）。锁定确定版本用
+> `TAG=1.0.1`，跟随最新发布用默认 `latest`。
 >
 > ⚠️ 若容器是旧版本手动创建的（没有 compose label），`up -d` 不会替换它，
 > 需先 `docker stop -t 60 medialab && docker rm medialab`。
