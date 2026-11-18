@@ -615,6 +615,9 @@ async def test_guangya_source_end_to_end(db_session, monkeypatch: pytest.MonkeyP
         target_driver_id=202,
         target_file_id="root",
         target_path="/影视",
+        # 本用例断言的是落盘/改名/串行，与提交间隔无关；默认 60s 会因
+        # rename 被钳到 5s → 单用例白等 5s。设为 0 不影响任何断言。
+        submit_interval_sec=0.0,
     )
     job = migration_jobs.MigrationJob(id="gypjob", params=params)
 

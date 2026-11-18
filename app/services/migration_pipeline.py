@@ -327,7 +327,13 @@ class TaskWatcher:
             from app.core.config import get_settings
 
             poll_interval = get_settings().migration_poll_interval_sec
-        self._poll_interval = max(1.0, float(poll_interval))
+        # 下限只防 0 / 负数 busy-loop，不再钳到 1s：
+        # - 生产路径的间隔已有保障（配置项 migration_poll_interval_sec 带
+        #   ge=1.0 约束；aggregate_sync 显式传 2.0、migration 显式传 5.0），
+        #   降到 0.01 对生产行为**零影响**。
+        # - 旧下限 max(1.0, ...) 会把测试加速 fixture 传入的 0.01 钳回 1s，
+        #   让 fast_watcher / _fast_poll 形同虚设（归拢用例曾单跑 40~52s）。
+        self._poll_interval = max(0.01, float(poll_interval))
 
     async def wait(
         self,
