@@ -1004,7 +1004,7 @@ async def _restore_share_with_retry(
     parent_id: str,
     *,
     title: str,
-) -> tuple[Any, str]:
+) -> tuple[Any, str, list[str]]:
     """建分享 → 取 token → 转存，**内容未就绪时重试**。
 
     ⚠️ 光鸭刚建好的分享**内容还没索引完** → 转存报「未选择转存文件」
@@ -1014,9 +1014,20 @@ async def _restore_share_with_retry(
     重试策略：同分享等 :data:`SHARE_SETTLE_SEC` 再试 → 仍失败则**重建
     分享**再试一次（分享本身可能有问题）。
 
+    ⚠️ **列分享内容失败 ≠ 审核拒绝**：列表接口抖动时按「内容齐全」继续
+    （**不做审核过滤**），让转存接口自己报错（那个错有信息量）。
+    ⚠️ **部分文件缺失先等再判**：分享内容可能只索引了一半 → 等
+    :data:`SHARE_SETTLE_SEC` 重列一次，才判「审核拒绝」——非会员副盘取不到
+    直链，被误判就等于这个文件彻底搬不动了。
+
     Returns:
-        ``(share, task_id)``——**分享不要提前删**：转存是异步任务，
-        删了可能中断服务端复制（由调用方在轮询结束后删）。
+        ``(share, task_id, dropped_ids)``——
+
+        - **分享不要提前删**：转存是异步任务，删了可能中断服务端复制
+          （由调用方在轮询结束后删）
+        - ``dropped_ids`` = **没进分享的文件**（服务端逐文件审核拒绝）→
+          它们**不在**本次转存里，调用方要把它们交给别的通道（回退云下载）。
+          只转存分享里有的文件 → 一个被拒的文件**不会连坐整批**
 
     Raises:
         Exception: 重试仍失败时抛出（调用方回退云下载）。
@@ -1028,19 +1039,37 @@ async def _restore_share_with_retry(
         # ⚠️ **分享内容可能被审核清空**（逐文件判定）——转存必然报「未选择
         # 转存文件」，重试也没用（不是竞态）。先确认文件在分享里，别白撞。
         # （实测 58 个文件里 44 个的分享内容为空 → 白撞就是白撞）
-        ids = await source.share_files(token)
-        if not ids:
-            # 可能是索引延迟 → 等一下再看一次
-            await asyncio.sleep(SHARE_SETTLE_SEC)
-            ids = await source.share_files(token)
-        missing = [fid for fid in file_ids if fid not in set(ids)]
-        if missing:
+        ids = await _share_content_ids(source, token)
+        missing: list[str] = []
+        present: list[str] = list(file_ids)
+        if ids is not None:
+            missing = [fid for fid in file_ids if fid not in ids]
+            if missing:
+                # ⚠️ **内容可能还没索引完**（真实竞态）→ 等一下再列一次，
+                # 别把只是 lag 的文件当成「审核拒绝」永久踢出本批转存
+                # （非会员副盘取不到直链 → 被踢出就等于搬不动）
+                await asyncio.sleep(SHARE_SETTLE_SEC)
+                retry_ids = await _share_content_ids(source, token)
+                if retry_ids:
+                    ids = retry_ids
+                    missing = [fid for fid in file_ids if fid not in ids]
+            present = [fid for fid in file_ids if fid in ids]
+        # ⚠️ **列表失败（``ids is None``）≠ 审核拒绝** → 不做审核过滤
+        # （``present`` 就是全部文件），让转存接口自己报错（那个错有信息量）
+        if not present:
             raise _ShareContentRejected(missing)
+        if missing:
+            # 部分文件没进分享 → **只转存有的那些**，被拒的交给别的通道
+            logger.warning(
+                "分享内容缺 %d 个文件（审核拒绝），只转存其余 %d 个",
+                len(missing),
+                len(present),
+            )
         try:
             task_id = await master_driver.restore_share(
-                token, file_ids, parent_id
+                token, present, parent_id
             )
-            return share, task_id
+            return share, task_id, missing
         except Exception as exc:
             if _SHARE_NOT_READY_HINT not in str(exc):
                 raise
@@ -1052,21 +1081,21 @@ async def _restore_share_with_retry(
             await asyncio.sleep(SHARE_SETTLE_SEC)
             try:
                 task_id = await master_driver.restore_share(
-                    token, file_ids, parent_id
+                    token, present, parent_id
                 )
-                return share, task_id
+                return share, task_id, missing
             except Exception as exc2:
                 if _SHARE_NOT_READY_HINT not in str(exc2):
                     raise
                 logger.warning("分享内容仍未就绪，重建分享再试一次")
                 await asyncio.sleep(SHARE_SETTLE_SEC)
                 await source.delete_share([share.share_id])
-                share = await source.create_share(file_ids, title=title)
+                share = await source.create_share(present, title=title)
                 token = await source.share_access_token(share.url_id, share.code)
                 task_id = await master_driver.restore_share(
-                    token, file_ids, parent_id
+                    token, present, parent_id
                 )
-                return share, task_id
+                return share, task_id, missing
     except Exception:
         # 失败路径：分享用完即删（别在账号里堆分享）
         if share is not None:
@@ -1075,6 +1104,35 @@ async def _restore_share_with_retry(
             except Exception as exc:  # 清理失败不影响归拢结果
                 logger.warning("删除分享失败 %s：%s", share.share_id, exc)
         raise
+
+
+async def _share_content_ids(source: Any, token: str) -> set[str] | None:
+    """取分享里的文件 id 集合（**接口抖动不该否决整批**）。
+
+    Returns:
+        ``set[str]`` = 成功列到的内容 id（**空集** = 分享确实空了）；
+        ``None`` = **列表失败**（接口抖动）→ 调用方按「**不做审核过滤**」
+        继续（宁可让转存接口自己报错，也不要因为一次列表失败就把整批
+        当成「审核拒绝」）。
+
+    ⚠️ **不能拿空集当「列表失败」**：空集在下游等价于「所有文件都缺失」
+    → 整批被判「审核拒绝」→ 白白回退云下载（每天仅 3 次的云添加额度）。
+    「未知」与「为空」必须用两个不同的返回值区分。
+    """
+    try:
+        ids = await source.share_files(token)
+    except Exception as exc:
+        logger.warning("列分享内容失败（按「内容齐全」继续）：%s", exc)
+        return None
+    if not ids:
+        # 可能是索引延迟 → 等一下再看一次
+        await asyncio.sleep(SHARE_SETTLE_SEC)
+        try:
+            ids = await source.share_files(token)
+        except Exception as exc:
+            logger.warning("列分享内容失败（按「内容齐全」继续）：%s", exc)
+            return None
+    return set(ids)
 
 
 async def _transfer_by_share(
@@ -1106,13 +1164,20 @@ async def _transfer_by_share(
     Returns:
         True = 已落地（同名同大小）；False = 尚未出现（调用方据此回退）。
     """
-    share, _task_id = await _restore_share_with_retry(
+    share, _task_id, dropped = await _restore_share_with_retry(
         source,
         master_driver,
         [row.remote_id],
         target_dir_id,
         title=row.file_name,
     )
+    if dropped:
+        # 审核拒绝 → 这个文件搬不动（单文件路径没有「同批其它文件」）
+        try:
+            await source.delete_share([share.share_id])
+        except Exception as exc:  # 清理失败不影响归拢结果
+            logger.warning("删除分享失败 %s：%s", share.share_id, exc)
+        return False
     try:
         deadline = time.monotonic() + SHARE_TRANSFER_WAIT_SEC
         while time.monotonic() < deadline:
@@ -1165,7 +1230,7 @@ async def _transfer_one_batch(
         )
     share: Any = None
     try:
-        share, _task_id = await _restore_share_with_retry(
+        share, _task_id, dropped = await _restore_share_with_retry(
             source,
             master_driver,
             [r.remote_id for r in chunk],
@@ -1175,7 +1240,14 @@ async def _transfer_one_batch(
 
         # 轮询：整批出现（同名同大小）或超时
         deadline = time.monotonic() + SHARE_TRANSFER_WAIT_SEC
-        pending = {r.file_name: r for r in chunk}
+        # ⚠️ **被审核拒绝的文件不在本次转存里** → 不等它们落地，直接
+        # 交给回退通道（别让它们白等满 600 秒）
+        dropped_ids = set(dropped)
+        pending = {
+            r.file_name: r
+            for r in chunk
+            if r.remote_id not in dropped_ids
+        }
         while pending and time.monotonic() < deadline:
             await asyncio.sleep(SHARE_TRANSFER_POLL_SEC)
             files = await index.refresh(chunk[0].target_dir)
@@ -1188,7 +1260,13 @@ async def _transfer_one_batch(
             if files.get(r.file_name) == r.size_bytes:
                 del pending[r.file_name]
 
-        landed = [r for r in chunk if r.file_name not in pending]
+        # ⚠️ **被拒的文件既没落地、也不在 pending 里** → 必须显式区分，
+        # 否则会被当成「已落地」去清理副盘副本（数据没了）
+        landed = [
+            r
+            for r in chunk
+            if r.remote_id not in dropped_ids and r.file_name not in pending
+        ]
         if landed:
             # **批量清理**副盘副本（一批一次请求；失败逐个兜底）
             try:
@@ -1206,7 +1284,15 @@ async def _transfer_one_batch(
                 logger.warning("批量清理副盘副本失败，逐个重试：%s", exc)
                 for r in landed:
                     await _cleanup_source(r, source, result)
-        not_landed = [r for r in chunk if r.file_name in pending]
+        not_landed = [
+            r
+            for r in chunk
+            if r.remote_id in dropped_ids or r.file_name in pending
+        ]
+        if dropped:
+            result.details.append(
+                f"分享审核拒绝 {len(dropped)} 个文件（未进分享）→ 回退云下载"
+            )
         if landed and not_landed:
             result.details.append(
                 f"批量转存超时：{len(landed)} 个落地、"
