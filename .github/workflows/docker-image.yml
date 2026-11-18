@@ -37,12 +37,14 @@ jobs:
     #   的代码只过闸门，不出镜像；要部署就发布一个版本。
     # · event == push：PR 的 ci 通过了也不构建。**这一条同时是安全边界**：
     #   PR 代码不可信，不该在持有 Docker Hub 凭据的 job 里被 checkout + 执行。
-    # · head_branch 判定：tag push 的 workflow_run.head_branch = tag 名
-    #   （如 ``v1.2.3``），startsWith('v') 即「发布」。
+    # · 发布判定**不能**用 workflow_run.head_branch——tag push 的
+    #   head_branch 是 **main**（不是 tag 名），startsWith('v') 永远不命中
+    #   → v1.0.0 的镜像因此没构建（2026-11-18 生产踩到）。发布判定移到
+    #   Compute 步骤（git tag --points-at + SEMVER），非发布 → 整个 job
+    #   干净跳过（见 skip 步骤）。
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      startsWith(github.event.workflow_run.head_branch, 'v')
+      github.event.workflow_run.event == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -76,13 +78,17 @@ jobs:
             | grep -E '^v[0-9]+\.[0-9]+' | head -1 | sed 's/^v//' || true)
           # 2026-11-17 改：镜像只在发布（tag v*）时构建 → tag 只有
           # latest + semver（main / sha-* 随「main push 出镜像」一并移除）
+          if [ -z "$SEMVER" ]; then
+            # 非发布（main push 无 v* tag）→ **跳过整个构建**：只有发布才打包
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "未检测到 v* semver tag → 非 release，跳过构建（main 日常合并不出镜像）"
+            exit 0
+          fi
           {
             echo "tags<<TAGS_EOF"
             echo "${IMAGE}:latest"
-            if [ -n "$SEMVER" ]; then
-              echo "${IMAGE}:${SEMVER}"
-              echo "${IMAGE}:$(echo "$SEMVER" | cut -d. -f1,2)"
-            fi
+            echo "${IMAGE}:${SEMVER}"
+            echo "${IMAGE}:$(echo "$SEMVER" | cut -d. -f1,2)"
             echo "TAGS_EOF"
           } >> "$GITHUB_OUTPUT"
           {
@@ -106,10 +112,16 @@ jobs:
           # 标记里的 << 在 sed 正则里需要转义，易错）
           awk '/^tags<<TAGS_EOF$/{f=1;next} /^TAGS_EOF$/{f=0} f' "$GITHUB_OUTPUT" | sed 's/^/  /'
 
+      - name: Skip if not a release
+        if: steps.meta.outputs.skip == 'true'
+        run: echo "非发布，跳过构建（镜像只在发布时打包）"
+
       - name: Set up Docker Buildx
+        if: steps.meta.outputs.skip != 'true'
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
 
       - name: Log in to Docker Hub
+        if: steps.meta.outputs.skip != 'true'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
@@ -117,6 +129,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push
+        if: steps.meta.outputs.skip != 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
           context: .
@@ -130,6 +143,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Verify image is publicly pullable
+        if: steps.meta.outputs.skip != 'true'
         # 校验镜像**匿名可拉**（128 主机没有 Docker Hub 凭据，靠 public
         # 仓库拉取；私有则 pull 失败 → 生产部署不了）。
         #
