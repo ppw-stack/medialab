@@ -48,18 +48,32 @@ async def _create_legacy_tables(engine) -> None:
                 " path_prefix TEXT NOT NULL)"
             )
         )
+        await conn.execute(
+            text("INSERT INTO dav_acl (user_id, path_prefix) VALUES (7, '/legacy')")
+        )
 
 
 async def test_obsolete_tables_dropped(db_engine):
-    """废弃表 ``dav_acl`` 被删除。"""
+    """废弃表 ``dav_acl`` 在一次性迁移里被**备份后**删除，版本推到 3。"""
+    from app.db.migrations import drop_obsolete_tables_once
+
     engine, _ = db_engine
+    # fixture 的 create_all 已把版本推到 3；回退模拟升级前旧库
+    async with engine.begin() as conn:
+        await conn.execute(text("PRAGMA user_version = 2"))
     await _create_legacy_tables(engine)
     assert "dav_acl" in await _tables(engine)
 
-    await DbBootstrap()._run_media_migrations()
+    await drop_obsolete_tables_once()
 
     tables = await _tables(engine)
     assert "dav_acl" not in tables
+    assert "medialab_bak_v3_dav_acl" in tables, "删表前必须先备份"
+    async with engine.connect() as conn:
+        rows = await conn.execute(text("SELECT user_id, path_prefix FROM medialab_bak_v3_dav_acl"))
+        assert rows.all() == [(7, "/legacy")]
+        version = (await conn.execute(text("PRAGMA user_version"))).scalar_one()
+    assert version == 3
 
 
 async def test_job_runs_survives(db_engine):
@@ -149,14 +163,18 @@ async def test_dav_users_data_survives(db_engine):
 
 
 async def test_migration_is_idempotent(db_engine):
-    """重复跑不报错（表已不存在时直接跳过）。"""
-    engine, _ = db_engine
-    await _create_legacy_tables(engine)
-    bootstrap = DbBootstrap()
+    """一次性删表重复跑不报错（版本已到 3 时直接跳过）。"""
+    from app.db.migrations import drop_obsolete_tables_once
 
-    await bootstrap._run_media_migrations()
-    await bootstrap._run_media_migrations()  # 第二次：表已没了
-    await bootstrap._run_media_migrations()
+    engine, _ = db_engine
+    # 回退版本模拟升级前旧库，再建废弃表
+    async with engine.begin() as conn:
+        await conn.execute(text("PRAGMA user_version = 2"))
+    await _create_legacy_tables(engine)
+
+    await drop_obsolete_tables_once()
+    await drop_obsolete_tables_once()  # 版本已到 3：直接跳过
+    await drop_obsolete_tables_once()
 
     tables = await _tables(engine)
     assert "dav_acl" not in tables
@@ -187,3 +205,53 @@ async def test_each_table_dropped_independently(db_engine, table: str):
     assert table not in tables
     # 活表还在
     assert "job_runs" in tables
+
+
+async def test_one_time_drop_leaves_tables_created_afterwards(db_engine):
+    """版本已到 3 后重建同名表，再启动也不许删——一次性迁移不是常驻清理。"""
+    from app.db.migrations import drop_obsolete_tables_once
+
+    engine, _ = db_engine
+    await _create_legacy_tables(engine)
+    await drop_obsolete_tables_once()
+    assert "dav_acl" in await _tables(engine)
+
+
+async def test_backup_and_drop_rejects_unregistered_table(db_engine):
+    """白名单之外的表名（哪怕是活表）必须拒绝。"""
+    from app.db.migrations import backup_and_drop_table
+
+    engine, _ = db_engine
+    async with engine.begin() as conn:
+        with pytest.raises(ValueError, match="拒绝删除"):
+            await backup_and_drop_table(conn, "job_runs")
+
+
+async def test_alter_failure_blocks_startup() -> None:
+    """真失败必须抛错；只有「列已存在」是预期内静默。"""
+
+    class FailingConn:
+        async def execute(self, stmt):
+            raise RuntimeError("boom")
+
+    class DuplicateConn:
+        async def execute(self, stmt):
+            raise RuntimeError("duplicate column name: x")
+
+    bootstrap = DbBootstrap()
+    with pytest.raises(RuntimeError, match="数据库迁移失败"):
+        await bootstrap._run_alter(FailingConn(), "add_column", "ALTER TABLE t ADD COLUMN x")
+    await bootstrap._run_alter(DuplicateConn(), "add_column", "ALTER TABLE t ADD COLUMN x")
+
+
+async def test_create_all_fails_on_index_error(db: None, monkeypatch) -> None:
+    """索引创建真失败 → 整个 create_all 抛错，不带病启动。"""
+    import app.db.bootstrap as bootstrap_mod
+
+    monkeypatch.setattr(
+        bootstrap_mod,
+        "_EXTRA_INDEXES",
+        ("CREATE INDEX ix_broken ON table_that_does_not_exist(x)",),
+    )
+    with pytest.raises(Exception, match="table_that_does_not_exist"):
+        await DbBootstrap().create_all()

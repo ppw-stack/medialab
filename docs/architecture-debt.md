@@ -294,9 +294,13 @@ get_user_snapshot   × 7    (7 站 15 行几乎一模一样)
 | Phase 2 完成 | 465 | 53% |
 | Phase 3 完成 | 489 | 53% |
 | Phase 4 完成 | 489 | 53%（前端类型集中，无后端用例变化） |
+| 合并 strmmanger 后（当前） | — | 约 69% |
+
+上表是 Phase 0–4 的**历史快照**；当前实测值见下方闸门说明。
 
 **Phase 0–4 全部完成。** 遗留（刻意保留，见 Phase 3 表格）：调试用字段
 （`FreeWindow.raw_text`）、DB 列（`value_str`）、适配器协议完整性方法。
 
 覆盖率门槛在 `pyproject.toml` 的 `[tool.coverage.report] fail_under`，
-当前 0（不阻断），**只许升不许降**。补测试后逐步抬高。
+当前 65（**阻断**，CI 也显式传 `--cov-fail-under=65`），**只许升不许降**。
+补测试后逐步抬高。

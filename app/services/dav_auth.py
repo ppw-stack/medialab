@@ -42,7 +42,7 @@ import secrets
 import time
 from dataclasses import dataclass, field
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.core.config import AppSettings
 from app.core.logging import get_logger
@@ -119,6 +119,21 @@ class _CacheEntry:
     expires_at: float
 
 
+@dataclass(frozen=True)
+class _AuthRow:
+    """从 DB 读出的不可变认证快照。
+
+    短事务只做 SELECT 并转成这个纯数据对象，随后**立即关事务**——
+    PBKDF2（600k 迭代，约 42ms）和用户不存在时的 dummy verify 都必须在
+    事务外执行，否则 SQLite 写锁会被一次 CPU 计算长期占用
+    （与 library 健康检查在事务里扫 CIFS 是同类问题）。
+    """
+
+    id: int
+    password_hash: str
+    is_active: bool
+
+
 class DavAuthenticator:
     """WebDAV 认证器（进程内单例）。
 
@@ -175,33 +190,58 @@ class DavAuthenticator:
         if cached is not None and cached.expires_at > time.time():
             return AuthResult(AUTH_OK, cached.user_id, cached.username)
 
-        # ③ 查库 + 验密码
+        # ③ 短事务只读：把需要的字段拷成不可变快照后立即关事务。
+        # PBKDF2（600k 迭代，约 42ms）与用户不存在时的 dummy verify 都必须在
+        # 事务外执行 —— 旧实现在 session_scope() 内跑哈希，一次 CPU 计算
+        # 全程持有 SQLite 写锁（与 library 健康检查在事务里扫 CIFS 同类问题）。
         async with session_scope() as db:
             row = (
                 await db.execute(select(DavUser).where(DavUser.username == username))
             ).scalar_one_or_none()
+            snapshot = (
+                _AuthRow(
+                    id=row.id,
+                    password_hash=row.password_hash,
+                    is_active=bool(row.is_active),
+                )
+                if row is not None
+                else None
+            )
 
-            if row is None:
-                # 用户不存在 —— **也要走一次哈希**避免时序差异暴露用户是否存在
-                await asyncio.to_thread(_dummy_verify, password)
-                self._record_failure(settings, ip, username)
-                return AuthResult(AUTH_INVALID, username=username)
+        if snapshot is None:
+            # 用户不存在 —— **也要走一次哈希**避免时序差异暴露用户是否存在
+            # （现在在事务外跑，恒定性反而更稳——不再叠加 commit 抖动）
+            await asyncio.to_thread(_dummy_verify, password)
+            self._record_failure(settings, ip, username)
+            return AuthResult(AUTH_INVALID, username=username)
 
-            if not row.is_active:
-                # 账号停用：不计失败次数（不是用户输错了），但也不放行。
-                return AuthResult(AUTH_DISABLED, username=username)
+        if not snapshot.is_active:
+            # 账号停用：不计失败次数（不是用户输错了），但也不放行。
+            return AuthResult(AUTH_DISABLED, username=username)
 
-            # PBKDF2 是 CPU 密集的同步计算 —— **必须**丢线程池，
-            # 否则会卡住 event loop，连带影响 /302 中转。
-            ok = await asyncio.to_thread(verify_password, password, row.password_hash)
-            if not ok:
-                self._record_failure(settings, ip, username)
-                return AuthResult(AUTH_INVALID, username=username)
+        # PBKDF2 是 CPU 密集的同步计算 —— **必须**丢线程池，
+        # 否则会卡住 event loop，连带影响 /302 中转。
+        ok = await asyncio.to_thread(verify_password, password, snapshot.password_hash)
+        if not ok:
+            self._record_failure(settings, ip, username)
+            return AuthResult(AUTH_INVALID, username=username)
 
-            user_id = row.id
-            row.last_login_at = bj_now()
+        # ④ 成功：单独短事务写 last_login_at（直接 UPDATE，不再 SELECT）。
+        # 认证成功不该因为统计字段写失败而变成 401 —— 记 warning 继续。
+        try:
+            async with session_scope() as db:
+                await db.execute(
+                    update(DavUser)
+                    .where(DavUser.id == snapshot.id)
+                    .values(last_login_at=bj_now())
+                )
+        except Exception as exc:
+            logger.warning(
+                "更新 WebDAV 最后登录时间失败 user_id=%s: %s", snapshot.id, exc
+            )
 
-        # ④ 成功：清失败计数 + 写缓存
+        user_id = snapshot.id
+        # ⑤ 成功：清失败计数 + 写缓存
         self._clear_failures(ip, username)
         self._cache[cache_key] = _CacheEntry(
             user_id=user_id,

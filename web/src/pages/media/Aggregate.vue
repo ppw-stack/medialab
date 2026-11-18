@@ -88,6 +88,35 @@
         </a-space>
       </template>
 
+      <!-- 实时进度：手动触发的归拢 job（2s 轮询，结束保留到下次触发） -->
+      <div v-if="jobOf(group.id)" class="progress">
+        <div class="progress-head">
+          <span class="section">归拢进度</span>
+          <a-tag :color="jobStateColor(jobOf(group.id)!.state)">
+            {{ jobStateLabel(jobOf(group.id)!.state) }}
+          </a-tag>
+          <span class="muted">用时 {{ jobOf(group.id)!.elapsed_sec }}s</span>
+          <a-button
+            v-if="jobOf(group.id)!.state === 'running'"
+            size="small"
+            danger
+            @click="cancelJob(jobOf(group.id)!.id)"
+          >
+            取消
+          </a-button>
+        </div>
+        <div class="progress-counts">
+          <span>✅ 已归拢 {{ jobOf(group.id)!.synced }}</span>
+          <span>🗑️ 已清理 {{ jobOf(group.id)!.cleaned }}</span>
+          <span>⏸ 暂停 {{ jobOf(group.id)!.paused }}</span>
+          <span>❌ 失败 {{ jobOf(group.id)!.failed }}</span>
+          <span>⏭ 跳过 {{ jobOf(group.id)!.skipped }}</span>
+        </div>
+        <div v-for="(l, i) in jobOf(group.id)!.logs.slice(-4)" :key="i" class="progress-log">
+          {{ l }}
+        </div>
+      </div>
+
       <a-row :gutter="12">
         <a-col :span="10">
           <div class="section">组内存储源</div>
@@ -384,6 +413,83 @@ const candidates = computed(() => drivers.value.filter((d) => d.type === "guangy
 /** 某组的目录映射 */
 function mappingOf(groupId: number): AggregateGroupMapping | undefined {
   return mappings.value[groupId]
+}
+
+// ---- 归拢进度（手动 job 实时展示）----
+/** 各组进行中 / 最近一次的归拢 job（group_id → job） */
+const jobs = ref<Record<number, AggregateSyncJob>>({})
+let jobTimer: number | undefined
+
+/** 某组的归拢 job（没有则 undefined）。 */
+function jobOf(groupId: number): AggregateSyncJob | undefined {
+  return jobs.value[groupId]
+}
+
+function jobStateLabel(state: string): string {
+  switch (state) {
+    case "running":
+      return "进行中"
+    case "success":
+      return "已完成"
+    case "failed":
+      return "失败"
+    case "cancelled":
+      return "已取消"
+    default:
+      return state
+  }
+}
+
+function jobStateColor(state: string): string {
+  switch (state) {
+    case "running":
+      return "processing"
+    case "success":
+      return "green"
+    case "failed":
+      return "red"
+    case "cancelled":
+      return "default"
+    default:
+      return "default"
+  }
+}
+
+/** 轮询一个 job 到结束（2s 间隔；结束保留卡片）。 */
+function watchJob(job: AggregateSyncJob, groupId: number) {
+  jobs.value[groupId] = job
+  if (jobTimer !== undefined) window.clearInterval(jobTimer)
+  jobTimer = window.setInterval(async () => {
+    try {
+      const j = await api.get<AggregateSyncJob>(`/aggregate/sync-jobs/${job.id}`)
+      jobs.value[groupId] = j
+      if (j.state !== "running") {
+        window.clearInterval(jobTimer)
+        jobTimer = undefined
+        await loadAll()
+      }
+    } catch {
+      // 轮询失败下轮再试
+    }
+  }, 2000)
+}
+
+/** 页面加载时恢复「正在跑」的 job（容器重启后 job 表清空 → 恢复不了就没了）。 */
+async function resumeRunningJobs(gs: AggregateGroup[]) {
+  for (const g of gs) {
+    try {
+      const list = await api.get<AggregateSyncJob[]>(
+        `/aggregate/sync-jobs?group_id=${g.id}`,
+      )
+      const running = list.find((j) => j.state === "running")
+      if (running) {
+        jobs.value[g.id] = running
+        watchJob(running, g.id)
+      }
+    } catch {
+      // 忽略（没有 job 或服务异常）
+    }
+  }
 }
 
 /**
@@ -804,30 +910,48 @@ async function syncNow(groupId: number) {
     const ref = await api.post<{ job_id: string; state: string }>(
       `/aggregate/groups/${groupId}/sync`,
     )
-    const jobId = ref.job_id
-    for (;;) {
-      await new Promise((r) => setTimeout(r, 2000))
-      const job = await api.get<AggregateSyncJob>(`/aggregate/sync-jobs/${jobId}`)
-      if (job.state === "success") {
-        message.success(
-          `归拢完成：成功 ${job.synced} / 清理 ${job.cleaned} / 暂停 ${job.paused} / 失败 ${job.failed} / 跳过 ${job.skipped}`,
-        )
-        break
-      }
-      if (job.state === "failed") {
-        message.error(errMsg(job.error || "归拢失败", "归拢失败"))
-        break
-      }
-      if (job.state === "cancelled") {
-        message.warning("归拢已取消")
-        break
-      }
+    const job = await api.get<AggregateSyncJob>(
+      `/aggregate/sync-jobs/${ref.job_id}`,
+    )
+    // 进度卡实时展示（2s 轮询），结束后 loadAll 刷新水位
+    watchJob(job, groupId)
+    syncingGroupId.value = null
+    const final = await waitForJobEnd(job.id)
+    if (final?.state === "success") {
+      message.success(
+        `归拢完成：成功 ${final.synced} / 清理 ${final.cleaned} / 暂停 ${final.paused} / 失败 ${final.failed} / 跳过 ${final.skipped}`,
+      )
+    } else if (final?.state === "failed") {
+      message.error(errMsg(final.error || "归拢失败", "归拢失败"))
+    } else if (final?.state === "cancelled") {
+      message.warning("归拢已取消")
     }
     await loadAll()
   } catch (e) {
     message.error(errMsg(e, "归拢失败"))
   } finally {
     syncingGroupId.value = null
+  }
+}
+
+/** 等一个 job 结束（2s 轮询），返回最终状态。 */
+async function waitForJobEnd(jobId: string): Promise<AggregateSyncJob | null> {
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 2000))
+    const j = await api.get<AggregateSyncJob>(`/aggregate/sync-jobs/${jobId}`)
+    if (j.state !== "running") {
+      jobs.value[j.group_id] = j
+      return j
+    }
+  }
+}
+
+async function cancelJob(jobId: string) {
+  try {
+    await api.post(`/aggregate/sync-jobs/${jobId}/cancel`)
+    message.success("已取消")
+  } catch (e) {
+    message.error(errMsg(e, "取消失败"))
   }
 }
 
@@ -850,7 +974,10 @@ async function removeStaging(id: number) {
   }
 }
 
-onMounted(loadAll)
+onMounted(async () => {
+  await loadAll()
+  await resumeRunningJobs(groups.value)
+})
 </script>
 
 <style scoped>
@@ -870,6 +997,42 @@ onMounted(loadAll)
 
 .mode-tag {
   margin-left: 4px;
+}
+
+.progress {
+  border: 1px solid #e8e8f0;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  background: #fafaff;
+}
+
+.progress-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.progress-head .section {
+  margin-bottom: 0;
+}
+
+.progress-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+
+.progress-log {
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+  color: var(--muted, #888);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mapping {

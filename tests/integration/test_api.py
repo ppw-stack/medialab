@@ -1455,3 +1455,78 @@ async def test_env_settings_requires_session(app_settings: AppSettings) -> None:
     ) as c:
         resp = await c.get("/api/v1/env-settings")
     assert resp.status_code == 401
+
+
+async def test_missing_signing_secret_blocks_startup(
+    app_settings: AppSettings, settings_copy: AppSettings
+) -> None:
+    """SIGNING_SECRET 为空必须 fail-fast，不能带病启动。"""
+    settings_copy.signing_secret = None
+    app = create_app(settings_copy)
+    with pytest.raises(RuntimeError, match="SIGNING_SECRET"):
+        async with app.router.lifespan_context(app):
+            pass
+
+
+async def test_metrics_requires_session(client: httpx.AsyncClient) -> None:
+    """/metrics 与其他管理端点同样要求登录。"""
+    client.cookies.clear()
+    resp = await client.get("/metrics")
+    assert resp.status_code == 401
+
+
+async def test_metrics_with_session(client: httpx.AsyncClient) -> None:
+    resp = await client.get("/metrics")
+    assert resp.status_code == 200
+
+
+async def test_readyz_reports_startup_degradations(client: httpx.AsyncClient) -> None:
+    """启动降级必须在 /readyz 可见，但 HTTP 仍 200（不触发容器重启）。"""
+    from app.services.startup_status import record, reset
+
+    reset()
+    record("watch_manager_start:unit", "监听目录不存在")
+    try:
+        resp = await client.get("/readyz")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "degraded"
+        assert body["degradations"]["watch_manager_start:unit"]["reason"] == (
+            "监听目录不存在"
+        )
+    finally:
+        reset()
+
+
+async def test_readyz_ok_when_no_degradation(client: httpx.AsyncClient) -> None:
+    """无降级且 DB 正常时 /readyz 应为 ok，且带 degradations 字段。"""
+    from app.services.startup_status import reset
+
+    reset()
+    resp = await client.get("/readyz")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["degradations"] == {}
+
+
+async def test_scheduler_status_with_enabled_setting(
+    client: httpx.AsyncClient,
+    app_settings: AppSettings,
+    settings_copy: AppSettings,
+) -> None:
+    """生产默认 scheduler_enabled=True 时状态端点必须反映开启态。
+
+    这里只验证配置分支的端点契约，不真跑 APScheduler——测试环境跑 lifespan
+    会启动真实调度器并注册作业，可能在测试期间触发外部网络请求。
+    """
+    from app.core.config import set_settings
+
+    enabled = settings_copy.model_copy(update={"scheduler_enabled": True})
+    set_settings(enabled)
+    try:
+        resp = await client.get("/api/v1/scheduler")
+        assert resp.status_code == 200
+        assert resp.json()["enabled"] is True
+    finally:
+        set_settings(app_settings)

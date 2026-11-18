@@ -13,7 +13,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        PY_IMAGE: ${PY_IMAGE:-python:3.13-slim}
+        PY_IMAGE: ${PY_IMAGE:-python:3.12-slim}
         NODE_IMAGE: ${NODE_IMAGE:-node:22-slim}
     image: docker.io/ppw111/medialab:${TAG:-main}
     container_name: medialab-dev
@@ -55,8 +55,9 @@ services:
       # **读写挂载**：开了任务的「同步成功后删除本地文件」就需要容器能删
       # 本地文件。只读挂载（:ro）时删除会失败（会记日志，不影响上传）。
       - ${WATCH_DIR:-/dev/null}:${WATCH_DIR:-/dev/null}:rw
-      # 整理刮削的测试源目录（宿主机 /Users/pw/临时/测试 → 容器内同名）
-      - /Users/pw/临时/测试:/app/test-media:rw
+      # 整理刮削的测试源目录（可选）：本地有样例媒体时设 TEST_MEDIA_DIR，
+      # 否则挂 /dev/null 占位（与上方 WATCH_DIR 同一模式），不再写死作者路径。
+      - ${TEST_MEDIA_DIR:-/dev/null}:${TEST_MEDIA_DIR:-/dev/null}:rw
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
       interval: 30s

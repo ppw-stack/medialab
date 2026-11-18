@@ -2,7 +2,7 @@
 
 > 网盘媒体库治理（STRM 生成 / 整理 / 302 中转 / WebDAV / 数据同步）+ PT 辅种自动化
 > （免费种窗口看护 / 辅种巡检 / 孤儿清理）。
-> Python 3.13 + FastAPI + SQLite + Vue 3，Docker 一键部署。
+> Python 3.12 + FastAPI + SQLite + Vue 3，Docker 一键部署。
 
 ## 定位
 
@@ -96,15 +96,16 @@ cp .env.example .env
 # 2. 启动
 docker compose up -d
 
-# 3. 验证
-curl http://localhost:8080/healthz
-curl http://localhost:8080/metrics | head
+# 3. 验证（主机端口 8092；容器内 8080）
+curl http://localhost:8092/healthz
+# /metrics 与其余管理端点一样需要登录（Bearer 用 WEB_TOKEN）：
+curl -H "Authorization: Bearer <WEB_TOKEN>" http://localhost:8092/metrics | head
 ```
 
 ## 开发
 
 ```bash
-# 安装依赖（Python 3.13，由 uv 管理）
+# 安装依赖（Python 3.12，由 uv 管理）
 uv sync --extra dev --extra p115 --extra guangya
 
 # 静态检查
@@ -151,8 +152,7 @@ tests/
 | backend | `ruff` + `mypy` + `pytest` |
 | frontend | `vue-tsc` + `oxlint` |
 
-**全绿才允许合并。** Playwright e2e 需要真实下载器与真实站点，
-CI 上跑不了也不跑（需在本机起 dev 容器后执行）。
+**全绿才允许合并。** 前端不保留 e2e 测试（原 Playwright e2e 依赖真实下载器与站点，无法在 CI 运行，已移除）。
 
 ## 架构
 

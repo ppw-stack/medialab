@@ -24,6 +24,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.services.health import db_available
+from app.services.startup_status import snapshot as startup_snapshot
 from app.services.svc_factory import get_link_cache
 
 router = APIRouter(tags=["system"])
@@ -63,13 +64,16 @@ async def healthz() -> dict[str, object]:
 async def readyz() -> dict[str, object]:
     """就绪探针：DB 可用 + 服务已初始化。
 
-    ``status`` 在 DB 不可用时为 ``degraded``——**不触发容器重启**，
-    但可以被人 / 监控系统看到。
+    ``status`` 在 DB 不可用**或存在启动降级**时为 ``degraded``——
+    **不触发容器重启**（HTTP 恒 200），但可以被人 / 监控系统看到。
+    降级明细在 ``degradations`` 字段（按 component 索引）。
     """
     db_ok = await db_available()
+    degradations = startup_snapshot()
     payload: dict[str, object] = {
-        "status": "ok" if db_ok else "degraded",
+        "status": "degraded" if (not db_ok or degradations) else "ok",
         "database": db_ok,
+        "degradations": degradations,
     }
     try:
         payload["cache"] = get_link_cache().stats()

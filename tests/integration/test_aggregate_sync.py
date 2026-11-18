@@ -52,7 +52,9 @@ class _FakeMaster:
         self.restore_error: str | None = None
 
     async def create_dir(self, name: str, parent_id: str = "") -> tuple[str, bool]:
-        dir_id = f"dir-{name}"
+        # ⚠️ id 必须含父目录——不同剧的同名 Season 目录要拿到不同 id
+        #   （真实光鸭的 fileId 全局唯一）
+        dir_id = f"dir-{parent_id}-{name}"
         self.dirs[name] = dir_id
         return dir_id, True
 
@@ -148,6 +150,10 @@ class _FakeSource:
 
     async def delete_file(self, file_id: str) -> None:
         self.deleted.append(file_id)
+
+    async def delete_files(self, file_ids: list[str]) -> None:
+        """批量删除（真实光鸭驱动有此方法；一次请求删 N 个）。"""
+        self.deleted.extend(file_ids)
 
     # -- 分享（源账号侧）--
 
@@ -750,6 +756,7 @@ async def test_share_transfer_failure_falls_back_to_cloud_download(
     master.restore_error = "转存失败（模拟）"
 
     result = await aggregate_sync.sync_group_now(group_id)
+    print("DBG details:", result.details)
     assert len(master.submitted) == 1, "应回退到离线下载"
     assert result.synced == 1 and result.failed == 0
     assert any("回退离线下载" in d for d in result.details)
@@ -770,6 +777,189 @@ async def test_share_channel_can_be_disabled(
     await aggregate_sync.sync_group_now(group_id)
     assert master.restored == []
     assert len(master.submitted) == 1
+
+
+async def test_small_files_batch_into_one_share(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """同目录的小文件**打包成一个分享、一次转存**（吞吐的最大杠杆）。"""
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "_share_threshold_bytes", lambda: 1024)
+    master, source = fake_drivers
+    group_id, master_id, secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+    # 转存落地的文件名（按副盘 fileId 还原原名）
+    master.source_names = {
+        "f1": "a.mkv",
+        "b0": "ep00.mkv",
+        "b1": "ep01.mkv",
+        "b2": "ep02.mkv",
+    }
+
+    # 3 个同目录的小文件（+_setup 的 1 个 = 4 行）
+    async with session_scope() as db_session:
+        for i in range(3):
+            db_session.add(
+                SecondaryStaging(
+                    group_id=group_id,
+                    source_driver_id=secondary_id,
+                    target_driver_id=master_id,
+                    remote_id=f"b{i}",
+                    file_name=f"ep{i:02d}.mkv",
+                    size_bytes=100,
+                    state="pending",
+                )
+            )
+        await db_session.commit()
+
+    result = await aggregate_sync.sync_group_now(group_id)
+    assert result.synced == 4
+    # **一次分享**打包全部 4 个文件（不是逐文件建分享）
+    assert len(source.shares_created) == 1
+    assert len(source.shares_created[0][0]) == 4
+    # 一次转存
+    assert len(master.restored) == 1
+    # 全部 done + 副盘副本清理
+    rows = await aggregate_staging.list_staging(group_id=group_id)
+    assert all(r.state == "done" and r.transfer_mode == "share_transfer" for r in rows)
+    assert len(source.deleted) == 4
+
+
+async def test_small_files_in_different_dirs_get_separate_shares(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """不同目标目录的小文件**各自成批**（转存只能落一个目录）。
+
+    ``_setup`` 的行在根目录（target_dir=""）→ 三个目录 = 三次分享。
+    """
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "_share_threshold_bytes", lambda: 1024)
+    master, source = fake_drivers
+    group_id, master_id, secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+    # 转存落地的文件名（按副盘 fileId 还原原名）
+    master.source_names = {
+        "f1": "a.mkv",
+        "c0": "ep0.nfo",
+        "c1": "ep1.nfo",
+    }
+
+    async with session_scope() as db_session:
+        for i, dir_name in enumerate(("剧A (2026)/Season 1", "剧B (2026)/Season 1")):
+            db_session.add(
+                SecondaryStaging(
+                    group_id=group_id,
+                    source_driver_id=secondary_id,
+                    target_driver_id=master_id,
+                    remote_id=f"c{i}",
+                    file_name=f"ep{i}.nfo",
+                    source_dir=dir_name,
+                    target_dir=dir_name,
+                    size_bytes=100,
+                    state="pending",
+                )
+            )
+        await db_session.commit()
+
+    result = await aggregate_sync.sync_group_now(group_id)
+    assert result.synced == 3
+    # 三个目录 → 三次分享（每次一批；同目录的才打包）
+    assert len(source.shares_created) == 3
+    rows = await aggregate_staging.list_staging(group_id=group_id)
+    done = [r for r in rows if r.transfer_mode == "share_transfer"]
+    assert len(done) == 3
+
+
+async def test_batch_timeout_falls_back_to_cloud_download(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """批量转存超时（文件没出现）→ 整批**回退云下载**（不会卡死）。"""
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "_share_threshold_bytes", lambda: 1024)
+    # 超时压短（真实 600s；测试里 1s 就够判定）
+    monkeypatch.setattr(aggregate_sync, "SHARE_TRANSFER_WAIT_SEC", 1.0)
+    monkeypatch.setattr(aggregate_sync, "SHARE_TRANSFER_POLL_SEC", 0.2)
+    master, _source = fake_drivers
+    group_id, _master_id, _secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+    # **不设 source_names** → 转存落地名（file-f1）≠ 期望名（a.mkv）
+    # → 轮询永远等不到 → 超时 → 回退
+
+    await aggregate_sync.sync_group_now(group_id)
+    assert len(master.submitted) == 1, "超时后应回退云下载"
+    rows = await aggregate_staging.list_staging(group_id=group_id)
+    assert rows[0].state == "done"
+    assert rows[0].transfer_mode == "cloud_download"
+
+
+async def test_quota_wall_only_pauses_cloud_channel_rows(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """额度墙**只暂停云下载通道的行**——分享转存通道不受额度影响。
+
+    早前是整组连坐暂停 → 附件也被拖到次日（附件本来 0 额度可搬）。
+    """
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "_share_threshold_bytes", lambda: 1024)
+    master, _source = fake_drivers
+    group_id, master_id, secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+    master.source_names = {"f1": "a.mkv"}
+
+    # 一个大文件（走云下载）+ 一个小文件（走转存）
+    async with session_scope() as db_session:
+        db_session.add(
+            SecondaryStaging(
+                group_id=group_id,
+                source_driver_id=secondary_id,
+                target_driver_id=master_id,
+                remote_id="big",
+                file_name="big.mkv",
+                size_bytes=5_000_000,  # > 阈值 → 云下载
+                state="pending",
+            )
+        )
+        await db_session.commit()
+
+    # 大文件的云下载撞额度墙
+    async def _wall(url: str, parent_id: str = "") -> str:
+        raise DriverError("云添加次数超限，下个自然日刷新", kind="unknown")
+
+    monkeypatch.setattr(master, "create_offline_task", _wall)
+
+    await aggregate_sync.sync_group_now(group_id)
+    rows = {r.file_name: r for r in await aggregate_staging.list_staging(group_id=group_id)}
+    # 大文件 → paused（撞墙）
+    assert rows["big.mkv"].state == "paused"
+    # 小文件 → 走转存，不受额度影响 → done
+    assert rows["a.mkv"].state == "done"
+    assert rows["a.mkv"].transfer_mode == "share_transfer"
+
+
+async def test_transfer_fallback_rows_pause_directly_when_wall_hit(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """转存未落地 + 额度已耗尽 → 回退行**直接暂停**（不再白撞一次额度）。"""
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "_share_threshold_bytes", lambda: 1024)
+    monkeypatch.setattr(aggregate_sync, "SHARE_TRANSFER_WAIT_SEC", 1.0)
+    monkeypatch.setattr(aggregate_sync, "SHARE_TRANSFER_POLL_SEC", 0.2)
+    master, _source = fake_drivers
+    group_id, _master_id, _secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+    # **不设 source_names** → 转存落地名不匹配 → 超时未落地
+
+    # 同时让云下载撞墙
+    async def _wall(url: str, parent_id: str = "") -> str:
+        raise DriverError("云添加次数超限，下个自然日刷新", kind="unknown")
+
+    monkeypatch.setattr(master, "create_offline_task", _wall)
+
+    await aggregate_sync.sync_group_now(group_id)
+    rows = await aggregate_staging.list_staging(group_id=group_id)
+    # 转存未落地 → 回退；额度已耗尽 → 直接 paused（不重复提交）
+    assert rows[0].state == "paused"
+    assert master.submitted == [], "额度耗尽后不该再提交云下载"
 
 
 async def test_sync_pauses_group_when_hitting_quota_wall(

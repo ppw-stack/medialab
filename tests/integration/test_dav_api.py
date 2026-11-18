@@ -56,7 +56,7 @@ def library(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-async def dav_client(settings: AppSettings, db_engine, library: Path):
+async def dav_client(app_settings: AppSettings, db_engine, library: Path):
     """已挂载 DAV 的测试客户端。"""
     async with session_scope() as db:
         db.add(
@@ -75,12 +75,12 @@ async def dav_client(settings: AppSettings, db_engine, library: Path):
 
     paths._root_cache.set(str(library))
 
-    dav_app = build_dav_app(settings, str(library))
+    dav_app = build_dav_app(app_settings, str(library))
 
     # 结构：守卫（ASGI）→ FastAPI → mount(/dav) → wsgidav（WSGI）
     inner = FastAPI()
     inner.mount(MOUNT, WSGIMiddleware(dav_app))
-    outer = DavGuard(inner, settings=settings)
+    outer = DavGuard(inner, settings=app_settings)
 
     transport = ASGITransport(app=outer)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -327,9 +327,9 @@ async def test_forged_root_header_cannot_escape(dav_client, tmp_path: Path):
 # --------------------------------------------------------------------------
 
 
-async def test_rate_limit_returns_429(dav_client, settings: AppSettings):
+async def test_rate_limit_returns_429(dav_client, app_settings: AppSettings):
     """超限流返回 429。"""
-    settings.dav_rate_limit_per_min = 3
+    app_settings.dav_rate_limit_per_min = 3
     from app.services.dav_ratelimit import dav_rate_limiter
 
     dav_rate_limiter.reset()
@@ -345,10 +345,10 @@ async def test_rate_limit_returns_429(dav_client, settings: AppSettings):
     dav_rate_limiter.reset()
 
 
-async def test_user_rate_limit_returns_429(dav_client, settings: AppSettings):
+async def test_user_rate_limit_returns_429(dav_client, app_settings: AppSettings):
     """按用户的限流生效（IP 维度不限）。"""
-    settings.dav_rate_limit_per_min = 0  # IP 不限
-    settings.dav_user_rate_limit_per_min = 2
+    app_settings.dav_rate_limit_per_min = 0  # IP 不限
+    app_settings.dav_user_rate_limit_per_min = 2
     from app.services.dav_ratelimit import dav_rate_limiter
 
     dav_rate_limiter.reset()

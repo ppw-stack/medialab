@@ -16,6 +16,11 @@
 - ``drain_task_queue`` — 排空任务队列：崩溃恢复（僵死 running 回收）+ 退避重试
 - ``daily_checkin`` — 对支持签到的站点执行每日签到
   （hhanclub / soulvoice / hdhome / hdsky / hdwing）
+- ``scrape_metadata`` — 媒体刮削（本地目录补 NFO / 图片）
+- ``organize_files`` — 下载整理（源目录 → 媒体库标准结构）
+- ``aggregate_sync`` — 网盘聚合归拢（副数据源 → 主数据源）
+- ``cleanup_link_cache`` — 清理过期直链缓存（L1 内存 + L2 表）
+- ``purge_dav_auth_cache`` — 淘汰过期的 WebDAV 认证失败缓存
 """
 from __future__ import annotations
 
@@ -67,6 +72,12 @@ DEFAULT_CRON: dict[str, str] = {
     # 不是受调度频率限制——跑得再勤也不会超过当日额度。小时级足够，
     # 且撞上额度耗尽时只是「等明天」，不会白扣。
     "aggregate_sync": "29 * * * *",
+    # 过期数据清理（此前 cleanup_expired / purge_expired 只有测试调用，
+    # 生产从不执行 → L2 缓存表与 DAV 失败记录单调增长）：
+    # 47 3  每天 03:47（避开 scrape_metadata 的 41 3）
+    # 7 *   每小时第 7 分钟（DAV TTL 默认 60s，小时级淘汰足够防 dict 无界）
+    "cleanup_link_cache": "47 3 * * *",
+    "purge_dav_auth_cache": "7 * * * *",
 }
 
 
@@ -223,6 +234,18 @@ JOB_META: tuple[JobMeta, ...] = (
         make_func=lambda f: _job_fn(_run_aggregate_sync),
         log_extra_fn=lambda: f" (单轮上限={_current_max_submissions()})",
     ),
+    JobMeta(
+        name="cleanup_link_cache",
+        title="清理直链缓存",
+        description="删除过期的直链缓存（L2 表 + L1 内存），防止缓存表单调增长（每天 03:47）",
+        make_func=lambda f: _job_fn(_run_cleanup_link_cache),
+    ),
+    JobMeta(
+        name="purge_dav_auth_cache",
+        title="清理 DAV 认证缓存",
+        description="淘汰过期的 WebDAV 认证失败记录，防止进程内字典无界增长（每小时）",
+        make_func=lambda f: _job_fn(_run_purge_dav_auth_cache),
+    ),
 )
 
 
@@ -300,6 +323,9 @@ def preflight_job_imports() -> None:
         "app.services.scrape_jobs",     # _run_scrape_metadata（整理刮削迁移）
         "app.services.organize_service",  # _run_organize（整理刮削迁移）
         "app.services.aggregate_sync",  # _run_aggregate_sync（网盘聚合归拢）
+        "app.services.svc_factory",     # _run_cleanup_link_cache（get_link_cache）
+        "app.services.link_cache",      # get_link_cache() 返回的缓存实现
+        "app.services.dav_auth",        # _run_purge_dav_auth_cache
     ):
         importlib.import_module(mod)
 
@@ -384,6 +410,26 @@ async def _run_aggregate_sync() -> dict[str, object]:
     from app.services.aggregate_sync import run_aggregate_sync
 
     return await run_aggregate_sync()
+
+
+async def _run_cleanup_link_cache() -> dict[str, object]:
+    """清理过期直链缓存（L2 表 + L1 内存）。"""
+    from app.services.svc_factory import get_link_cache
+
+    deleted = await get_link_cache().cleanup_expired()
+    return {"deleted": deleted}
+
+
+async def _run_purge_dav_auth_cache() -> dict[str, object]:
+    """淘汰过期的 WebDAV 认证失败缓存。
+
+    ``purge_expired()`` 是同步的纯内存操作（当前在主 event loop 调用），
+    这里直接调用即可，不需要 ``to_thread``。
+    """
+    from app.services.dav_auth import dav_authenticator
+
+    purged = dav_authenticator.purge_expired()
+    return {"purged": purged}
 
 
 def _job_fn(

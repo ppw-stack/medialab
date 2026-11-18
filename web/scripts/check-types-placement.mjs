@@ -10,7 +10,7 @@
  * **纯视图内部**的类型（Tile / Countdown / 格式化选项）留在组件里——
  * 它们不是 API 契约，放到共享文件反而是噪音。
  *
- * 独立 node 脚本（不依赖 Playwright / 容器）——CI 里能直接跑。
+ * 独立 node 脚本（不依赖浏览器 / 容器）——CI 里能直接跑。
  *
  * 用法：node web/scripts/check-types-placement.mjs
  */

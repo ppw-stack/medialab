@@ -17,11 +17,19 @@
           <a-alert
             :type="report.healthy ? 'success' : 'warning'"
             show-icon
-            :message="report.healthy ? '媒体库健康' : '发现问题'"
+            :message="
+              report.configuration_error
+                ? '配置不完整'
+                : report.healthy
+                  ? '媒体库健康'
+                  : '发现问题'
+            "
             :description="
-              report.healthy
-                ? '所有 STRM 文件均在位，签名有效，无孤儿文件。'
-                : '下方列出各类问题。修复请到「媒体库」批量重签，或重新扫描对应规则。'
+              report.configuration_error
+                ? report.configuration_error
+                : report.healthy
+                  ? '所有 STRM 文件均在位，签名有效，无孤儿文件。'
+                  : '下方列出各类问题。修复请到「媒体库」批量重签，或重新扫描对应规则。'
             "
             style="margin-bottom: 16px"
           />

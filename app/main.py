@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 
@@ -41,12 +41,15 @@ def _probe_targets() -> list[str]:
     面板**不会**跟着假死。
     """
     from app.services.env_settings import get_env_setting
+    from app.services.startup_status import record
 
     targets: list[str] = []
     for key in ("cross_seed_scan_dirs",):
         try:
             raw = get_env_setting(key)
-        except Exception:
+        except Exception as exc:
+            # 此前是静默 continue——挂载探活目录读不到，/readyz 却照样 ok。
+            record(f"probe_targets:{key}", exc)
             continue
         for part in raw.split(","):
             part = part.strip()
@@ -58,6 +61,10 @@ def _probe_targets() -> list[str]:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: AppSettings = get_settings()
+    # 启动降级台账：每次启动从零开始，避免测试里多次 create_app 串状态。
+    from app.services.startup_status import reset
+
+    reset()
     configure_logging(
         settings.log_level,
         json_output=settings.log_json,
@@ -75,6 +82,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise RuntimeError("WEB_TOKEN 未配置，无法派生 session HMAC 密钥")
     init_hmac_key(settings.web_token.get_secret_value())
 
+    # /302 中转 URL 的 HMAC 签名密钥——与 WEB_TOKEN 同等级必填。
+    # 旧实现不在启动时校验：空密钥能正常监听，直到生成 STRM / 播放才 500；
+    # 更糟的是库健康检查会用空串重算签名，把全库误判为「签名无效」，
+    # 诱导运维执行批量重签（改写所有 STRM）。
+    if not settings.signing_secret or not settings.signing_secret.get_secret_value().strip():
+        raise RuntimeError("SIGNING_SECRET 未配置，无法签发 /302 中转 URL")
+
     # 首次启动：明文密码升级为 PBKDF2 哈希（与 web_password 字段存储兼容）
     from pydantic import SecretStr
 
@@ -85,10 +99,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.info("已将默认 WEB_PASSWORD 升级为 PBKDF2 哈希")
         except Exception as exc:
             logger.warning("密码升级失败：%s", exc)
+            from app.services.startup_status import record
+
+            record("web_password_upgrade", exc)
 
     init_db(settings)
     # 建表 + 全部迁移（幂等）。含 FR-1.5 adapter 值迁移 + 媒体库域的迁移。
     await db_bootstrap.create_all()
+
+    # 单实例租约：本项目依赖大量进程内状态（调度中心、作业表、watch_manager
+    # 的全局字典、QR session），多 worker / 多副本会让它们各自为政 →
+    # 作业重复执行、任务 404。Dockerfile 的 --workers 1 只是部署约定，
+    # 这里在 DB 层强制只有一个实例能继续启动（测试环境跳过）。
+    from app.services.instance_lease import acquire_instance_lease
+
+    lease = await acquire_instance_lease()
+    app.state.instance_lease = lease
+
     state["db_healthy"].set(1 if await db_bootstrap.healthcheck() else 0)
 
     # 运行时参数（DB 持久化的可调设置）必须在 register_jobs 之前初始化，
@@ -234,6 +261,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if settings.dav_enabled:
             await dav_auditor.close()
         await watch_manager.stop_all()
+        # 租约必须在 dispose_db() 之前释放——释放要写 DB；且要先停心跳。
+        instance_lease = getattr(app.state, "instance_lease", None)
+        if instance_lease is not None:
+            await instance_lease.close()
         await dispose_db()
         logger.info("已停机")
 
@@ -289,6 +320,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 
 
 def _mount_routes(app: FastAPI) -> None:
+    from app.api.auth import require_session
     from app.api.auth import router as auth_router
     from app.api.routes import (
         aggregate,
@@ -348,7 +380,14 @@ def _mount_routes(app: FastAPI) -> None:
     ):
         app.include_router(router)
 
-    @app.get("/metrics", tags=["ops"], summary="Prometheus 指标（FR-8.3）")
+    # 指标里含站点 / 下载器 / 作业状态等运行画像——与其余管理端点一致，
+    # 必须登录（ Prometheus 抓取端请配 Bearer WEB_TOKEN 或放在反代内网）。
+    @app.get(
+        "/metrics",
+        tags=["ops"],
+        summary="Prometheus 指标（FR-8.3）",
+        dependencies=[Depends(require_session)],
+    )
     async def metrics() -> Response:
         payload, content_type = render_metrics()
         return Response(content=payload, media_type=content_type)

@@ -29,7 +29,7 @@ async def _rows() -> list[DavAuditLog]:
         return list((await db.execute(select(DavAuditLog))).scalars().all())
 
 
-async def test_record_and_flush(db_engine, settings: AppSettings):
+async def test_record_and_flush(db_engine, app_settings: AppSettings):
     """记录后 flush 能落库。"""
     auditor = DavAuditor()
     auditor.record(
@@ -43,7 +43,7 @@ async def test_record_and_flush(db_engine, settings: AppSettings):
     assert rows[0].status == 200
 
 
-async def test_no_entry_lost_on_flush(db_engine, settings: AppSettings):
+async def test_no_entry_lost_on_flush(db_engine, app_settings: AppSettings):
     """**关键回归**：flush 不丢条目。
 
     旧实现的 bug：``queue.get()`` 已消费一条后，后面又用
@@ -59,7 +59,7 @@ async def test_no_entry_lost_on_flush(db_engine, settings: AppSettings):
     assert await _count() == 10
 
 
-async def test_background_loop_writes(db_engine, settings: AppSettings):
+async def test_background_loop_writes(db_engine, app_settings: AppSettings):
     """后台 flush 协程能自动落库。"""
     auditor = DavAuditor()
     auditor.start()
@@ -76,7 +76,7 @@ async def test_background_loop_writes(db_engine, settings: AppSettings):
     assert await _count() == 5
 
 
-async def test_close_flushes_remaining(db_engine, settings: AppSettings):
+async def test_close_flushes_remaining(db_engine, app_settings: AppSettings):
     """停机时把剩余条目落库。"""
     auditor = DavAuditor()
     auditor.start()
@@ -85,7 +85,7 @@ async def test_close_flushes_remaining(db_engine, settings: AppSettings):
     assert await _count() == 1
 
 
-def test_queue_rebind_on_new_loop(settings: AppSettings):
+def test_queue_rebind_on_new_loop(app_settings: AppSettings):
     """**关键回归**：跨 event loop 不崩。
 
     进程级单例在测试里每个用例一个新 loop —— 若不重建队列会抛
@@ -104,7 +104,7 @@ def test_queue_rebind_on_new_loop(settings: AppSettings):
     asyncio.run(_in_loop())  # 第二个 loop —— 不该抛异常
 
 
-async def test_client_is_truncated(db_engine, settings: AppSettings):
+async def test_client_is_truncated(db_engine, app_settings: AppSettings):
     """User-Agent 超长被截断。"""
     auditor = DavAuditor()
     auditor.record(
@@ -117,10 +117,10 @@ async def test_client_is_truncated(db_engine, settings: AppSettings):
     )
     await auditor._flush()
     rows = await _rows()
-    assert len(rows[0].client) == settings.dav_audit_client_max_len
+    assert len(rows[0].client) == app_settings.dav_audit_client_max_len
 
 
-async def test_path_is_truncated(db_engine, settings: AppSettings):
+async def test_path_is_truncated(db_engine, app_settings: AppSettings):
     """超长路径被截断（防超长 URL 撑爆表）。"""
     auditor = DavAuditor()
     auditor.record(
@@ -131,7 +131,7 @@ async def test_path_is_truncated(db_engine, settings: AppSettings):
     assert len(rows[0].path) == 1024
 
 
-async def test_dropped_counted(db_engine, settings: AppSettings):
+async def test_dropped_counted(db_engine, app_settings: AppSettings):
     """队列满时丢弃并计数（不阻塞请求）。"""
     auditor = DavAuditor()
     for _ in range(1100):
@@ -139,9 +139,9 @@ async def test_dropped_counted(db_engine, settings: AppSettings):
     assert auditor.stats()["dropped"] > 0
 
 
-async def test_cleanup_audit_removes_old(db_engine, settings: AppSettings):
+async def test_cleanup_audit_removes_old(db_engine, app_settings: AppSettings):
     """留存期外的记录被清理。"""
-    settings.dav_audit_retention_days = 1
+    app_settings.dav_audit_retention_days = 1
     auditor = DavAuditor()
     # 造一条 10 天前的记录
     auditor.record(user_id=1, username="a", method="GET", path="/old", status=200)
@@ -150,33 +150,33 @@ async def test_cleanup_audit_removes_old(db_engine, settings: AppSettings):
         row = (await db.execute(select(DavAuditLog))).scalars().one()
         row.created_at = int(__import__("time").time()) - 10 * 86400
 
-    deleted = await cleanup_audit(settings)
+    deleted = await cleanup_audit(app_settings)
     assert deleted == 1
     assert await _count() == 0
 
 
-async def test_cleanup_audit_keeps_recent(db_engine, settings: AppSettings):
+async def test_cleanup_audit_keeps_recent(db_engine, app_settings: AppSettings):
     """留存期内的记录保留。"""
-    settings.dav_audit_retention_days = 90
+    app_settings.dav_audit_retention_days = 90
     auditor = DavAuditor()
     auditor.record(user_id=1, username="a", method="GET", path="/new", status=200)
     await auditor._flush()
-    assert await cleanup_audit(settings) == 0
+    assert await cleanup_audit(app_settings) == 0
     assert await _count() == 1
 
 
-async def test_cleanup_audit_disabled(db_engine, settings: AppSettings):
+async def test_cleanup_audit_disabled(db_engine, app_settings: AppSettings):
     """留存期 0 = 永久保留。"""
-    settings.dav_audit_retention_days = 0
+    app_settings.dav_audit_retention_days = 0
     auditor = DavAuditor()
     auditor.record(user_id=1, username="a", method="GET", path="/a", status=200)
     await auditor._flush()
-    assert await cleanup_audit(settings) == 0
+    assert await cleanup_audit(app_settings) == 0
     assert await _count() == 1
 
 
 @pytest.mark.parametrize("method", ["GET", "HEAD", "PROPFIND", "OPTIONS"])
-async def test_methods_recorded(db_engine, settings: AppSettings, method: str):
+async def test_methods_recorded(db_engine, app_settings: AppSettings, method: str):
     """各种方法都能记。"""
     auditor = DavAuditor()
     auditor.record(user_id=1, username="a", method=method, path="/a", status=207)

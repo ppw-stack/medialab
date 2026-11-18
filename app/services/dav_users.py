@@ -311,7 +311,7 @@ async def get_dav_root() -> DavRootConfig:
 
     from app.db.models import Driver, Setting
     from app.db.session import session_scope
-    from app.webdav.paths import KEY_ROOT_DRIVER_ID
+    from app.services.dav_root import KEY_ROOT_DRIVER_ID
 
     async with session_scope() as db:
         row = (
@@ -350,7 +350,7 @@ async def set_dav_root(driver_id: int | None) -> DavRootConfig:
 
     from app.db.models import Driver
     from app.db.session import session_scope
-    from app.webdav.paths import set_root_driver_id
+    from app.services.dav_root import set_root_driver_id
 
     if driver_id is not None:
         async with session_scope() as db:

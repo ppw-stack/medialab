@@ -24,7 +24,7 @@ PT 站 ──► 下载器 ──► 本地文件 ──► 网盘 ──► STR
 | 错误处理 | `ServiceError`（服务层不 import fastapi） | 路由里 `try/except` 样板 | pt 更干净 |
 | 日志 | 敏感字段自动脱敏 | 无脱敏 | pt 更安全 |
 | 时间口径 | 统一北京时间字符串 | Integer unix 时间戳 | pt 更一致 |
-| 前端 | 设计令牌 + Playwright e2e + 类型放置检查 | 无 e2e | pt 更成熟 |
+| 前端 | 设计令牌 + Playwright e2e + 类型放置检查 | 无 e2e | pt 更成熟（注：合并后 e2e 已整体移除，现仅保留设计令牌 + 类型/样式/CSS 静态检查） |
 | 死代码检测 | `test_dead_code.py` | 无 | pt 更严谨 |
 
 **代价**：strm 的 API 层代码需要下沉到 service 层（见下文「返工范围」）。

@@ -569,6 +569,9 @@ async def probe_driver(driver_id: int) -> AccountStatus:
                 )
         except Exception as exc:  # 落库失败不影响测连结果
             logger.warning("探测结果落库失败 driver_id=%s: %s", driver_id, exc)
+            from app.services.startup_status import record
+
+            record(f"driver_probe_persist:{driver_id}", exc)
     return status
 
 
@@ -646,6 +649,9 @@ async def probe_all_enabled() -> dict[int, CachedProbe]:
                 logger.info("启动测连完成 driver_id=%s", driver_id)
             except Exception as exc:
                 logger.warning("启动测连失败 driver_id=%s: %s", driver_id, exc)
+                from app.services.startup_status import record
+
+                record(f"driver_probe:{driver_id}", exc)
 
     await asyncio.gather(*(_one(i) for i in targets))
     logger.info("启动测连完成：%d 个存储源", len(targets))

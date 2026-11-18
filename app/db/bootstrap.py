@@ -205,6 +205,7 @@ class DbBootstrap:
             backfill_discount_pct,
             backfill_upload_concurrency,
             delete_offline_env_settings,
+            drop_obsolete_tables_once,
             migrate_adapter_values,
         )
         from app.db.models import Base
@@ -217,18 +218,18 @@ class DbBootstrap:
             for kind, stmt in _ALTER_STATEMENTS:
                 await self._run_alter(conn, kind, stmt)
             for stmt in _EXTRA_INDEXES:
-                # 用了 IF NOT EXISTS，失败是真问题 → 记 error 但不阻断启动
-                try:
-                    await conn.execute(text(stmt))
-                except Exception as exc:
-                    logger.error("创建索引失败（%s）：%s", stmt, exc)
+                # IF NOT EXISTS 已保证幂等，这里失败就是真问题 → 让异常
+                # 冒出去，engine.begin() 回滚整个 DDL 事务并阻断启动。
+                await conn.execute(text(stmt))
         logger.info("数据表已就绪")
         await backfill_discount_pct()
         await backfill_upload_concurrency()
         await migrate_adapter_values()
         await delete_offline_env_settings()
-        # 媒体库域的幂等迁移（补列 / 删废弃列 / 删废弃表）
+        # 媒体库域的幂等迁移（补列 / 删废弃列）
         await self._run_media_migrations()
+        # 不可逆删表走版本化一次性迁移（先备份，user_version < 3 才跑）
+        await drop_obsolete_tables_once()
 
     async def _rebuild_organize_history(self) -> None:
         """旧结构的 ``organize_history``（绑定下载器）→ DROP 重建。
@@ -250,7 +251,10 @@ class DbBootstrap:
             columns = {row[1] for row in rows}
             if "downloader_id" not in columns:
                 return  # 已是新结构
-            await conn.execute(text("DROP TABLE organize_history"))
+            # 先备份再删（同一事务）；create_all 随后按新模型重建。
+            from app.db.migrations import backup_and_drop_table
+
+            await backup_and_drop_table(conn, "organize_history")
             logger.info(
                 "已重建旧结构的 organize_history（判重模型改为 source_path）"
             )
@@ -266,12 +270,15 @@ class DbBootstrap:
         - ``drivers`` 表补媒体库配置列（``media_cid`` / ``output_dir`` …）
         - ``upload_tasks`` 表新增 ``delete_after_upload``、删除 ``watch_subdir``
         - 删除废弃列 ``drivers.naming_rule``
-        - 删除废弃表 ``scan_rules`` / ``dav_acl`` / ``job_runs``
 
         ⚠️ ``job_runs`` **是辅种域在用的表**（调度作业历史）——strmmanger
         时代的 ``job_runs`` 是它自己的调度模块残留，两者**表名相同但语义
         不同**。辅种域的 ``job_runs`` 有真实数据，**绝不能删**。
         故此处**不删** ``job_runs``——见下方注释。
+
+        废弃表（``scan_rules`` / ``dav_acl`` / ``quota_ledger``）的删除
+        已移到 :func:`app.db.migrations.drop_obsolete_tables_once`——
+        版本化一次性执行 + 先备份，见 :meth:`create_all`。
         """
         await self._migrate_driver_config()
         await self._migrate_aggregate_groups()
@@ -283,9 +290,7 @@ class DbBootstrap:
         # ``aggregate_group_roots``——聚合的目录映射两端都属组，不混进存储源
         # 配置。存量全为 NULL（从未使用），删列安全。
         await self._drop_column("drivers", "staging_root_id")
-        # ``quota_ledger`` 是「云添加额度账本」表的遗留（2026-11-15 改方案：
-        # 额度改走**撞墙探测**，不再记账）——表已无用途，删掉。
-        await self._drop_obsolete_tables(("scan_rules", "dav_acl", "quota_ledger"))
+        # 废弃表不在这里删——见 create_all() 末尾的 drop_obsolete_tables_once()。
 
     async def _migrate_driver_config(self) -> None:
         """给 ``drivers`` 表补齐媒体库配置列（幂等）。"""
@@ -423,29 +428,17 @@ class DbBootstrap:
                 logger.warning("删除列 %s.%s 失败（不影响功能）：%s", table, column, exc)
 
     async def _drop_obsolete_tables(self, names: tuple[str, ...]) -> None:
-        """删除废弃的表（幂等）。
+        """备份并删除指定废弃表（低层入口，供测试 / 显式调用）。
 
-        删表是**不可逆**操作，故：
-
-        - 逐张表**单独检查**存在性，不存在直接跳过（幂等）
-        - 每张表一条 DELETE，不做批量
+        启动链路**不要**直接调它——用
+        :func:`app.db.migrations.drop_obsolete_tables_once` 的版本化入口。
         """
+        from app.db.migrations import backup_and_drop_table
+
         engine = get_engine()
         async with engine.begin() as conn:
             for name in names:
-                row = (
-                    await conn.execute(
-                        text(
-                            "SELECT name FROM sqlite_master "
-                            "WHERE type='table' AND name=:name"
-                        ),
-                        {"name": name},
-                    )
-                ).first()
-                if row is None:
-                    continue
-                await conn.execute(text(f"DROP TABLE {name}"))
-                logger.info("已删除废弃表 %s", name)
+                await backup_and_drop_table(conn, name)
 
     async def _run_alter(self, conn: object, kind: str, stmt: str) -> None:
         """跑一条 ALTER，按类型区分「预期失败」与「真失败」。
@@ -455,10 +448,14 @@ class DbBootstrap:
 
         现在的处理：
 
-        - ``add_column``   —— 列已存在是幂等重跑的**正常**结果（静默）
+        - ``add_column``   —— 列已存在是幂等重跑的**正常**结果（静默）；
+          其它失败是真问题 → **抛错阻断启动**
         - ``drop_column``   —— 老库可能没这列，失败无害（warning）
         - ``rename_column`` —— 新库无 ``*_enc`` 列，失败无害（warning）
-        - ``create_index``  —— 用了 IF NOT EXISTS，失败是真问题（error）
+        - ``create_index``  —— 用了 IF NOT EXISTS，失败是真问题 → 抛错
+
+        旧实现把所有真失败都只记 error 然后继续启动，DB 可能停在
+        「缺列 / 缺索引」的半迁移状态，而 /readyz 仍显示健康。
         """
         try:
             await conn.execute(text(stmt))  # type: ignore[attr-defined]
@@ -466,12 +463,10 @@ class DbBootstrap:
             msg = str(exc).lower()
             if kind == "add_column" and "duplicate column name" in msg:
                 return  # 幂等重跑，预期内
-            if kind == "add_column":
-                logger.error("加列失败（不是「列已存在」，需排查）：%s → %s", stmt, exc)
-            elif kind in ("drop_column", "rename_column"):
+            if kind in ("drop_column", "rename_column"):
                 logger.warning("删列/改名失败（老库可能无此列，可忽略）：%s → %s", stmt, exc)
-            else:
-                logger.error("执行失败：%s → %s", stmt, exc)
+                return
+            raise RuntimeError(f"数据库迁移失败（{kind}）：{stmt}") from exc
 
     async def healthcheck(self) -> bool:
         """数据库健康检查（/healthz 用）。"""

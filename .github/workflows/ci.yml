@@ -9,8 +9,8 @@ name: ci
 #   backend : ruff + mypy + pytest
 #   frontend: vue-tsc（类型）+ oxlint（lint）
 #
-# 刻意**不含** Playwright e2e：现有 e2e 连的是真实下载器
-# （192.168.0.172:9091）和真实站点，CI 上跑不了也不该跑。
+# 不含 e2e：项目不保留 Playwright e2e（原 e2e 连真实下载器与站点，
+# CI 上跑不了，已整体移除）。
 
 on:
   push:
@@ -43,6 +43,8 @@ jobs:
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
           enable-cache: true
+          # 与 Dockerfile 的 ARG UV_VERSION 保持一致（uv 升级会改变 lock 解释）
+          uv-version: 0.13.9
 
       - name: Install dependencies
         # --frozen：用 uv.lock 里的精确版本，不用 pyproject 的浮动范围
@@ -57,11 +59,12 @@ jobs:
 
       - name: Pytest
         # 覆盖率阈值在 pyproject 的 [tool.coverage.report] fail_under 里
-        # （当前 0 = 不阻断）。补测试后逐步抬高，只许升不许降。
+        # （当前 65 = 阻断）。这里显式再传一次，避免只看 workflow 的人误以为
+        # 不阻断；只许升不许降。
         #
         # 只出 term 报告（人看），**不生成 coverage.xml、不上传 artifact**：
         # 仓库没有 codecov 等消费者，artifact 每次 CI 堆一份没人看。
-        run: uv run pytest --cov=app --cov-report=term-missing
+        run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=65
 
   frontend:
     name: frontend (vue-tsc + oxlint)
@@ -90,14 +93,14 @@ jobs:
 
       - name: Type placement check
         # API 契约类型必须集中在 web/src/types.ts（Phase 4）。
-        # 独立 node 脚本——不依赖 Playwright / 容器。
+        # 独立 node 脚本——不依赖浏览器 / 容器。
         working-directory: web
         run: node scripts/check-types-placement.mjs
 
       - name: CSS class check
         # template 里用到的 class 必须有样式定义（本文件 <style> 或 global.css）。
         # 防的是「合并页面时丢了 <style scoped>」——vue-tsc / oxlint 都不管 CSS，
-        # 丢了不会有任何报错，页面样式却已经坏了。
+        # 丢了不会有任何报错，页面样式却已经坏了。独立 node 脚本，不依赖浏览器 / 容器。
         working-directory: web
         run: node scripts/check-css-classes.mjs
 
