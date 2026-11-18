@@ -171,6 +171,8 @@ class RuntimeParamsUpdateIn(BaseModel):
     aggregate_max_submissions: int | None = None
     #: 小文件走「分享转存」的体积上限（0 = 关闭该通道）
     aggregate_share_threshold_bytes: int | None = None
+    #: 归拢传输通道（0 = 按体积分流 / 1 = 转存优先）
+    aggregate_transfer_mode: int | None = None
 
 
 def _assert_params_model_covers_specs() -> None:

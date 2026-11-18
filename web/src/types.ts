@@ -881,6 +881,8 @@ export interface AggregateGroupStats {
   counts: Record<string, number>
   /** 待归拢字节数 */
   pending_bytes: number
+  /** 各状态的字节数（与 counts 同口径，同一次 group by 产出） */
+  bytes_by_state: Record<string, number>
 }
 
 /** 手动归拢任务的运行状态（后台跑，前端轮询）。 */

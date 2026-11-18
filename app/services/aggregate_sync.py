@@ -103,6 +103,29 @@ SHARE_THRESHOLD_PARAM = "aggregate_share_threshold_bytes"
 #: 附件（nfo/jpg/png）是 KB 级、视频是 GB 级 → 10 MB 分界余量充足。
 SHARE_THRESHOLD_DEFAULT = 10 * 1024 * 1024
 
+#: 运行时参数 key（传输通道模式）。
+TRANSFER_MODE_PARAM = "aggregate_transfer_mode"
+
+#: 传输模式：**按体积分流**（旧行为）——小文件走转存，其余走云下载。
+TRANSFER_MODE_SIZE_SPLIT = 0
+
+#: 传输模式：**转存优先**（新行为）——所有文件都走「分享转存」。
+#:
+#: 为什么要有这个模式（2026-11-19 实测）：
+#:
+#: - **副盘账号非会员时取不到大文件直链**——服务端返回「网页端非会员下载
+#:   文件大小超过限制，请开通会员或使用客户端下载」（code=254）。实测
+#:   **换客户端身份也绕不开**：dt=1/2/3、客户端 UA、全套 x-* 客户端头，
+#:   6 种组合全部同样被拒 → 这条路对非会员是死的
+#: - **分享转存不受影响**——服务端内部复制，**不取直链**。实测 **7.74 GB
+#:   单文件 11 秒落地**（同名同大小），且**不消耗云添加额度**
+#:
+#: 故非会员副盘的大文件**只能**走转存。转存失败仍回退云下载（保底）。
+TRANSFER_MODE_SHARE_FIRST = 1
+
+#: 传输模式的兜底默认值（**转存优先**）。
+TRANSFER_MODE_DEFAULT = TRANSFER_MODE_SHARE_FIRST
+
 #: 分享转存通道：等文件出现在目标目录的上限（秒）。
 #:
 #: 转存是**异步任务**（返回 taskId），但**没有可靠的完成查询接口**
@@ -112,6 +135,37 @@ SHARE_TRANSFER_WAIT_SEC = 600.0
 
 #: 分享转存通道：列目录轮询间隔（秒）
 SHARE_TRANSFER_POLL_SEC = 3.0
+
+#: 转存报「未选择转存文件」时的等待（秒）——**分享内容还没索引完**。
+#:
+#: 2026-11-19 生产实测：刚建好的分享立刻转存报「未选择转存文件」，
+#: 同样的代码 2 分钟后成功（7.74 GB 的文件一次就落地）。故这是
+#: **竞态**，不是「这个文件不能转存」。
+SHARE_SETTLE_SEC = 2.5
+
+#: 「分享内容未就绪」的判定文案（服务端返回的 msg 里出现它）。
+_SHARE_NOT_READY_HINT = "未选择转存文件"
+
+
+class _ShareContentRejected(DriverError):
+    """分享内容为空——**服务端逐文件审核拒绝**（2026-11-19 实测）。
+
+    光鸭对每个文件**单独**判定能不能分享：被拒的文件**不进分享**，
+    转存必然报「未选择转存文件」。生产实测 58 个文件里 44 个如此。
+
+    这个错**重试没有意义**（不是竞态）——只能换通道（云下载），
+    而云下载要先取直链（非会员副盘取不到，见 :data:`TRANSFER_MODE_SHARE_FIRST`）。
+    """
+
+    def __init__(self, missing: list[str]) -> None:
+        super().__init__(
+            f"分享内容为空（{len(missing)} 个文件未通过分享审核）："
+            f"{', '.join(missing[:3])}"
+            + ("…" if len(missing) > 3 else ""),
+            kind="not_found",
+        )
+        #: 未进分享的文件 id
+        self.missing = missing
 
 #: 分享转存通道：**一个分享最多打包多少个文件**。
 #:
@@ -123,6 +177,17 @@ SHARE_TRANSFER_POLL_SEC = 3.0
 #: 25/30/35/40/50 全失败）。超限的批次**建分享直接失败** → 触发逐个
 #: 回退云下载（白扣额度）——所以这个数**不能拍脑袋调大**。
 SHARE_BATCH_SIZE = 20
+
+#: 分享转存通道：**一个分享最多打包多少字节**（体积上限）。
+#:
+#: 数量上限管不住体积——20 个 5 GB 的剧集 = 100 GB 的一个分享，服务端很可能
+#: 拒收（数量与体积是两个维度）。实测**单文件 7.74 GB 的分享可建可转存**
+#: （2026-11-19），故把单批体积压在 10 GB 内：大文件自动单独成批，
+#: 小文件照旧打包（附件才是吞吐大头）。
+#:
+#: 超限的风险是「整批失败 → 逐个回退云下载」——非会员副盘回退也搬不动，
+#: 故宁可拆小。
+SHARE_BATCH_MAX_BYTES = 10 * 1024 * 1024 * 1024
 
 #: ⚠️ **失败的文件不自动重试**（2026-11-15 决策）
 #:
@@ -314,13 +379,33 @@ async def run_aggregate_sync() -> dict[str, Any]:
 
 
 def _share_threshold_bytes() -> int:
-    """小文件走「分享转存」的体积上限（**运行时参数**，0 = 关闭该通道）。"""
+    """小文件走「分享转存」的体积上限（**运行时参数**，0 = 关闭该通道）。
+
+    ⚠️ 只在**按体积分流**模式下生效（见 :func:`_transfer_mode`）。
+    """
     try:
         from app.services.runtime_params import get_runtime_params
 
         return get_runtime_params().get_int(SHARE_THRESHOLD_PARAM)
     except Exception:
         return SHARE_THRESHOLD_DEFAULT
+
+
+def _transfer_mode() -> int:
+    """传输通道模式（**运行时参数**）。
+
+    - :data:`TRANSFER_MODE_SHARE_FIRST` —— **转存优先**：所有文件都走
+      「分享转存」（不取直链、不耗云添加额度），失败才回退云下载。
+      **非会员副盘必须用它**（取不到大文件直链）。
+    - :data:`TRANSFER_MODE_SIZE_SPLIT` —— 按体积分流（旧行为）。
+    """
+    try:
+        from app.services.runtime_params import get_runtime_params
+
+        value = get_runtime_params().get_int(TRANSFER_MODE_PARAM)
+    except Exception:
+        return TRANSFER_MODE_DEFAULT
+    return TRANSFER_MODE_SHARE_FIRST if value >= 1 else TRANSFER_MODE_SIZE_SPLIT
 
 
 def _scheduled_max_submissions() -> int | None:
@@ -344,6 +429,7 @@ async def run_group(
     *,
     max_submissions: int | None = MAX_SUBMISSIONS_PER_RUN,
     wait_for_lock: bool = True,
+    include_failed: bool = False,
 ) -> None:
     """跑一个组的完整流程：**先登记在途 → 再归拢**。
 
@@ -355,6 +441,10 @@ async def run_group(
         result: 结果对象（**就地更新**）。
         max_submissions: 单轮最多提交多少次（None = 不限）。
         wait_for_lock: 锁被占时等待还是跳过。
+        include_failed: 是否把 ``failed`` 行也纳入本轮处理。**默认 False**——
+            定时作业不自动重试失败（泛化失败认不出是不是额度问题，而失败也扣
+            额度，自动重试就是白扣）；**手动触发传 True**——用户盯着、明确要
+            重试（人工意志，不是自动重试）。
     """
     group_name = await _group_name(group_id)
     # ① 登记在途（幂等）
@@ -378,6 +468,7 @@ async def run_group(
         result,
         max_submissions=max_submissions,
         wait_for_lock=wait_for_lock,
+        include_failed=include_failed,
     )
 
 
@@ -398,6 +489,7 @@ async def _sync_group(
     *,
     max_submissions: int | None = MAX_SUBMISSIONS_PER_RUN,
     wait_for_lock: bool = True,
+    include_failed: bool = False,
 ) -> None:
     """归拢一个聚合组（**持组级锁**——手动触发与 cron 作业互斥）。
 
@@ -409,6 +501,7 @@ async def _sync_group(
             - **定时作业限 20**（无人值守，别一轮跑飞占着事件循环）
         wait_for_lock: 组级锁被别人占着时是**等待**还是**跳过**。
             定时作业 → 跳过（不白等）；手动 → 等待（用户明确要的）。
+        include_failed: ``failed`` 行是否纳入本轮（手动 = True，定时 = False）。
     """
     lock = await _group_lock(group_id)
     if not wait_for_lock and lock.locked():
@@ -416,7 +509,10 @@ async def _sync_group(
         return
     async with lock:
         await _sync_group_locked(
-            group_id, result, max_submissions=max_submissions
+            group_id,
+            result,
+            max_submissions=max_submissions,
+            include_failed=include_failed,
         )
 
 
@@ -425,8 +521,16 @@ async def _sync_group_locked(
     result: AggregateSyncResult,
     *,
     max_submissions: int | None = MAX_SUBMISSIONS_PER_RUN,
+    include_failed: bool = False,
 ) -> None:
-    """归拢一个聚合组（调用方必须已持组级锁）。"""
+    """归拢一个聚合组（调用方必须已持组级锁）。
+
+    Args:
+        group_id: 聚合组 id。
+        result: 结果对象（**就地更新**，调用方能实时读进度）。
+        max_submissions: 单轮最多提交多少次（``None`` = 不限）。
+        include_failed: ``failed`` 行是否纳入本轮（手动 = True，定时 = False）。
+    """
     async with session_scope() as db:
         group = (
             await db.execute(
@@ -468,7 +572,9 @@ async def _sync_group_locked(
         root_id = str(group.target_dir_id)
         group_name = group.name
 
-    rows = await _load_processable_rows(group_id)
+    rows = await _load_processable_rows(
+        group_id, include_failed=include_failed
+    )
     if not rows:
         return
 
@@ -489,6 +595,7 @@ async def _sync_group_locked(
 
     # ① **逐行预检**（两条通道共用）：主盘已有同名文件的处理 + 分流
     threshold = _share_threshold_bytes()
+    mode = _transfer_mode()
     transfer_rows: list[_Row] = []  # 可批量转存（小文件、无同名冲突）
     cloud_rows: list[_Row] = []     # 走云下载（大文件 / replace / 阈值关闭）
     for row in rows:
@@ -508,7 +615,16 @@ async def _sync_group_locked(
             continue
         if action == "skip":
             continue  # 已清理副盘副本并标 done
-        if action == "replace" or threshold <= 0 or row.size_bytes > threshold:
+        if action == "replace":
+            # 主盘已有**更小的**同名文件 → 删旧重传。云下载通道才能删旧
+            # 再传（转存落地同名文件的覆盖语义未验证，保守走云下载）
+            cloud_rows.append(row)
+        elif mode == TRANSFER_MODE_SHARE_FIRST:
+            # **转存优先**：不取直链、不耗云添加额度——非会员副盘取不到
+            # 大文件直链，这是唯一能搬的路（2026-11-19 实测 7.74 GB 11 秒
+            # 落地）。转存失败仍回退云下载（见下）
+            transfer_rows.append(row)
+        elif threshold <= 0 or row.size_bytes > threshold:
             cloud_rows.append(row)
         else:
             transfer_rows.append(row)
@@ -798,15 +914,7 @@ async def _sync_one(
             )
         else:
             if transferred:
-                # ⚠️ **先写通道、再清理**：反过来会用**过期快照**（row.state
-                # 还是处理前的 pending）把刚写好的 done 覆盖回 pending →
-                # 行永远回不到完成态 → 下一轮又归拢一遍。
-                await _mark(row.id, STAGING_SYNCING, transfer_mode="share_transfer")
-                await _cleanup_source(row, source, result)
-                result.synced += 1
-                result.details.append(
-                    f"{row.file_name}：已归拢（分享转存，不消耗云添加额度）"
-                )
+                await _mark_share_transferred(row, source, result)
                 return False
 
     # ④ 取直链（光鸭直链不绑 UA）
@@ -889,6 +997,86 @@ async def _sync_one(
     )
 
 
+async def _restore_share_with_retry(
+    source: Any,
+    master_driver: Any,
+    file_ids: list[str],
+    parent_id: str,
+    *,
+    title: str,
+) -> tuple[Any, str]:
+    """建分享 → 取 token → 转存，**内容未就绪时重试**。
+
+    ⚠️ 光鸭刚建好的分享**内容还没索引完** → 转存报「未选择转存文件」
+    （2026-11-19 生产实测：第一个分享失败，2 分钟后同代码成功落地
+    7.74 GB）。这是**竞态**，不是「这个文件不能转存」。
+
+    重试策略：同分享等 :data:`SHARE_SETTLE_SEC` 再试 → 仍失败则**重建
+    分享**再试一次（分享本身可能有问题）。
+
+    Returns:
+        ``(share, task_id)``——**分享不要提前删**：转存是异步任务，
+        删了可能中断服务端复制（由调用方在轮询结束后删）。
+
+    Raises:
+        Exception: 重试仍失败时抛出（调用方回退云下载）。
+    """
+    share = None
+    try:
+        share = await source.create_share(file_ids, title=title)
+        token = await source.share_access_token(share.url_id, share.code)
+        # ⚠️ **分享内容可能被审核清空**（逐文件判定）——转存必然报「未选择
+        # 转存文件」，重试也没用（不是竞态）。先确认文件在分享里，别白撞。
+        # （实测 58 个文件里 44 个的分享内容为空 → 白撞就是白撞）
+        ids = await source.share_files(token)
+        if not ids:
+            # 可能是索引延迟 → 等一下再看一次
+            await asyncio.sleep(SHARE_SETTLE_SEC)
+            ids = await source.share_files(token)
+        missing = [fid for fid in file_ids if fid not in set(ids)]
+        if missing:
+            raise _ShareContentRejected(missing)
+        try:
+            task_id = await master_driver.restore_share(
+                token, file_ids, parent_id
+            )
+            return share, task_id
+        except Exception as exc:
+            if _SHARE_NOT_READY_HINT not in str(exc):
+                raise
+            logger.warning(
+                "转存时分享内容未就绪（%s），等待 %.1fs 后重试",
+                exc,
+                SHARE_SETTLE_SEC,
+            )
+            await asyncio.sleep(SHARE_SETTLE_SEC)
+            try:
+                task_id = await master_driver.restore_share(
+                    token, file_ids, parent_id
+                )
+                return share, task_id
+            except Exception as exc2:
+                if _SHARE_NOT_READY_HINT not in str(exc2):
+                    raise
+                logger.warning("分享内容仍未就绪，重建分享再试一次")
+                await asyncio.sleep(SHARE_SETTLE_SEC)
+                await source.delete_share([share.share_id])
+                share = await source.create_share(file_ids, title=title)
+                token = await source.share_access_token(share.url_id, share.code)
+                task_id = await master_driver.restore_share(
+                    token, file_ids, parent_id
+                )
+                return share, task_id
+    except Exception:
+        # 失败路径：分享用完即删（别在账号里堆分享）
+        if share is not None:
+            try:
+                await source.delete_share([share.share_id])
+            except Exception as exc:  # 清理失败不影响归拢结果
+                logger.warning("删除分享失败 %s：%s", share.share_id, exc)
+        raise
+
+
 async def _transfer_by_share(
     row: _Row,
     *,
@@ -897,9 +1085,9 @@ async def _transfer_by_share(
     index: TargetIndex,
     target_dir_id: str,
 ) -> bool:
-    """用「分享 → 转存」把小文件搬到主盘（**不消耗云添加额度**）。
+    """用「分享 → 转存」把文件搬到主盘（**不消耗云添加额度**）。
 
-    链路（2026-11-16 生产实测）::
+    链路（2026-11-16 生产实测，2026-11-19 扩展到大文件）::
 
         源账号 share_create → 取 access_token → 目标账号 share_restore
         → 轮询目标目录直到出现同名同大小文件
@@ -912,15 +1100,20 @@ async def _transfer_by_share(
     - 转存落地的文件**直接就是原名**（不像云下载要落成 ``download`` 再改名）
     - 转存是**异步任务**且没有可靠的完成查询接口 → 靠**列目录轮询**判定
     - 转存的**配额体系与云添加不同** → 不消耗云添加额度
+    - **不取直链** → 非会员副盘也搬得动（2026-11-19 实测 7.74 GB 单文件
+      11 秒落地；非会员取直链被服务端拒且换客户端身份也不行）
 
     Returns:
         True = 已落地（同名同大小）；False = 尚未出现（调用方据此回退）。
     """
-    share = await source.create_share([row.remote_id], title=row.file_name)
+    share, _task_id = await _restore_share_with_retry(
+        source,
+        master_driver,
+        [row.remote_id],
+        target_dir_id,
+        title=row.file_name,
+    )
     try:
-        token = await source.share_access_token(share.url_id, share.code)
-        await master_driver.restore_share(token, [row.remote_id], target_dir_id)
-
         deadline = time.monotonic() + SHARE_TRANSFER_WAIT_SEC
         while time.monotonic() < deadline:
             await asyncio.sleep(SHARE_TRANSFER_POLL_SEC)
@@ -972,13 +1165,12 @@ async def _transfer_one_batch(
         )
     share: Any = None
     try:
-        share = await source.create_share(
+        share, _task_id = await _restore_share_with_retry(
+            source,
+            master_driver,
             [r.remote_id for r in chunk],
+            chunk[0].target_dir_id,
             title=f"{chunk[0].file_name} 等 {len(chunk)} 个",
-        )
-        token = await source.share_access_token(share.url_id, share.code)
-        await master_driver.restore_share(
-            token, [r.remote_id for r in chunk], chunk[0].target_dir_id
         )
 
         # 轮询：整批出现（同名同大小）或超时
@@ -1026,15 +1218,105 @@ async def _transfer_one_batch(
         #   try 块里赋值）→ 回退列表为空 → 云下载循环空转。
         logger.warning("分享转存批次失败（%d 个文件）：%s", len(chunk), exc)
         result.details.append(
-            f"批量转存失败（{len(chunk)} 个文件）：{exc} → 逐个回退"
+            f"批量转存失败（{len(chunk)} 个文件）：{exc} → 逐个重试"
         )
-        return list(chunk)
+        # ⚠️ **逐个重试**：分享审核是**逐文件**的（2026-11-19 实测：58 个
+        # 失败行里 14 个能进分享、44 个进不去）——一个被拒的文件会把**整批**
+        # 拖下水。逐个重试能把能搬的搬走，只让真正搬不动的回退云下载。
+        return await _transfer_rows_one_by_one(
+            chunk,
+            source=source,
+            master_driver=master_driver,
+            index=index,
+            result=result,
+        )
     finally:
         if share is not None:
             try:
                 await source.delete_share([share.share_id])
             except Exception as exc:  # 清理失败不影响归拢
                 logger.warning("删除分享失败 %s：%s", share.share_id, exc)
+
+
+async def _mark_share_transferred(
+    row: _Row, source: Any, result: AggregateSyncResult
+) -> None:
+    """分享转存落地后的收尾：写通道 → 清理副盘副本 → 计数。
+
+    ⚠️ **先写通道、再清理**：反过来会用**过期快照**（row.state 还是处理前
+    的 pending）把刚写好的 done 覆盖回 pending → 行永远回不到完成态 →
+    下一轮又归拢一遍。
+    """
+    await _mark(row.id, STAGING_SYNCING, transfer_mode="share_transfer")
+    await _cleanup_source(row, source, result)
+    result.synced += 1
+    result.details.append(
+        f"{row.file_name}：已归拢（分享转存，不消耗云添加额度）"
+    )
+
+
+async def _transfer_rows_one_by_one(
+    chunk: list[_Row],
+    *,
+    source: Any,
+    master_driver: Any,
+    index: TargetIndex,
+    result: AggregateSyncResult,
+) -> list[_Row]:
+    """整批失败后**逐个重试**（分享审核是逐文件判定的）。
+
+    一个被审核拒绝的文件会让整批转存失败——逐个重试才能把**能搬的**搬走。
+
+    Returns:
+        仍然搬不动的行（调用方回退云下载）。
+    """
+    still_bad: list[_Row] = []
+    for row in chunk:
+        try:
+            ok = await _transfer_by_share(
+                row,
+                master_driver=master_driver,
+                source=source,
+                index=index,
+                target_dir_id=row.target_dir_id,
+            )
+        except Exception as exc:
+            logger.warning("逐个转存失败 %s：%s", row.file_name, exc)
+            ok = False
+        if ok:
+            await _mark_share_transferred(row, source, result)
+        else:
+            still_bad.append(row)
+    return still_bad
+
+
+def _split_share_batches(rows: list[_Row]) -> list[list[_Row]]:
+    """把同 (源账号, 目标目录) 的行切成分享批次。
+
+    两个上限都管：**文件数**（光鸭实测 20 个封顶）与**总字节**
+    （大文件单独成批——单文件 7.74 GB 的分享实测可用）。
+    """
+    batches: list[list[_Row]] = []
+    current: list[_Row] = []
+    current_bytes = 0
+    for row in rows:
+        size = int(row.size_bytes)
+        too_big = (
+            current
+            and (
+                len(current) >= SHARE_BATCH_SIZE
+                or current_bytes + size > SHARE_BATCH_MAX_BYTES
+            )
+        )
+        if too_big:
+            batches.append(current)
+            current = []
+            current_bytes = 0
+        current.append(row)
+        current_bytes += size
+    if current:
+        batches.append(current)
+    return batches
 
 
 async def _batch_share_transfer(
@@ -1045,7 +1327,9 @@ async def _batch_share_transfer(
     result: AggregateSyncResult,
     source_drivers: dict[int, Any],
 ) -> list[_Row]:
-    """小文件**批量打包转存**（rows 已过预检：无同名冲突、目标目录已解析）。
+    """**批量打包转存**（rows 已过预检：无同名冲突、目标目录已解析）。
+
+    文件可以是任意体积——「转存优先」模式下大文件也走这里（不取直链）。
 
     分组规则：**(源账号, 目标目录)**——分享必须建在文件自己的账号上，
     转存只能落到一个目录 → 跨目录/跨账号的行各自成批。
@@ -1064,10 +1348,10 @@ async def _batch_share_transfer(
     # 分组 → 批次（(源账号, 批次行) 列表）
     batches: list[tuple[int, list[_Row]]] = []
     for (source_driver_id, _target_dir), chunk_rows in groups.items():
-        for chunk_start in range(0, len(chunk_rows), SHARE_BATCH_SIZE):
-            batches.append(
-                (source_driver_id, chunk_rows[chunk_start : chunk_start + SHARE_BATCH_SIZE])
-            )
+        batches.extend(
+            (source_driver_id, chunk)
+            for chunk in _split_share_batches(chunk_rows)
+        )
 
     async def _run(batch: tuple[int, list[_Row]]) -> list[_Row]:
         source_driver_id, chunk = batch
@@ -1097,7 +1381,6 @@ async def _batch_share_transfer(
 
 #: 批次并发的信号量（进程级，跨组共用）
 _SHARE_SEMAPHORE: asyncio.Semaphore | None = None
-
 
 async def _semaphore() -> asyncio.Semaphore:
     """取批次并发信号量（惰性创建，绑定当前事件循环）。"""
@@ -1155,12 +1438,17 @@ class _Row:
     target_dir_id: str = ""
 
 
-async def _load_processable_rows(group_id: int) -> list[_Row]:
+async def _load_processable_rows(
+    group_id: int, *, include_failed: bool = False
+) -> list[_Row]:
     """取本轮要处理的行（``pending`` / ``paused`` / ``failed`` / ``syncing``）。
 
     - ``paused``（额度耗尽，**文案明确**）→ 次日额度窗口打开后自动续传
-    - ``failed``（泛化失败，认不出是不是额度）→ **不自动重试**，只由人工点
-      「重试」——失败也扣额度，自动重试就是白扣
+    - ``failed``（泛化失败，认不出是不是额度）→ **默认跳过**（定时作业不
+      自动重试——失败也扣额度，自动重试就是白扣）；**手动触发传
+      ``include_failed=True`` 纳入**——用户盯着、明确要重试（人工意志）。
+      人工「重试」按钮（:func:`aggregate_staging.retry_staging`）把行重置
+      为 ``pending``，两条入口也都会捡起来
     - ``syncing`` → 先看光鸭活跃任务：**还在跑就跳过**（别重复提交），
       已消失则重置为 ``pending``（残留认领会接住已落盘的情况）；
       **查询失败本轮整批跳过**（分不清在不在跑，保守不碰）
@@ -1215,10 +1503,11 @@ async def _load_processable_rows(group_id: int) -> list[_Row]:
             # 任务已消失（可能已落盘）→ 重置为待归拢，残留认领会接住
             await _mark(row.id, STAGING_PENDING, error=None, task_id="")
             row.state = STAGING_PENDING
-        if row.state == STAGING_FAILED:
-            # ⚠️ **失败不自动重试**（2026-11-15 决策）——泛化失败认不出是不是
-            # 额度问题，而**失败也扣额度** → 自动重试就是白扣。只由人工点
-            # 「重试」（:func:`app.services.aggregate_staging.retry_staging`）。
+        if row.state == STAGING_FAILED and not include_failed:
+            # ⚠️ **失败不自动重试**（2026-11-15 决策，2026-11-18 修订）——
+            # 泛化失败认不出是不是额度问题，而**失败也扣额度** → 无人值守的
+            # 定时作业不自动重试。**手动「立即归拢」传 include_failed=True
+            # 纳入**（用户盯着、明确要重试）；逐行「重试」按钮仍可用。
             continue
         result.append(row)
     return result
@@ -1398,8 +1687,14 @@ async def sync_group_now(
     if lock.locked():
         result.details.append("另一轮归拢在跑，本轮等它结束后继续")
     # **手动触发：全量归拢，不限单轮次数**（用户盯着，要搬到台账清空；
-    # 只有服务端额度墙才会停——那是硬约束，无视不了）
+    # 只有服务端额度墙才会停——那是硬约束，无视不了）。
+    # **含 failed 行**（2026-11-18 用户决策）：与「不限次数」同一语义——
+    # 人工意志的重试不是「自动重试」，定时作业仍不碰 failed。
     await run_group(
-        group_id, result, max_submissions=None, wait_for_lock=True
+        group_id,
+        result,
+        max_submissions=None,
+        wait_for_lock=True,
+        include_failed=True,
     )
     return result

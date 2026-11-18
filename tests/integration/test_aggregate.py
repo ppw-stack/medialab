@@ -528,7 +528,7 @@ async def test_retry_resets_failed_row(
 async def test_group_stats_reports_counts(
     db, group_id: int, master_id: int, secondary_id: int
 ) -> None:
-    """水位：各状态条数 + 待归拢字节。"""
+    """水位：各状态条数 + 待归拢字节 + **各状态字节**（与条数同口径）。"""
     await aggregate_groups.assign_driver_role(
         master_id, group_id=group_id, role="master"
     )
@@ -544,6 +544,17 @@ async def test_group_stats_reports_counts(
                 state="pending",
             )
         )
+        db_session.add(
+            SecondaryStaging(
+                group_id=group_id,
+                source_driver_id=secondary_id,
+                target_driver_id=master_id,
+                remote_id="f2",
+                file_name="b.mkv",
+                size_bytes=4096,
+                state="failed",
+            )
+        )
         await db_session.commit()
 
     stats = await aggregate_staging.group_stats()
@@ -552,7 +563,12 @@ async def test_group_stats_reports_counts(
     assert s.group_id == group_id
     assert s.master_driver_id == master_id
     assert s.counts.get("pending") == 1
-    assert s.pending_bytes == 2048
+    assert s.counts.get("failed") == 1
+    assert s.pending_bytes == 2048 + 4096  # 非终态都算「未消化」
+    # bytes_by_state 与 counts **同一次 group by 产出**——口径天然一致
+    assert s.bytes_by_state.get("pending") == 2048
+    assert s.bytes_by_state.get("failed") == 4096
+    assert "done" not in s.bytes_by_state
 
 
 # ---------------------------------------------------------------- HTTP 端点

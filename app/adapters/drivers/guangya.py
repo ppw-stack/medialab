@@ -793,6 +793,34 @@ class GuangyaDriver:
         data = payload.get("data") or {}
         return str(data.get("taskId") or "")
 
+    async def share_files(self, access_token: str) -> list[str]:
+        """列分享里的文件 id（**公开接口**，无需登录）。
+
+        ⚠️ **光鸭的分享内容可能为空**：服务端对每个文件**单独**做分享审核，
+        被拒的文件**不进分享**（2026-11-19 生产实测：58 个文件里 14 个
+        进得去、44 个的分享内容为空）。转存前用它确认「文件确实在分享里」
+        ——否则转存会报「未选择转存文件」（那不是竞态，是审核拒绝）。
+
+        Returns:
+            分享里的 fileId 列表（**空 = 分享内容为空**）。
+        """
+        payload = await asyncio_to_thread(
+            self.client.share_files_list, access_token, "", 1, 100
+        )
+        code = payload.get("code")
+        if code not in (None, 0):
+            raise DriverError(
+                f"光鸭列分享内容失败：{payload.get('msg') or payload}",
+                kind=_map_code(code),
+            )
+        data = payload.get("data") or {}
+        items = data.get("list") or []
+        return [
+            str(item.get("fileId") or "")
+            for item in items
+            if isinstance(item, dict) and item.get("fileId")
+        ]
+
     async def delete_share(self, share_ids: list[str]) -> None:
         """删除分享（转存完成后清理，别在账号里堆分享）。"""
         payload = await self._call("share_delete", [str(sid) for sid in share_ids])
