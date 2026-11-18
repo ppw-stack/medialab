@@ -906,6 +906,93 @@ async def test_share_content_rejected_file_falls_back_alone(
     assert len(master.submitted) == 1, "应只有被拒的 b0 回退云下载"
 
 
+async def test_share_content_list_failure_is_not_audit_rejection(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """**列分享内容失败 ≠ 审核拒绝**（接口抖动）→ 照常转存，不回退云下载。
+
+    空集在下游等价于「所有文件都缺失」→ 整批被判审核拒绝 → 白白回退云
+    下载（每天仅 3 次的云添加额度）。故「列表失败」必须与「列表为空」用
+    两个不同的返回值区分开。
+    """
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "SHARE_SETTLE_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "_share_threshold_bytes", lambda: 1024)
+    master, source = fake_drivers
+    group_id, _master_id, _secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+    master.source_names["f1"] = "a.mkv"
+
+    async def _boom(access_token: str) -> list[str]:
+        raise RuntimeError("列分享内容接口抖动")
+
+    source.share_files = _boom  # type: ignore[method-assign]
+
+    result = await aggregate_sync.sync_group_now(group_id)
+    # 照常走转存（没被误判成「审核拒绝」）
+    assert master.restored, "列表失败不该否决整批，应照常转存"
+    assert master.submitted == [], "不该回退云下载（要吃云添加额度）"
+    assert result.synced == 1 and result.failed == 0
+    rows = await aggregate_staging.list_staging(group_id=group_id)
+    assert rows[0].state == "done"
+
+
+async def test_share_content_partial_list_settles_before_rejecting(
+    db, fast_watcher, fake_drivers, monkeypatch
+) -> None:
+    """分享内容**只列到一部分** → 等一下重列，别把 lag 的文件判成审核拒绝。
+
+    分享内容索引有延迟（真实竞态）→ 只列到一半时直接判「审核拒绝」，被
+    踢出的文件只能落云下载；而非会员副盘取不到直链 → 彻底搬不动。
+    """
+    monkeypatch.setattr(aggregate_sync, "SUBMIT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "SHARE_SETTLE_SEC", 0.0)
+    monkeypatch.setattr(aggregate_sync, "_share_threshold_bytes", lambda: 1024)
+    master, source = fake_drivers
+    group_id, master_id, secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+    master.source_names["f1"] = "a.mkv"
+    master.source_names["b0"] = "ep00.mkv"
+
+    original_share_files = source.share_files
+    calls = {"n": 0}
+
+    async def _share_files(access_token: str) -> list[str]:
+        calls["n"] += 1
+        ids = await original_share_files(access_token)
+        if calls["n"] == 1:
+            # 第一次只列到一半（内容还没索引完）
+            return [fid for fid in ids if fid != "b0"]
+        return ids
+
+    source.share_files = _share_files  # type: ignore[method-assign]
+
+    # 再加一行 b0（与 f1 同目录 → 会被打包进同一个分享批次）
+    async with session_scope() as db_session:
+        db_session.add(
+            SecondaryStaging(
+                group_id=group_id,
+                source_driver_id=secondary_id,
+                target_driver_id=master_id,
+                remote_id="b0",
+                file_name="ep00.mkv",
+                size_bytes=100,
+                state="pending",
+            )
+        )
+        await db_session.commit()
+
+    result = await aggregate_sync.sync_group_now(group_id)
+    # 两个都走转存：b0 等重列后回来了，没被误判成「审核拒绝」
+    assert result.synced == 2, f"两个都该归拢：{result.details}"
+    assert master.submitted == [], "不该回退云下载"
+    assert any(
+        set(ids) == {"f1", "b0"} for ids, _parent in master.restored
+    ), f"整批应一次转存两个文件：{master.restored}"
+    rows = await aggregate_staging.list_staging(group_id=group_id)
+    assert all(r.state == "done" for r in rows)
+
+
 async def test_share_transfer_failure_falls_back_to_cloud_download(
     db, fast_watcher, fake_drivers, monkeypatch
 ) -> None:

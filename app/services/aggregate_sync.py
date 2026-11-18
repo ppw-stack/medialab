@@ -1014,6 +1014,12 @@ async def _restore_share_with_retry(
     重试策略：同分享等 :data:`SHARE_SETTLE_SEC` 再试 → 仍失败则**重建
     分享**再试一次（分享本身可能有问题）。
 
+    ⚠️ **列分享内容失败 ≠ 审核拒绝**：列表接口抖动时按「内容齐全」继续
+    （**不做审核过滤**），让转存接口自己报错（那个错有信息量）。
+    ⚠️ **部分文件缺失先等再判**：分享内容可能只索引了一半 → 等
+    :data:`SHARE_SETTLE_SEC` 重列一次，才判「审核拒绝」——非会员副盘取不到
+    直链，被误判就等于这个文件彻底搬不动了。
+
     Returns:
         ``(share, task_id, dropped_ids)``——
 
@@ -1034,8 +1040,22 @@ async def _restore_share_with_retry(
         # 转存文件」，重试也没用（不是竞态）。先确认文件在分享里，别白撞。
         # （实测 58 个文件里 44 个的分享内容为空 → 白撞就是白撞）
         ids = await _share_content_ids(source, token)
-        missing = [fid for fid in file_ids if fid not in ids]
-        present = [fid for fid in file_ids if fid in ids]
+        missing: list[str] = []
+        present: list[str] = list(file_ids)
+        if ids is not None:
+            missing = [fid for fid in file_ids if fid not in ids]
+            if missing:
+                # ⚠️ **内容可能还没索引完**（真实竞态）→ 等一下再列一次，
+                # 别把只是 lag 的文件当成「审核拒绝」永久踢出本批转存
+                # （非会员副盘取不到直链 → 被踢出就等于搬不动）
+                await asyncio.sleep(SHARE_SETTLE_SEC)
+                retry_ids = await _share_content_ids(source, token)
+                if retry_ids:
+                    ids = retry_ids
+                    missing = [fid for fid in file_ids if fid not in ids]
+            present = [fid for fid in file_ids if fid in ids]
+        # ⚠️ **列表失败（``ids is None``）≠ 审核拒绝** → 不做审核过滤
+        # （``present`` 就是全部文件），让转存接口自己报错（那个错有信息量）
         if not present:
             raise _ShareContentRejected(missing)
         if missing:
@@ -1086,18 +1106,24 @@ async def _restore_share_with_retry(
         raise
 
 
-async def _share_content_ids(source: Any, token: str) -> set[str]:
+async def _share_content_ids(source: Any, token: str) -> set[str] | None:
     """取分享里的文件 id 集合（**接口抖动不该否决整批**）。
 
-    分享内容列表拿不到时返回**全集假设**（= 不做审核过滤）——宁可让转存
-    接口自己报错（那个错有信息量），也不要因为一次列表失败就把整批
-    当成「审核拒绝」。
+    Returns:
+        ``set[str]`` = 成功列到的内容 id（**空集** = 分享确实空了）；
+        ``None`` = **列表失败**（接口抖动）→ 调用方按「**不做审核过滤**」
+        继续（宁可让转存接口自己报错，也不要因为一次列表失败就把整批
+        当成「审核拒绝」）。
+
+    ⚠️ **不能拿空集当「列表失败」**：空集在下游等价于「所有文件都缺失」
+    → 整批被判「审核拒绝」→ 白白回退云下载（每天仅 3 次的云添加额度）。
+    「未知」与「为空」必须用两个不同的返回值区分。
     """
     try:
         ids = await source.share_files(token)
     except Exception as exc:
         logger.warning("列分享内容失败（按「内容齐全」继续）：%s", exc)
-        return set()
+        return None
     if not ids:
         # 可能是索引延迟 → 等一下再看一次
         await asyncio.sleep(SHARE_SETTLE_SEC)
@@ -1105,7 +1131,7 @@ async def _share_content_ids(source: Any, token: str) -> set[str]:
             ids = await source.share_files(token)
         except Exception as exc:
             logger.warning("列分享内容失败（按「内容齐全」继续）：%s", exc)
-            return set()
+            return None
     return set(ids)
 
 

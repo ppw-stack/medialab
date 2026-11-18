@@ -633,8 +633,12 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
         返回 `dropped_ids`）——整批失败时再**逐个重试**
         （`_transfer_rows_one_by_one`）兜底
       - ⚠️ **列分享内容失败 ≠ 审核拒绝**：接口抖动时按「内容齐全」继续
-        （`_share_content_ids`）——宁可让转存接口自己报错（那个错有信息量），
-        也不要一次列表失败把整批当成「审核拒绝」
+        （`_share_content_ids` 返回 `None` = **未知**，与「空集 = 确实被拒」
+        分开）——宁可让转存接口自己报错（那个错有信息量），也不要一次列表
+        失败把整批当成「审核拒绝」
+      - ⚠️ **分享内容只列到一部分 → 先等再判**：内容索引有延迟（真实竞态）
+        → 等 `SHARE_SETTLE_SEC` 重列一次才判「审核拒绝」——非会员副盘取不到
+        直链，被误判就等于这个文件彻底搬不动
       - 故新增运行时参数 **`aggregate_transfer_mode`**（0=按体积分流 /
         1=**转存优先**，默认 1）：转存优先 = 所有文件走分享转存，转存失败才
         回退云下载（保底）。`aggregate_share_threshold_bytes` 的体积上限
@@ -647,7 +651,9 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
       - 契约：`test_share_first_mode_sends_big_file_to_share_transfer`、
         `test_share_batches_split_by_total_bytes`、
         `test_share_transfer_retries_when_content_not_ready`、
-        `test_share_content_rejected_file_falls_back_alone`
+        `test_share_content_rejected_file_falls_back_alone`、
+        `test_share_content_list_failure_is_not_audit_rejection`、
+        `test_share_content_partial_list_settles_before_rejecting`
     - 契约：`test_sync_pauses_group_when_hitting_quota_wall`（撞墙 → 整组
       paused + 停手）、`test_paused_rows_resume_after_quota_resets`（次日续传）
   - **归拢链路 = 手动迁移同一条**（`app/services/migration_pipeline.py`
