@@ -1,0 +1,17 @@
+title: 禁止裸 except:，必须捕获具体异常
+rule: |
+  裸的 except:（或 except Exception 且吞掉不处理）会掩盖真实缺陷，还会吞掉
+  KeyboardInterrupt / SystemExit 等必要异常。
+
+  - 必须捕获具体异常类型（如 httpx.HTTPError、sqlite3.Error、json.JSONDecodeError）。
+  - 确实需要兜底时用 except Exception 并记日志 + 重新抛出或显式降级，
+    不得静默 pass。
+  - PT 站点抓取（httpx / parsel / BeautifulSoup）与 SQLite 写入路径尤其注意：
+    网络失败和数据库锁死的处理策略不同，混在一个裸 except 里会掩盖真实原因。
+severity: high
+scope: file
+path: 'app/**'
+inheritance:
+  inheritable: true
+  exclude: []
+  include: []
