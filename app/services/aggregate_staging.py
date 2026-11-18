@@ -92,6 +92,11 @@ class StagingStats:
     counts: dict[str, int]
     #: 待归拢字节数（不含已完成）
     pending_bytes: int
+    #: 各状态的字节数——与 ``counts`` **同口径**（同一批 group by 产出）。
+    #: 前端「失败 / 暂停」栏靠它显示字节，与行数不再错位
+    #: （2026-11-18：水位「个数」与「字节」曾口径不一致——字节含 failed、
+    #: 个数不含，页面读起来像「142G 只登记 1 个文件」）
+    bytes_by_state: dict[str, int]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -101,6 +106,7 @@ class StagingStats:
             "secondary_driver_ids": list(self.secondary_driver_ids),
             "counts": dict(self.counts),
             "pending_bytes": self.pending_bytes,
+            "bytes_by_state": dict(self.bytes_by_state),
         }
 
 
@@ -371,14 +377,22 @@ async def group_stats() -> list[StagingStats]:
             rows = (
                 (
                     await db.execute(
-                        select(SecondaryStaging.state, func.count())
+                        select(
+                            SecondaryStaging.state,
+                            func.count(),
+                            func.coalesce(func.sum(SecondaryStaging.size_bytes), 0),
+                        )
                         .where(SecondaryStaging.group_id == group.id)
                         .group_by(SecondaryStaging.state)
                     )
                 )
                 .all()
             )
-            counts = {str(state): int(cnt) for state, cnt in rows}
+            # 条数与字节数来自**同一次 group by**——两份口径天然一致
+            counts = {str(state): int(cnt) for state, cnt, _ in rows}
+            bytes_by_state = {
+                str(state): int(total) for state, _, total in rows
+            }
 
             pending_bytes = int(
                 (
@@ -399,6 +413,7 @@ async def group_stats() -> list[StagingStats]:
                     secondary_driver_ids=secondaries,
                     counts=counts,
                     pending_bytes=pending_bytes,
+                    bytes_by_state=bytes_by_state,
                 )
             )
     return result

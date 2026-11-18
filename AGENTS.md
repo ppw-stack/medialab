@@ -600,11 +600,13 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
       **源端取直链不吃额度**——源账号头上记的是**直链流量**，与云添加额度
       是两回事。故 115 → 光鸭A 消耗 **光鸭A** 的额度；光鸭B → 光鸭A 消耗
       **光鸭A** 的额度，**副盘的额度分文不动**
-    - ⚠️ **泛化失败不自动重试**（2026-11-15 决策）：光鸭撞额度时**可能只回
+    - ⚠️ **泛化失败不自动重试**（2026-11-15 决策，2026-11-18 修订）：光鸭撞额度时**可能只回
       泛化的「云添加失败」**（code=8，无「次数超限」字样）——认不出是不是额度
-      问题，而**失败也扣额度** → 自动重试就是白扣。故泛化失败一律记
-      `failed` 且**不自动重试**，只由人工点「重试」
-      （`aggregate_staging.retry_staging`）。契约：
+      问题，而**失败也扣额度** → **定时作业不自动重试** failed 行（无人值守
+      不白扣）。**手动「立即归拢」（`sync_group_now`）包含 failed 行**
+      （`run_group` 的 `include_failed=True`）——人工意志的重试不是自动重试，
+      与「手动不限单轮次数」同一语义；逐行「重试」按钮（
+      `aggregate_staging.retry_staging`）仍可用。契约：
       `test_generic_failure_is_failed_and_not_auto_retried`
     - 契约：`test_sync_pauses_group_when_hitting_quota_wall`（撞墙 → 整组
       paused + 停手）、`test_paused_rows_resume_after_quota_resets`（次日续传）

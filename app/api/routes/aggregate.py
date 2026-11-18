@@ -141,6 +141,8 @@ class GroupStatsOut(BaseModel):
     secondary_driver_ids: list[int]
     counts: dict[str, int]
     pending_bytes: int
+    #: 各状态的字节数（与 counts 同口径，同一次 group by 产出）
+    bytes_by_state: dict[str, int] = Field(default_factory=dict)
 
 
 class StagingOut(BaseModel):

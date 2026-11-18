@@ -344,6 +344,7 @@ async def run_group(
     *,
     max_submissions: int | None = MAX_SUBMISSIONS_PER_RUN,
     wait_for_lock: bool = True,
+    include_failed: bool = False,
 ) -> None:
     """跑一个组的完整流程：**先登记在途 → 再归拢**。
 
@@ -355,6 +356,10 @@ async def run_group(
         result: 结果对象（**就地更新**）。
         max_submissions: 单轮最多提交多少次（None = 不限）。
         wait_for_lock: 锁被占时等待还是跳过。
+        include_failed: 是否把 ``failed`` 行也纳入本轮处理。**默认 False**——
+            定时作业不自动重试失败（泛化失败认不出是不是额度问题，而失败也扣
+            额度，自动重试就是白扣）；**手动触发传 True**——用户盯着、明确要
+            重试（人工意志，不是自动重试）。
     """
     group_name = await _group_name(group_id)
     # ① 登记在途（幂等）
@@ -378,6 +383,7 @@ async def run_group(
         result,
         max_submissions=max_submissions,
         wait_for_lock=wait_for_lock,
+        include_failed=include_failed,
     )
 
 
@@ -398,6 +404,7 @@ async def _sync_group(
     *,
     max_submissions: int | None = MAX_SUBMISSIONS_PER_RUN,
     wait_for_lock: bool = True,
+    include_failed: bool = False,
 ) -> None:
     """归拢一个聚合组（**持组级锁**——手动触发与 cron 作业互斥）。
 
@@ -409,6 +416,7 @@ async def _sync_group(
             - **定时作业限 20**（无人值守，别一轮跑飞占着事件循环）
         wait_for_lock: 组级锁被别人占着时是**等待**还是**跳过**。
             定时作业 → 跳过（不白等）；手动 → 等待（用户明确要的）。
+        include_failed: ``failed`` 行是否纳入本轮（手动 = True，定时 = False）。
     """
     lock = await _group_lock(group_id)
     if not wait_for_lock and lock.locked():
@@ -416,7 +424,10 @@ async def _sync_group(
         return
     async with lock:
         await _sync_group_locked(
-            group_id, result, max_submissions=max_submissions
+            group_id,
+            result,
+            max_submissions=max_submissions,
+            include_failed=include_failed,
         )
 
 
@@ -425,6 +436,7 @@ async def _sync_group_locked(
     result: AggregateSyncResult,
     *,
     max_submissions: int | None = MAX_SUBMISSIONS_PER_RUN,
+    include_failed: bool = False,
 ) -> None:
     """归拢一个聚合组（调用方必须已持组级锁）。"""
     async with session_scope() as db:
@@ -468,7 +480,9 @@ async def _sync_group_locked(
         root_id = str(group.target_dir_id)
         group_name = group.name
 
-    rows = await _load_processable_rows(group_id)
+    rows = await _load_processable_rows(
+        group_id, include_failed=include_failed
+    )
     if not rows:
         return
 
@@ -1155,12 +1169,17 @@ class _Row:
     target_dir_id: str = ""
 
 
-async def _load_processable_rows(group_id: int) -> list[_Row]:
+async def _load_processable_rows(
+    group_id: int, *, include_failed: bool = False
+) -> list[_Row]:
     """取本轮要处理的行（``pending`` / ``paused`` / ``failed`` / ``syncing``）。
 
     - ``paused``（额度耗尽，**文案明确**）→ 次日额度窗口打开后自动续传
-    - ``failed``（泛化失败，认不出是不是额度）→ **不自动重试**，只由人工点
-      「重试」——失败也扣额度，自动重试就是白扣
+    - ``failed``（泛化失败，认不出是不是额度）→ **默认跳过**（定时作业不
+      自动重试——失败也扣额度，自动重试就是白扣）；**手动触发传
+      ``include_failed=True`` 纳入**——用户盯着、明确要重试（人工意志）。
+      人工「重试」按钮（:func:`aggregate_staging.retry_staging`）把行重置
+      为 ``pending``，两条入口也都会捡起来
     - ``syncing`` → 先看光鸭活跃任务：**还在跑就跳过**（别重复提交），
       已消失则重置为 ``pending``（残留认领会接住已落盘的情况）；
       **查询失败本轮整批跳过**（分不清在不在跑，保守不碰）
@@ -1215,10 +1234,11 @@ async def _load_processable_rows(group_id: int) -> list[_Row]:
             # 任务已消失（可能已落盘）→ 重置为待归拢，残留认领会接住
             await _mark(row.id, STAGING_PENDING, error=None, task_id="")
             row.state = STAGING_PENDING
-        if row.state == STAGING_FAILED:
-            # ⚠️ **失败不自动重试**（2026-11-15 决策）——泛化失败认不出是不是
-            # 额度问题，而**失败也扣额度** → 自动重试就是白扣。只由人工点
-            # 「重试」（:func:`app.services.aggregate_staging.retry_staging`）。
+        if row.state == STAGING_FAILED and not include_failed:
+            # ⚠️ **失败不自动重试**（2026-11-15 决策，2026-11-18 修订）——
+            # 泛化失败认不出是不是额度问题，而**失败也扣额度** → 无人值守的
+            # 定时作业不自动重试。**手动「立即归拢」传 include_failed=True
+            # 纳入**（用户盯着、明确要重试）；逐行「重试」按钮仍可用。
             continue
         result.append(row)
     return result
@@ -1398,8 +1418,14 @@ async def sync_group_now(
     if lock.locked():
         result.details.append("另一轮归拢在跑，本轮等它结束后继续")
     # **手动触发：全量归拢，不限单轮次数**（用户盯着，要搬到台账清空；
-    # 只有服务端额度墙才会停——那是硬约束，无视不了）
+    # 只有服务端额度墙才会停——那是硬约束，无视不了）。
+    # **含 failed 行**（2026-11-18 用户决策）：与「不限次数」同一语义——
+    # 人工意志的重试不是「自动重试」，定时作业仍不碰 failed。
     await run_group(
-        group_id, result, max_submissions=None, wait_for_lock=True
+        group_id,
+        result,
+        max_submissions=None,
+        wait_for_lock=True,
+        include_failed=True,
     )
     return result

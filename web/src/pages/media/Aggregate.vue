@@ -170,7 +170,8 @@
               {{ pendingCount(group) }} 个 / {{ formatBytes(pendingBytes(group)) }}
             </a-descriptions-item>
             <a-descriptions-item label="失败 / 暂停">
-              {{ countOf(group, "failed") }} / {{ countOf(group, "paused") }}
+              {{ countOf(group, "failed") }} / {{ countOf(group, "paused") }} 个 ·
+              {{ formatBytes(failedPausedBytes(group)) }}
             </a-descriptions-item>
           </a-descriptions>
         </a-col>
@@ -524,7 +525,7 @@ function syncDisabled(group: AggregateGroup): boolean {
 /** 「立即归拢」的 tooltip。 */
 function syncTip(group: AggregateGroup): string {
   if (syncDisabled(group)) return "缺少归拢目标目录——请先「配置」目录映射"
-  return "全量归拢：一直搬到台账清空（只有云添加额度墙会停）"
+  return "全量归拢：含失败任务重试，一直搬到台账清空（只有云添加额度墙会停）"
 }
 
 /** 组内的副数据源 */
@@ -568,8 +569,18 @@ function pendingCount(group: AggregateGroup): number {
     (counts["pending"] ?? 0) +
     (counts["syncing"] ?? 0) +
     (counts["paused"] ?? 0) +
-    (counts["verified"] ?? 0)
+    (counts["verified"] ?? 0) +
+    // failed 与后端 pending_bytes **同口径**（非终态都算「未消化」）——
+    // 曾漏算 failed：字节含 failed、个数不含，页面读起来像
+    // 「142G 只登记 1 个文件」（2026-11-18 修正）
+    (counts["failed"] ?? 0)
   )
+}
+
+/** 失败 + 暂停行的字节数（失败栏与行数并排展示，口径不再错位）。 */
+function failedPausedBytes(group: AggregateGroup): number {
+  const bytes = statsOf(group.id)?.bytes_by_state ?? {}
+  return (bytes["failed"] ?? 0) + (bytes["paused"] ?? 0)
 }
 
 function pendingBytes(group: AggregateGroup): number {

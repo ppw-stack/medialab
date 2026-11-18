@@ -1038,13 +1038,16 @@ async def test_paused_rows_resume_after_quota_resets(
 async def test_generic_failure_is_failed_and_not_auto_retried(
     db, fast_watcher, fake_drivers, monkeypatch
 ) -> None:
-    """泛化失败（「云添加失败」）→ 记 ``failed``，且**不自动重试**。
+    """泛化失败（「云添加失败」）→ 记 ``failed``；**定时不重试，手动重试**。
 
-    泛化失败认不出是不是额度问题，而**失败也扣额度** → 自动重试就是白扣。
-    只由人工点「重试」才再试。
+    - **定时作业不自动重试**（无人值守；泛化失败认不出是不是额度问题，
+      而失败也扣额度 → 自动重试就是白扣）
+    - **手动「立即归拢」包含 failed 行**（2026-11-18 修订——人工意志的
+      重试不是自动重试，与「手动不限单轮次数」同一语义）
+    - 逐行「重试」按钮（retry_staging）把行重置回 pending，两条入口都会捡
     """
     master, _source = fake_drivers
-    group_id, _master_id, _secondary_id = await _setup(db, size=100)
+    group_id, master_id, secondary_id = await _setup(db, size=100)
 
     async def _boom(url: str, parent_id: str = "") -> str:
         raise DriverError("光鸭创建离线任务失败：云添加失败", kind="unknown")
@@ -1057,15 +1060,48 @@ async def test_generic_failure_is_failed_and_not_auto_retried(
 
     rows = await aggregate_staging.list_staging(group_id=group_id)
     assert rows[0].state == "failed"
+    submitted_after_fail = len(master.submitted)
 
-    # 下一轮**不再自动重试**（没有新的提交）
-    await aggregate_sync.sync_group_now(group_id)
-    assert len(master.submitted) == 0
+    # 定时路径（与 cron 同款入口）：**不自动重试**（没有新的提交）
+    await aggregate_sync.run_aggregate_sync()
+    assert len(master.submitted) == submitted_after_fail
 
-    # 人工点「重试」→ 回到待归拢，下一轮才会再试
+    # 人工点「重试」→ 回到待归拢（按钮契约不变）
     await aggregate_staging.retry_staging(rows[0].id)
     rows = await aggregate_staging.list_staging(group_id=group_id)
     assert rows[0].state == "pending"
+
+    # 手动路径：**包含 failed 行**——另一行直接 failed（不点重试），
+    # 恢复提交后「立即归拢」也能把它搬过去
+    async with session_scope() as db_session:
+        db_session.add(
+            SecondaryStaging(
+                group_id=group_id,
+                source_driver_id=secondary_id,
+                target_driver_id=master_id,
+                remote_id="failed-row-2",
+                file_name="ep02.mkv",
+                size_bytes=100,
+                state="failed",
+            )
+        )
+        await db_session.commit()
+
+    master.landed_size = 100
+    monkeypatch.setattr(
+        master,
+        "create_offline_task",
+        lambda url, parent_id="": master.__class__.create_offline_task(
+            master, url, parent_id
+        ),
+    )
+    result = await aggregate_sync.sync_group_now(group_id)
+    assert result.synced == 2
+    states = {
+        r.remote_id: r.state
+        for r in await aggregate_staging.list_staging(group_id=group_id)
+    }
+    assert set(states.values()) == {"done"}
 
 
 async def test_user_download_file_is_protected(
