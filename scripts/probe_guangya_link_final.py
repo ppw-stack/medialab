@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import sys
 from datetime import datetime
@@ -19,28 +20,33 @@ from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, os.environ.get("MEDIALAB_APP_PATH", "/app"))
 
 import httpx
-from sqlalchemy import select
-
+from app.adapters.drivers.base import DriverError
 from app.core.config import get_settings
 from app.db.models import Driver
 from app.db.session import dispose_db, init_db, session_scope
 from app.services.driver_factory import build_driver
 from app.services.migration import persist_guangya_credential
+from sqlalchemy import select
 
 DRIVER_ID = int(os.environ.get("MEDIALAB_PROBE_DRIVER", "2"))
 VIDEO_HINT = os.environ.get("MEDIALAB_PROBE_VIDEO", "缅北电诈覆灭纪实 - S01E03 - 第 3 集.mp4")
 IMAGE_HINT = os.environ.get("MEDIALAB_PROBE_IMAGE", "缅北电诈覆灭纪实 - S01E03 - 第 3 集.jpg")
 
+logger = logging.getLogger(__name__)
+
 
 def log(msg: str) -> None:
-    print(msg, flush=True)
+    """输出运行日志（走 logging，stdout 与旧版 print 行为一致）。"""
+    logger.info(msg)
 
 
 def fp(v: str) -> str:
+    """字符串指纹（sha1 前 8 位）——只用于比对，不泄露原文。"""
     return hashlib.sha1(v.encode()).hexdigest()[:8]
 
 
 def url_meta(url: str) -> dict:
+    """拆解直链的 host / 参数 / 签发时刻（参数只留指纹，不留原值）。"""
     p = urlparse(url)
     q = parse_qs(p.query)
     meta = {
@@ -58,6 +64,16 @@ def url_meta(url: str) -> dict:
 
 
 async def http_probe(url: str, do_range: bool = True, label: str = "") -> dict:
+    """对直链做 HEAD（+ 可选 Range）探测。
+
+    Args:
+        url: 待探测的直链。
+        do_range: 是否追加一次 Range 取样。
+        label: 日志标签。
+
+    Returns:
+        dict: 探测结果（状态码 / 头部 / 取样字节数；失败时带 ``error``）。
+    """
     headers = {"User-Agent": "curl/8.0.1", "Accept": "*/*"}
     for _ in range(3):
         out: dict = {}
@@ -92,9 +108,13 @@ async def http_probe(url: str, do_range: bool = True, label: str = "") -> dict:
                 except httpx.HTTPError as exc:
                     out["range"] = {"error": f"{type(exc).__name__}: {exc}"}
                 else:
-                    out["range"] = {"status": status, "bytes_read": got, "partial_206": status == 206}
+                    out["range"] = {
+                        "status": status,
+                        "bytes_read": got,
+                        "partial_206": status == 206,
+                    }
                     return out
-        except Exception as exc:  # noqa: BLE001
+        except httpx.HTTPError as exc:
             out["fatal"] = f"{type(exc).__name__}: {exc}"
         log(f"  ({label} HTTP 重试)")
         await asyncio.sleep(1.5)
@@ -102,6 +122,7 @@ async def http_probe(url: str, do_range: bool = True, label: str = "") -> dict:
 
 
 def compare(a: dict, b: dict) -> dict:
+    """比对两条直链的参数（相同 / 不同 / 各自独有）。"""
     pa, pb = a["params"], b["params"]
     return {
         "same": sorted(k for k in set(pa) & set(pb) if pa[k]["fp"] == pb[k]["fp"]),
@@ -112,6 +133,17 @@ def compare(a: dict, b: dict) -> dict:
 
 
 async def share_case(driver, client, file: dict, st: int = 0) -> dict:
+    """建一个临时分享，取分享直链并探测，结束后删分享。
+
+    Args:
+        driver: 光鸭驱动实例。
+        client: 底层 guangyaclient。
+        file: 目标文件条目。
+        st: ``shareType``（0 = 免登录下载，1 = 带码）。
+
+    Returns:
+        dict: 分享链路的结果（结论 / 直链元信息 / 探测结果）。
+    """
     fid = str(file.get("fileId") or "")
     out: dict = {"shareType": st}
     share = None
@@ -135,7 +167,7 @@ async def share_case(driver, client, file: dict, st: int = 0) -> dict:
         code = str(data.get("code") or "")
         try:
             token = await driver.share_access_token(url_id, code)
-        except Exception as exc:  # noqa: BLE001
+        except DriverError as exc:
             out["token_error"] = str(exc)
             return out
         contents = await driver.share_files(token)
@@ -165,7 +197,7 @@ async def share_case(driver, client, file: dict, st: int = 0) -> dict:
                 try:
                     await driver.delete_share([sid])
                     out["share_deleted"] = True
-                except Exception as exc:  # noqa: BLE001
+                except DriverError as exc:
                     out["share_delete_error"] = str(exc)
     if full_url:
         await asyncio.sleep(2.0)
@@ -174,6 +206,13 @@ async def share_case(driver, client, file: dict, st: int = 0) -> dict:
 
 
 async def main() -> int:
+    """跑一遍直接直链 / 分享直链的对比探针。
+
+    Returns:
+        int: 0 表示探针跑完；1 表示存储源不存在。
+    """
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
+
     init_db(get_settings())
     try:
         async with session_scope() as db:
@@ -189,7 +228,9 @@ async def main() -> int:
         async def _on_refresh(cred: object) -> None:
             await persist_guangya_credential(row.id, cred)
 
-        driver = build_driver(row.type, row.credential, row.device_type, on_token_refresh=_on_refresh)
+        driver = build_driver(
+            row.type, row.credential, row.device_type, on_token_refresh=_on_refresh
+        )
         client = driver.client
 
         files: list[dict] = []
@@ -212,7 +253,11 @@ async def main() -> int:
             direct = await driver.get_direct_link(fid, "curl/8.0.1")
             dmeta = url_meta(direct.url)
             entry: dict = {
-                "file": {"name": file.get("fileName"), "size": int(file.get("fileSize") or 0), "fileId": fid},
+                "file": {
+                    "name": file.get("fileName"),
+                    "size": int(file.get("fileSize") or 0),
+                    "fileId": fid,
+                },
                 "direct": {
                     "url": dmeta,
                     "ua_required": direct.ua_required,
@@ -225,9 +270,10 @@ async def main() -> int:
                 entry["compare"] = compare(dmeta, entry["shareType0"]["url"])
             entry["shareType1"] = await share_case(driver, client, file, 1)
             result[label] = entry
+            share1 = entry["shareType1"]
             log(
                 f"{label}: direct ok; shareType0={entry['shareType0'].get('verdict')} "
-                f"shareType1={entry['shareType1'].get('verdict') or entry['shareType1'].get('token_error')}"
+                f"shareType1={share1.get('verdict') or share1.get('token_error')}"
             )
 
         log("===== RESULT =====")

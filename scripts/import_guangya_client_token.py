@@ -22,7 +22,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
+import logging
 import os
 import sys
 
@@ -38,31 +41,71 @@ from app.db.session import dispose_db, init_db, session_scope
 from app.services.driver_service import store_credential
 from sqlalchemy import select
 
+logger = logging.getLogger(__name__)
+
 
 def log(msg: str) -> None:
-    print(msg, flush=True)
+    """输出运行日志（走 logging，stdout 与旧版 print 行为一致）。"""
+    logger.info(msg)
+
+
+def read_token_input() -> str:
+    """读取 token 输入（环境变量 / base64 / 文件）。
+
+    Returns:
+        str: token 的原始 JSON 文本；没给任何输入时返回空串。
+
+    Raises:
+        OSError: 读取 token 文件失败。
+        ValueError: base64 载荷解码失败。
+    """
+    raw = os.environ.get("GUANGYA_CLIENT_TOKEN", "")
+    b64 = os.environ.get("GUANGYA_CLIENT_TOKEN_B64", "")
+    if b64:
+        try:
+            raw = base64.b64decode(b64).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError) as exc:
+            raise ValueError(f"GUANGYA_CLIENT_TOKEN_B64 不是合法的 base64：{exc}") from exc
+    if not raw:
+        path = os.environ.get("GUANGYA_CLIENT_TOKEN_FILE", "")
+        if path:
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    raw = handle.read()
+            except OSError as exc:
+                raise OSError(f"读取 token 文件失败（{path}）：{exc}") from exc
+    return raw
 
 
 async def main() -> int:
+    """把客户端 token 导入指定光鸭驱动的凭据覆盖层。
+
+    Returns:
+        int: 0 表示成功；1 表示参数缺失、输入不可解析、驱动不存在或类型不符。
+    """
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
+
     driver_id = int(os.environ.get("MEDIALAB_DRIVER_ID", "0") or 0)
     if not driver_id:
         log("❌ 需要 MEDIALAB_DRIVER_ID")
         return 1
 
-    raw = os.environ.get("GUANGYA_CLIENT_TOKEN", "")
-    b64 = os.environ.get("GUANGYA_CLIENT_TOKEN_B64", "")
-    if b64:
-        import base64
-        raw = base64.b64decode(b64).decode("utf-8")
-    if not raw:
-        path = os.environ.get("GUANGYA_CLIENT_TOKEN_FILE", "")
-        if path:
-            with open(path, encoding="utf-8") as handle:
-                raw = handle.read()
+    try:
+        raw = read_token_input()
+    except (OSError, ValueError) as exc:
+        log(f"❌ {exc}")
+        return 1
     if not raw:
         log("❌ 需要 GUANGYA_CLIENT_TOKEN 或 GUANGYA_CLIENT_TOKEN_FILE")
         return 1
-    payload = json.loads(raw)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        log(f"❌ token 输入不是合法 JSON：{exc}")
+        return 1
+    if not isinstance(payload, dict):
+        log(f"❌ token 输入必须是 JSON 对象，实际是 {type(payload).__name__}")
+        return 1
 
     settings = get_settings()
     init_db(settings)

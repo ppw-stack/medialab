@@ -454,7 +454,7 @@
 - **光鸭客户端 token 覆盖层：非会员大文件直链的唯一入口**（2026-11-19 逆向 + 实测，`GuangyaCredential.client_*`）：
   - **判据是 token 的 `aud`，不是请求头**：服务端按 access_token 的 `aud`（客户端 clientId）认「是不是客户端」。实测客户端 token 配 **Web client_id + Web 路径 + dt=1** 也照样放行；反过来 Web 扫码 token 伪造 `dt=6` / 客户端 UA / 全套 x-* 头，6 种组合全被 `code=254` 拒绝 → **别再用请求头伪装去试**
   - 客户端身份：`macClientId = al9eLEtLE7_pp8GR`（逆向自 `app.asar` 的 `macClientId`）；token 由 `account.guangyapan.com` 签发，`scope=user sso offline profile`，2 小时过期
-  - **凭据加密可逆（固定 key + 固定 IV）**：`Credentials.db.credentials2.credentials` 是 AES-128-CBC/PKCS7，密钥来自 `@xbase/electron_xl_analysis_kit` 的 `EncryptionKeyUtility`（8 段字符串打散）：`key=644f8652348d46e483cbdd298a28e9d8`、`iv=8d752ee1e3af4daa963200cd53909868`。**不绑设备、不绑 Keychain**——本机任何能读该库的进程都能解密
+  - **凭据加密可逆（固定 key + 固定 IV）**：`Credentials.db.credentials2.credentials` 是 AES-128-CBC/PKCS7，密钥来自 `@xbase/electron_auth_kit` 的 `EncryptionKeyUtility`（8 段字符串打散）。**key/iv 属凭据类敏感材料，禁止以字面量写入仓库**——由 `scripts/export_guangya_client_token.py` 在本机从已安装客户端的 `app.asar` 动态提取（或用 `GUANGYA_AES_KEY_HEX` / `GUANGYA_AES_IV_HEX` 环境变量覆盖）。**不绑设备、不绑 Keychain**——本机任何能读该库的进程都能解密
   - **覆盖层字段**（`GuangyaCredential` 新增，向后兼容）：`client_access_token` / `client_expires_at` / `client_device_id`。**只影响 `get_direct_link`**：扫描 / 列目录 / 上传仍走 Web token（Web token 失效才会拖死整个驱动）
   - **`get_direct_link` 优先级**：客户端 token 有效（留 5 分钟余量）→ 走 `POST https://api.guangyapan.com/userres/v1/get_res_download_url` + `dt=6` + `did/av/vc`；非鉴权错误（如 254）**直接抛**（回退也拿不到，只会掩盖原因）；鉴权错误（117）才回退 Web
   - **不自动刷新客户端 token**：`guangyaclient.refresh_token()` 把 `client_id` 硬编码成 Web 值，与 token 的 `aud` 不匹配（是否绑 aud 未验证，**且刷新可能轮换 refresh_token 把客户端踢下线**）→ 过期就回退 Web，靠本机同步脚本保持新鲜
