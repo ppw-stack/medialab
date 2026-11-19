@@ -439,6 +439,18 @@
   - 混合列表（`file_types=[]`）里 nfo/jpg/iso 全在——本地按后缀分类不变，**绕开**光鸭自有类型分类（视频=2/图片=1/文档=4/压缩包=5，与我们的后缀清单对不上）
   - 契约由 `tests/unit/test_guangya_driver.py::TestIterTree` 固化；探针脚本 `scripts/probe_guangya_scan.py` / `probe_guangya_verify.py`（生产容器 `docker exec -i medialab /opt/venv/bin/python -` 跑，探针目录自建自删、绝不碰 `fs_clear_recycle_bin`）
 
+- **光鸭两种直链（直接 / 分享）是同一通道，差在签名与前置条件**（2026-11-19 主盘实测，驱动 id=2，探针 `scripts/probe_guangya_link_final.py`）：
+  - **两个入口**：`get_res_download_url` → 响应 `signedURL` + `urlDuration=21600`；`get_share_download_url(fileId, accessToken)` → 响应**只有 `downloadUrl`**，**没有 duration 字段**
+  - **落地产物同构**：都是 `https://<节点>-httpdown.guangyacdn.com/download/?<14 个参数>`（节点在 zjk01/zjk02/sh01/qd01 间调度），参数 `at f fid g mid ms p s srcid th threshold tid ts verno` 两边齐全、**无独有参数**
+  - **逐参数实测（同一 jpg）**：相同 `f fid g mid ms srcid th threshold tid verno`（`fid` 两边相同——分享链仍是文件自己的 64 字符加密 id，不是另一套 id 空间；`tid` 是账号维度）；**只有 4 个不同** `at`（32 字符令牌）/ `p`（签名串，分享链更长：383→412）/ `s`（16 字符签名）/ `ts`（签发秒，两次差 4 秒）
+  - **判等价口径**：比 `fid + s + ts`；`etag` 相同即同一对象。两边都**不绑 UA、不要 Cookie/Bearer**，链接即凭证（Range 实测 206，可直接丢给播放器/下载器）
+  - **分享直链的前置条件是 `shareType=0`**：`shareType=1` 的 `shareUrl` 尾段没有 `_key`，公开接口 `get_share_access_token` 直接报「分享链接错误」；`download_type` 只接受 1（传 2/3 建分享即 `code=112`）
+  - **但视频拿不到分享直链**：`shareType=0` 对 mp4 稳定返回 `code=207 分享者未开启免登录下载`，同账号/同参数换 jpg 立即成功 → **光鸭视频分享不开放免登录下载（平台策略，不是参数能绕的）**；分享直链只对图片/附件类有效。另有独立坑：分享**逐文件审核**，视频大多根本进不了分享（首批 8 个视频 7 个「分享内容为空」）
+  - **删除分享后分享直链仍 HEAD 200 可下**（自包含签名，不随分享生命周期失效）；有效期同样按 `ts` 起算（分享链没有 `urlDuration` 字段，6 小时为推断，未等到实际失效）
+  - → **302 播放 / 迁移 / 批量预取只用直接链**（`get_direct_link`）；分享链仅在「附件免登录分发」场景有额外价值，别把它当视频取链备胎
+  - ⚠️ 与 2026-11-12「光鸭直链是一次性的」记录冲突：本次同一 URL 连续 HEAD + Range + 删分享后 HEAD 三次均 200。差异可能来自附件下载场景的 CDN 缓存/连接行为——**别据此改重试逻辑**（重试仍换新链，代价小、更稳）
+  - 探针：`scripts/probe_guangya_link_final.py`（只读；临时分享 `finally` 删除；`MEDIALAB_PROBE_DRIVER/VIDEO/IMAGE` 可覆盖样本）
+
 - **光鸭批量写操作的铁律**（2026-11-13 生产实测，规则）：
   - **id 与 parentId 一律传字符串**：`fs_copy` / `fs_delete` 收到数字 id 返回 `code=112 参数错误`，而第三方客户端 `guangyaclient` 的签名却写着 `Optional[int]`——照签名传 int 必炸。**统一走驱动层的公开方法** `GuangyaDriver.copy_files(file_ids, parent_id)` / `delete_files(file_ids)`（内部强制 `str()`），**不要直接调客户端的方法**
   - **同名不覆盖**：目标已有同名文件时光鸭自动改名成 `xxx(1).xxx` → 要真正覆盖必须**先删掉旧的那份**再复制
