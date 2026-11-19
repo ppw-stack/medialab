@@ -136,10 +136,17 @@ async def main() -> int:
                 log("❌ 该驱动还没有 Web 凭据——先扫码/短信登录一次，再导入客户端 token")
                 return 1
 
+            raw_expires_at = payload.get("expires_at")
+            if raw_expires_at is None:
+                log("❌ token 输入里缺少 expires_at")
+                return 1
             try:
-                expires_at = int(payload.get("expires_at") or 0)
+                expires_at = int(raw_expires_at)
             except (TypeError, ValueError) as exc:
                 log(f"❌ token 输入里的 expires_at 必须是整数：{exc}")
+                return 1
+            if expires_at <= 0:
+                log(f"❌ token 输入里的 expires_at 必须是正整数时间戳，实际是 {expires_at}")
                 return 1
 
             cred.client_access_token = str(payload.get("access_token") or "")
@@ -159,7 +166,7 @@ async def main() -> int:
 
         log(
             f"✅ 已写入驱动 {driver_id} 的客户端 token："
-            f"sub={payload.get('sub')} expires_at={payload.get('expires_at')} "
+            f"sub={payload.get('sub')} expires_at={expires_at} "
             f"token_len={len(payload.get('access_token') or '')}"
         )
         return 0
