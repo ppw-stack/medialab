@@ -439,6 +439,32 @@
   - 混合列表（`file_types=[]`）里 nfo/jpg/iso 全在——本地按后缀分类不变，**绕开**光鸭自有类型分类（视频=2/图片=1/文档=4/压缩包=5，与我们的后缀清单对不上）
   - 契约由 `tests/unit/test_guangya_driver.py::TestIterTree` 固化；探针脚本 `scripts/probe_guangya_scan.py` / `probe_guangya_verify.py`（生产容器 `docker exec -i medialab /opt/venv/bin/python -` 跑，探针目录自建自删、绝不碰 `fs_clear_recycle_bin`）
 
+- **光鸭两种直链（直接 / 分享）是同一通道，差在签名与前置条件**（2026-11-19 主盘实测，驱动 id=2，探针 `scripts/probe_guangya_link_final.py`）：
+  - **两个入口**：`get_res_download_url` → 响应 `signedURL` + `urlDuration=21600`；`get_share_download_url(fileId, accessToken)` → 响应**只有 `downloadUrl`**，**没有 duration 字段**
+  - **落地产物同构**：都是 `https://<节点>-httpdown.guangyacdn.com/download/?<14 个参数>`（节点在 zjk01/zjk02/sh01/qd01 间调度），参数 `at f fid g mid ms p s srcid th threshold tid ts verno` 两边齐全、**无独有参数**
+  - **逐参数实测（同一 jpg）**：相同 `f fid g mid ms srcid th threshold tid verno`（`fid` 两边相同——分享链仍是文件自己的 64 字符加密 id，不是另一套 id 空间；`tid` 是账号维度）；**只有 4 个不同** `at`（32 字符令牌）/ `p`（签名串，分享链更长：383→412）/ `s`（16 字符签名）/ `ts`（签发秒，两次差 4 秒）
+  - **判等价口径**：比 `fid + s + ts`；`etag` 相同即同一对象。两边都**不绑 UA、不要 Cookie/Bearer**，链接即凭证（Range 实测 206，可直接丢给播放器/下载器）
+  - **分享直链的前置条件是 `shareType=0`**：`shareType=1` 的 `shareUrl` 尾段没有 `_key`，公开接口 `get_share_access_token` 直接报「分享链接错误」；`download_type` 只接受 1（传 2/3 建分享即 `code=112`）
+  - **但视频拿不到分享直链**：`shareType=0` 对 mp4 稳定返回 `code=207 分享者未开启免登录下载`，同账号/同参数换 jpg 立即成功 → **光鸭视频分享不开放免登录下载（平台策略，不是参数能绕的）**；分享直链只对图片/附件类有效。另有独立坑：分享**逐文件审核**，视频大多根本进不了分享（首批 8 个视频 7 个「分享内容为空」）
+  - **删除分享后分享直链仍 HEAD 200 可下**（自包含签名，不随分享生命周期失效）；有效期同样按 `ts` 起算（分享链没有 `urlDuration` 字段，6 小时为推断，未等到实际失效）
+  - → **302 播放 / 迁移 / 批量预取只用直接链**（`get_direct_link`）；分享链仅在「附件免登录分发」场景有额外价值，别把它当视频取链备胎
+  - ⚠️ 与 2026-11-12「光鸭直链是一次性的」记录冲突：本次同一 URL 连续 HEAD + Range + 删分享后 HEAD 三次均 200。差异可能来自附件下载场景的 CDN 缓存/连接行为——**别据此改重试逻辑**（重试仍换新链，代价小、更稳）
+  - 探针：`scripts/probe_guangya_link_final.py`（只读；临时分享 `finally` 删除；`MEDIALAB_PROBE_DRIVER/VIDEO/IMAGE` 可覆盖样本）
+
+- **光鸭客户端 token 覆盖层：非会员大文件直链的唯一入口**（2026-11-19 逆向 + 实测，`GuangyaCredential.client_*`）：
+  - **判据是 token 的 `aud`，不是请求头**：服务端按 access_token 的 `aud`（客户端 clientId）认「是不是客户端」。实测客户端 token 配 **Web client_id + Web 路径 + dt=1** 也照样放行；反过来 Web 扫码 token 伪造 `dt=6` / 客户端 UA / 全套 x-* 头，6 种组合全被 `code=254` 拒绝 → **别再用请求头伪装去试**
+  - 客户端身份：`macClientId = al9eLEtLE7_pp8GR`（逆向自 `app.asar` 的 `macClientId`）；token 由 `account.guangyapan.com` 签发，`scope=user sso offline profile`，2 小时过期
+  - **凭据加密可逆（固定 key + 固定 IV）**：`Credentials.db.credentials2.credentials` 是 AES-128-CBC/PKCS7，密钥来自 `@xbase/electron_auth_kit` 的 `EncryptionKeyUtility`（8 段字符串打散）。**key/iv 属凭据类敏感材料，禁止以字面量写入仓库**——由 `scripts/export_guangya_client_token.py` 在本机从已安装客户端的 `app.asar` 动态提取（或用 `GUANGYA_AES_KEY_HEX` / `GUANGYA_AES_IV_HEX` 环境变量覆盖）。**不绑设备、不绑 Keychain**——本机任何能读该库的进程都能解密
+  - **覆盖层字段**（`GuangyaCredential` 新增，向后兼容）：`client_access_token` / `client_expires_at` / `client_device_id`。**只影响 `get_direct_link`**：扫描 / 列目录 / 上传仍走 Web token（Web token 失效才会拖死整个驱动）
+  - **`get_direct_link` 优先级**：客户端 token 有效（留 5 分钟余量）→ 走 `POST https://api.guangyapan.com/userres/v1/get_res_download_url` + `dt=6` + `did/av/vc`；非鉴权错误（如 254）**直接抛**（回退也拿不到，只会掩盖原因）；鉴权错误（117）才回退 Web
+  - **不自动刷新客户端 token**：`guangyaclient.refresh_token()` 把 `client_id` 硬编码成 Web 值，与 token 的 `aud` 不匹配（是否绑 aud 未验证，**且刷新可能轮换 refresh_token 把客户端踢下线**）→ 过期就回退 Web，靠本机同步脚本保持新鲜
+  - 工具：`scripts/export_guangya_client_token.py`（本机只读解密，输出 JSON）+ `scripts/import_guangya_client_token.py`（容器内写覆盖层，`MEDIALAB_DRIVER_ID` / `GUANGYA_CLIENT_TOKEN_B64`）+ `scripts/sync_guangya_client_token.sh`（本机 cron/launchd 定时导出→ssh 导入）
+  - ⚠️ **旧代码会丢字段**：生产镜像若还是旧 `GuangyaCredential`（`from_json` 忽略未知键），Web token 刷新写回时会把 `client_*` 一起抹掉（约 2 小时一次）→ **必须部署新代码后才谈持久**
+  - 实测（驱动 5 = 小号3，`vipStatus=3` / 无 `directLinkFeature`）：导入客户端 token 后 1.07 GB 与 **19.6 GB** 文件都 `success`，URL 参数 `threshold=200` / `ms=th=204800`（与客户端任务库一致）；清空客户端 token 后同文件回退 Web → `254`
+  - **迁移 / 归拢无需改业务代码**：两处取链都走 `source.get_direct_link`（`migration.py:550` / `aggregate_sync.py:921`）→ 覆盖层在驱动层自动生效；云添加（主盘 `create_offline_task`）对链接**不校验 UA/Referer**（实测 1.07 GB 直链 12 秒落地、大小精确一致、落盘名 `download` 需改名）
+  - 实测（迁移单文件，源=驱动 5（非会员客户端 token）→ 目标=驱动 2 VIP）：`min/max=1024/1025 MB` 只匹配一集 → `success`，1.00 GB，落盘改名 `download → 走马上任 - S01E01 - 第 1 集.mkv`，耗 1 次云添加额度
+  - ⚠️ **不要靠临时改聚合组 root 来测归拢**：`assign_driver_role` 是单组绑定（`Driver.aggregate_group_id` 单列），把副盘指到临时组等于**把它从生产组移走**；归拢与迁移共用同一条取链路径，验证迁移即可
+
 - **光鸭批量写操作的铁律**（2026-11-13 生产实测，规则）：
   - **id 与 parentId 一律传字符串**：`fs_copy` / `fs_delete` 收到数字 id 返回 `code=112 参数错误`，而第三方客户端 `guangyaclient` 的签名却写着 `Optional[int]`——照签名传 int 必炸。**统一走驱动层的公开方法** `GuangyaDriver.copy_files(file_ids, parent_id)` / `delete_files(file_ids)`（内部强制 `str()`），**不要直接调客户端的方法**
   - **同名不覆盖**：目标已有同名文件时光鸭自动改名成 `xxx(1).xxx` → 要真正覆盖必须**先删掉旧的那份**再复制

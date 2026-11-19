@@ -65,6 +65,22 @@ PROVIDER_LINK = "guangya_link"
 #: 光鸭 Web 端的 client_id（官方固定值，不是用户申请的）
 DEFAULT_CLIENT_ID = "aMe-8VSlkrbQXpUR"
 
+#: macOS 客户端自己的 client_id（逆向自 ``app.asar`` 的 ``macClientId``）。
+#:
+#: **判据是 token 的 ``aud``，不是请求头**（2026-11-19 实测）：用客户端
+#: access_token 时，即使配 Web client_id + Web 路径也照样放行非会员大文件；
+#: 反过来，Web token + 伪造 ``dt=6`` 头仍被 ``code=254`` 拒绝。
+CLIENT_ID_MAC = "al9eLEtLE7_pp8GR"
+
+#: 客户端取链路径（Web 库用的是 ``/nd.bizuserres.s/v1/...``，两条都通）
+CLIENT_LINK_PATH = "/userres/v1/get_res_download_url"
+
+#: 客户端请求头里的身份字段（与 app 主进程拼的一致）
+CLIENT_DT = "6"  # darwin；Windows 客户端是 5
+CLIENT_AV = "1.1.2"
+CLIENT_VC = "1010"
+
+
 #: 业务域名
 DEFAULT_API_BASE_URL = "https://api.guangyapan.com"
 
@@ -904,12 +920,94 @@ class GuangyaDriver:
     async def get_direct_link(self, remote_id: str, user_agent: str) -> DirectLink:
         """换取直链。
 
+        优先用**客户端 token**（如果导入过且未过期）——服务端按 token 的
+        ``aud`` 判定客户端身份，非会员的大文件只有客户端 token 能取到；
+        失败则回退 Web token（可用性优先，代价可能是 ``254``）。
+
         **不绑 UA**——光鸭的 ``signedURL`` 可直接 GET，与 115 的 ``f=1``
         语义不同。
 
         **过期时间用 ``urlDuration``**——``signedURL`` 里没有可解析的
         过期参数，故由驱动直接给出 ``expires_at``。
         """
+        if self._client_token_usable():
+            try:
+                return await self._client_direct_link(remote_id)
+            except DriverError as exc:
+                if exc.kind != "auth":
+                    raise
+                logger.warning(
+                    "光鸭客户端 token 换直链失败，回退 Web token：%s", exc
+                )
+        return await self._web_direct_link(remote_id)
+
+    def _client_token_usable(self) -> bool:
+        """客户端 token 是否还在有效期（留 5 分钟余量）。"""
+        cred = self._cred
+        if cred is None or not cred.client_access_token:
+            return False
+        if cred.client_expires_at:
+            return time.time() < cred.client_expires_at - TOKEN_REFRESH_MARGIN_SEC
+        return True
+
+    async def _client_direct_link(self, remote_id: str) -> DirectLink:
+        """用客户端 token 换直链（``/userres/v1`` + ``dt=6`` 客户端身份）。
+
+        实测（2026-11-19）：同一张客户端 token，配 Web client_id / Web
+        路径也放行——**判据是 token 的 ``aud``**。这里仍按客户端原样发请求，
+        尽量贴近真实链路。
+        """
+        cred = self._cred
+        if cred is None or not cred.client_access_token:
+            raise DriverError("未导入光鸭客户端 token", kind="auth")
+
+        did = cred.client_device_id or cred.device_id
+        headers = {
+            "Authorization": f"Bearer {cred.client_access_token}",
+            "X-Client-Id": CLIENT_ID_MAC,
+            "X-Device-Id": did,
+            "did": did,
+            "dt": CLIENT_DT,
+            "av": CLIENT_AV,
+            "vc": CLIENT_VC,
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/plain, */*",
+        }
+        await rate_limiter.acquire(PROVIDER_LINK)
+        url = f"{_api_base_url()}{CLIENT_LINK_PATH}"
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as http:
+                response = await http.post(
+                    url, json={"fileId": str(remote_id)}, headers=headers
+                )
+        except httpx.HTTPError as exc:
+            raise DriverError(f"光鸭客户端换直链失败：{exc}") from exc
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise DriverError(
+                f"光鸭客户端换直链返回非 JSON（HTTP {response.status_code}）"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise DriverError("光鸭客户端换直链返回格式异常")
+
+        code = payload.get("code")
+        if code not in (None, 0):
+            raise DriverError(
+                f"光鸭客户端换直链失败：{payload.get('msg') or payload}",
+                kind=_map_code(code),
+            )
+        data = payload.get("data") or {}
+        link = str(data.get("signedURL") or data.get("downloadUrl") or "")
+        if not link:
+            raise DriverError("光鸭客户端换直链返回空", kind="not_found")
+        duration = int(data.get("urlDuration") or 0)
+        expires_at = int(time.time()) + duration if duration else None
+        logger.debug("光鸭：使用客户端 token 换直链（fileId=%s）", remote_id)
+        return DirectLink(url=link, expires_at=expires_at, ua_required=False)
+
+    async def _web_direct_link(self, remote_id: str) -> DirectLink:
+        """用 Web token 换直链（历史路径，非会员大文件会被 ``254`` 拒）。"""
         payload = await self._call(
             "download_url", str(remote_id), bucket=PROVIDER_LINK
         )
@@ -927,6 +1025,22 @@ class GuangyaDriver:
         duration = int(data.get("urlDuration") or 0)
         expires_at = int(time.time()) + duration if duration else None
         return DirectLink(url=url, expires_at=expires_at, ua_required=False)
+
+    async def import_client_token(
+        self, access_token: str, expires_at: int, device_id: str = ""
+    ) -> None:
+        """导入客户端 token（只写覆盖层，不动 Web 凭据）。
+
+        写回走 ``on_token_refresh`` 回调（与 Token 刷新同一路径），
+        但 ``invalidate_cache`` 语义由调用方决定——这里只是内存侧赋值。
+        """
+        cred = self._cred
+        if cred is None:
+            raise DriverError("未配置光鸭凭据", kind="auth")
+        cred.client_access_token = str(access_token or "")
+        cred.client_expires_at = int(expires_at or 0)
+        if device_id:
+            cred.client_device_id = str(device_id)
 
     async def check_login(self) -> bool:
         """检查凭据是否仍然有效。"""

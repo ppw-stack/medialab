@@ -42,6 +42,20 @@ class GuangyaCredential:
     device_id: str = ""
     expires_at: int = 0
 
+    # -- 客户端覆盖层（可选）--
+    #: macOS / Windows 客户端登录拿到的 access_token。
+    #:
+    #: **为什么要单独存**：服务端按 token 的 ``aud``（客户端 clientId）
+    #: 判定「是不是客户端」，客户端 token 才能取非会员的大文件直链
+    #: （Web token 返回 ``code=254``）。覆盖层只用于换直链，扫描 / 列目录
+    #: 等仍走 Web token——客户端 token 只有 2 小时有效期，过期回退即可，
+    #: 不会把整个驱动的登录态拖死。
+    client_access_token: str = ""
+    #: 客户端 token 的过期时刻（unix 秒）
+    client_expires_at: int = 0
+    #: 客户端设备 id（取自客户端 ``app-lifecycle/state.json`` 的 deviceId）
+    client_device_id: str = ""
+
     def to_json(self) -> str:
         """序列化成 JSON（加密前的明文）。"""
         return json.dumps(
@@ -50,6 +64,9 @@ class GuangyaCredential:
                 "refresh_token": self.refresh_token,
                 "device_id": self.device_id,
                 "expires_at": self.expires_at,
+                "client_access_token": self.client_access_token,
+                "client_expires_at": self.client_expires_at,
+                "client_device_id": self.client_device_id,
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -73,6 +90,9 @@ class GuangyaCredential:
             refresh_token=str(data.get("refresh_token") or ""),
             device_id=str(data.get("device_id") or ""),
             expires_at=int(data.get("expires_at") or 0),
+            client_access_token=str(data.get("client_access_token") or ""),
+            client_expires_at=int(data.get("client_expires_at") or 0),
+            client_device_id=str(data.get("client_device_id") or ""),
         )
 
 
