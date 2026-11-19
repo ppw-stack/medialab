@@ -102,17 +102,25 @@ async def _driver_type_and_credential(driver_id: int) -> tuple[str, str | None, 
 # ================================================================ 扫码登录
 
 
-async def start_qr(driver_id: int) -> QRStartResult:
+async def start_qr(driver_id: int, *, client_mode: bool = False) -> QRStartResult:
     """启动扫码登录。
 
     **按存储源类型分派**：115 走 p115client 的扫码（绑设备类型），
     光鸭走 Device Code（``account.guangyapan.com``）。
+
+    Args:
+        client_mode: 仅光鸭有效。``True`` = 用**客户端 client_id** 申领，
+            签发出的 token ``aud = 客户端``（能取非会员大文件直链），
+            且 scope 带 ``offline``（有 ``refresh_token`` 可自续期）。
+            ``False`` = 原来的 Web 身份登录。
     """
     driver_type, _, device_type = await _driver_type_and_credential(driver_id)
 
     if driver_type == "guangya":
         try:
-            gyp_result = await guangya_auth.start_qr_session()
+            gyp_result = await guangya_auth.start_qr_session(
+                client_mode=client_mode
+            )
         except guangya_auth.GuangyaAuthError as exc:
             raise DriverAuthError(str(exc), status_code=502) from exc
         except Exception as exc:
@@ -152,16 +160,11 @@ async def qr_status(driver_id: int, session_id: str) -> QRStatusResult:
             raise DriverAuthError("扫码会话不存在或已过期", status_code=404, kind="not_found")
         confirmed = gyp_status.kind == "confirmed"
         if confirmed and gyp_status.credential:
-            cred = guangya_credential.GuangyaCredential(
-                access_token=str(gyp_status.credential.get("access_token") or ""),
-                refresh_token=str(gyp_status.credential.get("refresh_token") or ""),
-                device_id=str(gyp_status.credential.get("device_id") or ""),
-                expires_at=int(gyp_status.credential.get("expires_at") or 0),
+            await _store_guangya_credential(
+                driver_id,
+                gyp_status.credential,
+                client_mode=gyp_status.client_mode,
             )
-            async with session_scope() as db:
-                await store_credential(
-                    db, driver_id, cred.to_json(), scheme=guangya_credential.SCHEME
-                )
         return QRStatusResult(
             kind=gyp_status.kind,
             error_kind=gyp_status.error_kind or "",
@@ -184,6 +187,62 @@ async def qr_status(driver_id: int, session_id: str) -> QRStatusResult:
         error_msg=p115_status.error_msg or "",
         confirmed=confirmed,
     )
+
+
+async def _store_guangya_credential(
+    driver_id: int,
+    payload: dict,
+    *,
+    client_mode: bool,
+) -> None:
+    """把光鸭登录结果写回凭据（**合并**，不覆盖另一层）。
+
+    Args:
+        payload: 登录返回的凭据 dict（``guangya_auth`` 的格式）。
+        client_mode: ``True`` = 本次签发的是**客户端身份** token
+            （``aud = CLIENT_ID_MAC``）。
+
+    **为什么要合并**：光鸭凭据是一个 JSON，含 Web 层与客户端覆盖层。
+    直接新建对象会把另一层抹掉——Web 扫码每 1~2 小时刷一次 token，
+    客户端 token 会被顺手清掉（2026-11-19 记录过的坑）。
+
+    client 模式下主 ``access_token`` 也用同一把：实测客户端 aud 的 token
+    对扫描 / 列目录 / 上传全部生效，一套比两套少一个失效点。
+    """
+    from app.db.session import session_scope
+
+    access = str(payload.get("access_token") or "")
+    refresh = str(payload.get("refresh_token") or "")
+    device = str(payload.get("device_id") or "")
+    expires_at = int(payload.get("expires_at") or 0)
+
+    async with session_scope() as db:
+        row = await get_driver(db, driver_id)
+        try:
+            cred = guangya_credential.decode_credential(row.credential)
+        except Exception:  # pragma: no cover - 旧密文 / 坏数据
+            cred = None
+        cred = cred or guangya_credential.GuangyaCredential(access_token="")
+
+        if client_mode:
+            cred.access_token = access
+            cred.expires_at = expires_at
+            cred.device_id = device
+            # 主路径不再走 Web 刷新（那是另一个 aud），交给客户端刷新
+            cred.refresh_token = ""
+            cred.client_access_token = access
+            cred.client_refresh_token = refresh
+            cred.client_expires_at = expires_at
+            cred.client_device_id = device
+        else:
+            cred.access_token = access
+            cred.refresh_token = refresh
+            cred.device_id = device
+            cred.expires_at = expires_at
+
+        await store_credential(
+            db, driver_id, cred.to_json(), scheme=guangya_credential.SCHEME
+        )
 
 
 # ================================================================ 短信登录（光鸭）
@@ -218,8 +277,6 @@ async def verify_sms_code(
     校验失败返回 ``ok=False``（**不抛异常**）——验证码输错是**用户可
     重试**的正常情况，不是服务端故障；用异常表达会让前端误判成故障。
     """
-    from app.db.session import session_scope
-
     driver_type, _, _ = await _driver_type_and_credential(driver_id)
     if driver_type != "guangya":
         raise DriverAuthError("该存储源不支持短信登录", status_code=400, kind="invalid")
@@ -229,16 +286,8 @@ async def verify_sms_code(
     except guangya_auth.GuangyaAuthError as exc:
         return SmsVerifyResult(ok=False, message=str(exc))
 
-    obj = guangya_credential.GuangyaCredential(
-        access_token=str(cred.get("access_token") or ""),
-        refresh_token=str(cred.get("refresh_token") or ""),
-        device_id=str(cred.get("device_id") or ""),
-        expires_at=int(cred.get("expires_at") or 0),
-    )
-    async with session_scope() as db:
-        await store_credential(
-            db, driver_id, obj.to_json(), scheme=guangya_credential.SCHEME
-        )
+    # **合并**写入：短信登录只更新 Web 层，客户端覆盖层原样保留
+    await _store_guangya_credential(driver_id, cred, client_mode=False)
     return SmsVerifyResult(ok=True, message="登录成功，凭据已加密存储")
 
 

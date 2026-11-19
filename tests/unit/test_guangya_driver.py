@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any, ClassVar
@@ -152,6 +153,7 @@ def _credential_json(**kwargs: Any) -> str:
         client_access_token=kwargs.get("client_access_token", ""),
         client_expires_at=kwargs.get("client_expires_at", 0),
         client_device_id=kwargs.get("client_device_id", ""),
+        client_refresh_token=kwargs.get("client_refresh_token", ""),
     )
     return cred.to_json()
 
@@ -760,6 +762,46 @@ class TestBatchCopyDelete:
 
 
 @contextmanager
+def _mock_refresh_and_link(refreshed: dict[str, Any]):
+    """mock 两个端点：``/v1/auth/token`` 返回 refresh 结果，其余返回直链。"""
+    import httpx
+
+    calls: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        body = request.content.decode("utf-8", "replace")
+        calls.append(
+            {
+                "path": path,
+                "authorization": request.headers.get("authorization"),
+                "x_client_id": request.headers.get("x-client-id"),
+                "x_action": request.headers.get("x-action"),
+                "body": json.loads(body) if body else {},
+            }
+        )
+        if path == "/v1/auth/token":
+            return httpx.Response(200, json=refreshed)
+        return httpx.Response(
+            200,
+            json={"code": 0, "data": {"signedURL": "https://cdn.test/client", "urlDuration": 21600}},
+        )
+
+    original = httpx.AsyncClient
+
+    class _Patched(original):  # type: ignore[misc, valid-type]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            kwargs.pop("transport", None)
+            super().__init__(*args, transport=httpx.MockTransport(handler), **kwargs)
+
+    httpx.AsyncClient = _Patched  # type: ignore[misc]
+    try:
+        yield calls
+    finally:
+        httpx.AsyncClient = original  # type: ignore[misc]
+
+
+@contextmanager
 def _mock_client_link_api(payload: dict[str, Any], seen: dict[str, Any] | None = None):
     """把 httpx 的 POST 换成固定 payload，并记录请求头（测客户端取链）。"""
     import httpx
@@ -878,5 +920,68 @@ class TestClientTokenLink:
             client_access_token="client",
             client_expires_at=2,
             client_device_id="client-dev",
+            client_refresh_token="client-ref",
         )
         assert GuangyaCredential.from_json(cred.to_json()) == cred
+
+    async def test_client_token_refreshed_with_client_aud(self) -> None:
+        """客户端 token 过期 + 有 RT → **自己续期**，不再回退 Web。
+
+        实测口径（2026-11-19）：``client_id`` 必须用客户端值，aud 才不漂移；
+        ``refresh_token`` 服务端不轮换。
+        """
+        seen: dict[str, Any] = {}
+        refreshed = {
+            "access_token": "fresh-client",
+            "refresh_token": "ref-same",
+            "expires_in": 7200,
+        }
+
+        def _download_url(self: Any, file_id: str) -> dict[str, Any]:
+            raise AssertionError("不该回退 Web 路径")
+
+        FakeGuangyaClient.download_url_impl = _download_url
+        driver = gyp_module.GuangyaDriver(
+            _credential_json(
+                client_access_token="old-client",
+                client_expires_at=1,
+                client_device_id="client-dev",
+                client_refresh_token="ref-same",
+            ),
+            on_token_refresh=lambda c: seen.setdefault("cred", c),
+        )
+        with _mock_refresh_and_link(refreshed) as calls:
+            link = await driver.get_direct_link("123", "Player/1.0")
+
+        assert link.url == "https://cdn.test/client"
+        assert calls[0]["path"] == "/v1/auth/token"
+        assert calls[0]["x_client_id"] == "al9eLEtLE7_pp8GR"
+        assert calls[0]["x_action"] == "401"
+        assert calls[0]["body"]["grant_type"] == "refresh_token"
+        assert calls[0]["body"]["refresh_token"] == "ref-same"
+        assert calls[0]["body"]["client_id"] == "al9eLEtLE7_pp8GR"
+        assert calls[1]["authorization"] == "Bearer fresh-client"
+        assert seen["cred"].client_access_token == "fresh-client"
+        assert seen["cred"].client_refresh_token == "ref-same"
+
+    async def test_client_mode_main_token_uses_client_refresh(self) -> None:
+        """主 token 就是客户端 token（client 模式登录）→ 续期走客户端路径。"""
+        driver = gyp_module.GuangyaDriver(
+            _credential_json(
+                access_token="old-client",
+                refresh_token="",
+                expires_at=1,
+                client_access_token="old-client",
+                client_expires_at=1,
+                client_device_id="client-dev",
+                client_refresh_token="ref-same",
+            )
+        )
+        with _mock_refresh_and_link(
+            {"access_token": "fresh-client", "refresh_token": "ref-same", "expires_in": 7200}
+        ) as calls:
+            await driver.list_root()
+
+        # 只发了一次续期请求；Web 的 guangyaclient.refresh_token 没被调用
+        assert len(calls) == 1
+        assert calls[0]["path"] == "/v1/auth/token"

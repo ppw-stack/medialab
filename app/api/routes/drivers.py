@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.auth import require_session
@@ -156,6 +156,8 @@ class DriverOut(BaseModel):
 class QRStartOut(BaseModel):
     session_id: str
     qr_image_b64: str
+    #: 本次登录模式（``web`` = Web 身份；``client`` = 客户端身份）
+    mode: str = "web"
 
 
 class QRStatusOut(BaseModel):
@@ -459,20 +461,33 @@ async def device_types() -> list[DeviceTypeOut]:
 
 
 @router.post("/{driver_id}/qr/start", response_model=QRStartOut)
-async def start_qr(driver_id: int) -> QRStartOut:
+async def start_qr(
+    driver_id: int,
+    mode: str = Query(
+        "web",
+        pattern="^(web|client)$",
+        description="光鸭登录身份：client 用客户端 clientId（token 的 aud 即客户端）",
+    ),
+) -> QRStartOut:
     """启动扫码登录。
 
     **按存储源类型分派**：115 走 p115client 的扫码（绑设备类型），
     光鸭走 Device Code（``account.guangyapan.com``）。
+
+    ``mode=client`` 时用客户端 clientId + ``offline`` scope 取码：
+    签发出的 token ``aud = 客户端``（能取非会员大文件直链），且带
+    ``refresh_token``——之后由驱动自己续期，不再依赖本机客户端。
     """
     try:
-        result = await driver_auth.start_qr(driver_id)
+        result = await driver_auth.start_qr(
+            driver_id, client_mode=(mode == "client")
+        )
     except DriverAuthError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except DriverServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return QRStartOut(
-        session_id=result.session_id, qr_image_b64=result.qr_image_b64
+        session_id=result.session_id, qr_image_b64=result.qr_image_b64, mode=mode
     )
 
 

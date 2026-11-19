@@ -32,6 +32,11 @@ from typing import Any, Literal
 
 import httpx
 
+from app.adapters.drivers.guangya_credential import (
+    CLIENT_ID_MAC,
+    CLIENT_ID_WEB,
+    CLIENT_SCOPE,
+)
 from app.adapters.drivers.qr_render import render_qr_png
 from app.core.logging import get_logger
 
@@ -41,7 +46,10 @@ logger = get_logger(__name__)
 DEFAULT_ACCOUNT_BASE_URL = "https://account.guangyapan.com"
 
 #: 光鸭 Web 端的 client_id（官方固定值，不是用户申请的）
-DEFAULT_CLIENT_ID = "aMe-8VSlkrbQXpUR"
+DEFAULT_CLIENT_ID = CLIENT_ID_WEB
+
+#: Web 登录用的 scope（不含 ``offline``）
+WEB_SCOPE = "user"
 
 #: 轮询间隔（秒）——服务端返回的 interval 优先
 POLL_INTERVAL_SEC = 2
@@ -81,6 +89,12 @@ class QRSession:
     kind: QRSessionKind = "waiting"
     error_kind: QRErrorKind | None = None
     error_msg: str | None = None
+    #: 本次会话用的 client_id（决定签发 token 的 ``aud``）
+    client_id: str = DEFAULT_CLIENT_ID
+    #: 本次会话用的 scope
+    scope: str = WEB_SCOPE
+    #: 是否「客户端身份」登录（``aud = CLIENT_ID_MAC``）
+    client_mode: bool = False
     #: 授权成功后拿到的凭据
     credential: dict[str, Any] | None = None
     task: asyncio.Task[None] | None = field(default=None, repr=False)
@@ -101,6 +115,8 @@ class QRStatusResult:
     """扫码状态查询结果。"""
 
     kind: QRSessionKind
+    #: 本次会话是否客户端身份登录（决定凭据落哪一层）
+    client_mode: bool = False
     credential: dict[str, Any] | None = None
     error_kind: QRErrorKind | None = None
     error_msg: str | None = None
@@ -198,11 +214,20 @@ def _extract_tokens(payload: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-async def start_qr_session(device_id: str | None = None) -> QRStartResult:
+async def start_qr_session(
+    device_id: str | None = None,
+    *,
+    client_mode: bool = False,
+    client_id: str = "",
+) -> QRStartResult:
     """启动扫码会话。
 
     Args:
         device_id: 设备标识。不传则新生成一个（32 位 hex）。
+        client_mode: ``True`` = 用**客户端 client_id** 申领，签发出的
+            token ``aud = CLIENT_ID_MAC``（能取非会员大文件直链），
+            scope 带 ``offline``（因此有 ``refresh_token`` 可自续期）。
+        client_id: 覆盖 client_id（默认按 ``client_mode`` 取值）。
 
     Returns:
         二维码（base64 PNG）与会话 id。
@@ -211,8 +236,10 @@ async def start_qr_session(device_id: str | None = None) -> QRStartResult:
         GuangyaAuthError: 取码失败（限流 / 其它）。
     """
     device = device_id or secrets.token_hex(16)
+    cid = client_id or (CLIENT_ID_MAC if client_mode else _client_id())
+    scope = CLIENT_SCOPE if client_mode else WEB_SCOPE
     url = f"{_account_base_url()}/v1/auth/device/code"
-    payload = {"scope": "user", "client_id": _client_id()}
+    payload = {"scope": scope, "client_id": cid}
 
     data = await asyncio.to_thread(_post, url, payload, _account_headers(device))
     if data.get("error") or (data.get("code") not in (None, 0)):
@@ -232,6 +259,9 @@ async def start_qr_session(device_id: str | None = None) -> QRStartResult:
         device_id=device,
         device_code=device_code,
         qr_image_b64=qr_b64,
+        client_id=cid,
+        scope=scope,
+        client_mode=client_mode,
     )
     async with _LOCK:
         _SESSIONS[session.session_id] = session
@@ -275,6 +305,8 @@ async def _run_qr_session(session: QRSession) -> None:
             if cred is None:
                 continue
             cred["device_id"] = session.device_id
+            cred["client_id"] = session.client_id
+            cred["client_mode"] = session.client_mode
             session.credential = cred
             session.kind = "confirmed"
             logger.info("光鸭扫码成功：%s", session.session_id)
@@ -291,12 +323,15 @@ async def _run_qr_session(session: QRSession) -> None:
 
 
 def _poll_token(session: QRSession) -> dict[str, Any]:
-    """轮询一次 token（同步）。"""
+    """轮询一次 token（同步）。
+
+    ``client_id`` 必须与取码时一致——服务端按它决定 token 的 ``aud``。
+    """
     url = f"{_account_base_url()}/v1/auth/token"
     payload = {
         "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
         "device_code": session.device_code,
-        "client_id": _client_id(),
+        "client_id": session.client_id,
     }
     return _post(url, payload, _account_headers(session.device_id))
 
@@ -308,6 +343,7 @@ async def get_qr_status(session_id: str) -> QRStatusResult | None:
         return None
     return QRStatusResult(
         kind=session.kind,
+        client_mode=session.client_mode,
         credential=session.credential,
         error_kind=session.error_kind,
         error_msg=session.error_msg,

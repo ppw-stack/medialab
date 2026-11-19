@@ -1252,6 +1252,8 @@ export interface DriverStatus {
 export interface QrStartResult {
   session_id: string
   qr_image_b64: string
+  /** 本次登录身份：`web` = Web 身份；`client` = 客户端身份（可直链非会员大文件） */
+  mode?: 'web' | 'client'
 }
 
 export type QrStatusKind = 'waiting' | 'scanned' | 'confirmed' | 'expired' | 'error'

@@ -152,6 +152,8 @@ async def main() -> int:
             cred.client_access_token = str(payload.get("access_token") or "")
             cred.client_expires_at = expires_at
             cred.client_device_id = str(payload.get("device_id") or "")
+            # **续期钥匙**：有它驱动就能自己刷新（不再每 2 小时回客户端库解密）
+            cred.client_refresh_token = str(payload.get("refresh_token") or "")
             if not cred.client_access_token:
                 log("❌ 输入里没有 access_token")
                 return 1
@@ -167,7 +169,8 @@ async def main() -> int:
         log(
             f"✅ 已写入驱动 {driver_id} 的客户端 token："
             f"sub={payload.get('sub')} expires_at={expires_at} "
-            f"token_len={len(payload.get('access_token') or '')}"
+            f"token_len={len(payload.get('access_token') or '')} "
+            f"refresh={'有' if cred.client_refresh_token else '无（过期后只能回退 Web）'}"
         )
         return 0
     finally:
