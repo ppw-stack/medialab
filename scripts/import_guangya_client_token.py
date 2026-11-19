@@ -85,9 +85,17 @@ async def main() -> int:
     """
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
 
-    driver_id = int(os.environ.get("MEDIALAB_DRIVER_ID", "0") or 0)
-    if not driver_id:
+    raw_driver_id = os.environ.get("MEDIALAB_DRIVER_ID", "").strip()
+    if not raw_driver_id:
         log("❌ 需要 MEDIALAB_DRIVER_ID")
+        return 1
+    try:
+        driver_id = int(raw_driver_id)
+    except ValueError as exc:
+        log(f"❌ MEDIALAB_DRIVER_ID 必须是数字：{exc}")
+        return 1
+    if driver_id <= 0:
+        log(f"❌ MEDIALAB_DRIVER_ID 必须是正整数，实际是 {driver_id}")
         return 1
 
     try:
@@ -128,8 +136,14 @@ async def main() -> int:
                 log("❌ 该驱动还没有 Web 凭据——先扫码/短信登录一次，再导入客户端 token")
                 return 1
 
+            try:
+                expires_at = int(payload.get("expires_at") or 0)
+            except (TypeError, ValueError) as exc:
+                log(f"❌ token 输入里的 expires_at 必须是整数：{exc}")
+                return 1
+
             cred.client_access_token = str(payload.get("access_token") or "")
-            cred.client_expires_at = int(payload.get("expires_at") or 0)
+            cred.client_expires_at = expires_at
             cred.client_device_id = str(payload.get("device_id") or "")
             if not cred.client_access_token:
                 log("❌ 输入里没有 access_token")
