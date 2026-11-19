@@ -32,6 +32,18 @@ SCHEME_PREFIX = "gypcipher:"
 #: 解密密钥的环境变量名（与 115 共用同一个密钥）
 SECRET_ENV = "CREDENTIAL_ENCRYPTION_SECRET"
 
+#: 光鸭 Web 端的固定 client_id（官方自己的值，不是用户申请的）
+CLIENT_ID_WEB = "aMe-8VSlkrbQXpUR"
+
+#: macOS 客户端的 client_id（逆向自 ``app.asar`` 的 ``macClientId``）。
+#:
+#: **它决定 token 的 ``aud``**——服务端按 aud 认「是不是客户端」，
+#: 所以「对应客户端 ID 的 token」= 用这个 client_id 申领（实测 2026-11-19）。
+CLIENT_ID_MAC = "al9eLEtLE7_pp8GR"
+
+#: 客户端登录的 scope（``offline`` 是拿到 ``refresh_token`` 的前提）
+CLIENT_SCOPE = "user sso offline profile"
+
 
 @dataclass
 class GuangyaCredential:
@@ -55,6 +67,15 @@ class GuangyaCredential:
     client_expires_at: int = 0
     #: 客户端设备 id（取自客户端 ``app-lifecycle/state.json`` 的 deviceId）
     client_device_id: str = ""
+    #: 客户端 token 的 **refresh_token**（续期用）。
+    #:
+    #: 为什么必须存：客户端 access_token 只有 2 小时，**但没有它就只能
+    #: 每 2 小时回客户端库解密一次**。存下 RT 后由驱动自己刷新
+    #: （``_ensure_client_token``），彻底摆脱对本机客户端的依赖。
+    #:
+    #: ⚠️ 刷新时必须用 ``CLIENT_ID_MAC``（不是 Web 值）：aud 跟着请求的
+    #: client_id 走，用错会刷新出一个 Web 身份的 token（客户端身份丢失）。
+    client_refresh_token: str = ""
 
     def to_json(self) -> str:
         """序列化成 JSON（加密前的明文）。"""
@@ -67,6 +88,7 @@ class GuangyaCredential:
                 "client_access_token": self.client_access_token,
                 "client_expires_at": self.client_expires_at,
                 "client_device_id": self.client_device_id,
+                "client_refresh_token": self.client_refresh_token,
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -93,6 +115,7 @@ class GuangyaCredential:
             client_access_token=str(data.get("client_access_token") or ""),
             client_expires_at=int(data.get("client_expires_at") or 0),
             client_device_id=str(data.get("client_device_id") or ""),
+            client_refresh_token=str(data.get("client_refresh_token") or ""),
         )
 
 

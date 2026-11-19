@@ -43,6 +43,8 @@ import httpx
 
 from app.adapters.drivers.base import CloudFile, DirectLink, DriverError
 from app.adapters.drivers.guangya_credential import (
+    CLIENT_ID_MAC,
+    CLIENT_ID_WEB,
     GuangyaCredential,
     decode_credential,
 )
@@ -63,15 +65,15 @@ PROVIDER = "guangya"
 PROVIDER_LINK = "guangya_link"
 
 #: 光鸭 Web 端的 client_id（官方固定值，不是用户申请的）
-DEFAULT_CLIENT_ID = "aMe-8VSlkrbQXpUR"
+DEFAULT_CLIENT_ID = CLIENT_ID_WEB
 
 #: macOS 客户端自己的 client_id（逆向自 ``app.asar`` 的 ``macClientId``）。
 #:
 #: **判据是 token 的 ``aud``，不是请求头**（2026-11-19 实测）：用客户端
 #: access_token 时，即使配 Web client_id + Web 路径也照样放行非会员大文件；
 #: 反过来，Web token + 伪造 ``dt=6`` 头仍被 ``code=254`` 拒绝。
-CLIENT_ID_MAC = "al9eLEtLE7_pp8GR"
-
+#:
+#: 定义在 :mod:`guangya_credential`（登录侧也要用），此处仅作兼容导出。
 #: 客户端取链路径（Web 库用的是 ``/nd.bizuserres.s/v1/...``，两条都通）
 CLIENT_LINK_PATH = "/userres/v1/get_res_download_url"
 
@@ -147,6 +149,16 @@ def _client_id() -> str:
     from app.core.config import get_settings
 
     return get_settings().guangya_client_id.strip() or DEFAULT_CLIENT_ID
+
+
+def _account_base_url() -> str:
+    """取账号域名（登录 / 刷新 token 用；配置优先）。"""
+    from app.core.config import get_settings
+
+    return (
+        get_settings().guangya_account_base_url.strip().rstrip("/")
+        or "https://account.guangyapan.com"
+    )
 
 
 def _api_base_url() -> str:
@@ -261,15 +273,43 @@ class GuangyaDriver:
             raise DriverError(f"光鸭客户端初始化失败：{exc}", kind="auth") from exc
         return self._client
 
+    def _uses_client_identity(self) -> bool:
+        """主 access_token 是不是**客户端身份**的（``aud=CLIENT_ID_MAC``）。
+
+        判据用「主 token 与覆盖层同一个字符串」——client 模式登录与导入
+        路径都会留下这个痕迹，不必每次解 JWT。主 token 若还是 Web 的，
+        两者不同，走原来的 Web 刷新路径。
+        """
+        cred = self._cred
+        if cred is None or not cred.access_token:
+            return False
+        return cred.access_token == cred.client_access_token
+
     async def _ensure_token(self) -> None:
-        """确保 access_token 有效（过期则刷新）。
+        """确保主 access_token 有效（过期则刷新）。
 
         刷新成功后通过回调把新 token 写回 DB——**这一步不能省**，否则
         进程重启后又用旧 token，服务端返回 117 / 401。
+
+        **客户端身份的主 token**走 :meth:`_ensure_client_token`：刷新时必须
+        用 ``CLIENT_ID_MAC``，否则会把 ``aud`` 刷成 Web（实测 2026-11-19：
+        aud 跟着请求里的 ``client_id`` 走，客户端身份就丢了）。
+
+        Raises:
+            DriverError: 未配置凭据、已过期且无 ``refresh_token``、
+                或刷新请求失败。
         """
         cred = self._cred
         if cred is None:
             raise DriverError("未配置光鸭凭据", kind="auth")
+
+        if self._uses_client_identity():
+            if not await self._ensure_client_token():
+                raise DriverError(
+                    "光鸭客户端 Token 已过期且无 refresh_token", kind="auth"
+                )
+            return
+
         if not cred.expires_at:
             return
         if time.time() < cred.expires_at - TOKEN_REFRESH_MARGIN_SEC:
@@ -297,11 +337,118 @@ class GuangyaDriver:
             cred.refresh_token = str(result["refresh_token"])
         cred.expires_at = int(time.time()) + int(expires_in) if expires_in else 0
 
-        if self._on_token_refresh is not None:
-            try:
-                await self._on_token_refresh(cred)
-            except Exception:
-                logger.exception("光鸭 Token 写回失败（不影响本次使用）")
+        await self._notify_token_refresh()
+
+    async def _notify_token_refresh(self) -> None:
+        """把刷新后的凭据写回 DB（失败只记日志，不影响本次使用）。"""
+        cred = self._cred
+        if cred is None or self._on_token_refresh is None:
+            return
+        try:
+            await self._on_token_refresh(cred)
+        except Exception:
+            logger.exception("光鸭 Token 写回失败（不影响本次使用）")
+
+    async def _ensure_client_token(self) -> bool:
+        """确保**客户端覆盖层** token 有效（过期则用 RT 自己续期）。
+
+        这是「不再依赖本机客户端」的关键：客户端 access_token 只有 2 小时，
+        但 ``client_refresh_token`` 是长期钥匙。
+
+        实测（2026-11-19）：``grant_type=refresh_token`` + ``client_id`` 用
+        ``CLIENT_ID_MAC`` → 新 token 的 ``aud`` 仍是客户端；服务端**不轮换**
+        ``refresh_token`` → 与客户端各自持有一份互不影响。
+
+        Returns:
+            bool: 是否有可用的客户端 token（无 RT 且已过期 → False）。
+
+        Raises:
+            DriverError: 未配置凭据，或客户端刷新请求失败。
+        """
+        cred = self._cred
+        if cred is None:
+            raise DriverError("未配置光鸭凭据", kind="auth")
+        if cred.client_access_token and self._client_token_usable():
+            return True
+        if not cred.client_refresh_token:
+            return False
+
+        await rate_limiter.acquire(PROVIDER)
+        try:
+            result = await self._refresh_client_token(cred)
+        except DriverError:
+            raise
+        except Exception as exc:
+            raise DriverError(f"光鸭客户端 Token 刷新失败：{exc}", kind="auth") from exc
+
+        access = result.get("access_token") if isinstance(result, dict) else None
+        if not access:
+            raise DriverError(
+                "光鸭客户端 Token 刷新失败：未返回 access_token", kind="auth"
+            )
+
+        old_client = cred.client_access_token
+        cred.client_access_token = str(access)
+        expires_in = result.get("expires_in") if isinstance(result, dict) else None
+        cred.client_expires_at = (
+            int(time.time()) + int(expires_in)
+            if expires_in
+            else _jwt_expires_at(str(access))
+        )
+        if isinstance(result, dict) and result.get("refresh_token"):
+            cred.client_refresh_token = str(result["refresh_token"])
+
+        # client 模式登录：主 token 就是客户端 token → 同步主字段，
+        # 这样扫描 / 列目录与换直链共用同一把（少一次刷新、少一个失效点）
+        if not cred.access_token or cred.access_token == old_client:
+            cred.access_token = cred.client_access_token
+            cred.expires_at = cred.client_expires_at
+
+        await self._notify_token_refresh()
+        logger.info("光鸭客户端 token 已自动续期（aud=%s）", CLIENT_ID_MAC)
+        return True
+
+    async def _refresh_client_token(self, cred: GuangyaCredential) -> dict[str, Any]:
+        """调 ``/v1/auth/token`` 的 ``refresh_token`` grant（客户端身份）。
+
+        Raises:
+            DriverError: 请求失败、返回非 JSON、格式异常或服务端报错。
+        """
+        did = cred.client_device_id or cred.device_id
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/plain, */*",
+            "X-Client-Id": CLIENT_ID_MAC,
+            "X-Device-Id": did,
+            # 客户端刷新时会带这个头（osascript 无关，仅形态对齐）
+            "x-action": "401",
+        }
+        payload = {
+            "grant_type": "refresh_token",
+            "refresh_token": cred.client_refresh_token,
+            "client_id": CLIENT_ID_MAC,
+        }
+        url = f"{_account_base_url()}/v1/auth/token"
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as http:
+                response = await http.post(url, json=payload, headers=headers)
+        except httpx.HTTPError as exc:
+            raise DriverError(f"光鸭客户端刷新请求失败：{exc}", kind="auth") from exc
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise DriverError(
+                f"光鸭客户端刷新返回非 JSON（HTTP {response.status_code}）",
+                kind="auth",
+            ) from exc
+        if not isinstance(data, dict):
+            raise DriverError("光鸭客户端刷新返回格式异常", kind="auth")
+        if data.get("error") or data.get("code") not in (None, 0):
+            raise DriverError(
+                f"光鸭客户端刷新失败：{data.get('error_description') or data.get('msg') or data}",
+                kind="auth",
+            )
+        return data
 
     async def _call(
         self,
@@ -930,15 +1077,27 @@ class GuangyaDriver:
         **过期时间用 ``urlDuration``**——``signedURL`` 里没有可解析的
         过期参数，故由驱动直接给出 ``expires_at``。
         """
-        if self._client_token_usable():
+        cred = self._cred
+        has_client = bool(
+            cred and (cred.client_access_token or cred.client_refresh_token)
+        )
+        if has_client:
             try:
-                return await self._client_direct_link(remote_id)
+                usable = await self._ensure_client_token()
             except DriverError as exc:
                 if exc.kind != "auth":
                     raise
-                logger.warning(
-                    "光鸭客户端 token 换直链失败，回退 Web token：%s", exc
-                )
+                logger.warning("光鸭客户端 token 续期失败，回退 Web token：%s", exc)
+                usable = False
+            if usable:
+                try:
+                    return await self._client_direct_link(remote_id)
+                except DriverError as exc:
+                    if exc.kind != "auth":
+                        raise
+                    logger.warning(
+                        "光鸭客户端 token 换直链失败，回退 Web token：%s", exc
+                    )
         return await self._web_direct_link(remote_id)
 
     def _client_token_usable(self) -> bool:
@@ -1027,9 +1186,20 @@ class GuangyaDriver:
         return DirectLink(url=url, expires_at=expires_at, ua_required=False)
 
     async def import_client_token(
-        self, access_token: str, expires_at: int, device_id: str = ""
+        self,
+        access_token: str,
+        expires_at: int,
+        device_id: str = "",
+        refresh_token: str = "",
     ) -> None:
         """导入客户端 token（只写覆盖层，不动 Web 凭据）。
+
+        Args:
+            access_token: 客户端 access_token。
+            expires_at: 过期时刻（unix 秒；0 = 用 JWT 的 ``exp`` 兜底）。
+            device_id: 客户端设备 id。
+            refresh_token: **续期钥匙**。给了就能自动续期（``_ensure_client_token``），
+                再也不需要回客户端库解密；不给则仍是 2 小时一过就回退 Web。
 
         写回走 ``on_token_refresh`` 回调（与 Token 刷新同一路径），
         但 ``invalidate_cache`` 语义由调用方决定——这里只是内存侧赋值。
@@ -1038,9 +1208,13 @@ class GuangyaDriver:
         if cred is None:
             raise DriverError("未配置光鸭凭据", kind="auth")
         cred.client_access_token = str(access_token or "")
-        cred.client_expires_at = int(expires_at or 0)
+        cred.client_expires_at = int(expires_at or 0) or _jwt_expires_at(
+            str(access_token or "")
+        )
         if device_id:
             cred.client_device_id = str(device_id)
+        if refresh_token:
+            cred.client_refresh_token = str(refresh_token)
 
     async def check_login(self) -> bool:
         """检查凭据是否仍然有效。"""
@@ -1196,6 +1370,30 @@ def _to_cloud_file(
         mtime=int(item.get("utime") or item.get("ctime") or 0),
         relative_dir=rel_dir if is_dir else rel,
     )
+
+
+def _jwt_expires_at(token: str) -> int:
+    """从 JWT 的 ``exp`` 取过期时刻（unix 秒）；解不出返回 0。
+
+    刷新响应偶尔不带 ``expires_in``（光鸭的 refresh 是带的，但别赌）——
+    没有时用 token 自己的 ``exp``，总比写 0（= 永不过期）安全。
+    """
+    parts = token.split(".")
+    if len(parts) < 2:
+        return 0
+    try:
+        padded = parts[1] + "=" * (-len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded))
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return 0
+    # **payload 可能是合法 JSON 但不是对象**（列表 / 字符串 / 数字）——
+    # 那时 ``payload.get`` 会抛 AttributeError，与「解不出返回 0」的承诺不符。
+    if not isinstance(payload, dict):
+        return 0
+    try:
+        return int(payload.get("exp") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _map_code(code: Any) -> str:

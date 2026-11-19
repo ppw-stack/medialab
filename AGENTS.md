@@ -461,6 +461,22 @@
   - 工具：`scripts/export_guangya_client_token.py`（本机只读解密，输出 JSON）+ `scripts/import_guangya_client_token.py`（容器内写覆盖层，`MEDIALAB_DRIVER_ID` / `GUANGYA_CLIENT_TOKEN_B64`）+ `scripts/sync_guangya_client_token.sh`（本机 cron/launchd 定时导出→ssh 导入）
   - ⚠️ **旧代码会丢字段**：生产镜像若还是旧 `GuangyaCredential`（`from_json` 忽略未知键），Web token 刷新写回时会把 `client_*` 一起抹掉（约 2 小时一次）→ **必须部署新代码后才谈持久**
   - 实测（驱动 5 = 小号3，`vipStatus=3` / 无 `directLinkFeature`）：导入客户端 token 后 1.07 GB 与 **19.6 GB** 文件都 `success`，URL 参数 `threshold=200` / `ms=th=204800`（与客户端任务库一致）；清空客户端 token 后同文件回退 Web → `254`
+  - ✅ **客户端 token 现在能自己续期**（2026-11-19 实测，替代「只能靠本机定时同步」）：
+    - `GuangyaCredential.client_refresh_token`（与 `client_access_token` / `client_expires_at` / `client_device_id` 同层）+ `GuangyaDriver._ensure_client_token()`
+    - 刷新 = `POST {GUANGYA_ACCOUNT_BASE}/v1/auth/token`，`grant_type=refresh_token` + **`client_id` 必须用 `CLIENT_ID_MAC`** + 头 `X-Client-Id: al9eLEtLE7_pp8GR` / `X-Device-Id` / `x-action: 401`
+    - 实测：刷新后 `aud` 仍是 `al9eLEtLE7_pp8GR`、`scope=user sso offline profile`、`exp=iat+7200`；**`refresh_token` 不轮换** → 与客户端各持一份互不影响（不会把客户端踢下线）
+    - `import_guangya_client_token.py` 已改为**保存 refresh_token**（此前只存 access_token，这就是「2 小时一到只能回客户端解密」的根因）
+    - `get_direct_link` 顺序变为：有客户端层 → 先 `_ensure_client_token()`（过期即自续）→ 客户端路径；续期/取链的 `auth` 错误才回退 Web（`254` 等非鉴权错误照旧直接抛）
+  - ✅ **同 aud 的 token 可以自己申领，不需要浏览器**（2026-11-19 实测）：
+    - `device_code` 的 `verification_uri_complete`（`account.guangyapan.com/__/auth/device/...`）**访问 404**——`account` 域名是纯 API，不托管前端页面（`GET /` 也 404）。别拿它给用户点
+    - 真正的授权入口是客户端 SDK 的 `POST /v1/user/device/authorize`（body `{client_id, user_code}`，带任一**有效账号 token** 的 Bearer）→ 返回 `{address, device_name, browser}`
+    - 之后照常轮询 `POST /v1/auth/token`（`grant_type=urn:ietf:params:oauth:grant-type:device_code`），拿到的 token `aud=al9eLEtLE7_pp8GR`、`scope=user sso offline profile`、`sub` 与原 token 同账号、带 `refresh_token`
+    - `grant_type=client_credentials` 被拒（`4122 unauthorized_client`）→ **token 必须由账号授权产生**，本地无法自签（JWT 是 `RS256`，私钥在服务端）
+    - 结论：只要手上有一份**未过期**的账号 token（客户端库里那份即可），就能自助换出可续期的客户端会话；需要人参与的只剩「种子 token 也过期」这一种情况
+    - 工具：`scripts/probe_guangya_client_aud_login.py`（`--token-file <export 输出>` 全自动；不带则打印授权链接人工确认）
+  - ✅ **扫码登录新增 `mode=client`**（`POST /api/drivers/{id}/qr/start?mode=client`）：用客户端 clientId + `offline` scope 取码，签发出的就是客户端身份 token（`QRStartOut.mode` 回显）
+  - 前端入口：登录方式弹框里 **单选组「扫码身份」**（Web / 客户端，仅光鸭显示）+ 单个「扫码登录」按钮——**不是两个按钮**（枚举型选项按项目规范用 `a-radio-group`）。选中的身份经 `onLoginByQr` 传给 `openQr(driver, mode)`；每次打开弹框复位为 `web`（上次的客户端选择不该静默延续）。扫码弹框内「重新获取二维码」走 `refreshQr`，**沿用同一身份**，不会偷偷退回 Web。可用性判定用 `qrRefreshCapable`（光鸭恒 true / 115 看 `device_type`）——别用 `configDriver`：登录流程里它是 `null`，`isQrCapable(null)=false` 会把按钮禁掉
+  - ⚠️ **光鸭凭据落库必须「合并两层」**（`driver_auth._store_guangya_credential`）：`store_credential` 是整串替换，直接新建对象会把另一层抹掉。client 模式登录还会把**主 `access_token` 也设成客户端那把**（实测客户端 aud 对扫描 / 列目录 / 上传全部生效），并清空 Web 的 `refresh_token`——否则主 token 过期时会被 Web 刷新（`guangyaclient` 硬编码 Web client_id）刷成 `aud=web`，客户端身份丢失
   - **迁移 / 归拢无需改业务代码**：两处取链都走 `source.get_direct_link`（`migration.py:550` / `aggregate_sync.py:921`）→ 覆盖层在驱动层自动生效；云添加（主盘 `create_offline_task`）对链接**不校验 UA/Referer**（实测 1.07 GB 直链 12 秒落地、大小精确一致、落盘名 `download` 需改名）
   - 实测（迁移单文件，源=驱动 5（非会员客户端 token）→ 目标=驱动 2 VIP）：`min/max=1024/1025 MB` 只匹配一集 → `success`，1.00 GB，落盘改名 `download → 走马上任 - S01E01 - 第 1 集.mkv`，耗 1 次云添加额度
   - ⚠️ **不要靠临时改聚合组 root 来测归拢**：`assign_driver_role` 是单组绑定（`Driver.aggregate_group_id` 单列），把副盘指到临时组等于**把它从生产组移走**；归拢与迁移共用同一条取链路径，验证迁移即可

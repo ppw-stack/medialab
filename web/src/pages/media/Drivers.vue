@@ -526,6 +526,22 @@
             loginDriver.type === "guangya" ? "光鸭盘" : "115"
           }}）尚未登录。
         </p>
+        <div v-if="loginDriver.type === 'guangya'" class="identity-pick">
+          <p class="hint" style="margin: 0 0 6px">扫码身份</p>
+          <a-radio-group
+            v-model:value="loginIdentity"
+            button-style="solid"
+            style="width: 100%"
+          >
+            <a-radio-button value="web" style="width: 50%; text-align: center">
+              Web 身份
+            </a-radio-button>
+            <a-radio-button value="client" style="width: 50%; text-align: center">
+              客户端身份
+            </a-radio-button>
+          </a-radio-group>
+          <p class="hint" style="margin: 6px 0 0">{{ loginIdentityHint }}</p>
+        </div>
         <a-space direction="vertical" style="width: 100%">
           <a-button block type="primary" @click="onLoginByQr">
             扫码登录
@@ -604,7 +620,9 @@
     <!-- 扫码登录 -->
     <a-modal
       v-model:open="qrOpen"
-      :title="`${qrDriverType === 'guangya' ? '光鸭盘' : '115'} 扫码登录`"
+      :title="`${qrDriverType === 'guangya' ? '光鸭盘' : '115'} 扫码登录${
+        qrMode === 'client' ? '（客户端身份）' : ''
+      }`"
       :footer="null"
       :width="360"
     >
@@ -613,6 +631,13 @@
       </div>
       <a-empty v-else description="正在获取二维码…" />
 
+      <a-alert
+        v-if="qrDriverType === 'guangya' && qrMode === 'client'"
+        type="info"
+        message="客户端身份：可换取非会员大文件直链；凭据自带 refresh_token，后台会自动续期"
+        show-icon
+        style="margin-bottom: 12px"
+      />
       <a-alert
         v-if="qrError"
         type="error"
@@ -642,17 +667,13 @@
       <template #footer>
         <a-space>
           <a-button
-            v-if="!isQrCapable(configDriver?.device_type)"
+            v-if="qrDriverType === 'p115' && !qrRefreshCapable"
             size="small"
             @click="openEditDeviceType"
           >
             修改设备类型
           </a-button>
-          <a-button
-            size="small"
-            :disabled="!isQrCapable(configDriver?.device_type)"
-            @click="openQr(configDriver!)"
-          >
+          <a-button size="small" :disabled="!qrRefreshCapable" @click="refreshQr">
             重新获取二维码
           </a-button>
         </a-space>
@@ -752,6 +773,20 @@ const editForm = ref<DriverUpdate>({ name: "", device_type: null })
 const qrOpen = ref(false)
 const qrDriverId = ref<number | null>(null)
 const qrDriverType = ref("p115")
+/** 本次扫码身份：web = Web 身份；client = 客户端身份（aud = 客户端 clientId） */
+const qrMode = ref<"web" | "client">("web")
+
+/**
+ * 当前扫码对象是否支持二维码。
+ *
+ * **不能看 `configDriver`**——登录流程里配置抽屉没打开，它是 null；
+ * 且光鸭 `device_type` 恒为空，用 `isQrCapable(null)` 会把按钮禁掉。
+ */
+const qrRefreshCapable = computed(() => {
+  const d = drivers.value.find((x) => x.id === qrDriverId.value)
+  if (!d) return false
+  return d.type === "guangya" ? true : isQrCapable(d.device_type)
+})
 const qrSessionId = ref("")
 const qrImage = ref("")
 const qrKind = ref<QrStatusKind>("waiting")
@@ -760,6 +795,21 @@ const qrError = ref("")
 // -- 登录方式选择 --
 const loginOpen = ref(false)
 const loginDriver = ref<Driver | null>(null)
+/**
+ * 光鸭扫码身份（**单选组**，不是多开一个按钮）。
+ *
+ * - `web`    = Web 身份，普通登录；非会员的大文件直链会被 `254` 拒绝
+ * - `client` = 客户端身份（token 的 `aud` = 客户端 clientId），可换大文件直链，
+ *              且 scope 带 `offline` → 有 `refresh_token` 可自续期
+ */
+const loginIdentity = ref<"web" | "client">("web")
+
+/** 身份说明（跟着单选取值走，别让用户猜两个选项的差别）。 */
+const loginIdentityHint = computed(() =>
+  loginIdentity.value === "client"
+    ? "客户端身份：可换取非会员大文件直链；凭据自带 refresh_token，后台会自动续期。"
+    : "Web 身份：普通登录；非会员的大文件直链会被服务端拒绝（254）。",
+)
 
 // -- 短信登录（光鸭盘）--
 const smsOpen = ref(false)
@@ -1427,15 +1477,18 @@ async function onDelete(id: number): Promise<void> {
 /** 打开登录方式选择。 */
 function onLogin(driver: Driver): void {
   loginDriver.value = driver
+  // 每次都从默认身份开始——上一次选的客户端身份不该静默延续
+  loginIdentity.value = "web"
   loginOpen.value = true
 }
 
-/** 用扫码方式登录。 */
+/** 用扫码方式登录（身份取当前单选值；115 恒为 Web，忽略该值）。 */
 function onLoginByQr(): void {
   const driver = loginDriver.value
   if (!driver) return
+  const mode = driver.type === "guangya" ? loginIdentity.value : "web"
   loginOpen.value = false
-  void openQr(driver)
+  void openQr(driver, mode)
 }
 
 /** 打开短信登录（光鸭盘）。 */
@@ -1511,22 +1564,52 @@ async function onVerifySms(): Promise<void> {
 
 // -- 扫码 --
 
-async function openQr(driver: Driver): Promise<void> {
+async function openQr(
+  driver: Driver,
+  mode: "web" | "client" = "web",
+): Promise<void> {
   qrDriverId.value = driver.id
   qrDriverType.value = driver.type
+  qrOpen.value = true
+  await startQrSession(driver, mode)
+}
+
+/**
+ * 取码并开始轮询（弹框已打开时也可重复调用）。
+ *
+ * `mode=client` 只对光鸭有意义：服务端用**客户端 clientId** 签发 token，
+ * 其 `aud` 决定能否换非会员大文件直链；scope 带 `offline` 因此有
+ * `refresh_token`，后台可自行续期。
+ */
+async function startQrSession(
+  driver: Driver,
+  mode: "web" | "client" = "web",
+): Promise<void> {
+  qrMode.value = mode
   qrSessionId.value = ""
   qrImage.value = ""
   qrKind.value = "waiting"
   qrError.value = ""
-  qrOpen.value = true
+  stopPolling()
   try {
-    const res = await api.post<QrStartResult>(`/drivers/${driver.id}/qr/start`)
+    const url =
+      mode === "client"
+        ? `/drivers/${driver.id}/qr/start?mode=client`
+        : `/drivers/${driver.id}/qr/start`
+    const res = await api.post<QrStartResult>(url)
     qrSessionId.value = res.session_id
     qrImage.value = res.qr_image_b64
     startPolling()
   } catch (e) {
     qrError.value = errMsg(e, "获取二维码失败")
   }
+}
+
+/** 弹框内「重新获取二维码」：沿用同一身份，别偷偷退回 Web。 */
+async function refreshQr(): Promise<void> {
+  const driver = drivers.value.find((d) => d.id === qrDriverId.value)
+  if (!driver) return
+  await startQrSession(driver, qrMode.value)
 }
 
 function startPolling(): void {
@@ -1605,6 +1688,10 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.identity-pick {
+  margin-bottom: 12px;
+}
+
 .name-cell {
   display: flex;
   align-items: center;
