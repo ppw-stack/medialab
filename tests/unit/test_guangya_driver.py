@@ -149,6 +149,9 @@ def _credential_json(**kwargs: Any) -> str:
         refresh_token=kwargs.get("refresh_token", "ref"),
         device_id=kwargs.get("device_id", "dev"),
         expires_at=kwargs.get("expires_at", 0),
+        client_access_token=kwargs.get("client_access_token", ""),
+        client_expires_at=kwargs.get("client_expires_at", 0),
+        client_device_id=kwargs.get("client_device_id", ""),
     )
     return cred.to_json()
 
@@ -754,3 +757,126 @@ class TestBatchCopyDelete:
 
         with pytest.raises(DriverError, match="删除文件失败"):
             await driver.delete_files(["1"])
+
+
+@contextmanager
+def _mock_client_link_api(payload: dict[str, Any], seen: dict[str, Any] | None = None):
+    """把 httpx 的 POST 换成固定 payload，并记录请求头（测客户端取链）。"""
+    import httpx
+
+    record = seen if seen is not None else {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        record["authorization"] = request.headers.get("authorization")
+        record["dt"] = request.headers.get("dt")
+        record["x_client_id"] = request.headers.get("x-client-id")
+        record["did"] = request.headers.get("did")
+        record["path"] = request.url.path
+        record["body"] = request.content.decode("utf-8", "replace")
+        return httpx.Response(200, json=payload)
+
+    original = httpx.AsyncClient
+
+    class _Patched(original):  # type: ignore[misc, valid-type]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            kwargs.pop("transport", None)
+            super().__init__(*args, transport=httpx.MockTransport(handler), **kwargs)
+
+    httpx.AsyncClient = _Patched  # type: ignore[misc]
+    try:
+        yield record
+    finally:
+        httpx.AsyncClient = original  # type: ignore[misc]
+
+
+class TestClientTokenLink:
+    """客户端 token 覆盖层（2026-11-19 逆向实测后加入）。"""
+
+    async def test_uses_client_token_when_valid(self) -> None:
+        """有效客户端 token → 走 ``/userres/v1`` + 客户端身份头。"""
+        driver = gyp_module.GuangyaDriver(
+            _credential_json(
+                client_access_token="client-tok",
+                client_expires_at=9_999_999_999,
+                client_device_id="client-dev",
+            )
+        )
+        with _mock_client_link_api(
+            {"code": 0, "data": {"signedURL": "https://cdn.test/c", "urlDuration": 21600}}
+        ) as seen:
+            link = await driver.get_direct_link("123", "Player/1.0")
+
+        assert link.url == "https://cdn.test/c"
+        assert link.ua_required is False
+        assert seen["authorization"] == "Bearer client-tok"
+        assert seen["path"] == "/userres/v1/get_res_download_url"
+        assert seen["dt"] == "6"
+        assert seen["x_client_id"] == "al9eLEtLE7_pp8GR"
+        assert seen["did"] == "client-dev"
+        assert '"fileId": "123"' in seen["body"] or '"fileId":"123"' in seen["body"]
+
+    async def test_falls_back_to_web_when_client_token_expired(self) -> None:
+        """客户端 token 过期 → 直接用 Web 路径（不发客户端请求）。"""
+        driver = gyp_module.GuangyaDriver(
+            _credential_json(client_access_token="client-tok", client_expires_at=1)
+        )
+        called: list[str] = []
+
+        def _download_url(self: Any, file_id: str) -> dict[str, Any]:
+            called.append(file_id)
+            return {
+                "code": 0,
+                "data": {"signedURL": "https://cdn.test/web", "urlDuration": 3600},
+            }
+
+        FakeGuangyaClient.download_url_impl = _download_url
+        link = await driver.get_direct_link("123", "Player/1.0")
+
+        assert called == ["123"]
+        assert link.url == "https://cdn.test/web"
+
+    async def test_falls_back_to_web_on_client_auth_error(self) -> None:
+        """客户端 token 被服务端判 401（117）→ 回退 Web，不把错误抛出去。"""
+        driver = gyp_module.GuangyaDriver(
+            _credential_json(
+                client_access_token="client-tok", client_expires_at=9_999_999_999
+            )
+        )
+
+        def _download_url(self: Any, file_id: str) -> dict[str, Any]:
+            return {
+                "code": 0,
+                "data": {"signedURL": "https://cdn.test/web", "urlDuration": 3600},
+            }
+
+        FakeGuangyaClient.download_url_impl = _download_url
+        with _mock_client_link_api({"code": 117, "msg": "token expired"}):
+            link = await driver.get_direct_link("123", "Player/1.0")
+
+        assert link.url == "https://cdn.test/web"
+
+    async def test_client_non_auth_error_is_raised(self) -> None:
+        """非鉴权错误（如 254 大小限制）**不回退**——回退也拿不到，只会掩盖原因。"""
+        driver = gyp_module.GuangyaDriver(
+            _credential_json(
+                client_access_token="client-tok", client_expires_at=9_999_999_999
+            )
+        )
+        with (
+            _mock_client_link_api({"code": 254, "msg": "big file"}),
+            pytest.raises(DriverError) as exc,
+        ):
+            await driver.get_direct_link("123", "Player/1.0")
+        assert "254" in str(exc.value) or "big file" in str(exc.value)
+
+    async def test_credential_roundtrip_keeps_client_fields(self) -> None:
+        cred = GuangyaCredential(
+            access_token="web",
+            refresh_token="ref",
+            device_id="dev",
+            expires_at=1,
+            client_access_token="client",
+            client_expires_at=2,
+            client_device_id="client-dev",
+        )
+        assert GuangyaCredential.from_json(cred.to_json()) == cred
