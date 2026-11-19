@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from app.adapters.drivers import guangya_auth, guangya_credential, p115_qr
 from app.core.logging import get_logger
@@ -191,7 +192,7 @@ async def qr_status(driver_id: int, session_id: str) -> QRStatusResult:
 
 async def _store_guangya_credential(
     driver_id: int,
-    payload: dict,
+    payload: dict[str, Any],
     *,
     client_mode: bool,
 ) -> None:

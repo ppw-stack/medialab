@@ -1688,6 +1688,10 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.identity-pick {
+  margin-bottom: 12px;
+}
+
 .name-cell {
   display: flex;
   align-items: center;
