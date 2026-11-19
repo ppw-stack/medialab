@@ -34,8 +34,8 @@ class UploadTaskIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1, max_length=128)
-    #: 光鸭存储源 id
-    driver_id: int
+    #: 光鸭存储源 id（**聚合模式下可省**——落点由后端分配）
+    driver_id: int | None = None
     #: 光鸭目标目录 fileId
     target_file_id: str = Field(default="", max_length=32)
     #: 监听目录（**完整路径**，面板上用目录浏览器选）
@@ -55,6 +55,9 @@ class UploadTaskIn(BaseModel):
     )
     #: 光鸭目标目录路径（只读展示）
     target_path: str = Field(default="", max_length=1024)
+    #: 目标**聚合组**（非空 = 「本地同步到网盘聚合」：落点自动分配 +
+    #: 上传后进归拢台账）。给了组就不用给盘。
+    aggregate_group_id: int | None = None
 
 
 class UploadTaskPatch(BaseModel):
@@ -73,6 +76,8 @@ class UploadTaskPatch(BaseModel):
     #: 同名且大小不同时的冲突策略：0=本地优先（覆盖云端）/ 1=保留大的（默认）
     conflict_policy: int | None = Field(default=None, ge=0, le=1)
     target_path: str | None = Field(default=None, max_length=1024)
+    #: 目标聚合组（**显式传 null** = 退回「指定存储源」模式）
+    aggregate_group_id: int | None = None
 
 
 class UploadTaskOut(BaseModel):
@@ -90,6 +95,8 @@ class UploadTaskOut(BaseModel):
     concurrency: int
     #: 同名且大小不同时的冲突策略：0=本地优先 / 1=保留大的
     conflict_policy: int = 1
+    #: 目标聚合组（None = 目标是某个具体存储源）
+    aggregate_group_id: int | None = None
     created_at: str
     updated_at: str
     #: 运行态（监听中？正在传什么？）
@@ -120,6 +127,7 @@ def _to_out(row: UploadTaskView) -> UploadTaskOut:
         delete_after_upload=row.delete_after_upload,
         concurrency=row.concurrency,
         conflict_policy=row.conflict_policy,
+        aggregate_group_id=row.aggregate_group_id,
         created_at=row.created_at,
         updated_at=row.updated_at,
         listening=row.listening,
@@ -192,6 +200,16 @@ async def upload_capabilities() -> dict[str, Any]:
     return await upload_tasks.upload_capabilities()
 
 
+@router.get("/aggregate-targets")
+async def aggregate_targets() -> dict[str, Any]:
+    """「本地同步到网盘聚合」的**可选目标**（前端下拉用）。
+
+    只列**可用**的组：启用 + 有主盘 + 已配归拢目标目录 + 有可用副盘。
+    每个组带各副盘的状态（缓冲根 / 剩余空间 / 额度标记 / 测连状态）。
+    """
+    return await upload_tasks.aggregate_targets()
+
+
 @router.get("/{task_id}", response_model=UploadTaskOut)
 async def get_upload_task(task_id: int) -> UploadTaskOut:
     """取单个任务。
@@ -225,6 +243,7 @@ async def create_upload_task(payload: UploadTaskIn) -> UploadTaskOut:
             concurrency=payload.concurrency,
             conflict_policy=payload.conflict_policy,
             target_path=payload.target_path,
+            aggregate_group_id=payload.aggregate_group_id,
         )
     except UploadTaskError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -300,6 +319,8 @@ async def _maybe_restart(row: UploadTaskView) -> None:
             concurrency=row.concurrency,
             name=row.name,
             delete_after_upload=row.delete_after_upload,
+            conflict_policy=row.conflict_policy,
+            aggregate_group_id=row.aggregate_group_id,
         )
     except Exception as exc:
         runtime.error = f"{type(exc).__name__}: {exc}"

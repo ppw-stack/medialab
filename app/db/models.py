@@ -603,6 +603,14 @@ class Driver(Base):
     #: - ``master`` —— 主数据源：内容以它为准（扫描 / STRM / 播放只认它）
     #: - ``secondary`` —— 副数据源：缓冲，**内容不对外展示**
     role: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    #: **本月上传额度已耗尽**的月份键（``"2026-11"``；NULL = 未耗尽）。
+    #:
+    #: 光鸭的「每月上传限额」**没有查询接口**——只能撞墙探测（与聚合的
+    #: 「云添加额度」同一套哲学）。撞到限额类报错时写上当前月份，
+    #: 落点分配器据此跳过该账号；**跨月自动失效**（键 ≠ 当前月即正常）。
+    upload_quota_exhausted_month: Mapped[str | None] = mapped_column(
+        String(16), nullable=True
+    )
 
     __table_args__ = (
         Index("idx_drivers_group_role", "aggregate_group_id", "role"),
@@ -958,6 +966,17 @@ class UploadTask(Base):
     #: 默认 ``1``：小文件误覆盖大文件是真实踩过的坑（本地重新压制出的
     #: 版本往往更小）。``0`` 保留给「本地永远是最新」的工作流。
     conflict_policy: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    #: 目标**聚合组**（NULL = 目标就是 ``driver_id`` 那个存储源）。
+    #:
+    #: 非空 = 「本地同步到网盘聚合」：落点由**落点分配器**在组内副盘之间
+    #: 自动挑选（撞到月度上传限额就换下一个），上传成功后**即时登记台账**，
+    #: 归拢引擎接管搬运（见 :mod:`app.services.aggregate_upload`）。
+    #:
+    #: ⚠️ 此时 ``driver_id`` / ``target_file_id`` 是**分配器维护的落点快照**
+    #: （粘性——重启后恢复，避免已传文件被重传），不是用户直接指定的目标。
+    aggregate_group_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
     created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
     updated_at: Mapped[str] = mapped_column(
         String(32), default=_bj_now, onupdate=_bj_now

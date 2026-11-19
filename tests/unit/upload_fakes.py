@@ -18,13 +18,15 @@ from app.services.cloud_index import CloudDirIndex
 class FakeUploader:
     """假上传器（记录调用，不真的传）。"""
 
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(self, *, fail: bool = False, fail_reason: str = "假上传失败") -> None:
         #: 传过的文件：``[(name, size)]``
         self.uploaded: list[tuple[str, int]] = []
         #: 删过的 fileId
         self.deleted: list[str] = []
         #: 模拟失败
         self.fail = fail
+        #: 失败时的文案（可模拟「限额类」错误）
+        self.fail_reason = fail_reason
         #: 传完后自动改名的规则（``{原名: 新名}``）
         self.rename_map: dict[str, str] = {}
         self._counter = 0
@@ -37,9 +39,14 @@ class FakeUploader:
         name: str | None = None,
         progress: Any = None,
     ) -> Any:
-        """假上传。"""
+        """假上传。
+
+        :raises DriverError: ``fail=True`` 时抛出，文案取 ``fail_reason``
+            （默认「假上传失败」，可注入成「限额类」错误来测撞墙分支）；
+            ``kind`` 固定为 ``unknown``。
+        """
         if self.fail:
-            raise DriverError("假上传失败", kind="unknown")
+            raise DriverError(self.fail_reason, kind="unknown")
         file_name = name or path.name
         size = path.stat().st_size
         self._counter += 1

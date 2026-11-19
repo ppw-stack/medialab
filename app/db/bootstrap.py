@@ -293,7 +293,18 @@ class DbBootstrap:
         # 废弃表不在这里删——见 create_all() 末尾的 drop_obsolete_tables_once()。
 
     async def _migrate_driver_config(self) -> None:
-        """给 ``drivers`` 表补齐媒体库配置列（幂等）。"""
+        """给 ``drivers`` 表补齐媒体库配置列（幂等）。
+
+        **锁表评估**（2026-11-19 加列迁移必写）：SQLite 的
+        ``ALTER TABLE ... ADD COLUMN`` 是**纯元数据操作**——只改 schema 页，
+        **不重写表数据、不触发表重建**；写锁窗口是**毫秒级**（GB 级表上
+        同样瞬时），**无需停机**。本批新增列**全部可空且无默认值** →
+        **不回填、不改写任何现有行** → 无数据迁移风险。
+        **回滚路径**：① 列可空 + 无默认值 → 旧代码读不到它们，**留着无害**，
+        升级失败**直接回退镜像**即可（首选，零 DB 操作）；② 彻底删列走
+        ``_drop_column``（SQLite ≥ 3.35 的 ``DROP COLUMN``，老版本失败无害
+        ——列残留对旧代码同样无害）；③ 兜底恢复 Unraid appdata 备份快照。
+        """
         columns: tuple[tuple[str, str, str | None], ...] = (
             ("media_cid", "TEXT", None),
             ("media_path", "TEXT", None),
@@ -315,6 +326,9 @@ class DbBootstrap:
             # NULL = 独立存储源，行为与引入聚合前完全一致。
             ("aggregate_group_id", "INTEGER", None),
             ("role", "VARCHAR(16)", None),
+            # 本月上传额度已耗尽的月份键（2026-11-19）：撞墙探测用。
+            # NULL = 未耗尽；跨月自动失效（键 ≠ 当前月即正常）。
+            ("upload_quota_exhausted_month", "VARCHAR(16)", None),
         )
         await self._add_columns("drivers", columns)
 
@@ -329,6 +343,11 @@ class DbBootstrap:
         - 删除 ``last_sync_at`` / ``last_uploaded_count`` / ``last_error``
           —— 统计一律是**内存运行态**，这三列曾长期「只写不读」
           （前端只渲染运行态），写进 DB 只是给 SQLite 单写者添堵。
+
+        **锁表评估 / 回滚路径**：见 :meth:`_migrate_driver_config` 的
+        docstring（同款 ``ADD COLUMN`` 元数据操作；``aggregate_group_id``
+        同样**可空 + 无默认值** → 不回填、不改写现有行；回滚首选
+        「留列无害 + 回退镜像」）。
         """
         await self._add_columns(
             "upload_tasks",
@@ -336,6 +355,9 @@ class DbBootstrap:
                 ("delete_after_upload", "INTEGER", "0"),
                 # 默认 1 = 保留大的（见 models.UploadTask.conflict_policy）
                 ("conflict_policy", "INTEGER", "1"),
+                # 目标聚合组（2026-11-19）：非空 = 「本地同步到网盘聚合」，
+                # 落点由分配器在组内副盘之间自动挑选。
+                ("aggregate_group_id", "INTEGER", None),
             ),
         )
         await self._drop_column("upload_tasks", "watch_subdir")

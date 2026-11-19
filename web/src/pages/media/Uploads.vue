@@ -26,6 +26,9 @@
                       <a-tag :color="item.enabled ? 'green' : 'default'">
                         {{ item.enabled ? "已启用" : "已停用" }}
                       </a-tag>
+                      <a-tag v-if="item.aggregate_group_id" color="purple">
+                        聚合组
+                      </a-tag>
                       <a-tag :color="item.listening ? 'blue' : 'orange'">
                         {{ item.listening ? "监听中" : "未监听" }}
                       </a-tag>
@@ -34,7 +37,15 @@
                       </a-tag>
                     </a-space>
                     <span class="muted mono break-any">
-                      {{ item.watch_root }} → {{ item.target_path || item.target_file_id }}
+                      {{ item.watch_root }} →
+                      <template v-if="item.aggregate_group_id">
+                        聚合组 {{ groupNameOf(item.aggregate_group_id) }}（{{
+                          item.target_path || item.target_file_id
+                        }}）
+                      </template>
+                      <template v-else>
+                        {{ item.target_path || item.target_file_id }}
+                      </template>
                     </span>
                     <a-space :size="12" class="muted">
                       <span>已上传 {{ item.total_uploaded }}</span>
@@ -157,7 +168,14 @@
           <a-input v-model:value="form.name" placeholder="例如：PT 下载目录" />
         </a-form-item>
 
-        <a-form-item label="目标网盘" required>
+        <a-form-item label="目标" required>
+          <a-radio-group v-model:value="form.mode" @change="onModeChange">
+            <a-radio-button value="driver">指定存储源</a-radio-button>
+            <a-radio-button value="aggregate">网盘聚合</a-radio-button>
+          </a-radio-group>
+        </a-form-item>
+
+        <a-form-item v-if="form.mode === 'driver'" label="目标网盘" required>
           <a-select
             v-model:value="form.driver_id"
             placeholder="选择目标网盘"
@@ -171,6 +189,65 @@
               {{ d.name }}
             </a-select-option>
           </a-select>
+        </a-form-item>
+
+        <a-form-item v-else label="聚合组" required>
+          <a-select
+            v-model:value="form.aggregate_group_id"
+            placeholder="选择网盘聚合组"
+            :disabled="aggregateGroups.length === 0"
+          >
+            <a-select-option
+              v-for="g in aggregateGroups"
+              :key="g.group_id"
+              :value="g.group_id"
+            >
+              {{ g.group_name }}（主盘：{{ g.master_driver_name || g.master_driver_id }}）
+            </a-select-option>
+          </a-select>
+          <div class="muted hint">
+            文件先落到组内副盘的缓冲根，再由「网盘聚合」的归拢作业搬回主盘。
+            落点由系统自动分配：某个副盘撞到「本月上传限额」时会自动换下一个。
+          </div>
+          <a-alert
+            v-if="aggregateGroups.length === 0"
+            type="info"
+            show-icon
+            style="margin-top: 8px"
+            message="没有可用的聚合组"
+            description="聚合组需满足：已启用、已配主数据源、已配「归拢目标目录」，且组内至少有一个已配缓冲根的副数据源。请先到「网盘聚合」页配置。"
+          />
+          <div v-else-if="selectedGroup" class="candidate-box">
+            <div class="muted">
+              可用副盘（落点按此顺序挑选；剩余空间与额度状态来自测连缓存）：
+            </div>
+            <DataTable
+              size="small"
+              :pagination="false"
+              :columns="candidateColumns"
+              :data-source="selectedGroup.candidates"
+              row-key="driver_id"
+            >
+              <template #bodyCell="{ column, record }">
+                <template v-if="column.key === 'root_path'">
+                  <span class="mono">{{ record.root_path || record.root_id }}</span>
+                </template>
+                <template v-else-if="column.key === 'free'">
+                  {{ record.free_bytes === null ? "未知" : formatBytes(record.free_bytes) }}
+                </template>
+                <template v-else-if="column.key === 'quota'">
+                  <a-tag v-if="record.exhausted" color="red">本月已耗尽</a-tag>
+                  <span v-else class="muted">可用</span>
+                </template>
+                <template v-else-if="column.key === 'healthy'">
+                  <span v-if="record.healthy === null" class="muted">未探测</span>
+                  <a-tag v-else :color="record.healthy ? 'green' : 'red'">
+                    {{ record.healthy ? "正常" : "异常" }}
+                  </a-tag>
+                </template>
+              </template>
+            </DataTable>
+          </div>
         </a-form-item>
 
         <a-form-item label="监听目录（本地）" required>
@@ -196,7 +273,7 @@
           />
         </a-form-item>
 
-        <a-form-item label="云端目标目录" required>
+        <a-form-item v-if="form.mode === 'driver'" label="云端目标目录" required>
           <div class="target-picker">
             <DirBrowser
               title="目标网盘目录"
@@ -249,9 +326,11 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from "vue"
 import { message } from "ant-design-vue"
 import DirBrowser from "../../components/DirBrowser.vue"
+import DataTable from "../../components/DataTable.vue"
 import PageHeader from "../../components/PageHeader.vue"
 import { errMsg, mediaApi as api } from "../../api"
 import type {
+  AggregateTargetGroup,
   DirEntry,
   Driver,
   SyncNowResult,
@@ -277,7 +356,10 @@ const formOpen = ref(false)
 const editing = ref<UploadTask | null>(null)
 const form = reactive({
   name: "",
+  /** 目标模式：``driver`` = 指定存储源 / ``aggregate`` = 网盘聚合 */
+  mode: "driver" as "driver" | "aggregate",
   driver_id: undefined as number | undefined,
+  aggregate_group_id: undefined as number | undefined,
   watch_root: "",
   include_subdirs: true,
   enabled: true,
@@ -297,6 +379,9 @@ const loadingLocal = ref(false)
 const targetDirs = ref<DirEntry[]>([])
 const loadingTarget = ref(false)
 
+/** 可选的聚合组（「本地同步到网盘聚合」的目标） */
+const aggregateGroups = ref<AggregateTargetGroup[]>([])
+
 let timer: number | undefined
 
 /**
@@ -311,12 +396,27 @@ const targetDrivers = computed(() =>
   drivers.value.filter((d) => uploadableTypes.value.includes(d.type)),
 )
 
+/** 当前选中的聚合组 */
+const selectedGroup = computed(() =>
+  aggregateGroups.value.find((g) => g.group_id === form.aggregate_group_id),
+)
+
+/** 候选落点表格的列 */
+const candidateColumns = [
+  { title: "副盘", dataIndex: "driver_name", key: "driver_name", width: 140 },
+  { title: "缓冲根", dataIndex: "root_path", key: "root_path", width: 180 },
+  { title: "剩余空间", key: "free", width: 110 },
+  { title: "本月额度", key: "quota", width: 120 },
+  { title: "测连", key: "healthy", width: 90 },
+]
+
 const watch = computed(() => runtime.value?.watch)
 
 onMounted(async () => {
   await reload()
   await loadDrivers()
   await loadCapabilities()
+  await loadAggregateGroups()
   timer = window.setInterval(poll, 2000)
 })
 
@@ -356,6 +456,23 @@ async function loadCapabilities(): Promise<void> {
     // 拿不到能力列表时保守处理：不显示任何存储源
     uploadableTypes.value = []
   }
+}
+
+/** 载入可选的聚合组（「本地同步到网盘聚合」的目标）。 */
+async function loadAggregateGroups(): Promise<void> {
+  try {
+    const resp = await api.get<{ groups: AggregateTargetGroup[] }>(
+      "/upload-tasks/aggregate-targets",
+    )
+    aggregateGroups.value = resp.groups ?? []
+  } catch {
+    aggregateGroups.value = []
+  }
+}
+
+/** 组名（任务列表展示用）。 */
+function groupNameOf(groupId: number): string {
+  return aggregateGroups.value.find((g) => g.group_id === groupId)?.group_name ?? `#${groupId}`
 }
 
 async function poll(): Promise<void> {
@@ -443,7 +560,9 @@ async function syncNow(): Promise<void> {
 function openCreate(): void {
   editing.value = null
   form.name = ""
+  form.mode = "driver"
   form.driver_id = targetDrivers.value[0]?.id
+  form.aggregate_group_id = undefined
   form.watch_root = ""
   localStack.value = [{ id: "/", name: "/" }]
   localDirs.value = []
@@ -464,7 +583,9 @@ function openCreate(): void {
 function openEdit(task: UploadTask): void {
   editing.value = task
   form.name = task.name
+  form.mode = task.aggregate_group_id ? "aggregate" : "driver"
   form.driver_id = task.driver_id
+  form.aggregate_group_id = task.aggregate_group_id ?? undefined
   form.watch_root = task.watch_root
   localStack.value = [{ id: task.watch_root, name: task.watch_root }]
   localDirs.value = []
@@ -479,28 +600,65 @@ function openEdit(task: UploadTask): void {
   targetStack.value = [{ id: task.target_file_id, name: task.target_path || "目标目录" }]
   targetDirs.value = []
   formOpen.value = true
-  void loadTargetDirs(task.target_file_id)
+  if (form.mode === "driver") void loadTargetDirs(task.target_file_id)
   void loadLocalDirs(task.watch_root)
 }
 
+/** 切换目标模式 —— 目标目录的选择互斥（fileId 是**另一个账号**的）。 */
+function onModeChange(): void {
+  if (form.mode === "aggregate") {
+    form.driver_id = undefined
+    form.target_file_id = ""
+    form.target_path = ""
+    targetStack.value = [{ id: "", name: "网盘根目录" }]
+    targetDirs.value = []
+    if (!form.aggregate_group_id && aggregateGroups.value.length > 0) {
+      form.aggregate_group_id = aggregateGroups.value[0].group_id
+    }
+  } else {
+    form.aggregate_group_id = undefined
+    form.driver_id = targetDrivers.value[0]?.id
+    void loadTargetDirs("")
+  }
+}
+
 async function save(): Promise<void> {
-  if (!form.name || !form.driver_id || !form.watch_root) {
-    message.warning("请填写任务名、存储源与监听根")
+  if (!form.name || !form.watch_root) {
+    message.warning("请填写任务名与监听根")
+    return
+  }
+  if (form.mode === "aggregate" && !form.aggregate_group_id) {
+    message.warning("请选择聚合组")
+    return
+  }
+  if (form.mode === "driver" && !form.driver_id) {
+    message.warning("请选择目标存储源")
     return
   }
   saving.value = true
   try {
-    const payload = {
-      name: form.name,
-      driver_id: form.driver_id,
-      target_file_id: form.target_file_id,
-      target_path: form.target_path,
-      watch_root: form.watch_root,
-      include_subdirs: form.include_subdirs,
-      enabled: form.enabled,
-      delete_after_upload: form.delete_after_upload,
-      conflict_policy: form.conflict_policy,
-    }
+    const payload =
+      form.mode === "aggregate"
+        ? {
+            name: form.name,
+            aggregate_group_id: form.aggregate_group_id,
+            watch_root: form.watch_root,
+            include_subdirs: form.include_subdirs,
+            enabled: form.enabled,
+            delete_after_upload: form.delete_after_upload,
+            conflict_policy: form.conflict_policy,
+          }
+        : {
+            name: form.name,
+            driver_id: form.driver_id,
+            target_file_id: form.target_file_id,
+            target_path: form.target_path,
+            watch_root: form.watch_root,
+            include_subdirs: form.include_subdirs,
+            enabled: form.enabled,
+            delete_after_upload: form.delete_after_upload,
+            conflict_policy: form.conflict_policy,
+          }
     if (editing.value) {
       await api.patch(`/upload-tasks/${editing.value.id}`, payload)
       message.success("已保存")
@@ -683,6 +841,12 @@ function logText(line: string): string {
 }
 
 .target-picker {
+  width: 100%;
+}
+
+/* 候选落点表（聚合模式）：与表单其它块保持一点间距 */
+.candidate-box {
+  margin-top: 8px;
   width: 100%;
 }
 

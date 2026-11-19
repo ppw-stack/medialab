@@ -66,6 +66,8 @@ class UploadTaskView:
     updated_at: str
     #: 同名且大小不同时的冲突策略（0=本地优先 / 1=保留大的）
     conflict_policy: int = CONFLICT_KEEP_LARGER
+    #: 目标**聚合组**（None = 目标是某个具体存储源）
+    aggregate_group_id: int | None = None
     #: 运行态（监听中？正在传什么？）
     listening: bool = False
     current: str = ""
@@ -95,6 +97,7 @@ def to_task_view(row: UploadTaskRow) -> UploadTaskView:
         delete_after_upload=row.delete_after_upload,
         concurrency=row.concurrency,
         conflict_policy=row.conflict_policy,
+        aggregate_group_id=row.aggregate_group_id,
         created_at=row.created_at,
         updated_at=row.updated_at,
         listening=runtime.listening,
@@ -224,7 +227,7 @@ async def create_task(
     db: Any,
     *,
     name: str,
-    driver_id: int,
+    driver_id: int | None,
     target_file_id: str,
     watch_root: str,
     include_subdirs: bool = True,
@@ -233,14 +236,30 @@ async def create_task(
     target_path: str = "",
     delete_after_upload: bool = False,
     conflict_policy: int = CONFLICT_KEEP_LARGER,
+    aggregate_group_id: int | None = None,
 ) -> UploadTaskRow:
     """创建上传任务。
 
+    ``aggregate_group_id`` 非空 = **「本地同步到网盘聚合」**：目标不是某个
+    具体存储源，而是**一个聚合组**——落点由分配器在组内副盘之间挑选
+    （撞到月度上传限额就换下一个），上传成功后**即时登记台账**，归拢
+    引擎接管搬运。此时 ``driver_id`` / ``target_file_id`` 由后端写入
+    **落点快照**（粘性——重启后恢复）。
+
     Raises:
-        UploadTaskError: 存储源不支持上传 / 路径非法 / 目录不存在。
+        UploadTaskError: 存储源不支持上传 / 路径非法 / 目录不存在 /
+            聚合组不可用。
     """
     from app.adapters.drivers.upload_base import is_uploadable
     from app.db.models import Driver
+
+    if aggregate_group_id is not None:
+        landing = await _resolve_aggregate_landing(aggregate_group_id)
+        driver_id = landing.driver_id
+        target_file_id = landing.root_id
+        target_path = landing.root_path or ""
+    elif driver_id is None:
+        raise UploadTaskError("必须选择目标存储源", status_code=400, kind="config")
 
     driver = (
         await db.execute(select(Driver).where(Driver.id == driver_id))
@@ -266,6 +285,7 @@ async def create_task(
         delete_after_upload=delete_after_upload,
         concurrency=max(1, int(concurrency)),
         conflict_policy=max(0, min(1, int(conflict_policy))),
+        aggregate_group_id=aggregate_group_id,
         created_at=now,
         updated_at=now,
     )
@@ -273,26 +293,74 @@ async def create_task(
     await db.commit()
     await db.refresh(row)
     logger.info(
-        "创建上传任务 id=%s 监听=%s → 网盘 %s（driver=%s）",
+        "创建上传任务 id=%s 监听=%s → %s",
         row.id,
         watch_dir,
-        target_file_id,
-        driver.type,
+        (
+            f"聚合组 {aggregate_group_id}（落点副盘 {driver_id}）"
+            if aggregate_group_id is not None
+            else f"网盘 {target_file_id}（driver={driver_id}）"
+        ),
     )
     return row
+
+
+async def _resolve_aggregate_landing(group_id: int) -> Any:
+    """校验聚合组并挑一个初始落点。
+
+    Raises:
+        UploadTaskError: 组不可用（不存在 / 停用 / 无主盘 / 未配归拢目标 /
+            没有可用副盘）。
+    """
+    from app.services import aggregate_upload
+    from app.services.errors import ServiceError
+
+    try:
+        await aggregate_upload.validate_group_target(group_id)
+    except ServiceError as exc:
+        raise UploadTaskError(str(exc), status_code=exc.status, kind="config") from exc
+    candidate = await aggregate_upload.pick_candidate(group_id, 0)
+    if candidate is None:
+        raise UploadTaskError(
+            "该聚合组没有可用的副盘落点（副盘需启用、已配缓冲根、"
+            "且本月上传额度未耗尽）",
+            status_code=400,
+            kind="config",
+        )
+    return candidate
 
 
 async def update_task(db: Any, task_id: int, **fields: Any) -> UploadTaskRow:
     """修改任务。
 
+    **聚合组**：切换组时重新挑落点；留在同一个组里时**忽略**外部传入的
+    ``driver_id`` / ``target_file_id``（落点由分配器维护）。
+
     Raises:
-        UploadTaskError: 任务不存在 / 路径非法。
+        UploadTaskError: 任务不存在 / 路径非法 / 聚合组不可用。
     """
     row = await get_task(db, task_id)
 
     watch_root = fields.get("watch_root", row.watch_root)
     if "watch_root" in fields:
         _validate_watch_dir(watch_root)
+
+    prev_group = row.aggregate_group_id
+    new_group = prev_group
+    if "aggregate_group_id" in fields:
+        new_group = fields["aggregate_group_id"]
+
+    if new_group is not None and new_group != prev_group:
+        # 换组 → 重新挑落点
+        landing = await _resolve_aggregate_landing(new_group)
+        fields["driver_id"] = landing.driver_id
+        fields["target_file_id"] = landing.root_id
+        fields["target_path"] = landing.root_path
+    elif new_group is not None:
+        # 同一个组：落点由分配器维护，忽略外部指定的目标
+        fields.pop("driver_id", None)
+        fields.pop("target_file_id", None)
+        fields.pop("target_path", None)
 
     for key in (
         "name",
@@ -308,6 +376,10 @@ async def update_task(db: Any, task_id: int, **fields: Any) -> UploadTaskRow:
     ):
         if key in fields and fields[key] is not None:
             setattr(row, key, fields[key])
+
+    # 聚合组：**显式**赋值——``None`` 表示「退回存储源模式」
+    if "aggregate_group_id" in fields:
+        row.aggregate_group_id = fields["aggregate_group_id"]
 
     row.updated_at = bj_now()
     await db.commit()
@@ -383,6 +455,63 @@ async def upload_capabilities() -> dict[str, Any]:
     from app.adapters.drivers.upload_base import UPLOADABLE_DRIVER_TYPES
 
     return {"uploadable_types": sorted(UPLOADABLE_DRIVER_TYPES)}
+
+
+async def aggregate_targets() -> dict[str, Any]:
+    """「本地同步到网盘聚合」的**可选目标**（前端下拉用）。
+
+    返回**可用**的聚合组：启用 + 有主盘 + 已配归拢目标目录 + 至少一个
+    可用副盘（启用、已配缓冲根、支持上传、本月额度未耗尽）。
+
+    每个组带各副盘的状态（缓冲根、剩余空间、额度标记、测连状态）——
+    前端据此展示「自动分配会落到哪」。
+    """
+    from app.db.models import AggregateGroup, Driver
+    from app.domain.aggregate_types import ROLE_MASTER
+    from app.services import aggregate_upload
+    from app.services.errors import ServiceError
+
+    async with session_scope() as db:
+        groups = (
+            (await db.execute(select(AggregateGroup).order_by(AggregateGroup.id)))
+            .scalars()
+            .all()
+        )
+        masters = (
+            (
+                await db.execute(
+                    select(Driver).where(Driver.role == ROLE_MASTER)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    master_names = {int(m.id): str(m.name) for m in masters}
+
+    items: list[dict[str, Any]] = []
+    for group in groups:
+        try:
+            info = await aggregate_upload.validate_group_target(int(group.id))
+        except ServiceError as exc:
+            # **只吞「组不可用」**——数据库故障 / KeyError 等**真实缺陷**
+            # 必须冒泡，不能被静默 continue 掩盖成「这个组不可用」。
+            logger.info("聚合组 %s 不可用作同步目标：%s", group.id, exc)
+            continue
+        items.append(
+            {
+                "group_id": info["group_id"],
+                "group_name": info["group_name"],
+                "master_driver_id": info["master_driver_id"],
+                "master_driver_name": master_names.get(
+                    info["master_driver_id"], ""
+                ),
+                "target_dir_path": group.target_dir_path,
+                "candidates": [
+                    cand.to_dict() for cand in info["candidates"]
+                ],
+            }
+        )
+    return {"groups": items}
 
 
 async def browse_target_dirs(driver_id: int, parent_id: str = "") -> list[tuple[str, str]]:

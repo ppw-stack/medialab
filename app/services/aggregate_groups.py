@@ -174,10 +174,12 @@ async def update_group(
 async def delete_group(group_id: int) -> None:
     """解散聚合组。
 
-    **两道闸**（都是「不误删」底线）：
+    **三道闸**（都是「不误删」底线）：
 
     1. 组内还有盘 → 拒绝（先把盘移出组，或直接删盘）
     2. 组内还有**未消化**的台账行 → 拒绝（台账指向具体盘，组没了就失去归属）
+    3. 组下还挂着**上传任务** → 拒绝（任务是用户配置，不该被级联删掉；
+       且组没了任务会往一个没人认领的缓冲根里写文件）
     """
     async with session_scope() as db:
         await _get_group_or_404(db, group_id)
@@ -198,6 +200,14 @@ async def delete_group(group_id: int) -> None:
                 status=409,
             )
 
+        tasks = await _bound_upload_task_count(db, group_id)
+        if tasks:
+            raise ServiceError(
+                f"该组还挂着 {tasks} 个数据同步任务，"
+                "请先把它们改回「指定存储源」或删除，再解散本组",
+                status=409,
+            )
+
         await db.execute(delete(SecondaryStaging).where(SecondaryStaging.group_id == group_id))
         await db.execute(delete(AggregateGroup).where(AggregateGroup.id == group_id))
         await db.commit()
@@ -205,6 +215,21 @@ async def delete_group(group_id: int) -> None:
         from app.services.aggregate_sync import forget_group_lock
 
         forget_group_lock(group_id)
+
+
+async def _bound_upload_task_count(db: Any, group_id: int) -> int:
+    """该组下挂着的**数据同步任务**数（删除组的守卫）。"""
+    from app.db.models import UploadTask
+
+    return int(
+        (
+            await db.execute(
+                select(func.count())
+                .select_from(UploadTask)
+                .where(UploadTask.aggregate_group_id == group_id)
+            )
+        ).scalar_one()
+    )
 
 
 async def get_mapping(group_id: int) -> GroupMapping:
