@@ -232,7 +232,9 @@ async def _store_guangya_credential(
             # 降级必须留痕：否则解密层出问题没人知道，客户端 token
             # 覆盖层会被无声清空。
             logger.warning(
-                "光鸭凭据解密失败，按新建凭据降级处理 driver_id=%s", driver_id
+                "光鸭凭据解密失败，按新建凭据降级处理 driver_id=%s",
+                driver_id,
+                exc_info=True,
             )
             cred = None
         cred = cred or guangya_credential.GuangyaCredential(access_token="")
