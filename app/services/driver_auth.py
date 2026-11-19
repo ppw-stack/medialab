@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.adapters.drivers import guangya_auth, guangya_credential, p115_qr
+from app.adapters.drivers.credential_crypto import CredentialCryptoError
 from app.core.logging import get_logger
 from app.domain.device_types import DEFAULT_DEVICE_TYPE
 from app.services.driver_service import (
@@ -221,7 +222,18 @@ async def _store_guangya_credential(
         row = await get_driver(db, driver_id)
         try:
             cred = guangya_credential.decode_credential(row.credential)
-        except Exception:  # pragma: no cover - 旧密文 / 坏数据
+        except (
+            CredentialCryptoError,
+            ValueError,
+            TypeError,
+        ):
+            # **只降级「数据坏了」**（密文解不开 / 明文不是合法 JSON /
+            # 字段类型不对）——编程缺陷（AttributeError 等）让它冒泡。
+            # 降级必须留痕：否则解密层出问题没人知道，客户端 token
+            # 覆盖层会被无声清空。
+            logger.warning(
+                "光鸭凭据解密失败，按新建凭据降级处理 driver_id=%s", driver_id
+            )
             cred = None
         cred = cred or guangya_credential.GuangyaCredential(access_token="")
 

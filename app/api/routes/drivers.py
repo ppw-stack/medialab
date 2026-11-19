@@ -154,6 +154,8 @@ class DriverOut(BaseModel):
 
 
 class QRStartOut(BaseModel):
+    """扫码登录取码结果：会话 id、二维码图片与登录模式。"""
+
     session_id: str
     qr_image_b64: str
     #: 本次登录模式（``web`` = Web 身份；``client`` = 客户端身份）
@@ -477,6 +479,10 @@ async def start_qr(
     ``mode=client`` 时用客户端 clientId + ``offline`` scope 取码：
     签发出的 token ``aud = 客户端``（能取非会员大文件直链），且带
     ``refresh_token``——之后由驱动自己续期，不再依赖本机客户端。
+
+    Raises:
+        HTTPException: 存储源不存在（404）或取码会话创建失败——
+            由 DriverAuthError / DriverServiceError 翻译为对应状态码。
     """
     try:
         result = await driver_auth.start_qr(

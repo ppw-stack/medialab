@@ -72,7 +72,11 @@ def _post(
     extra=None,
     bearer: str = "",
 ) -> dict:
-    """POST 一个 JSON 接口。"""
+    """POST 一个 JSON 接口。
+
+    Raises:
+        SystemExit: 请求失败、响应不是 JSON、或响应格式异常。
+    """
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/plain, */*",
@@ -140,7 +144,11 @@ def _summarize(tag: str, data: dict) -> dict:
 
 
 def main(argv=None) -> int:
-    """入口。"""
+    """入口。
+
+    Raises:
+        SystemExit: 取码 / 授权 / 轮询 / 读写文件任一环节失败。
+    """
     parser = argparse.ArgumentParser(description="光鸭客户端 aud token 自助申领探针")
     parser.add_argument(
         "--device-id", default="", help="设备标识（默认新生成 32 位 hex）"
@@ -190,8 +198,17 @@ def main(argv=None) -> int:
     if args.token_file:
         # **自助授权**：用已有账号 token 调 /v1/user/device/authorize，
         # 服务端把这个 user_code 绑到该账号上——不需要任何人打开网页。
-        with open(args.token_file, encoding="utf-8") as fh:
-            seed = json.load(fh)
+        try:
+            with open(args.token_file, encoding="utf-8") as fh:
+                seed = json.load(fh)
+        except OSError as exc:
+            raise SystemExit(f"无法读取 token 文件 {args.token_file}：{exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise SystemExit(
+                f"token 文件 {args.token_file} 不是有效 JSON：{exc}"
+            ) from exc
+        if not isinstance(seed, dict):
+            raise SystemExit(f"token 文件 {args.token_file} 格式异常（不是对象）")
         seed_token = str(seed.get("access_token") or "")
         if not seed_token:
             raise SystemExit(f"{args.token_file} 里没有 access_token")
@@ -289,8 +306,11 @@ def main(argv=None) -> int:
     }
     text = json.dumps(result, ensure_ascii=False)
     if args.out:
-        with open(args.out, "w", encoding="utf-8") as fh:
-            fh.write(text)
+        try:
+            with open(args.out, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        except OSError as exc:
+            raise SystemExit(f"无法写入凭据文件 {args.out}：{exc}") from exc
         print(f"已写入 {args.out}")
     else:
         print(text)

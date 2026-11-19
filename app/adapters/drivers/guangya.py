@@ -294,6 +294,10 @@ class GuangyaDriver:
         **客户端身份的主 token**走 :meth:`_ensure_client_token`：刷新时必须
         用 ``CLIENT_ID_MAC``，否则会把 ``aud`` 刷成 Web（实测 2026-11-19：
         aud 跟着请求里的 ``client_id`` 走，客户端身份就丢了）。
+
+        Raises:
+            DriverError: 未配置凭据、已过期且无 ``refresh_token``、
+                或刷新请求失败。
         """
         cred = self._cred
         if cred is None:
@@ -357,6 +361,9 @@ class GuangyaDriver:
 
         Returns:
             bool: 是否有可用的客户端 token（无 RT 且已过期 → False）。
+
+        Raises:
+            DriverError: 未配置凭据，或客户端刷新请求失败。
         """
         cred = self._cred
         if cred is None:
@@ -402,7 +409,11 @@ class GuangyaDriver:
         return True
 
     async def _refresh_client_token(self, cred: GuangyaCredential) -> dict[str, Any]:
-        """调 ``/v1/auth/token`` 的 ``refresh_token`` grant（客户端身份）。"""
+        """调 ``/v1/auth/token`` 的 ``refresh_token`` grant（客户端身份）。
+
+        Raises:
+            DriverError: 请求失败、返回非 JSON、格式异常或服务端报错。
+        """
         did = cred.client_device_id or cred.device_id
         headers = {
             "Content-Type": "application/json",
@@ -1374,6 +1385,10 @@ def _jwt_expires_at(token: str) -> int:
         padded = parts[1] + "=" * (-len(parts[1]) % 4)
         payload = json.loads(base64.urlsafe_b64decode(padded))
     except (ValueError, TypeError, json.JSONDecodeError):
+        return 0
+    # **payload 可能是合法 JSON 但不是对象**（列表 / 字符串 / 数字）——
+    # 那时 ``payload.get`` 会抛 AttributeError，与「解不出返回 0」的承诺不符。
+    if not isinstance(payload, dict):
         return 0
     try:
         return int(payload.get("exp") or 0)

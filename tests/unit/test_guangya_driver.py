@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -626,6 +627,37 @@ class TestCodeMapping:
         assert gyp_module._map_code(430) == "auth"
         assert gyp_module._map_code(999) == "unknown"
         assert gyp_module._map_code("bad") == "unknown"
+
+
+class TestJwtExpiresAt:
+    """``_jwt_expires_at``：**解不出返回 0**（不得抛异常）。"""
+
+    @staticmethod
+    def _token(payload: object) -> str:
+        seg = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+        return f"header.{seg.rstrip('=')}.signature"
+
+    def test_reads_exp(self) -> None:
+        assert gyp_module._jwt_expires_at(self._token({"exp": 123})) == 123
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param([1, 2, 3], id="list"),
+            pytest.param("hello", id="string"),
+            pytest.param(42, id="number"),
+            pytest.param(None, id="null"),
+            pytest.param({}, id="no_exp"),
+            pytest.param({"exp": "abc"}, id="bad_exp"),
+        ],
+    )
+    def test_malformed_payload_returns_zero(self, payload: object) -> None:
+        """合法 JSON 但不是对象 / 取不出 exp → 一律 0，不抛 AttributeError。"""
+        assert gyp_module._jwt_expires_at(self._token(payload)) == 0
+
+    def test_garbage_returns_zero(self) -> None:
+        assert gyp_module._jwt_expires_at("not-a-jwt") == 0
+        assert gyp_module._jwt_expires_at("a.!!!not-base64!!!.c") == 0
 
 
 class TestListOfflineTasks:

@@ -13,6 +13,8 @@ Web 扫码每 1~2 小时刷一次 token，顺手清掉客户端 token 的后果�
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from app.adapters.drivers.guangya_credential import (
     GuangyaCredential,
@@ -139,3 +141,53 @@ async def test_client_login_keeps_web_layer(db: None) -> None:
     # 主 token 已经不是 Web 身份了，留着反而会被 Web 刷新拿去换 aud
     assert cred.refresh_token == ""
     assert cred.client_refresh_token == "ref"
+
+
+async def test_bad_credential_degrades_and_logs(
+    db: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """旧密文 / 坏数据 → 降级成新凭据，**且必须留痕**。
+
+    降级本身是对的（不能因为一条坏凭据让登录整个失败），但静默降级会
+    把解密层的问题藏起来——客户端 token 覆盖层被无声清空时无从排查。
+    """
+    driver_id = await _add_driver()
+    async with session_scope() as session:
+        row = await driver_service.get_driver(session, driver_id)
+        row.credential = "gypcipher:v2:这段不是合法密文"
+        await session.flush()
+
+    with caplog.at_level(logging.WARNING, logger="app.services.driver_auth"):
+        await driver_auth._store_guangya_credential(
+            driver_id, _login_payload(), client_mode=False
+        )
+
+    assert "光鸭凭据解密失败" in caplog.text
+    assert str(driver_id) in caplog.text
+
+    cred = await _read_credential(driver_id)
+    assert cred is not None
+    assert cred.access_token == "tok"
+
+
+async def test_unexpected_error_bubbles_up(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """解密层的**编程缺陷**不得被当成「坏数据」吞掉。
+
+    窄化捕获异常的意义就在这里：``AttributeError`` 之类的缺陷要冒泡，
+    否则真实 bug 被掩盖，而凭据还会被无声替换成空对象。
+    """
+
+    def _boom(_credential: str | None) -> GuangyaCredential:
+        raise AttributeError("解密层自身的缺陷")
+
+    monkeypatch.setattr(
+        driver_auth.guangya_credential, "decode_credential", _boom
+    )
+
+    driver_id = await _add_driver()
+    with pytest.raises(AttributeError):
+        await driver_auth._store_guangya_credential(
+            driver_id, _login_payload(), client_mode=False
+        )
