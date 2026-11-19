@@ -469,6 +469,7 @@ async def aggregate_targets() -> dict[str, Any]:
     from app.db.models import AggregateGroup, Driver
     from app.domain.aggregate_types import ROLE_MASTER
     from app.services import aggregate_upload
+    from app.services.errors import ServiceError
 
     async with session_scope() as db:
         groups = (
@@ -491,8 +492,11 @@ async def aggregate_targets() -> dict[str, Any]:
     for group in groups:
         try:
             info = await aggregate_upload.validate_group_target(int(group.id))
-        except Exception:
-            continue  # 不可用的组不列出来（前端不需要知道为什么）
+        except ServiceError as exc:
+            # **只吞「组不可用」**——数据库故障 / KeyError 等**真实缺陷**
+            # 必须冒泡，不能被静默 continue 掩盖成「这个组不可用」。
+            logger.info("聚合组 %s 不可用作同步目标：%s", group.id, exc)
+            continue
         items.append(
             {
                 "group_id": info["group_id"],

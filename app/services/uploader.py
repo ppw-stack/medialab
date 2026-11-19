@@ -204,9 +204,11 @@ class SyncContext:
         conflict_policy: 同名且大小不同时的冲突策略（见
             :data:`CONFLICT_KEEP_LARGER`）。默认**保留大的**。
         staged_lookup: **组级幂等探测**（聚合模式用）。签名
-            ``(rel_dir, file_name, size) -> CloudEntry | None``（可 await）——
+            ``(rel_dir, file_name, size) -> StagedHit | None``（可 await）——
             返回组内缓冲/主盘里**已存在的同名同大小**文件则不必重传。
             ``None`` = 不用这层探测（普通存储源目标）。
+            ⚠️ 返回类型是 :class:`StagedHit`（**不是** ``CloudEntry``——
+            消费方要读它的 ``note`` 字段）。
     """
 
     driver: Any

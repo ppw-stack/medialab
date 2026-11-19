@@ -39,7 +39,12 @@ class FakeUploader:
         name: str | None = None,
         progress: Any = None,
     ) -> Any:
-        """假上传。"""
+        """假上传。
+
+        :raises DriverError: ``fail=True`` 时抛出，文案取 ``fail_reason``
+            （默认「假上传失败」，可注入成「限额类」错误来测撞墙分支）；
+            ``kind`` 固定为 ``unknown``。
+        """
         if self.fail:
             raise DriverError(self.fail_reason, kind="unknown")
         file_name = name or path.name

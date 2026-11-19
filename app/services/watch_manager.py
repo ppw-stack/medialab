@@ -250,12 +250,6 @@ _SYNC_TASKS: dict[int, asyncio.Task[None]] = {}
 #: 非空 = 这个任务的目标是**聚合组**（落点由分配器在组内副盘之间挑选）。
 _LANDINGS: dict[int, _Landing] = {}
 
-#: 聚合任务的**组级幂等索引**：task_id → {(相对目录, 文件名): StagedEntry}
-#:
-#: 落点会换盘，「当前落点目录里没有这个文件」≠「文件没传过」——文件可能
-#: 在另一个副盘的缓冲里，或已经归拢到主盘。这张表就是判据。
-_STAGED_INDEX: dict[int, dict[tuple[str, str], aggregate_staging.StagedEntry]] = {}
-
 #: 候选缓存的有效期（秒）——避免每个文件都查一次 DB
 _CANDIDATES_TTL_SEC = 60.0
 
@@ -266,6 +260,10 @@ class _Landing:
 
     持久化的那份在 ``upload_tasks.driver_id`` / ``target_file_id``
     （粘性——重启后恢复，避免已传文件被重传）。
+
+    **组级幂等索引挂在落点上**（:attr:`staged_index`）——它本来就是
+    「这个任务往组里放过什么」的记录，与落点同生共死（任务停 → 落点
+    与索引一起清掉），不另设一份全局表。
     """
 
     group_id: int
@@ -279,6 +277,13 @@ class _Landing:
     candidates: list[LandingCandidate] = field(default_factory=list)
     #: 候选缓存的取样时刻（monotonic）
     candidates_at: float = 0.0
+    #: **组级幂等索引**：``(相对目录, 文件名) → 台账条目``
+    #:
+    #: 落点会换盘，「当前落点目录里没有这个文件」≠「文件没传过」——
+    #: 文件可能在**另一个副盘**的缓冲里，或**已经归拢到主盘**。
+    staged_index: dict[tuple[str, str], aggregate_staging.StagedEntry] = field(
+        default_factory=dict
+    )
 
     def current_candidate(self) -> LandingCandidate | None:
         """当前落点在候选表里的那一条（None = 缓存里没有）。"""
@@ -483,6 +488,12 @@ async def start_watcher(
     # 上传上下文
     if landing is not None:
         # 聚合模式：落点 = 分配器挑中的副盘缓冲根
+        # **先登记落点**（幂等索引挂在落点上，探测回调要读它）
+        _LANDINGS[task_id] = landing
+        # 组级幂等索引（台账）——载入一次，之后登记时增量维护
+        landing.staged_index = await aggregate_staging.load_staged_index(
+            landing.group_id
+        )
         ctx = SyncContext(
             driver=driver,
             uploader=uploader,
@@ -493,12 +504,7 @@ async def start_watcher(
             delete_local=landing.delete_after_upload,
             conflict_policy=landing.conflict_policy,
             # 组级幂等探测：文件可能已在别的副盘缓冲里 / 已归拢到主盘
-            staged_lookup=_make_staged_lookup(task_id),
-        )
-        _LANDINGS[task_id] = landing
-        # 组级幂等索引（台账）——载入一次，之后登记时增量维护
-        _STAGED_INDEX[task_id] = await aggregate_staging.load_staged_index(
-            landing.group_id
+            staged_lookup=_make_staged_lookup(landing),
         )
         # 落点快照写回 DB（粘性——重启后恢复，避免已传文件被重传）
         await _persist_landing(task_id, landing)
@@ -607,8 +613,8 @@ async def stop_watcher(task_id: int) -> None:
     _QUEUES_LARGE.pop(task_id, None)
     _QUEUES_SMALL.pop(task_id, None)
     _CONTEXTS.pop(task_id, None)
+    # 落点与它的组级幂等索引**一起清**（索引挂在落点上）
     _LANDINGS.pop(task_id, None)
-    _STAGED_INDEX.pop(task_id, None)
     _SYNC_LOCKS.pop(task_id, None)
     _INFLIGHT.pop(task_id, None)
     _OVERFLOW.pop(task_id, None)
@@ -809,12 +815,16 @@ async def _resolve_landing(
 async def _persist_landing(task_id: int, landing: _Landing) -> None:
     """把落点快照写回任务行（**粘性**——重启后恢复）。
 
-    **写失败只记日志 + 登记降级台账**：内存里的落点仍然正确，重启后
-    重新解析即可；但**粘性丢了**（重启后落点可能漂移 → 已传文件有被重传
-    的风险）——故按「启动降级必须登记」的规矩写进
-    :mod:`app.services.startup_status`（``/readyz`` 的 ``degradations``
-    会显示它，成功写回后清除）。
+    **只降级数据库故障**（``SQLAlchemyError``）：写库失败 → 记日志 + 登记
+    降级台账（``/readyz`` 的 ``degradations`` 会显示「粘性落点没写成」），
+    内存里的落点仍然正确，重启后重新解析即可。
+
+    ⚠️ **其余异常一律冒泡**——``NameError`` / ``AttributeError`` 之类是
+    **程序缺陷**，宽泛捕获会把它们降级成 warning，掩盖真 bug（启动路径
+    由 ``start_all`` 兜住并登记台账）。
     """
+    from sqlalchemy.exc import SQLAlchemyError
+
     from app.services.startup_status import clear, record
 
     component = f"upload_landing_persist:{task_id}"
@@ -831,14 +841,14 @@ async def _persist_landing(task_id: int, landing: _Landing) -> None:
             row.target_file_id = landing.root_id
             row.target_path = landing.root_path
             await db.commit()
-    except Exception as exc:
+    except SQLAlchemyError as exc:
         logger.warning("落点快照写回失败（task_id=%s）：%s", task_id, exc)
         record(component, exc)
         return
     clear(component)
 
 
-def _make_staged_lookup(task_id: int) -> Any:
+def _make_staged_lookup(landing: _Landing) -> Any:
     """构造**组级幂等探测**回调（挂到 :attr:`SyncContext.staged_lookup`）。
 
     落点会换盘，「当前落点目录里没有这个文件」≠「文件没传过」——
@@ -848,8 +858,7 @@ def _make_staged_lookup(task_id: int) -> Any:
     async def _lookup(
         rel_dir: str, file_name: str, size: int
     ) -> StagedHit | None:
-        index = _STAGED_INDEX.get(task_id) or {}
-        entry = index.get((rel_dir, file_name))
+        entry = landing.staged_index.get((rel_dir, file_name))
         if entry is None or entry.size_bytes != size:
             return None
         return StagedHit(
@@ -907,7 +916,7 @@ async def _switch_landing(task_id: int, candidate: LandingCandidate) -> None:
         delete_delay=settings.upload_delete_verify_delay_sec,
         delete_local=landing.delete_after_upload,
         conflict_policy=landing.conflict_policy,
-        staged_lookup=_make_staged_lookup(task_id),
+        staged_lookup=_make_staged_lookup(landing),
     )
     landing.driver_id = candidate.driver_id
     landing.driver_name = candidate.driver_name
@@ -995,8 +1004,7 @@ async def _register_after_upload(
         runtime.log(f"⚠️ 归拢台账登记失败：{exc}")
         return
     if result == "added":
-        index = _STAGED_INDEX.setdefault(task_id, {})
-        index[(rel_dir, file_name)] = aggregate_staging.StagedEntry(
+        landing.staged_index[(rel_dir, file_name)] = aggregate_staging.StagedEntry(
             size_bytes=int(outcome.size or size),
             file_id=file_id,
             driver_id=landing.driver_id,

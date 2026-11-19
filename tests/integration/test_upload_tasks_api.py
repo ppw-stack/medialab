@@ -111,6 +111,8 @@ async def aggregate_group(db_session):
 
 
 class TestAggregateTarget:
+    """聚合组作为上传目标的接口行为（创建 / 可选目标 / 退回存储源模式）。"""
+
     async def test_创建聚合任务返回组id(
         self, client, db_session, aggregate_group, tmp_path
     ) -> None:

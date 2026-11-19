@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from app.db.models import Driver, UploadTask
@@ -25,6 +26,7 @@ from app.services.errors import ServiceError
 from app.services.upload_tasks import UploadTaskError
 from app.services.uploader import RESULT_FAILED, RESULT_UPLOADED, SyncContext
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from tests.unit.upload_fakes import FakeDriver, FakeUploader
 
@@ -38,12 +40,10 @@ def _clean_manager():
 
     watch_manager._LANDINGS.clear()
     watch_manager._CONTEXTS.clear()
-    watch_manager._STAGED_INDEX.clear()
     clear_all()
     yield
     watch_manager._LANDINGS.clear()
     watch_manager._CONTEXTS.clear()
-    watch_manager._STAGED_INDEX.clear()
     clear_all()
 
 
@@ -265,7 +265,7 @@ class Test台账登记:
             delete_after_upload=False,
             conflict_policy=1,
         )
-        watch_manager._STAGED_INDEX[row.id] = {}
+        watch_manager._LANDINGS[row.id].staged_index.clear()
 
         path = tmp_path / "a.mkv"
         path.write_bytes(b"x" * 100)
@@ -378,7 +378,7 @@ class Test撞墙换盘:
             delete_after_upload=False,
             conflict_policy=1,
         )
-        watch_manager._STAGED_INDEX[row.id] = {}
+        watch_manager._LANDINGS[row.id].staged_index.clear()
 
         path = tmp_path / "a.mkv"
         path.write_bytes(b"x" * 100)
@@ -442,7 +442,7 @@ class Test撞墙换盘:
             delete_after_upload=False,
             conflict_policy=1,
         )
-        watch_manager._STAGED_INDEX[row.id] = {}
+        watch_manager._LANDINGS[row.id].staged_index.clear()
 
         path = tmp_path / "a.mkv"
         path.write_bytes(b"x" * 100)
@@ -477,7 +477,7 @@ class Test撞墙换盘:
             delete_after_upload=False,
             conflict_policy=1,
         )
-        watch_manager._STAGED_INDEX[row.id] = {}
+        watch_manager._LANDINGS[row.id].staged_index.clear()
 
         path = tmp_path / "a.mkv"
         path.write_bytes(b"x" * 100)
@@ -516,7 +516,6 @@ class Test组级幂等:
         driver = FakeDriver()
         uploader = FakeUploader()
         ctx = _ctx(driver, uploader, tmp_path)
-        ctx.staged_lookup = watch_manager._make_staged_lookup(row.id)
         watch_manager._CONTEXTS[row.id] = ctx
         watch_manager._LANDINGS[row.id] = watch_manager._Landing(
             group_id=grp.id,
@@ -527,8 +526,11 @@ class Test组级幂等:
             delete_after_upload=False,
             conflict_policy=1,
         )
-        watch_manager._STAGED_INDEX[row.id] = (
+        watch_manager._LANDINGS[row.id].staged_index = (
             await aggregate_staging.load_staged_index(grp.id)
+        )
+        ctx.staged_lookup = watch_manager._make_staged_lookup(
+            watch_manager._LANDINGS[row.id]
         )
 
         path = tmp_path / "a.mkv"
@@ -544,6 +546,8 @@ class Test组级幂等:
 
 
 class Test降级台账:
+    """落点快照写回的降级登记与清除（``/readyz`` 的 ``degradations``）。"""
+
     async def test_落点写回失败登记台账(self, db, group, tmp_path, monkeypatch) -> None:
         """写库失败 → 登记 ``startup_status``（``/readyz`` 看得见）。"""
         from app.services import startup_status
@@ -560,10 +564,18 @@ class Test降级台账:
         )
 
         class _Boom:
-            async def __aenter__(self):
-                raise RuntimeError("写库炸了")
+            """注入 ``session_scope`` 的失败桩（进入上下文即炸）。"""
 
-            async def __aexit__(self, *exc):
+            async def __aenter__(self) -> None:
+                """模拟「拿到事务就失败」。
+
+                :raises OperationalError: 永远抛——模拟**数据库故障**
+                    （这才是可降级的那一类）。
+                """
+                raise OperationalError("写库炸了", None, None)
+
+            async def __aexit__(self, *exc: Any) -> bool:
+                """异常已被本桩吞掉（不向外传播）。"""
                 return False
 
         monkeypatch.setattr(
@@ -574,6 +586,35 @@ class Test降级台账:
         degradations = startup_status.snapshot()
         assert "upload_landing_persist:1" in degradations
         assert "写库炸了" in degradations["upload_landing_persist:1"]["reason"]
+
+    async def test_非数据库异常冒泡(self, db, group, monkeypatch) -> None:
+        """**程序缺陷**（``NameError`` 之类）不降级——让它冒泡。
+
+        宽泛捕获会把真 bug 伪装成 warning；DB 故障才走降级台账。
+        """
+        grp, _master, s1, _s2 = group
+        landing = watch_manager._Landing(
+            group_id=grp.id,
+            driver_id=s1.id,
+            driver_name="副号1",
+            root_id="root-1",
+            root_path="/缓冲1",
+            delete_after_upload=False,
+            conflict_policy=1,
+        )
+
+        class _Boom:
+            async def __aenter__(self) -> None:
+                raise NameError("这是程序缺陷")
+
+            async def __aexit__(self, *exc: Any) -> bool:
+                return False
+
+        monkeypatch.setattr(
+            watch_manager, "session_scope", lambda *a, **k: _Boom()
+        )
+        with pytest.raises(NameError):
+            await watch_manager._persist_landing(1, landing)
 
     async def test_写回成功后清除台账(self, db, group, tmp_path) -> None:
         """写成功 → 台账清掉（它是「当前态」语义）。"""
