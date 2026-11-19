@@ -543,6 +543,64 @@ class Test组级幂等:
         assert len(rows) == 1
 
 
+class Test降级台账:
+    async def test_落点写回失败登记台账(self, db, group, tmp_path, monkeypatch) -> None:
+        """写库失败 → 登记 ``startup_status``（``/readyz`` 看得见）。"""
+        from app.services import startup_status
+
+        grp, _master, s1, _s2 = group
+        landing = watch_manager._Landing(
+            group_id=grp.id,
+            driver_id=s1.id,
+            driver_name="副号1",
+            root_id="root-1",
+            root_path="/缓冲1",
+            delete_after_upload=False,
+            conflict_policy=1,
+        )
+
+        class _Boom:
+            async def __aenter__(self):
+                raise RuntimeError("写库炸了")
+
+            async def __aexit__(self, *exc):
+                return False
+
+        monkeypatch.setattr(
+            watch_manager, "session_scope", lambda *a, **k: _Boom()
+        )
+        await watch_manager._persist_landing(1, landing)
+
+        degradations = startup_status.snapshot()
+        assert "upload_landing_persist:1" in degradations
+        assert "写库炸了" in degradations["upload_landing_persist:1"]["reason"]
+
+    async def test_写回成功后清除台账(self, db, group, tmp_path) -> None:
+        """写成功 → 台账清掉（它是「当前态」语义）。"""
+        from app.services import startup_status
+
+        grp, _master, s1, _s2 = group
+        view = await upload_tasks_service.create_task_view(
+            name="任务",
+            driver_id=None,
+            target_file_id="",
+            watch_root=str(tmp_path),
+            aggregate_group_id=grp.id,
+        )
+        startup_status.record(f"upload_landing_persist:{view.id}", "旧降级")
+        landing = watch_manager._Landing(
+            group_id=grp.id,
+            driver_id=s1.id,
+            driver_name="副号1",
+            root_id="root-1",
+            root_path="/缓冲1",
+            delete_after_upload=False,
+            conflict_policy=1,
+        )
+        await watch_manager._persist_landing(view.id, landing)
+        assert f"upload_landing_persist:{view.id}" not in startup_status.snapshot()
+
+
 # ---------------------------------------------------------------- 删组守卫
 
 

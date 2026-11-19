@@ -809,8 +809,15 @@ async def _resolve_landing(
 async def _persist_landing(task_id: int, landing: _Landing) -> None:
     """把落点快照写回任务行（**粘性**——重启后恢复）。
 
-    写失败只记日志：内存里的落点仍然正确，重启后重新解析即可。
+    **写失败只记日志 + 登记降级台账**：内存里的落点仍然正确，重启后
+    重新解析即可；但**粘性丢了**（重启后落点可能漂移 → 已传文件有被重传
+    的风险）——故按「启动降级必须登记」的规矩写进
+    :mod:`app.services.startup_status`（``/readyz`` 的 ``degradations``
+    会显示它，成功写回后清除）。
     """
+    from app.services.startup_status import clear, record
+
+    component = f"upload_landing_persist:{task_id}"
     try:
         async with session_scope() as db:
             row = (
@@ -826,6 +833,9 @@ async def _persist_landing(task_id: int, landing: _Landing) -> None:
             await db.commit()
     except Exception as exc:
         logger.warning("落点快照写回失败（task_id=%s）：%s", task_id, exc)
+        record(component, exc)
+        return
+    clear(component)
 
 
 def _make_staged_lookup(task_id: int) -> Any:
@@ -971,6 +981,10 @@ async def _register_after_upload(
             size_bytes=int(outcome.size or size),
         )
     except OperationalError as exc:
+        # ⚠️ **不登记降级台账**（与「落点快照写回」不同）：这是**运行期**
+        # 的偶发撞锁，且**可丢**——兜底扫描（每小时）会把漏登记的文件补上。
+        # 登记它会让面板长期显示 degraded（台账要等下一次成功才清），
+        # 反而淹没真正的降级。
         runtime.log(
             f"⚠️ 归拢台账登记失败（写库繁忙）：{exc}"
             "——稍后由聚合作业的兜底扫描补登记"

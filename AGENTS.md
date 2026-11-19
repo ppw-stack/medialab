@@ -922,6 +922,19 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
   - 契约由 `tests/unit/test_aggregate_upload.py`（匹配器 + 闸门）+
     `tests/integration/test_aggregate_upload.py`（校验矩阵 / 登记幂等 /
     撞墙换盘 / 组级幂等 / 删组守卫）固化
+  - **加列迁移的锁表评估与回滚**（2026-11-19，Kody 评审要求）：本次新增
+    `upload_tasks.aggregate_group_id` 与 `drivers.upload_quota_exhausted_month`
+    —— SQLite 的 `ADD COLUMN` 是**纯元数据操作**（不改数据、不重建表，
+    写锁毫秒级，**不停机**），两列**可空 + 无默认值** → **不回填、不改写
+    现有行**；**回滚首选「留列无害 + 回退镜像」**（旧代码读不到这两列），
+    彻底删列走 `_drop_column`（SQLite ≥3.35），兜底恢复 appdata 备份快照
+  - **落点快照写回的降级必须登记台账**（2026-11-19，Kody 评审要求）：
+    `_persist_landing` 写库失败 → `startup_status.record(
+    "upload_landing_persist:{task_id}")`（`/readyz` 的 `degradations`
+    会显示「粘性落点没写成」），写成功后 `clear` —— 不登记的话运维只能
+    事后从「重启后重传」倒查
+    - ⚠️ 但**运行期**的偶发降级（台账登记撞锁）**不登记**：它可丢（兜底
+      扫描会补），登记会让面板长期 degraded，反而淹没真正的降级
 - **启动期密钥闸门（2026-11-17，P0）**：`WEB_TOKEN` 与 `SIGNING_SECRET` 都是
   必填，lifespan 缺任一即 `RuntimeError` 拒绝启动；配置层拒绝 `change-me*`
   占位符，prod 还要求二者 ≥32 字符。`/metrics` 不再公开，抓取端要带
