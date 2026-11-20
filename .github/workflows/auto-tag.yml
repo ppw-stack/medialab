@@ -18,25 +18,31 @@ name: auto-tag
 #     PAT 推 v* tag → ci.yml(push tags) → 绿 → workflow_run → docker-image.yml
 #     → git tag --points-at 认到 v* semver → 推镜像 latest + 1.0.4 + 1.0
 #
-# ⚠️⚠️⚠️ 二号坑（2026-11-20 实测踩到）：**PAT 必须带「触发 workflow」的权限**，
-#   否则 tag 照样推成功、但**什么都不触发**（同样静默）：
-#     · classic PAT          → scope 必须含 **`workflow`**
-#                              （`gh auth refresh -s workflow`）
-#     · fine-grained PAT     → Repository permissions 必须勾
-#                              **Workflows: Read and write**
-#   实测对照（同一 tag v1.0.4、同一 commit，只换推送凭据）：
-#     · fine-grained PAT（只勾 Contents: Read and write）→ **ci 没被触发**
-#     · classic token（scopes = gist, read:org, repo, **workflow**）→ ci 正常触发
-#   → 「推 tag 用 PAT」还不够，**PAT 还要有 Workflows 权限**。
+# ⚠️⚠️⚠️ 二号坑（2026-11-20 实测两次）：**token 必须带「触发 workflow」的能力**，
+#   否则 tag 照样推成功、但**什么都不触发**（同样静默）。实测矩阵：
+#
+#   | 凭据                                   | scopes / 权限                          | ci 被触发？ |
+#   |----------------------------------------|----------------------------------------|------------|
+#   | classic PAT（ghp_）                    | repo + **workflow**                    | ✅          |
+#   | fine-grained PAT（github_pat_）        | Contents: Read and write               | ❌          |
+#   | fine-grained PAT（github_pat_）        | Contents + **Workflows: Read and write**| ❌ 仍不行   |
+#
+#   → 「推 tag 用 PAT」还不够，**且 fine-grained PAT 实测不可用**（加了
+#     Workflows 权限后重测依然不触发）。**必须用 classic PAT**，scopes 勾
+#     `repo` + `workflow`。
+#
+#   GitHub 文档对应的官方说法：PAT 推送要触发 workflow，token 需要
+#   `workflow` scope（classic）；fine-grained 的 "Workflows" 权限管的是
+#   「修改 .github/workflows/*.yml」，**不含**触发 workflow。
+#
 #   本 workflow 末尾有「校验 ci 是否被触发」步骤：没触发就 **::error:: 明确
 #   报错退出**，不再让「tag 打上了、镜像没有」这种事无声发生。
 #
 # PAT 准备（仓库 ppw-stack/medialab）：
-#   1. GitHub → Settings → Developer settings → Fine-grained tokens
-#   2. Resource owner: ppw-stack，Repository access: Only select repositories
-#      → 选中 ppw-stack/medialab
-#   3. Repository permissions → **Contents: Read and write**
-#                              + **Workflows: Read and write**（★ 少了它不触发）
+#   1. GitHub → Settings → Developer settings → **Tokens (classic)**
+#   2. Note 写「medialab 发布用」，Expiration 按需（最长 1 年，勾
+#      "No expiration" 则 gh CLI 的 classic token 不会自动过期）
+#   3. Scopes 勾 **repo** + **workflow**（★ 少了 workflow 不触发）
 #   4. 生成后把 token 存到 **environment `tag`** 的 secret：
 #      **RELEASE_TOKEN**（Settings → Environments → tag → Environment secrets）
 #      → Actions 权限需允许 Actions 创建 workflow run（默认允许）
@@ -189,6 +195,10 @@ jobs:
         if: steps.ver.outputs.tag != '' && (inputs.dry_run != true)
         env:
           TAG: ${{ steps.ver.outputs.tag }}
+          # gh CLI 读 GH_TOKEN 环境变量认证。⚠️ 不能写 "$GITHUB_TOKEN"——
+          # Actions 不注入该环境变量（见下方注释），set -u 下会 unbound
+          # variable → 校验永远查不到 → 假阴性。
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # 把「tag 推成功但 workflow 没被触发」从**静默失败**变成**显式失败**。
@@ -199,9 +209,16 @@ jobs:
           # workflow 全绿。没人看日志就完全发现不了（2026-11-20 实测踩到）。
           #
           # 判定：GitHub 收到 push 后通常 5~15 秒内创建 run，轮询 60 秒。
+          #
+          # ⚠️ GITHUB_TOKEN **不是**自动注入的环境变量（Actions 只把它放在
+          #    `github.token` / `secrets.GITHUB_TOKEN` 上下文里）。直接写
+          #    "$GITHUB_TOKEN" 在 `set -u` 下会 unbound variable → 校验步骤
+          #    永远查不到 run → **假阴性**（2026-11-20 实测踩到：脚本 12 次
+          #    循环全部 unbound variable，最后误报「没被触发」）。
+          #    故必须用 env: 把 ${{ github.token }} 显式传进来。
           RUN_ID=""
           for i in $(seq 1 12); do
-            RUN_ID=$(GH_TOKEN="$GITHUB_TOKEN" gh api \
+            RUN_ID=$(gh api \
               "repos/${GITHUB_REPOSITORY}/actions/runs?event=push&per_page=30" \
               --jq '.workflow_runs[] | "\(.id) \(.head_branch) \(.name)"' \
               2>/dev/null | awk -v t="$TAG" '$2 == t {print $1; exit}' || true)
@@ -216,10 +233,11 @@ jobs:
           else
             echo "::error::tag ${TAG} 已推送，但 60 秒内没有任何 workflow 被触发（ref=${TAG}）"
             echo "::error::→ 镜像不会推、闸门不会跑，而本 workflow 却是绿的——最坏的一类故障"
-            echo "::error::多半是推送用的 PAT 缺「触发 workflow」的权限："
-            echo "::error::  · fine-grained PAT → Repository permissions 需勾 **Workflows: Read and write**"
-            echo "::error::  · classic PAT      → scope 需含 **workflow**（gh auth refresh -s workflow）"
-            echo "::error::修完权限后重跑本 workflow（force=true 会打下一个 patch 版本）"
+            echo "::error::多半是推送用的 token 缺「触发 workflow」的能力（2026-11-20 实测）："
+            echo "::error::  · classic PAT（ghp_，scopes 含 **repo** + **workflow**）→ ✅ 触发"
+            echo "::error::  · fine-grained PAT（github_pat_，即使勾了 Contents+Workflows）→ ❌ 不触发"
+            echo "::error::→ 修法：把 environment 'tag' 的 RELEASE_TOKEN 换成 classic PAT"
+            echo "::error::修完重跑本 workflow（force=true 会打下一个 patch 版本）"
             exit 1
           fi
 
