@@ -86,8 +86,23 @@ _COMMON_SITE_USERDATA_FALLBACK_SCHEMAS = frozenset(
 )
 
 
+#: 是否用站点 ajax 促销接口补全 HDWinG 的优惠标记。
+#:
+#: 2026-11-20 实测：该接口受 Cloudflare Turnstile 保护，未过闸时对**任意**
+#: 种子 id（含已过期的）都返回兜底的 ``pro_free`` 且 ``timeout`` 恒为空——
+#: 直接采用会把「限时免费但已到期」的种子全判成永久免费。实测对照
+#: ``promotion.php?id=`` 权威页：838960 的免费窗口 2026-11-11 已结束，
+#: 接口仍回 pro_free。
+#:
+#: 关掉补全后，列表页的优惠占位符不会被填充 → 规则匹配不到 pro_* →
+#: 全部按「非免费」处理。这是**保守且安全**的口径（宁可漏推免费种，
+#: 也不把付费种当免费种推下去）。要恢复精确判定需接回逐种
+#: ``promotion.php?id=`` 查询。
+HDWING_PROMOTION_INJECTION = False
+
+
 class HDWingPageSpider(HDWingPromotionMixin, SiteSpider):
-    """在通用页面解析前补全 HDWinG 促销状态。"""
+    """在通用页面解析前补全 HDWinG 促销状态（当前默认关闭，见上方常量）。"""
 
     def __init__(
         self,
@@ -104,7 +119,7 @@ class HDWingPageSpider(HDWingPromotionMixin, SiteSpider):
         super().__init__(indexer=indexer, keyword=keyword, mtype=mtype, cat=cat, page=page)
 
     def parse(self, html_text: str) -> JsonList:
-        if html_text:
+        if html_text and HDWING_PROMOTION_INJECTION:
             html_text = self.inject_promotions(html_text)
         return super().parse(html_text)
 

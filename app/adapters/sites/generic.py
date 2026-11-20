@@ -325,12 +325,36 @@ def _cookie_dict(cookies: str | None) -> dict[str, str] | None:
     return result or None
 
 
+
+def _row_item_id(row: dict[str, Any]) -> str | None:
+    """取站内 ID。
+
+    页面规则里通常有 ``id`` 字段；API 站（m-team 等）的 spider 只给
+    ``page_url`` / ``enclosure``，没有 ``id`` 键——从 URL 的 ``id=`` 参数
+    回退提取，否则下载/去重/幂等键全都拿不到 ID。
+    """
+    raw = row.get("id")
+    if raw not in (None, ""):
+        return str(raw)
+    for key in ("page_url", "enclosure", "download"):
+        url = row.get(key)
+        if not url:
+            continue
+        text = str(url)
+        # 页面型站点 `details.php?id=123`；API 站（m-team）`/detail/123`
+        for pattern in (r"[?&]id=(\d+)", r"/detail/(\d+)", r"/(\d+)/?$"):
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1)
+    return None
+
+
 def _to_feed_item(row: dict[str, Any], rule: dict[str, Any]) -> FeedItem:
     published = parse_abs_datetime(str(row.get("pubdate") or "")) or row.get("pubdate")
     factor = row.get("downloadvolumefactor")
     return FeedItem(
         title=str(row.get("title") or ""),
-        item_id=str(row.get("id")) if row.get("id") is not None else None,
+        item_id=_row_item_id(row),
         info_hash=None,
         size=int(row.get("size") or 0),
         category=str(row.get("category") or "") or None,
