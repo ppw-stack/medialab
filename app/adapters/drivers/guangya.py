@@ -241,6 +241,9 @@ class GuangyaDriver:
         self._on_token_refresh = on_token_refresh
         self._cred: GuangyaCredential | None = None
         self._client: Any = None
+        #: 上次「客户端 token 续期」的时刻（unix 秒）——
+        #: 用于「过期时间解析不出来」时避免每次调用都刷一遍
+        self._client_refreshed_at: float = 0.0
 
         if credential:
             try:
@@ -285,7 +288,7 @@ class GuangyaDriver:
             return False
         return cred.access_token == cred.client_access_token
 
-    async def _ensure_token(self) -> None:
+    async def _ensure_token(self, *, force: bool = False) -> None:
         """确保主 access_token 有效（过期则刷新）。
 
         刷新成功后通过回调把新 token 写回 DB——**这一步不能省**，否则
@@ -294,6 +297,11 @@ class GuangyaDriver:
         **客户端身份的主 token**走 :meth:`_ensure_client_token`：刷新时必须
         用 ``CLIENT_ID_MAC``，否则会把 ``aud`` 刷成 Web（实测 2026-11-19：
         aud 跟着请求里的 ``client_id`` 走，客户端身份就丢了）。
+
+        Args:
+            force: **无视本地过期时间强制刷新**——401 兜底用。服务端把
+                token 判死时，本地记录的 ``expires_at`` 可能还没到（账号在
+                别处重新登录会**立即作废**旧 token，2026-11-20 生产事故）。
 
         Raises:
             DriverError: 未配置凭据、已过期且无 ``refresh_token``、
@@ -304,18 +312,41 @@ class GuangyaDriver:
             raise DriverError("未配置光鸭凭据", kind="auth")
 
         if self._uses_client_identity():
-            if not await self._ensure_client_token():
+            if not await self._ensure_client_token(force=force):
                 raise DriverError(
                     "光鸭客户端 Token 已过期且无 refresh_token", kind="auth"
                 )
             return
 
-        if not cred.expires_at:
-            return
-        if time.time() < cred.expires_at - TOKEN_REFRESH_MARGIN_SEC:
-            return
+        if not force:
+            # 过期时间优先用凭据里记录的；没有就解析 JWT 的 ``exp``
+            # （存量库里可能有 ``expires_at=0`` 的行）。
+            expires_at = cred.expires_at or _jwt_expires_at(cred.access_token)
+            if not expires_at:
+                # 过期时间未知 → **不主动刷**（否则每次调用都刷一遍）。
+                # 真失效了由 :meth:`_call` 的 401 兜底兜住。
+                return
+            if time.time() < expires_at - TOKEN_REFRESH_MARGIN_SEC:
+                return
         if not cred.refresh_token:
             raise DriverError("光鸭 Token 已过期且无 refresh_token", kind="auth")
+
+        await self._refresh_web_token()
+
+    async def _refresh_web_token(self) -> None:
+        """用 Web ``refresh_token`` 续期主 token。
+
+        续期后**必须同步进已缓存的业务客户端**（:meth:`_sync_client_token`）
+        并写回 DB（:meth:`_notify_token_refresh`）——少任何一步，业务
+        请求仍会带旧 token（2026-11-20 生产事故：DB 里 token 是新的，
+        ``fs_create_dir`` 却 401）。
+
+        Raises:
+            DriverError: 刷新请求失败或未返回 access_token。
+        """
+        cred = self._cred
+        if cred is None:
+            raise DriverError("未配置光鸭凭据", kind="auth")
 
         await rate_limiter.acquire(PROVIDER)
         try:
@@ -337,7 +368,38 @@ class GuangyaDriver:
             cred.refresh_token = str(result["refresh_token"])
         cred.expires_at = int(time.time()) + int(expires_in) if expires_in else 0
 
+        self._sync_client_token()
         await self._notify_token_refresh()
+
+    def _sync_client_token(self) -> None:
+        """把当前主 token 同步进**已缓存**的业务客户端实例。
+
+        ``guangyaclient.GuangyaClient`` 在构造时把 token 写死进
+        ``authorization`` 头（``self.token`` + ``self._client.headers``）。
+        驱动续期后若不同步，**业务请求仍带旧 token** → 401。
+
+        2026-11-20 生产事故：driver 5 的 token 在 12:21 已续期并写回 DB，
+        13:11 的 ``fs_create_dir`` 仍 401——新 token 只进了凭据对象，
+        没进业务客户端。
+
+        客户端实例还不存在时不用管：:attr:`client` 会**用新 token 重新构造**。
+        """
+        cred = self._cred
+        client = self._client
+        if cred is None or client is None or not cred.access_token:
+            return
+        token = cred.access_token
+        try:
+            client.token = token
+            inner = getattr(client, "_client", None)
+            if inner is not None:
+                inner.headers["authorization"] = f"Bearer {token}"
+            # 刷新接口会轮换 refresh_token——同步给客户端，
+            # 它内部的「401 自动重试」要用最新那把
+            if cred.refresh_token:
+                client.refresh_token_value = cred.refresh_token
+        except Exception:  # pragma: no cover - 防御性（第三方库结构变了）
+            logger.warning("同步光鸭 token 到业务客户端失败", exc_info=True)
 
     async def _notify_token_refresh(self) -> None:
         """把刷新后的凭据写回 DB（失败只记日志，不影响本次使用）。"""
@@ -349,7 +411,7 @@ class GuangyaDriver:
         except Exception:
             logger.exception("光鸭 Token 写回失败（不影响本次使用）")
 
-    async def _ensure_client_token(self) -> bool:
+    async def _ensure_client_token(self, *, force: bool = False) -> bool:
         """确保**客户端覆盖层** token 有效（过期则用 RT 自己续期）。
 
         这是「不再依赖本机客户端」的关键：客户端 access_token 只有 2 小时，
@@ -358,6 +420,10 @@ class GuangyaDriver:
         实测（2026-11-19）：``grant_type=refresh_token`` + ``client_id`` 用
         ``CLIENT_ID_MAC`` → 新 token 的 ``aud`` 仍是客户端；服务端**不轮换**
         ``refresh_token`` → 与客户端各自持有一份互不影响。
+
+        Args:
+            force: **无视本地过期时间强制续期**——401 兜底用（服务端把
+                token 判死时本地记录的过期时间可能还没到）。
 
         Returns:
             bool: 是否有可用的客户端 token（无 RT 且已过期 → False）。
@@ -368,7 +434,7 @@ class GuangyaDriver:
         cred = self._cred
         if cred is None:
             raise DriverError("未配置光鸭凭据", kind="auth")
-        if cred.client_access_token and self._client_token_usable():
+        if not force and cred.client_access_token and self._client_token_usable():
             return True
         if not cred.client_refresh_token:
             return False
@@ -403,6 +469,11 @@ class GuangyaDriver:
         if not cred.access_token or cred.access_token == old_client:
             cred.access_token = cred.client_access_token
             cred.expires_at = cred.client_expires_at
+
+        # ⚠ **必须同步进已缓存的业务客户端**——否则业务请求仍带旧 token
+        # （2026-11-20 生产事故：续期 + 写回都成功了，业务请求却 401）。
+        self._sync_client_token()
+        self._client_refreshed_at = time.time()
 
         await self._notify_token_refresh()
         logger.info("光鸭客户端 token 已自动续期（aud=%s）", CLIENT_ID_MAC)
@@ -459,6 +530,11 @@ class GuangyaDriver:
     ) -> dict[str, Any]:
         """调一次业务接口（自动限速 + Token 刷新 + 错误码映射）。
 
+        **401 兜底**：服务端把 token 判死时，本地记录的 ``expires_at`` 可能
+        还没到（账号在别处重新登录会**立即作废**旧 token）——此时强制刷新
+        一次再重试。否则一次 401 会让整批文件全挂（2026-11-20 生产事故：
+        上传任务 69 个文件全失败在同一处 ``fs_create_dir`` 401）。
+
         Args:
             bucket: 限速桶名。默认光鸭业务接口桶；换直链走
                 :data:`PROVIDER_LINK`（官方限频更严，2 次/秒）。
@@ -470,8 +546,37 @@ class GuangyaDriver:
                 getattr(self.client, method), *args, **kwargs
             )
         except Exception as exc:
-            raise DriverError(f"光鸭接口 {method} 调用失败：{exc}") from exc
+            if not is_unauthorized_error(exc):
+                raise DriverError(f"光鸭接口 {method} 调用失败：{exc}") from exc
+            # 401 → 强制刷新一次再重试（**只重试一次**，避免无限循环）
+            await self._recover_unauthorized(method, exc)
+            try:
+                result = await asyncio_to_thread(
+                    getattr(self.client, method), *args, **kwargs
+                )
+            except Exception as retry_exc:
+                raise DriverError(
+                    f"光鸭接口 {method} 调用失败：{retry_exc}"
+                ) from retry_exc
         return result if isinstance(result, dict) else {}
+
+    async def _recover_unauthorized(self, method: str, exc: Exception) -> None:
+        """401 之后强制刷新 token（刷新不了就把鉴权错误抛出去）。"""
+        logger.warning("光鸭接口 %s 返回 401，强制刷新 token 后重试一次", method)
+        try:
+            await self._ensure_token(force=True)
+        except DriverError as refresh_exc:
+            raise DriverError(
+                f"光鸭接口 {method} 鉴权失败（401）：{exc}", kind="auth"
+            ) from refresh_exc
+
+    async def force_refresh_token(self) -> None:
+        """强制刷新主 token 并同步进业务客户端。
+
+        给上传器用：它的客户端与驱动是**同一个实例**，驱动刷新后
+        上传器直接受益（2026-11-20 生产事故的 401 兜底）。
+        """
+        await self._ensure_token(force=True)
 
     # -- 协议实现 --
 
@@ -773,7 +878,9 @@ class GuangyaDriver:
         Raises:
             DriverError: 重命名失败（接口返回非 0 业务码）。
         """
-        payload = self.client.fs_rename(str(file_id), str(new_name))
+        # **必须走 ``_call``**：它负责刷新 token + 401 兜底 + 限速，
+        # 顺便把同步 HTTP 调用挪进线程池（别在事件循环里等网络往返）。
+        payload = await self._call("fs_rename", str(file_id), str(new_name))
         code = payload.get("code")
         if code not in (None, 0):
             raise DriverError(
@@ -1101,13 +1208,24 @@ class GuangyaDriver:
         return await self._web_direct_link(remote_id)
 
     def _client_token_usable(self) -> bool:
-        """客户端 token 是否还在有效期（留 5 分钟余量）。"""
+        """客户端 token 是否还在有效期（留 5 分钟余量）。
+
+        **过期时间解析不出来时**：能续期就当「不可用」（续完就有过期时间
+        了）；刚续过 / 没有续期钥匙就先用着——宁可撞一次 401（401 有兜底
+        重试），也不要直接罢工。
+
+        旧实现把「过期时间未知（=0）」当成**永远可用** → token 明明过期
+        了也不续期，只能靠撞 401（2026-11-20 生产事故的一环）。
+        """
         cred = self._cred
         if cred is None or not cred.client_access_token:
             return False
-        if cred.client_expires_at:
-            return time.time() < cred.client_expires_at - TOKEN_REFRESH_MARGIN_SEC
-        return True
+        expires_at = cred.client_expires_at or _jwt_expires_at(cred.client_access_token)
+        if not expires_at:
+            if self._client_refreshed_at:
+                return True  # 刚续过但过期时间仍解析不出来 → 先用着
+            return not cred.client_refresh_token  # 有 RT → 续期；没 RT → 先用着
+        return time.time() < expires_at - TOKEN_REFRESH_MARGIN_SEC
 
     async def _client_direct_link(self, remote_id: str) -> DirectLink:
         """用客户端 token 换直链（``/userres/v1`` + ``dt=6`` 客户端身份）。
@@ -1394,6 +1512,20 @@ def _jwt_expires_at(token: str) -> int:
         return int(payload.get("exp") or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def is_unauthorized_error(exc: BaseException) -> bool:
+    """异常是不是「HTTP 401」。
+
+    **只认 HTTP 状态码 401**——光鸭的**业务码** 117 / 111 也表示鉴权失败，
+    但那是响应体里的 ``code``（走 :func:`_map_code` 那条路），不是这里。
+
+    401 值得单独处理：它意味着「token 被服务端判死」，而**本地记录的
+    过期时间可能还没到**（账号在别处重新登录会立即作废旧 token）——
+    所以要能识别出来并强制刷新重试（2026-11-20 生产事故）。
+    """
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None) == 401
 
 
 def _map_code(code: Any) -> str:

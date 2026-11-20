@@ -168,6 +168,41 @@ def uploader(client: FakeClient) -> GuangyaUploader:
     return GuangyaUploader(client)
 
 
+class _FakeDriver:
+    """假的驱动——只提供上传器用到的 ``force_refresh_token``。
+
+    上传器的客户端与驱动的客户端是**同一个实例**（``build_guangya_uploader``
+    传的是 ``driver.client``），所以驱动刷新后上传器直接受益。
+    """
+
+    def __init__(self, client: FakeClient | None = None) -> None:
+        self.refresh_calls = 0
+        self._client = client
+        #: 刷新时报错（模拟「RT 也失效了」）
+        self.refresh_error: Exception | None = None
+
+    async def force_refresh_token(self) -> None:
+        self.refresh_calls += 1
+        if self.refresh_error is not None:
+            raise self.refresh_error
+        if self._client is not None:
+            # 刷新后 token 恢复有效——撤掉注入的 401
+            self._client.errors.pop("upload_token", None)
+
+
+def _http_401(url: str) -> Exception:
+    """造一个「HTTP 401」异常（``guangyaclient`` 用 ``raise_for_status`` 抛的）。"""
+    import httpx
+
+    request = httpx.Request("POST", url)
+    response = httpx.Response(401, request=request)
+    return httpx.HTTPStatusError(
+        f"Client error '401 Unauthorized' for url '{url}'",
+        request=request,
+        response=response,
+    )
+
+
 async def test_小文件带md5并单PUT(uploader: GuangyaUploader, client: FakeClient, tmp_path: Path):
     """小文件 → upload_token 带 md5 → OSS 单 PUT → 轮询拿 fileId。"""
     path = tmp_path / "a.bin"
@@ -428,3 +463,41 @@ async def test_删除失败抛错(uploader: GuangyaUploader, client: FakeClient)
     client.errors["fs_delete"] = RuntimeError("网络错误")
     with pytest.raises(DriverError, match="fs_delete"):
         await uploader.delete_file("fid-1")
+
+
+async def test_401后刷新并重试(client: FakeClient, tmp_path: Path) -> None:
+    """业务接口 401 → 让驱动刷新 token 后重试一次。
+
+    2026-11-20 生产事故：上传任务 69 个文件全挂在 ``fs_create_dir`` 401
+    ——服务端把 token 判死（本地记录的过期时间还没到），不刷新就永远失败。
+    """
+    client.errors["upload_token"] = _http_401(
+        "https://api.guangyapan.com/nd.bizuserres.s/v1/upload_token"
+    )
+    driver = _FakeDriver(client)
+    up = GuangyaUploader(client, driver)
+    path = tmp_path / "a.bin"
+    path.write_bytes(b"x" * 100)
+
+    result = await up.upload_file(path, "dir-1")
+
+    assert driver.refresh_calls == 1
+    assert result.file_id == "fid-1"
+
+
+async def test_401且刷新失败抛鉴权错误(client: FakeClient, tmp_path: Path) -> None:
+    """刷新也失败 → 明确报鉴权失败（kind=auth），别含糊成「接口调用失败」。"""
+    client.errors["upload_token"] = _http_401(
+        "https://api.guangyapan.com/nd.bizuserres.s/v1/upload_token"
+    )
+    driver = _FakeDriver(client)
+    driver.refresh_error = RuntimeError("refresh_token 已失效")
+    up = GuangyaUploader(client, driver)
+    path = tmp_path / "a.bin"
+    path.write_bytes(b"x" * 100)
+
+    with pytest.raises(DriverError) as exc:
+        await up.upload_file(path, "dir-1")
+
+    assert exc.value.kind == "auth"
+    assert "401" in str(exc.value)

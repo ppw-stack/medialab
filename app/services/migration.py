@@ -754,26 +754,15 @@ def _pickcode_from_task(item: dict[str, Any]) -> str:
 
 
 async def persist_guangya_credential(driver_id: int, cred: Any) -> None:
-    """光鸭 Token 刷新后写回 DB（不写回则重启后 401）。"""
-    from app.adapters.drivers.guangya_credential import SCHEME, GuangyaCredential
-    from app.services.driver_service import store_credential
+    """光鸭 Token 刷新后写回 DB（不写回则重启后 401）。
 
-    if not isinstance(cred, GuangyaCredential):
-        return
-    try:
-        async with session_scope() as db:
-            await store_credential(
-                db,
-                driver_id,
-                cred.to_json(),
-                scheme=SCHEME,
-                # Token 刷新是**同一个账号换 token**，登录态没变
-                # → 不能作废测连缓存（否则面板退回「未测连」）。
-                invalidate_cache=False,
-            )
-        logger.info("已写回刷新的光鸭凭据 driver_id=%s", driver_id)
-    except Exception:
-        logger.exception("写回刷新的光鸭凭据失败（本次任务不受影响）")
+    真正的实现放在 :func:`app.services.driver_service.persist_guangya_credential`
+    ——**合并**「Web 层 + 客户端覆盖层」后再写回（整串替换会把另一层抹掉，
+    2026-11-20 生产事故）。这里保留本函数只是为了兼容既有调用点。
+    """
+    from app.services.driver_service import persist_guangya_credential as _persist
+
+    await _persist(driver_id, cred)
 
 
 # ================================================================ 目录浏览
