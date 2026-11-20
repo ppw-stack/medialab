@@ -685,7 +685,10 @@ class MTorrentSpider:
             for subtitle_id in self.__subtitle_ids(torrent_id) or []:
                 if link := self.__subtitle_genlink(subtitle_id):
                     results.append(link)
-        except (httpx.HTTPError, KeyError, TypeError, ValueError):
+        except (httpx.HTTPError, AttributeError, KeyError, TypeError, ValueError):
+            # AttributeError：M-Team 在鉴权失败 / 限流时可能回 JSON 数组或其它
+            # 非对象结构，__subtitle_ids 里的 result.get("code") 会抛它——
+            # 不接住就会穿透成整条字幕链路失败，而不是返回已收集到的 results。
             logger.exception(
                 "获取字幕失败", extra={"site": self._name}
             )

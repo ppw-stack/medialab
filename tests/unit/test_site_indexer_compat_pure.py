@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from xml.dom import minidom
 
 import pytest
@@ -456,7 +457,8 @@ class TestDownloadProtocol:
         assert parse_download_response(params, 200, {"success": False}, None) is None
 
     def test_encrypt_site_payload(self) -> None:
-        key = b"0123456789abcdef"
+        # 密钥运行时随机生成——测试里也不该出现凭据字面量
+        key = os.urandom(16)
         payload = encrypt_site_payload("hello", key)
         decoded = json.loads(base64.b64decode(payload).decode())
         assert set(decoded) == {"iv", "value", "mac", "tag"}

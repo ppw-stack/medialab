@@ -124,11 +124,16 @@ class YemaSpider:
                 return False, "无法打开网站！"
             if response.status_code != 200:
                 return False, f"错误：{response.status_code} {response.reason}"
-            payload = None
             try:
                 payload = response.json()
-            except (TypeError, ValueError):
-                payload = None
+            except (TypeError, ValueError) as err:
+                # 站点返回非 JSON（登录页 HTML / 维护页 / 限流页）与 Cookie 真正
+                # 失效是两种故障——别混成一句「Cookie已过期」，否则会误导用户
+                # 去重新登录，而真实原因（限流 / 站点改版）被掩盖。
+                logger.warning(
+                    "%s Cookie 连通性检测响应不是有效 JSON：%s", self._name, err
+                )
+                return False, "响应不是有效 JSON，请稍后重试或检查站点状态"
             if isinstance(payload, dict) and payload.get("success"):
                 return True, "连接成功"
             return False, "Cookie已过期"
@@ -293,6 +298,7 @@ class YemaSpider:
         :param page: 从 0 开始的搜索页码
         :param cat: 逗号分隔的站点分类 ID，优先于媒体类型并逐分类查询
         :return: 各分类的请求体；缺少认证信息时返回 None
+        :raises ValueError: cat 中含有非法（非正整数）分类 ID 时抛出
         """
         if not self._api_key:
             logger.warning(f"{self._name} 未配置 API AuthKey")

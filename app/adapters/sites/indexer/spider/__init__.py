@@ -1151,7 +1151,10 @@ class SiteSpider:
                     query_params = parse_qs(parsed_url.query)
                     param_value = query_params.get(str(args))
                     filtered_text = param_value[0] if param_value else ''
-            except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+            except (AttributeError, IndexError, KeyError, TypeError, ValueError, re.error):
+                # re.error 是 Exception 的直接子类（不是 ValueError 的子类）：
+                # 规则包里的脏正则会让 re.search / strptime 抛它——不放进元组
+                # 就会穿透到 17 个调用方，把单条脏规则放大成整站搜索失败。
                 logger.debug(
                     '过滤器 %s 处理失败：%s', method_name, traceback.format_exc()
                 )

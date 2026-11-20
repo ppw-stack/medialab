@@ -130,7 +130,10 @@ class TorrentLeech:
             except (TypeError, ValueError):
                 # 站点在 Cookie 失效 / 限流时仍回 200，但 body 不是 JSON。
                 logger.warning(
-                    f"{self._indexer.get('name')} 搜索响应解析失败：{self._indexer.get('domain')}"
+                    "%s 搜索响应解析失败：%s",
+                    self._indexer.get("name"),
+                    self._indexer.get("domain"),
+                    exc_info=True,
                 )
                 return True, []
             return False, self.__parse_result(results, mtype)

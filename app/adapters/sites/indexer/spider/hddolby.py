@@ -135,9 +135,14 @@ class HddolbySpider:
         """
         解析搜索结果。
 
-        返回字段与接口示例一致（``id`` / ``promotion_time_type`` / ``category`` /
-        ``name`` / ``small_descr`` / ``size`` / ``seeders`` / ``leechers`` /
-        ``times_completed`` / ``added`` / ``hr`` / ``tags`` 等）。
+        :param results: HDDolby API 返回的原始条目（``id`` / ``name`` /
+            ``small_descr`` / ``size`` / ``seeders`` / ``leechers`` /
+            ``times_completed`` / ``added`` / ``hr`` / ``tags`` 等）
+        :return: 统一后的资源字典（``title`` / ``description`` /
+            ``enclosure`` / ``pubdate`` / ``size`` / ``seeders`` / ``peers`` /
+            ``grabs`` / ``downloadvolumefactor`` / ``uploadvolumefactor`` /
+            ``freedate`` / ``page_url`` / ``labels`` / ``hit_and_run`` /
+            ``category``）
         """
         torrents = []
         if not results:

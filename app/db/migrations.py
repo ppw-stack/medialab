@@ -24,7 +24,7 @@ from __future__ import annotations
 from typing import cast
 
 from sqlalchemy import CursorResult, text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.core.logging import get_logger
 from app.db.models import TorrentIndex
@@ -240,45 +240,85 @@ async def migrate_adapter_values() -> None:
         await session.commit()
 
 
-async def restore_adapter_values(engine: AsyncEngine | None = None) -> int:
+async def _restore_adapter_values(conn: AsyncConnection) -> int:
+    """在给定连接上还原 adapter 值（事务边界由调用方决定）。
+
+    :param conn: 已开启事务的连接
+    :return: 实际还原的站点行数
+    """
+    exists = await conn.execute(
+        text("SELECT 1 FROM sqlite_master WHERE type='table' AND name=:name"),
+        {"name": ADAPTER_ROLLBACK_TABLE},
+    )
+    if exists.first() is None:
+        logger.warning("回滚台账表 %s 不存在，无需还原 adapter 值", ADAPTER_ROLLBACK_TABLE)
+        return 0
+    rows = (
+        await conn.execute(
+            text(f"SELECT site_id, old_adapter FROM {ADAPTER_ROLLBACK_TABLE}")
+        )
+    ).all()
+    if not rows:
+        return 0
+    # 一次 executemany：台账行数 = 受影响站点数，逐行 UPDATE 会把上百次
+    # IO 往返全塞在同一个写锁里，批量执行语义不变、快一个量级。
+    result = cast(
+        CursorResult[object],
+        await conn.execute(
+            text("UPDATE sites SET adapter = :old WHERE id = :id"),
+            [{"id": site_id, "old": old_adapter} for site_id, old_adapter in rows],
+        ),
+    )
+    return result.rowcount or 0
+
+
+async def restore_adapter_values(
+    engine: AsyncEngine | None = None,
+    conn: AsyncConnection | None = None,
+) -> int:
     """按回滚台账把站点的 adapter 值还原成迁移前的旧值。
 
     回滚到「10 个站点专用 adapter」那个版本时使用：新代码只认 ``generic``，
     旧代码只认各自的专用 adapter——**不改回旧值就等于让这些站点全部失效**。
 
     :param engine: 目标 engine；默认用应用全局 engine
+    :param conn: 外部已开启的事务连接；给了就用它（**不**再自行 begin，
+        让调用方把多个写步骤绑进同一个事务）
     :return: 实际还原的站点行数
     """
-    target = engine or get_engine()
-    restored = 0
-    async with target.begin() as conn:
-        exists = await conn.execute(
-            text("SELECT 1 FROM sqlite_master WHERE type='table' AND name=:name"),
-            {"name": ADAPTER_ROLLBACK_TABLE},
-        )
-        if exists.first() is None:
-            logger.warning("回滚台账表 %s 不存在，无需还原 adapter 值", ADAPTER_ROLLBACK_TABLE)
-            return 0
-        rows = (
-            await conn.execute(
-                text(f"SELECT site_id, old_adapter FROM {ADAPTER_ROLLBACK_TABLE}")
-            )
-        ).all()
-        for site_id, old_adapter in rows:
-            result = cast(
-                CursorResult[object],
-                await conn.execute(
-                    text("UPDATE sites SET adapter = :old WHERE id = :id"),
-                    {"id": site_id, "old": old_adapter},
-                ),
-            )
-            restored += result.rowcount or 0
+    if conn is not None:
+        restored = await _restore_adapter_values(conn)
+    else:
+        target = engine or get_engine()
+        async with target.begin() as own_conn:
+            restored = await _restore_adapter_values(own_conn)
     if restored:
         logger.info("已按回滚台账还原 %d 个站点的 adapter 值", restored)
     return restored
 
 
-async def readd_site_user_data_hourly_bonus_columns(engine: AsyncEngine | None = None) -> int:
+async def _readd_hourly_bonus_columns(conn: AsyncConnection) -> int:
+    """在给定连接上加回时魔四列（事务边界由调用方决定）。
+
+    :param conn: 已开启事务的连接
+    :return: 实际新增的列数
+    """
+    existing = {
+        row[1] for row in (await conn.execute(text("PRAGMA table_info(site_user_data)"))).all()
+    }
+    added = 0
+    for name, ddl_type in HOURLY_BONUS_COLUMNS:
+        if name in existing:
+            continue
+        await conn.execute(text(f"ALTER TABLE site_user_data ADD COLUMN {name} {ddl_type}"))
+        added += 1
+    return added
+
+
+async def readd_site_user_data_hourly_bonus_columns(
+    engine: AsyncEngine | None = None,
+    conn: AsyncConnection | None = None,
+) -> int:
     """把「时魔」四列加回 ``site_user_data``（回滚用，幂等）。
 
     删列不可逆：回滚到删列之前的镜像前必须先加回来，否则旧镜像的 ORM
@@ -288,19 +328,16 @@ async def readd_site_user_data_hourly_bonus_columns(engine: AsyncEngine | None =
     四列全部可空且无默认值 → **不回填、不改写任何现有行**。
 
     :param engine: 目标 engine；默认用应用全局 engine
+    :param conn: 外部已开启的事务连接；给了就用它（**不**再自行 begin，
+        让调用方把多个写步骤绑进同一个事务）
     :return: 实际新增的列数
     """
-    target = engine or get_engine()
-    added = 0
-    async with target.begin() as conn:
-        existing = {
-            row[1] for row in (await conn.execute(text("PRAGMA table_info(site_user_data)"))).all()
-        }
-        for name, ddl_type in HOURLY_BONUS_COLUMNS:
-            if name in existing:
-                continue
-            await conn.execute(text(f"ALTER TABLE site_user_data ADD COLUMN {name} {ddl_type}"))
-            added += 1
+    if conn is not None:
+        added = await _readd_hourly_bonus_columns(conn)
+    else:
+        target = engine or get_engine()
+        async with target.begin() as own_conn:
+            added = await _readd_hourly_bonus_columns(own_conn)
     if added:
         logger.info("已把 site_user_data 的 %d 个时魔列加回（回滚路径）", added)
     return added

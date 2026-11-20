@@ -78,7 +78,6 @@ class TNodeSpider:
                 return False, "无法打开网站！"
             if response.status_code != 200:
                 return False, f"错误：{response.status_code} {response.reason}"
-            payload = None
             try:
                 payload = response.json()
             except (TypeError, ValueError):
@@ -196,7 +195,9 @@ class TNodeSpider:
                 results = res.json().get('data', {}).get("torrents") or []
             except (TypeError, ValueError):
                 # 站点在 Cookie 失效 / 限流时仍回 200，但 body 不是 JSON。
-                logger.warning(f"{self._name} 搜索响应解析失败：{self._domain}")
+                logger.warning(
+                    "%s 搜索响应解析失败：%s", self._name, self._domain, exc_info=True
+                )
                 return True, []
             return False, self.__parse_result(results)
         if res is not None:

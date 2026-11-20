@@ -84,11 +84,15 @@ async def _run(db_path: Path, dry_run: bool) -> int:
                 logger.info("dry-run：未写库")
                 return 0
 
-        restored = await restore_adapter_values(engine)
-        logger.info("已还原 %d 个站点的 adapter 值", restored)
+        # 两步写操作必须同生共死：第一步提交、第二步失败的话，库会停在
+        # 「adapter 已还原成旧值、但 site_user_data 仍缺四列」的中间态——
+        # 旧镜像的 ORM 读写这四列会直接 OperationalError: no such column。
+        async with engine.begin() as conn:
+            restored = await restore_adapter_values(conn=conn)
+            logger.info("已还原 %d 个站点的 adapter 值", restored)
 
-        added = await readd_site_user_data_hourly_bonus_columns(engine)
-        logger.info("已加回 %d 个时魔列", added)
+            added = await readd_site_user_data_hourly_bonus_columns(conn=conn)
+            logger.info("已加回 %d 个时魔列", added)
         return 0
     finally:
         await engine.dispose()
