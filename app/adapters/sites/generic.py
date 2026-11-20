@@ -33,6 +33,7 @@ from app.adapters.sites.base import (
     parse_abs_datetime,
     parse_size_text,
 )
+from app.adapters.sites.indexer.compat.settings import get_runtime_setting
 from app.adapters.sites.indexer.engine import SPIDER_PARSER_CLASSES, IndexerEngine
 from app.adapters.sites.indexer.rules import SiteRules, load_site_rules
 from app.adapters.sites.user_data import SiteUserSnapshot
@@ -84,10 +85,11 @@ class GenericAdapter(SiteAdapter):
     ) -> None:
         super().__init__(profile, cookies=cookies, apikey=apikey, timeout=timeout)
         settings = get_settings()
+        self._user_agent = get_runtime_setting("USER_AGENT")
         self._rule = resolve_rule(profile.domain)
         self._base_url_value = str((self._rule or {}).get("domain") or profile.domain).rstrip("/")
         self._client = httpx.AsyncClient(
-            headers={"User-Agent": settings.default_user_agent},
+            headers={"User-Agent": self._user_agent},
             cookies=_cookie_dict(cookies),
             timeout=timeout,
             follow_redirects=True,
@@ -105,7 +107,7 @@ class GenericAdapter(SiteAdapter):
             "domain": f"{self._base_url_value}/",
             "cookie": self._cookies,
             "apikey": self._apikey,
-            "ua": get_settings().default_user_agent,
+            "ua": self._user_agent,
             "proxy": False,
         }
 
