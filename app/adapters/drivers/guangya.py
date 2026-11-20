@@ -402,7 +402,20 @@ class GuangyaDriver:
             logger.warning("同步光鸭 token 到业务客户端失败", exc_info=True)
 
     async def _notify_token_refresh(self) -> None:
-        """把刷新后的凭据写回 DB（失败只记日志，不影响本次使用）。"""
+        """把刷新后的凭据写回 DB（失败只记日志，不影响本次使用）。
+
+        **这层 try/except 是刻意的，别删**：它是 ``on_token_refresh`` 回调
+        的最后一道兜底——即使回调自己抛异常（DB 写回失败等），也不该打断
+        token 刷新流程（刷新已经成功了，新 token 已在内存里生效）。
+
+        ⚠️ 删掉它 = 「写回失败向上抛」真的生效：驱动实例随操作失败被丢弃，
+        内存里的新 token 一起丢，而服务端已轮换 token → **账号彻底掉线**。
+        依据与实测后果见
+        :func:`app.services.driver_service.persist_guangya_credential`。
+
+        Raises:
+            无。本方法永远不向上抛（写回失败只记日志）。
+        """
         cred = self._cred
         if cred is None or self._on_token_refresh is None:
             return
@@ -575,6 +588,10 @@ class GuangyaDriver:
 
         给上传器用：它的客户端与驱动是**同一个实例**，驱动刷新后
         上传器直接受益（2026-11-20 生产事故的 401 兜底）。
+
+        Raises:
+            DriverError: 未配置凭据、已过期且无 ``refresh_token``、
+                或刷新请求失败（kind="auth"）。
         """
         await self._ensure_token(force=True)
 

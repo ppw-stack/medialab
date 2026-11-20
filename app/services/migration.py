@@ -759,6 +759,18 @@ async def persist_guangya_credential(driver_id: int, cred: Any) -> None:
     真正的实现放在 :func:`app.services.driver_service.persist_guangya_credential`
     ——**合并**「Web 层 + 客户端覆盖层」后再写回（整串替换会把另一层抹掉，
     2026-11-20 生产事故）。这里保留本函数只是为了兼容既有调用点。
+
+    **异常口径（与委托前的实现一致，没变）**：写回失败（DB 错误等）在底层
+    :func:`app.services.driver_service.persist_guangya_credential` 里被捕获
+    并记日志（``写回刷新的光鸭凭据失败``），**不向上抛**。本函数被
+    ``_on_refresh`` / ``_on_refresh_source`` / ``_guangya_refresh_callback``
+    当作 ``on_token_refresh`` 回调用，调用方依赖「写回失败不影响本次任务」
+    这条约定；驱动侧 :meth:`GuangyaDriver._notify_token_refresh` 还有一层
+    兜底（回调抛异常也只记日志）。**别改成向上抛**——理由与实测后果见
+    :func:`app.services.driver_service.persist_guangya_credential`。
+
+    Raises:
+        无——写回失败只记日志，不中断调用链。
     """
     from app.services.driver_service import persist_guangya_credential as _persist
 

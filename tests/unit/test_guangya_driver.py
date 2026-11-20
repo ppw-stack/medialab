@@ -79,7 +79,11 @@ class FakeGuangyaClient:
         parent_id: str | None = None,
         fail_if_name_exist: bool = False,
     ) -> dict[str, Any]:
-        """建目录（可注入 401——生产事故就挂在这里）。"""
+        """建目录（可注入 401——生产事故就挂在这里）。
+
+        Raises:
+            Exception: 注入的 401 未耗尽时抛 ``httpx.HTTPStatusError``。
+        """
         self.seen_tokens.append(self.token)
         if type(self).unauthorized_times > 0:
             type(self).unauthorized_times -= 1
@@ -1071,6 +1075,7 @@ class TestClientTokenBusinessSync:
     """
 
     async def test_refresh_syncs_business_client(self) -> None:
+        """客户端身份续期后，**已缓存的业务客户端必须用上新 token**。"""
         driver = gyp_module.GuangyaDriver(
             _credential_json(
                 access_token="old-client",
@@ -1136,6 +1141,7 @@ class TestUnauthorizedFallback:
     """
 
     async def test_401_refreshes_and_retries(self) -> None:
+        """业务调用遇 401 时强制刷新一次，并以新 token 重试。"""
         FakeGuangyaClient.unauthorized_times = 1
         driver = gyp_module.GuangyaDriver(
             _credential_json(

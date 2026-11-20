@@ -194,6 +194,11 @@ class GuangyaUploader:
         **401 兜底**：token 被服务端判死时（本地记录的过期时间可能还没到）
         让驱动强制刷新一次再重试——上传器的客户端与驱动是**同一个实例**，
         驱动刷新后这里直接受益（2026-11-20 生产事故）。
+
+        Raises:
+            DriverError: 接口调用失败（非 401 直接抛）；401 且强制刷新也
+                失败时抛鉴权错误（kind="auth"）；刷新后重试仍失败同样抛
+                DriverError。
         """
         await rate_limiter.acquire(PROVIDER)
         try:

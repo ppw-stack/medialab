@@ -273,6 +273,25 @@ async def persist_guangya_credential(driver_id: int, cred: Any) -> None:
     （:func:`app.services.driver_auth._store_guangya_credential`）一致：
     - 实例带**客户端层** → 更新客户端层，主 token 跟着一起更新
     - 实例只有 **Web 层** → 只更新 Web 层，**保留 DB 里已有的客户端层**
+
+    **异常口径**：写回失败（DB 错误等）在此被捕获并记日志，**不向上抛**
+    ——本函数是 ``on_token_refresh`` 回调，调用方依赖「写回失败不影响本次
+    任务」（内存里的新 token 仍然有效）。
+
+    ⚠️ **别改成向上抛**（2026-11-20 实测定论）：写回发生在**服务端已经
+    轮换 token 之后**（它是 :meth:`GuangyaDriver._refresh_web_token` 的
+    最后一步）。一旦向上抛：
+
+    - 本次业务操作作废，驱动实例被丢弃 → **内存里的新 token 一起丢**
+    - DB 里只剩**已被服务端作废**的旧 token → 重启后账号彻底掉线，
+      必须重新扫码（刷新接口轮换 ``refresh_token`` 后无法自救）
+    - 且异常是裸 ``RuntimeError``，接不住 :meth:`GuangyaDriver._recover_unauthorized`
+      的 ``except DriverError`` → 401 兜底路径丢失 ``kind="auth"`` 分类
+
+    吞掉的代价只是「重启后掉线」，抛出的代价是「**现在就掉**」。
+
+    Raises:
+        无。写回失败只记日志（``写回刷新的光鸭凭据失败``），不中断调用链。
     """
     from app.adapters.drivers.guangya_credential import (
         SCHEME as GUANGYA_SCHEME,

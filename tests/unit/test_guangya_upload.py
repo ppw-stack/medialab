@@ -182,6 +182,11 @@ class _FakeDriver:
         self.refresh_error: Exception | None = None
 
     async def force_refresh_token(self) -> None:
+        """模拟驱动的强制刷新（把注入的 401 撤掉）。
+
+        Raises:
+            Exception: ``refresh_error`` 不为空时原样抛出（模拟刷新失败）。
+        """
         self.refresh_calls += 1
         if self.refresh_error is not None:
             raise self.refresh_error
