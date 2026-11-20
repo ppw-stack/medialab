@@ -214,6 +214,8 @@ class PiggoSpider:
         :param path: 实验室根地址下的相对接口路径
         :param body: JSON 参数对象；空对象仍发送 JSON 正文
         :return: 已校验的业务数据，响应在返回或失败前关闭
+        :raises ValueError: 无法连接实验室 API、鉴权失败或响应结构无效
+        :raises RateLimitExceededException: 远端限流已交由共享冷却处理
         """
         wait_for_site_request(self._rate_site)
         response = RequestUtils(headers=self._headers(), proxies=self._proxy, timeout=self._timeout).post_res(
@@ -232,6 +234,8 @@ class PiggoSpider:
         :param path: 实验室根地址下的相对接口路径
         :param body: JSON 参数对象；空对象仍发送 JSON 正文
         :return: 已校验的业务数据，取消或失败时沿用同一响应释放流程
+        :raises ValueError: 无法连接实验室 API、鉴权失败或响应结构无效
+        :raises RateLimitExceededException: 远端限流已交由共享冷却处理
         """
         await async_wait_for_site_request(self._rate_site)
         response = await AsyncRequestUtils(
@@ -363,6 +367,8 @@ class PiggoSpider:
         读取有界内存缓存；失败目录不缓存，也不回退到旧分类。
 
         :return: 当前 API 地址和凭据对应的可见目录
+        :raises ValueError: 无法连接实验室 API、鉴权失败或目录结构无效
+        :raises RateLimitExceededException: 远端限流已交由共享冷却处理
         """
         catalog = cast(Optional[_Catalog], self._catalog_cache.get(self._cache_key, region=self._catalog_region))
         if catalog is None:
@@ -375,6 +381,8 @@ class PiggoSpider:
         异步获取目录，缓存仅在短临界区访问内存，不阻塞执行网络操作。
 
         :return: 当前 API 地址和凭据对应的可见目录
+        :raises ValueError: 无法连接实验室 API、鉴权失败或目录结构无效
+        :raises RateLimitExceededException: 远端限流已交由共享冷却处理
         """
         catalog = cast(Optional[_Catalog], self._catalog_cache.get(self._cache_key, region=self._catalog_region))
         if catalog is None:

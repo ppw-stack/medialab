@@ -134,38 +134,16 @@ class HddolbySpider:
     def __parse_result(self, results: List[dict[str, Any]]) -> List[dict[str, Any]]:
         """
         解析搜索结果。
+
+        返回字段与接口示例一致（``id`` / ``promotion_time_type`` / ``category`` /
+        ``name`` / ``small_descr`` / ``size`` / ``seeders`` / ``leechers`` /
+        ``times_completed`` / ``added`` / ``hr`` / ``tags`` 等）。
         """
         torrents = []
         if not results:
             return []
 
         for result in results:
-            """
-            {
-                "id": 120202,
-                "promotion_time_type": 0,
-                "promotion_until": "0000-00-00 00:00:00",
-                "category": 402,
-                "medium": 6,
-                "codec": 1,
-                "standard": 2,
-                "team": 10,
-                "audiocodec": 14,
-                "leechers": 0,
-                "seeders": 1,
-                "name": "[DBY] Lost S06 2010 Complete 1080p Netflix WEB-DL AVC DDP5.1-DBTV",
-                "small_descr": "lost ",
-                "times_completed": 0,
-                "size": 33665425886,
-                "added": "2025-02-18 19:47:56",
-                "url": 0,
-                "hr": 0,
-                "tmdb_type": "tv",
-                "tmdb_id": 4607,
-                "imdb_id": null,
-                "tags": "gf"
-            }
-            """
             # 类别
             category_value = result.get('category')
             if category_value in self._music_category:

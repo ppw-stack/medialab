@@ -184,7 +184,8 @@ class SiteUtils:
         """
         判断站点是否已经签到。
 
-        :return True已签到 False未签到
+        :param html_text: 站点页面文本
+        :return: 已签到为 True，未签到为 False
         """
         html = etree.HTML(html_text)
         try:

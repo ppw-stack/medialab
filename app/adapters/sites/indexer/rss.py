@@ -5,7 +5,9 @@
 """
 
 import re
+from collections.abc import Mapping
 from html import unescape
+from types import MappingProxyType
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -14,13 +16,14 @@ from lxml import etree
 from app.adapters.sites.indexer.compat.rss_types import RssLinkRecipe
 from app.adapters.sites.indexer.compat import site_rules
 
-_DEFAULT_PARAMS = {
+_DEFAULT_PARAMS: Mapping[str, Any] = MappingProxyType({
     "inclbookmarked": 0, "itemsmalldescr": 1, "showrows": 50, "search_mode": 1,
-}
+})
 _DEFAULT_XPATH = "//a[@class='faqlink']/@href"
 
 # 只登记相对于通用配方的专站差异，配方构造时复制参数，避免跨请求共享可变状态。
-_SITE_RECIPES: dict[str, dict[str, Any]] = {
+# 用 MappingProxyType 声明只读——导入方不能就地改写配方表造成全局污染。
+_SITE_RECIPES: Mapping[str, Mapping[str, Any]] = MappingProxyType({
     "star-space.net": {
         "url": "p_rss/rss_create.php", "method": "get", "params": {},
         "xpath": "//a[contains(@href, 'rss.php?key=')]/@href",
@@ -53,7 +56,7 @@ _SITE_RECIPES: dict[str, dict[str, Any]] = {
     "hdtime.org": {"params": {**_DEFAULT_PARAMS, "search_mode": 0}},
     "m-team.io": {"params": {"showrows": 50, "inclbookmarked": 0, "itemsmalldescr": 1, "https": 1}},
     "u2.dmhy.org": {"params": {**_DEFAULT_PARAMS, "inclautochecked": 1, "trackerssl": 1}},
-}
+})
 _EXPIRED_MESSAGES = frozenset({
     "RSS 链接已过期, 您需要获得一个新的!",
     "RSS Link has expired, You need to get a new one!",

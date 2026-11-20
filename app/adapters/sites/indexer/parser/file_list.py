@@ -50,7 +50,7 @@ class FileListSiteUserInfo(SiteParserBase):
 
     def _parse_user_traffic_info(self, html_text: str) -> None:
         """
-        上传/下载/分享率 [做种数/魔力值]。
+        流量信息在基础资料入口一次性解析，本入口不追加操作。
 
         :param html_text: 当前页面或 API 响应文本
         """

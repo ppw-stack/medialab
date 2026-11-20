@@ -30,12 +30,13 @@ class DiscuzUserInfo(SiteParserBase):
         try:
             user_info = html.xpath('//a[contains(@href, "&uid=")]')
             if user_info:
-                user_id_match = re.search(r"&uid=(\d+)", user_info[0].attrib['href'])
+                href = user_info[0].attrib.get('href', '')
+                user_id_match = re.search(r"&uid=(\d+)", href)
                 if user_id_match and user_id_match.group().strip():
                     self.userid = user_id_match.group(1)
                     self._torrent_seeding_page = "forum.php?&mod=torrents&cat_5up=on"
-                    self._user_detail_page = user_info[0].attrib['href']
-                    self.username = user_info[0].text.strip()
+                    self._user_detail_page = href
+                    self.username = (user_info[0].text or "").strip()
         finally:
             if html is not None:
                 del html
@@ -155,7 +156,11 @@ class DiscuzUserInfo(SiteParserBase):
 
     def _parse_message_unread_links(self, html_text: str, msg_links: list[str]) -> Optional[str]:
         """
-        收集未读消息链接，返回仍需读取的下一页。
+        Discuz 没有兼容的未读消息列表解析。
+
+        :param html_text: 保留基类签名，不读取页面
+        :param msg_links: 不添加 PHP 消息地址
+        :return: 没有消息后续页面
         """
         return None
 

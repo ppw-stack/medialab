@@ -36,7 +36,7 @@ def test_nexus_php_homepage_traffic_fixture() -> None:
 
 
 def test_nexus_php_detail_page_overrides_traffic() -> None:
-    """用户详情页的流量文本能覆盖首页值（盒子/修真院等变种）。"""
+    """用户详情页的流量文本能覆盖首页值；无法识别时只断言不抛异常。"""
     detail = (_FIXTURES / "depthstudio_userdetails.html").read_text(encoding="utf-8")
     parser = _parser()
     parser._parse_user_traffic_info(detail)

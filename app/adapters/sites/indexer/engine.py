@@ -387,7 +387,14 @@ class IndexerEngine:
         keyword: str | None = None,
         page: int = 0,
     ) -> list[dict[str, Any]]:
-        """同步字幕搜索（无字幕配置的站点返回空列表）。"""
+        """同步字幕搜索（无字幕配置的站点返回空列表）。
+
+        :param site: 站点配置
+        :param keyword: 搜索关键词
+        :param page: 从零开始的页码
+        :return: 字幕条目列表
+        :raises SiteFetchError: 站点请求失败或响应无法解析
+        """
         request = self._build_request(site, keyword, None, None, page, "subtitles")
         if request is None:
             return []

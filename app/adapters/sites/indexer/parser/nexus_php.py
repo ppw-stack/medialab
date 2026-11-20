@@ -114,6 +114,9 @@ class NexusPhpSiteUserInfo(SiteParserBase):
     def _parse_user_base_info(self, html_text: SitePage) -> None:
         """
         解析用户基本信息。
+
+        :param html_text: 站点页面或接口返回的文本
+        :raises TypeError: 传入 dict 而不是文本
         """
         if isinstance(html_text, dict):
             raise TypeError("expected string or bytes-like object, got 'dict'")
@@ -218,8 +221,10 @@ class NexusPhpSiteUserInfo(SiteParserBase):
                                         flags=re.S)
                 if bonus_match and bonus_match.group(1).strip():
                     self.bonus = text_tools.parse_float(bonus_match.group(1).strip('"'))
-            except Exception as err:
-                logger.error(f"{self._site_name} 解析魔力值出错, 错误信息: {str(err)}")
+            except (AttributeError, TypeError, ValueError):
+                logger.exception(
+                    "解析魔力值出错", extra={"site": self._site_name}
+                )
         finally:
             if html is not None:
                 del html

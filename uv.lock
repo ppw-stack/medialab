@@ -1443,6 +1443,7 @@ dependencies = [
     { name = "greenlet" },
     { name = "httpx" },
     { name = "jinja2" },
+    { name = "lxml" },
     { name = "parsel" },
     { name = "pillow" },
     { name = "prometheus-client" },
@@ -1492,7 +1493,8 @@ requires-dist = [
     { name = "guangyaclient", marker = "extra == 'guangya'", specifier = ">=0.0.2" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "httpx", extras = ["http2"], marker = "extra == 'guangya'", specifier = ">=0.27" },
-    { name = "jinja2", specifier = ">=3.1" },
+    { name = "jinja2", specifier = ">=3.1,<4" },
+    { name = "lxml", specifier = ">=5.0,<7" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13" },
     { name = "p115cipher", marker = "extra == 'p115'", specifier = ">=0.0.5.4" },
     { name = "p115client", marker = "extra == 'p115'", specifier = ">=0.0.9.4.6.1" },
@@ -1500,19 +1502,19 @@ requires-dist = [
     { name = "parsel", specifier = ">=1.9" },
     { name = "pillow", specifier = ">=11.0" },
     { name = "prometheus-client", specifier = ">=0.21" },
-    { name = "pycryptodome", specifier = ">=3.20" },
+    { name = "pycryptodome", specifier = ">=3.20,<5" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },
-    { name = "pyquery", specifier = ">=2.0" },
+    { name = "pyquery", specifier = ">=2.0,<3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0" },
-    { name = "python-dateutil", specifier = ">=2.9" },
+    { name = "python-dateutil", specifier = ">=2.9,<5" },
     { name = "python-multipart", specifier = ">=0.0.12" },
     { name = "qrcode", extras = ["pil"], marker = "extra == 'guangya'", specifier = ">=7.4" },
     { name = "qrcode", extras = ["pil"], marker = "extra == 'p115'", specifier = ">=7.4" },
     { name = "respx", marker = "extra == 'dev'", specifier = ">=0.21" },
-    { name = "ruamel-yaml", marker = "extra == 'dev'", specifier = ">=0.18" },
+    { name = "ruamel-yaml", marker = "extra == 'dev'", specifier = ">=0.18,<1" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
@@ -2835,11 +2837,11 @@ wheels = [
 
 [[package]]
 name = "soupsieve"
-version = "3.0.4"
+version = "4.1.3"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/19/63/0b6bae54546aed98d72f12d09df57b19a287f01c84d22047fa2e23772ab9/soupsieve-3.0.4.tar.gz", hash = "sha256:924fab84ae21604c19e175e1f39815eb6fa83ba23836e09e9de180925e5bc4c0", size = 119017, upload-time = "2026-10-22T00:45:26.362Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/82/77/d59ca6aa338bdd8d880234d15b7c466cb176e44502899a9df81ba2e13cd0/soupsieve-4.1.3.tar.gz", hash = "sha256:13f70186c8f40bf8d0ff7bbab09a18fb149600b465269207b5e5b588f55fda08", size = 181564, upload-time = "2026-11-20T12:58:27.613Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/07/66/473f7ca0be0b06e38ee8c85ee2db184e3981bd769fac2e7c19c8a8865211/soupsieve-3.0.4-py3-none-any.whl", hash = "sha256:8412826614f9c632227067d0985aeb9f584bd15efc852955430e097a9fe7afbf", size = 42458, upload-time = "2026-10-22T00:45:24.843Z" },
+    { url = "https://files.pythonhosted.org/packages/f6/f7/be207468cac6ad79389f36cf1fce4f2836960df91659979ec486c727bb2e/soupsieve-4.1.3-py3-none-any.whl", hash = "sha256:7a390d1a57d1ab7bb228531e9b8a750a5ebf87db774e0ef6faeeac057d22a5bf", size = 59792, upload-time = "2026-11-20T12:58:26.459Z" },
 ]
 
 [[package]]

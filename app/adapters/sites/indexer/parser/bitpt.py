@@ -149,6 +149,10 @@ class BitptSiteUserInfo(SiteParserBase):
     def _parse_user_torrent_seeding_info(self, html_text: str, multi_page: bool = False) -> Optional[str]:
         """
         该站点在其他解析入口处理此数据，本入口不追加操作。
+
+        :param html_text: 做种列表页面文本
+        :param multi_page: 保留基类调用参数，本实现不继续翻页
+        :return: 恒为 None（没有下一页）
         """
         pass
 
@@ -161,7 +165,7 @@ class BitptSiteUserInfo(SiteParserBase):
             soup = BeautifulSoup(self._index_html, 'html.parser')
             user_link = soup.find('a', href=re.compile(r'userdetails\.php\?uid=\d+'))
             if user_link:
-                uid_match = re.search(r'uid=(\d+)', user_link['href'])
+                uid_match = re.search(r'uid=(\d+)', user_link.get('href', ''))
                 if uid_match:
                     self.userid = uid_match.group(1)
 

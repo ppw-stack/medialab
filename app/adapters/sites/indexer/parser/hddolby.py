@@ -89,6 +89,10 @@ class HDDolbySiteUserInfo(SiteParserBase):
     def _parse_user_base_info(self, html_text: SitePage) -> None:
         """
         解析用户基本信息，这里把_parse_user_traffic_info和_parse_user_detail_info合并到这里。
+
+        :param html_text: 用户资料接口的 JSON 文本
+        :raises TypeError: 传入 dict 而不是 JSON 文本
+        :raises json.JSONDecodeError: 响应不是合法 JSON
         """
         if not html_text:
             return None
@@ -96,23 +100,10 @@ class HDDolbySiteUserInfo(SiteParserBase):
             raise TypeError("the JSON object must be str, bytes or bytearray, not dict")
         detail = json.loads(html_text)
         if not detail or detail.get("status") != 0:
-            return
+            return None
         user_infos = detail.get("data")
-        """
-        {
-            "id": "1",
-            "added": "2019-03-03 15:30:36",
-            "last_access": "2025-02-18 19:48:04",
-            "class": "22",
-            "uploaded": "852071699418375",
-            "downloaded": "1885536536176",
-            "seedbonus": "99774808.0",
-            "sebonus": "3739023.7",
-            "unread_messages": "0",
-        }
-        """
         if not user_infos:
-            return
+            return None
         user_info = user_infos[0]
         self.userid = user_info.get("id")
         self.username = user_info.get("username")

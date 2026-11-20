@@ -8,6 +8,8 @@ import re
 from typing import Any, List, Optional, Tuple
 from urllib.parse import urlparse
 
+import httpx
+
 from app.adapters.sites.indexer.http import AsyncRequestUtils, RequestUtils
 from app.adapters.sites.indexer.compat.configuration import get_configured_system_config
 from app.adapters.sites.indexer.compat.observation import report_site_search_page
@@ -683,8 +685,10 @@ class MTorrentSpider:
             for subtitle_id in self.__subtitle_ids(torrent_id) or []:
                 if link := self.__subtitle_genlink(subtitle_id):
                     results.append(link)
-        except Exception as e:
-            logger.error(f"{self._name} 获取字幕失败：{e}")
+        except (httpx.HTTPError, KeyError, TypeError, ValueError):
+            logger.exception(
+                "获取字幕失败", extra={"site": self._name}
+            )
         return results
 
     def __subtitle_ids(self, torrent_id: str) -> Optional[List[str]]:

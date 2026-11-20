@@ -8,7 +8,6 @@ from typing import Any, List, Optional, Tuple
 from app.adapters.sites.indexer.http import AsyncRequestUtils, RequestUtils
 from app.adapters.sites.indexer.compat.configuration import get_configured_system_config
 from app.adapters.sites.indexer.compat import site_rules
-from app.adapters.sites.indexer.compat import temporal as time_tools
 from app.adapters.sites.indexer.compat.log import logger
 from app.adapters.sites.indexer.compat.settings import get_runtime_setting
 from app.adapters.sites.indexer.compat.types import MediaType
@@ -145,7 +144,7 @@ class HaiDanSpider:
                 'title': item.get('name'),
                 'description': item.get('small_descr'),
                 'enclosure': item.get('url'),
-                'pubdate': time_tools.format_timestamp(item.get('added')),
+                'pubdate': item.get('added'),
                 'size': int(item.get('size') or '0'),
                 'seeders': int(item.get('seeders') or '0'),
                 'peers': int(item.get("leechers") or '0'),
@@ -164,7 +163,15 @@ class HaiDanSpider:
         统一判定搜索响应状态、业务代码并投影 HaiDan 结果。
         """
         if res and res.status_code == 200:
-            result = res.json()
+            try:
+                result = res.json()
+            except (TypeError, ValueError):
+                # 站点在 Cookie 失效 / 限流时仍回 200，但 body 不是 JSON。
+                logger.warning(f"{self._name} 搜索响应解析失败：{self._domain}")
+                return True, []
+            if not isinstance(result, dict):
+                logger.warning(f"{self._name} 搜索响应结构无效：{self._domain}")
+                return True, []
             if result.get('code') != 0:
                 logger.warn(f"{self._name} 搜索失败：{result.get('msg')}")
                 return True, []

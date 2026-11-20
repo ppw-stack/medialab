@@ -76,7 +76,7 @@ class HDAreaSiteUserInfo(SiteParserBase):
             self.err_msg = str(err).replace(apikey, "[已隐藏]") if apikey else str(err)
             if torrent_rules.rate_limit_cooldown(self.err_msg) is not None:
                 defer_site_request(rate_site, self.err_msg)
-            logger.warning(f"{self._site_name} 用户数据刷新失败：{self.err_msg}")
+            logger.warning("%s 用户数据刷新失败：%s", self._site_name, self.err_msg)
         finally:
             if response is not None:
                 response.close()

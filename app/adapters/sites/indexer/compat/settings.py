@@ -29,6 +29,11 @@ def get_runtime_setting(name: str, default: Any = None) -> Any:
     settings = get_settings()
     if name == "USER_AGENT":
         return (settings.default_user_agent or "").strip() or _FALLBACK_UA
+    if name == "NORMAL_USER_AGENT":
+        # MoviePilot 的「浏览器标识」与「默认标识」是两个设置；本项目只有一个
+        # UA 配置，未映射会走到 default=None，调用方 str(None) 会得到字面量
+        # "None" 并被站点 WAF 拒绝。
+        return _FALLBACK_UA
     if name == "PROXY":
         proxy = (settings.proxy_url or "").strip()
         return {"http": proxy, "https": proxy} if proxy else None

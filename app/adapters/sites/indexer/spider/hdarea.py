@@ -147,8 +147,13 @@ class HDAreaSpider:
         self._use_proxy = bool(indexer.get("proxy"))
         self._timeout = indexer.get("timeout") or 15
         category = indexer.get("category") or {}
+        # 规则包里的分类项可能缺 ``id``——脏规则只降级该分类，不炸掉整个适配器。
         self._categories = {
-            media_type: [str(item["id"]) for item in category.get(key) or []]
+            media_type: [
+                str(item.get("id"))
+                for item in category.get(key) or []
+                if isinstance(item, dict) and item.get("id") is not None
+            ]
             for media_type, key in ((MediaType.MOVIE, "movie"), (MediaType.TV, "tv"), (MediaType.MUSIC, "music"))
         }
         self._rate_site = {key: indexer.get(key) for key in
@@ -201,6 +206,7 @@ class HDAreaSpider:
 
         :param torrent_id: 正整数站内种子 ID
         :return: 下载时才调用 genDlToken 的配方
+        :raises ValueError: 种子 ID 或 API Key 缺失
         """
         return download_enclosure(
             self._api_url, self._site_url, torrent_id, self._apikey, self._use_proxy, self._ua,

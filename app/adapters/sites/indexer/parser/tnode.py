@@ -80,7 +80,6 @@ class TNodeSiteUserInfo(SiteParserBase):
 
         self.message_unread = user_info.get("unreadAdmin", 0) + user_info.get("unreadInbox", 0) + user_info.get(
             "unreadSystem", 0)
-        pass
 
     def _parse_user_torrent_seeding_info(self, html_text: str, multi_page: Optional[bool] = False) -> Optional[str]:
         """

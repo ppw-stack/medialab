@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any
 from urllib.parse import quote, urljoin, urlsplit
@@ -39,6 +40,7 @@ from app.adapters.sites.indexer.rules import SiteRules, load_site_rules
 from app.adapters.sites.user_data import SiteUserSnapshot
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.core.timeutils import format_bj
 
 logger = get_logger(__name__)
 
@@ -353,8 +355,31 @@ def _row_item_id(row: dict[str, Any]) -> str | None:
     return None
 
 
+def _published_at(value: Any) -> str | None:
+    """把协议侧发布时间转成 DB 记录时刻（北京时间字符串）。
+
+    协议侧的值有两种形态：unix 秒（整数，与 ``time.time()`` 同口径）或站点
+    自带的时间文本。**只有在这一层（落库边界）才转成北京时间字符串**——
+    协议层保持原值，避免两套时间口径在中间层混用。
+
+    :param value: 协议侧发布时间
+    :return: 北京时间字符串；无法解释时返回原文本或 None
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return format_bj(datetime.fromtimestamp(float(value), UTC))
+        except (OSError, OverflowError, ValueError):
+            return None
+    text = parse_abs_datetime(str(value))
+    if text:
+        return text
+    return str(value)
+
+
 def _to_feed_item(row: dict[str, Any], rule: dict[str, Any]) -> FeedItem:
-    published = parse_abs_datetime(str(row.get("pubdate") or "")) or row.get("pubdate")
+    published = _published_at(row.get("pubdate"))
     factor = row.get("downloadvolumefactor")
     return FeedItem(
         title=str(row.get("title") or ""),
@@ -382,7 +407,7 @@ def _size_bytes(value: Any) -> int:
 
 def _to_subtitle_item(row: dict[str, Any]) -> SubtitleItem:
     """规则解析结果 → 字幕契约对象。"""
-    published = parse_abs_datetime(str(row.get("pubdate") or "")) or row.get("pubdate")
+    published = _published_at(row.get("pubdate"))
     return SubtitleItem(
         title=str(row.get("title") or ""),
         language=str(row["language"]) if row.get("language") else None,

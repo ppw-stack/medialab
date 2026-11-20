@@ -216,13 +216,23 @@ class RousiSiteUserInfo(SiteParserBase):
                 url=urljoin(self._base_url, "api/messages"),
                 params=params
             )
-            if not res or res.status_code != 200 or res.json().get("code", -1) != 0:
-                logger.warn(f"{self._site_name} 站点解析消息失败，状态码: {res.status_code if res else '无响应'}")
+            payload = None
+            if res is not None and res.status_code == 200:
+                try:
+                    payload = res.json()
+                except (TypeError, ValueError):
+                    payload = None
+            if not isinstance(payload, dict) or payload.get("code", -1) != 0:
+                logger.warning(
+                    "%s 站点解析消息失败，状态码: %s",
+                    self._site_name,
+                    res.status_code if res else "无响应",
+                )
                 return {
                     "messages": [],
                     "total_pages": 0
                 }
-            data = res.json().get("data")
+            data = payload.get("data")
             return data if isinstance(data, dict) else {"messages": [], "total_pages": 0}
 
         # 分页获取所有未读消息
@@ -241,7 +251,7 @@ class RousiSiteUserInfo(SiteParserBase):
             head = messsage.get("title")
             date = time_tools.normalize_datetime(messsage.get("created_at"))
             content = messsage.get("content")
-            logger.debug(f"{self._site_name} 标题 {head} 时间 {date} 内容 {content}")
+            logger.debug("%s 标题 %s 时间 %s 内容 %s", self._site_name, head, date, content)
             self.message_unread_contents.append((head, date, content))
 
         # 更新消息为已读

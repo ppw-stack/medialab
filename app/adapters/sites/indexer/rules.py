@@ -42,7 +42,8 @@ class SiteRules:
                 try:
                     candidate = item if "//" in item else f"https://{item}"
                     item_host = (urlsplit(candidate).hostname or "").lower()
-                except Exception:
+                except ValueError:
+                    # urlsplit 对非法 IPv6 之类会抛 ValueError，脏规则只跳过该条。
                     continue
                 if not item_host:
                     continue
@@ -62,8 +63,21 @@ class SiteRules:
 
 @lru_cache(maxsize=1)
 def load_site_rules() -> SiteRules:
-    """加载规则包（进程内缓存）。"""
-    payload = json.loads(_RULES_PATH.read_text(encoding="utf-8"))
+    """加载规则包（进程内缓存）。
+
+    :return: 已解析的站点规则集
+    :raises RuntimeError: 规则包文件缺失、不可读或 JSON 内容损坏
+    """
+    try:
+        raw = _RULES_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"读取站点规则包失败：{_RULES_PATH}：{exc}") from exc
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"站点规则包 JSON 解析失败：{_RULES_PATH}：{exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"站点规则包结构无效：{_RULES_PATH}：顶层不是对象")
     return SiteRules(payload)
 
 

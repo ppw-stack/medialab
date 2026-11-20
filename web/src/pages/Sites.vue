@@ -251,7 +251,6 @@ function factorLabel(v: number | null): string {
   return `×${v}`
 }
 
-
 async function onFeedTest(s: Site) {
   feedTestId.value = s.id
   feedTestResult.value = null
@@ -439,7 +438,6 @@ const columns = [
               </template>
             </a-table>
           </template>
-
         </template>
       </a-spin>
     </a-modal>

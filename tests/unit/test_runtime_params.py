@@ -127,9 +127,8 @@ def test_specs_for_job_keeps_enum_options() -> None:
         if spec.key == "monitor_delete_expired":
             assert spec.options is not None
             assert spec.note
-    for spec in specs_for_job("push_free_torrents"):
-        if spec.key == "push_within_bucket_order":
-            assert spec.options is not None
+    # 注：``push_within_bucket_order`` 已随「时魔」功能删除（2026-11-20），
+    # 推送作业不再有枚举型运行参数。
 
 
 # ------------------------------------------------------- 校验契约

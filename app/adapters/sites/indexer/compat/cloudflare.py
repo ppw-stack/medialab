@@ -21,6 +21,9 @@ CHALLENGE_SELECTORS = (
     "div.vc div.text-box h2",
 )
 
+#: 标题的小写集合——模块级建一次，不要每次调用都重建集合。
+_CHALLENGE_TITLES_LOWER = frozenset(title.lower() for title in CHALLENGE_TITLES)
+
 
 def under_challenge(html_text: str) -> bool:
     """页面标题或选择器命中已知挑战页时返回 True。"""
@@ -28,6 +31,6 @@ def under_challenge(html_text: str) -> bool:
         return False
     doc = Selector(text=html_text, type="html")
     title = (doc.css("title::text").get() or "").strip()
-    if title.lower() in {t.lower() for t in CHALLENGE_TITLES}:
+    if title.lower() in _CHALLENGE_TITLES_LOWER:
         return True
     return any(doc.css(sel) for sel in CHALLENGE_SELECTORS)

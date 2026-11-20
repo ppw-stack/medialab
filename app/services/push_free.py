@@ -12,30 +12,12 @@ freeleech_timed}``，且限时种 ``free_end_at - now > push_min_remaining_hours
 ``DownloaderAdapter.add_torrent(torrent_bytes=bytes)`` →
 更新 ``torrent_index.push_status = pushed``。
 
-选种优先级（FR-1.6 增补）：**时魔未封顶的站优先**。
+排序：按 ``torrent_index.last_seen_at DESC``（新条目优先）。
 
-NexusPHP 的魔力公式是 ``每小时魔力 = B0 × (1 − e^(−A/B0))``，A = 自己的
-做种 A 值总和。A 越大越逼近上限 B0，**多推一个种子的边际收益越小**；
-已封顶（时魔进度 ≥ 100%）的站再推也不涨时魔。
-
-所以推送名额（``push_max_per_run``）应优先给「离上限还远」的站：
-
-=====  ==================  ==========================================
-档位   含义                排序
-=====  ==================  ==========================================
-0     明确未封顶            最优先
-1     无上限信号（NULL）     次之
-2     已封顶                最后
-=====  ==================  ==========================================
-
-排序：
-
-- ``0``（默认）——按各站时魔进度升序（同进度退化为 ``last_seen_at DESC``）
-- ``1`` —— 整个档内随机打乱（含站点顺序）
-
-档内随机在 **Python 侧**做（不用 SQL ``RANDOM()``）——SQL 的 ``RANDOM()``
-既不可 seed 也不可测；Python 侧用 ``random.Random``（生产不传 seed =
-真随机，测试传 seed = 确定性）。
+注：曾按「时魔封顶档」分档排序（未封顶 / 无信号 / 已封顶），档内再按运行时
+参数 ``push_within_bucket_order`` 选择「时魔进度升序」或「随机打乱」。该特性
+随「时魔」功能整体删除（2026-11-20），对应的运行时参数、档位常量与
+``SiteUserData`` 外连接一并移除——**当前只剩上面这一条排序口径**。
 """
 
 from __future__ import annotations
@@ -374,7 +356,7 @@ class PushFreeService:
     async def _select_candidates(
         self, session: AsyncSession, downloader_id: int
     ) -> list[_Candidate]:
-        """选候选免费种：未推过 + 剩余时间满足阈值 + **按时魔封顶档排序**。
+        """选候选免费种：未推过 + 剩余时间满足阈值 + **按新条目优先排序**。
 
         排序：按 ``last_seen_at DESC``（新条目优先）。
 

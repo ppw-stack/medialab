@@ -110,7 +110,7 @@ class RequestUtils:
             self._client.cookies.update(cookie_parse(cookies))
         try:
             response = self._client.request(method.upper(), url, **kwargs)
-            response.raise_for_status() if False else None  # 保留 4xx/5xx 给调用方判断
+            # 不调用 raise_for_status：4xx/5xx 要留给调用方判断。
             return response
         except httpx.HTTPError:
             return None
@@ -195,7 +195,7 @@ class RequestUtils:
             return ""
         try:
             return _decode_bytes(response.content, response.encoding)
-        except Exception:
+        except (LookupError, UnicodeDecodeError, ValueError):
             return ""
 
     @staticmethod

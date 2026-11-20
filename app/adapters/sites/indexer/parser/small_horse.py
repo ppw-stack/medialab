@@ -129,12 +129,6 @@ class SmallHorseSiteUserInfo(SiteParserBase):
                 del html
         return next_page
 
-    def _parse_message_unread_links(self, html_text: str, msg_links: list[str]) -> Optional[str]:
-        """
-        收集未读消息链接，返回仍需读取的下一页。
-        """
-        return None
-
     def _parse_message_content(self, html_text: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
         """
         解析消息标题、日期和正文；无独立消息页时返回空结果。

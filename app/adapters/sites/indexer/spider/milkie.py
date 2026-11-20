@@ -10,6 +10,7 @@ from app.adapters.sites.indexer.compat import temporal as time_tools
 from app.adapters.sites.indexer.compat.log import logger
 from app.adapters.sites.indexer.compat.settings import get_runtime_setting
 from app.adapters.sites.indexer.compat.types import MediaType
+from app.core.timeutils import BJ_TZ
 
 
 class MilkieSpider:
@@ -41,17 +42,23 @@ class MilkieSpider:
     def __init__(self, indexer: dict[str, Any]):
         """
         使用站点配置初始化 Milkie 请求上下文。
+
+        :param indexer: 站点索引配置
+        :raises ValueError: 配置缺少必填的 ``domain``
         """
-        if indexer:
-            self._indexerid = indexer.get('id')
-            self._domain = indexer.get('domain')
-            self._searchurl = self._searchurl % self._domain
-            self._name = indexer.get('name')
-            if indexer.get('proxy'):
-                self._proxy = get_runtime_setting('PROXY')
-            self._apikey = indexer.get('apikey')
-            self._ua = indexer.get('ua')
-            self._timeout = indexer.get('timeout') or 15
+        indexer = indexer or {}
+        domain = str(indexer.get("domain") or "").strip()
+        if not domain:
+            raise ValueError("Milkie 站点配置缺少必填字段 domain")
+        self._indexerid = indexer.get('id')
+        self._domain = domain
+        self._searchurl = self._searchurl % self._domain
+        self._name = indexer.get('name')
+        if indexer.get('proxy'):
+            self._proxy = get_runtime_setting('PROXY')
+        self._apikey = indexer.get('apikey')
+        self._ua = indexer.get('ua')
+        self._timeout = indexer.get('timeout') or 15
 
     @classmethod
     def get_search_page_size(cls, keyword: Optional[str] = None) -> Optional[int]:
@@ -108,14 +115,26 @@ class MilkieSpider:
                 params["categories"] = self._music_category
         return params
 
-    def __parse_created_at(self, created_at: str) -> str:
+    def __parse_created_at(self, created_at: str) -> Optional[int]:
         """
-        将站点 ISO8601 发布时间转换为本地日期时间文本。
+        把站点 ISO8601 发布时间换算成 unix 秒（协议侧时刻）。
+
+        协议层不产出时间字符串——落库边界（``generic._published_at``）才转成
+        北京时间字符串，避免两套时间口径在中间层混用。站点时间没有时区标记
+        时按北京时间解释（与站点自身口径一致）。
+
+        :param created_at: 站点返回的发布时间文本
+        :return: unix 秒；无法解析时为 None
         """
         parsed = time_tools.parse_datetime(created_at)
         if not parsed:
-            return created_at or ""
-        return parsed.strftime("%Y-%m-%d %H:%M:%S")
+            return None
+        try:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=BJ_TZ)
+            return int(parsed.timestamp())
+        except (OSError, OverflowError, ValueError):
+            return None
 
     def __parse_result(self, results: List[dict[str, Any]]) -> List[dict[str, Any]]:
         """
@@ -157,7 +176,12 @@ class MilkieSpider:
         统一判定搜索响应状态并投影 Milkie 种子结果。
         """
         if res and res.status_code == 200:
-            results = res.json().get("torrents") or []
+            try:
+                results = res.json().get("torrents") or []
+            except (TypeError, ValueError):
+                # 站点在 Cookie 失效 / 限流时仍回 200，但 body 不是 JSON。
+                logger.warning(f"{self._name} 搜索响应解析失败：{self._domain}")
+                return True, []
             return False, self.__parse_result(results)
         if res is not None:
             if res.status_code in (401, 403):

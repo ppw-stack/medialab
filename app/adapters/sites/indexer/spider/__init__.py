@@ -55,7 +55,7 @@ def _describe_unusable_response(response: Any) -> str:
     try:
         body = str(response.text or "")
     # 响应正文的解码错误可能来自不同客户端，此处统一回退到状态码。
-    except Exception:  # noqa: BLE001
+    except (LookupError, UnicodeDecodeError, ValueError):
         body = ""
     title = _HTML_TITLE_PATTERN.search(body[:_FAILURE_TITLE_SCAN_CHARS])
     source = title.group(1) if title else body[:_FAILURE_TITLE_SCAN_CHARS]
@@ -455,7 +455,7 @@ class SiteSpider:
 
         searchurl = self.__get_search_url()
 
-        logger.debug(f"开始请求：{mask_url_credentials(searchurl)}")
+        logger.debug("开始请求：%s", mask_url_credentials(searchurl))
 
         ret = RequestUtils(
             ua=self.ua,
@@ -482,7 +482,7 @@ class SiteSpider:
 
         searchurl = self.__get_search_url()
 
-        logger.debug(f"开始异步请求：{mask_url_credentials(searchurl)}")
+        logger.debug("开始异步请求：%s", mask_url_credentials(searchurl))
 
         ret = await AsyncRequestUtils(
             ua=self.ua,
@@ -1151,8 +1151,10 @@ class SiteSpider:
                     query_params = parse_qs(parsed_url.query)
                     param_value = query_params.get(str(args))
                     filtered_text = param_value[0] if param_value else ''
-            except Exception as err:
-                logger.debug(f'过滤器 {method_name} 处理失败：{str(err)} - {traceback.format_exc()}')
+            except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+                logger.debug(
+                    '过滤器 %s 处理失败：%s', method_name, traceback.format_exc()
+                )
         return filtered_text.strip() if isinstance(filtered_text, str) else str(filtered_text)
 
     @staticmethod

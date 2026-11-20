@@ -10,7 +10,7 @@ from app.adapters.sites.indexer.http import AsyncRequestUtils, RequestUtils
 from app.adapters.sites.indexer.compat.throttle import async_wait_for_site_request, wait_for_site_request
 from app.adapters.sites.indexer.compat import temporal as time_tools
 from app.adapters.sites.indexer.compat.log import logger
-from app.adapters.sites.indexer.compat.settings import get_runtime_setting
+from app.adapters.sites.indexer.compat.settings import _FALLBACK_UA, get_runtime_setting
 from app.adapters.sites.indexer.compat.types import MediaType
 
 # FluxTorrent 兼容层的只读接口前缀。
@@ -204,7 +204,8 @@ class FluxTorrentSpider:
         :return: 本次站点请求使用的 User-Agent
         """
         if not ua or ua == get_runtime_setting("USER_AGENT"):
-            return str(get_runtime_setting("NORMAL_USER_AGENT"))
+            # str(None) 会得到字面量 "None" 并被 WAF 拒绝，必须再兜一层。
+            return str(get_runtime_setting("NORMAL_USER_AGENT") or _FALLBACK_UA)
         return ua
 
     @classmethod
@@ -252,7 +253,7 @@ class FluxTorrentSpider:
         status_code = getattr(response, "status_code", 0)
         try:
             body = response.json()
-        except Exception:
+        except (TypeError, ValueError):
             logger.warning(f"{self._name} {operation}失败：响应不是 JSON（状态码 {status_code}）")
             return None
         if not isinstance(body, dict):

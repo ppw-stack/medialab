@@ -11,7 +11,7 @@ from typing import Any, Optional, Union
 
 try:  # pragma: no cover - 环境差异
     from dateutil import parser as _date_parser
-except Exception:  # pragma: no cover
+except ImportError:  # pragma: no cover
     _date_parser = None
 
 #: 站点常见的绝对时间格式

@@ -78,7 +78,11 @@ class TNodeSpider:
                 return False, "无法打开网站！"
             if response.status_code != 200:
                 return False, f"错误：{response.status_code} {response.reason}"
-            payload = response.json()
+            payload = None
+            try:
+                payload = response.json()
+            except (TypeError, ValueError):
+                payload = None
             if isinstance(payload, dict) and payload.get("data"):
                 return True, "连接成功"
             return False, "Cookie已失效"
@@ -188,7 +192,12 @@ class TNodeSpider:
         统一判定搜索响应状态并投影 TNode 种子结果。
         """
         if res and res.status_code == 200:
-            results = res.json().get('data', {}).get("torrents") or []
+            try:
+                results = res.json().get('data', {}).get("torrents") or []
+            except (TypeError, ValueError):
+                # 站点在 Cookie 失效 / 限流时仍回 200，但 body 不是 JSON。
+                logger.warning(f"{self._name} 搜索响应解析失败：{self._domain}")
+                return True, []
             return False, self.__parse_result(results)
         if res is not None:
             logger.warn(f"{self._name} 搜索失败，错误码：{res.status_code}")

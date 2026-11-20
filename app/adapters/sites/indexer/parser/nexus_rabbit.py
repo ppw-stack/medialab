@@ -78,8 +78,8 @@ class NexusRabbitSiteUserInfo(SiteParserBase):
 
         try:
             torrents = json.loads(html_text).get("data", [])
-        except Exception as e:
-            logger.error(f"解析做种信息失败: {str(e)}")
+        except (AttributeError, json.JSONDecodeError, TypeError, ValueError):
+            logger.exception("解析做种信息失败", extra={"site": self._site_name})
             return None
 
         seeding_size = 0
@@ -104,8 +104,8 @@ class NexusRabbitSiteUserInfo(SiteParserBase):
         unread_ids = []
         try:
             messages = json.loads(html_text).get("data", [])
-        except Exception as e:
-            logger.error(f"解析未读消息失败: {e}")
+        except (AttributeError, json.JSONDecodeError, TypeError, ValueError):
+            logger.exception("解析未读消息失败", extra={"site": self._site_name})
             return None
         for msg in messages:
             msg_id, msg_unread = msg.get("id"), msg.get("unread")

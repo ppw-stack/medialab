@@ -116,6 +116,22 @@ _ALTER_STATEMENTS: tuple[tuple[str, str], ...] = (
         "ON site_user_data(site_id, last_seen_at)",
     ),
     # 时魔字段已随「时魔」功能删除（2026-11-20）：旧库删列，新库无列即跳过。
+    #
+    # **锁表评估**（2026-11-20 加列/删列迁移必写）：SQLite 的
+    # ``ALTER TABLE ... DROP COLUMN`` 会**重写整表**并在执行期间持排他锁——
+    # 但 ``site_user_data`` 是**每站一行的当前快照**表（``UNIQUE site_id``），
+    # 行数上限 = 站点数（百量级），重写耗时**毫秒级**；且本批迁移跑在
+    # **lifespan 启动期**——调度器未起、API 未对外服务（应用单实例，见
+    # ``app/services/instance_lease.py``），**没有并发写者**，写锁窗口
+    # 不会阻塞任何请求。**停写窗口 ≈ 0，无需停机**。
+    #
+    # **回滚路径**：删列不可逆，回滚到删列之前的镜像前**必须**先把这四列
+    # 加回来（``app/db/migrations.py:readd_site_user_data_hourly_bonus_columns``，
+    # 或跑 ``scripts/rollback_site_adapter_migration.py``），否则旧镜像的
+    # ORM 读写这四列会直接 ``OperationalError: no such column``。加列是
+    # 纯元数据操作（毫秒级、不回填）。本批 ``drop_column`` 的失败被
+    # ``_run_alter`` 按「老库可能没这列」降级为 debug——SQLite < 3.35
+    # 不支持 DROP COLUMN 时**列会留着**，对旧代码同样无害。
     ("drop_column", "ALTER TABLE site_user_data DROP COLUMN hourly_bonus"),
     ("drop_column", "ALTER TABLE site_user_data DROP COLUMN hourly_bonus_unit"),
     ("drop_column", "ALTER TABLE site_user_data DROP COLUMN hourly_bonus_capped"),

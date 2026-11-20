@@ -80,7 +80,10 @@ class IptSiteUserInfo(SiteParserBase):
 
     def _parse_user_torrent_seeding_info(self, html_text: str, multi_page: bool = False) -> None:
         """
-        读取做种页面数据并返回后续分页入口。
+        读取做种页面数据并累加做种数与体积。
+
+        :param html_text: 做种页面文本
+        :param multi_page: 保留基类调用参数，本实现不继续翻页
         """
         html = etree.HTML(html_text)
         try:

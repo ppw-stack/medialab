@@ -176,6 +176,7 @@ class RousiSpider:
 
         :param results: API 返回的种子列表
         :return: 标准化的种子信息列表
+        :raises ValueError: 种子条目缺少标题或大小等必要字段
         """
         torrents: list[dict[str, object]] = []
         if not results:

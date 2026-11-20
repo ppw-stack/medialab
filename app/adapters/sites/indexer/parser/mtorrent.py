@@ -8,6 +8,8 @@ from operator import iadd
 from typing import Optional
 from urllib.parse import urljoin
 
+import httpx
+
 from app.adapters.sites.indexer.compat import site_rules
 from app.adapters.sites.indexer.parser import SitePage, SiteParserBase, SiteSchema
 from app.adapters.sites.indexer.compat.log import logger
@@ -85,6 +87,8 @@ class MTorrentSiteUserInfo(SiteParserBase):
         解析用户资料与流量，优先保留站点等级名及空分享率语义。
 
         :param html_text: MTorrent 用户资料接口的 JSON 文本
+        :raises TypeError: 传入 dict 而不是 JSON 文本
+        :raises json.JSONDecodeError: 响应不是合法 JSON
         """
         if not html_text:
             return None
@@ -127,6 +131,12 @@ class MTorrentSiteUserInfo(SiteParserBase):
     def _parse_user_torrent_seeding_info(self, html_text: str, multi_page: Optional[bool] = False) -> Optional[str]:
         """
         解析用户做种信息。
+
+        :param html_text: 做种列表接口的 JSON 文本
+        :param multi_page: 保留基类调用参数，本实现按需继续翻页
+        :return: 后续页地址；没有下一页时为 None
+        :raises json.JSONDecodeError: 响应不是合法 JSON
+        :raises TypeError: 分页参数缺失
         """
         if not html_text:
             return None
@@ -171,8 +181,11 @@ class MTorrentSiteUserInfo(SiteParserBase):
             if result:
                 seeder_info = json.loads(result)
                 seeder_count = int(seeder_info.get("data", {}).get("seeder") or 0)
-        except Exception as e:
-            logger.error(f"获取做种数失败: {str(e)}")
+        except (httpx.HTTPError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            logger.exception(
+                "获取做种数失败",
+                extra={"site": self._site_name, "base_url": self._base_url},
+            )
         if not seeder_count:
             return None
         if self.seeding >= seeder_count:

@@ -9,6 +9,7 @@ from lxml import etree
 
 from app.adapters.sites.indexer.parser import SitePage, SiteSchema
 from app.adapters.sites.indexer.parser.nexus_php import NexusPhpSiteUserInfo
+from app.adapters.sites.indexer.compat.log import logger
 
 
 class NexusProjectSiteUserInfo(NexusPhpSiteUserInfo):
@@ -65,6 +66,7 @@ class NexusProjectSiteUserInfo(NexusPhpSiteUserInfo):
                     self.ratio = round(self.upload / self.download, 3)
                 if self.upload or self.download:
                     return
-        except Exception:
-            pass
+        except (etree.XMLSyntaxError, ValueError, TypeError, ZeroDivisionError):
+            # 快速解析失败不是致命错误：退回基类的默认流量解析。
+            logger.debug("%s 流量信息快速解析失败，回退到默认解析", self._site_name)
         super()._parse_user_traffic_info(html_text)

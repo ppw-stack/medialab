@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Final, cast
 
 from sqlalchemy import CursorResult, delete, select
@@ -278,11 +279,11 @@ def validate_adapter(adapter: str) -> None:
         )
 
 
-def list_site_rules() -> list[SiteRuleInfo]:
-    """返回规则包里的全部站点（按名称排序）。
+@lru_cache(maxsize=1)
+def _site_rule_infos() -> tuple[SiteRuleInfo, ...]:
+    """构建并排序规则包里的全部站点（进程内缓存）。
 
-    数据源是随包分发的 ``indexers.json``（MoviePilot-Resources v3），
-    只读、不联网。
+    规则包在进程生命周期内只读不变，构建一次即可。
     """
     from app.adapters.sites.indexer.rules import load_site_rules
 
@@ -302,7 +303,17 @@ def list_site_rules() -> list[SiteRuleInfo]:
                 has_subtitles=bool(rule.get("subtitles")),
             )
         )
-    return sorted(result, key=lambda item: item.name)
+    return tuple(sorted(result, key=lambda item: item.name))
+
+
+def list_site_rules() -> list[SiteRuleInfo]:
+    """返回规则包里的全部站点（按名称排序）。
+
+    数据源是随包分发的 ``indexers.json``（MoviePilot-Resources v3），
+    只读、不联网。构建结果在进程内缓存；这里返回**副本**，调用方就地修改
+    不会污染缓存。
+    """
+    return list(_site_rule_infos())
 
 
 def list_adapters() -> list[AdapterInfo]:

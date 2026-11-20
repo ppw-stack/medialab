@@ -98,7 +98,11 @@ class YemaSpider:
                 return False, "无法打开网站！"
             if response.status_code != 200:
                 return False, f"错误：{response.status_code} {response.reason}"
-            payload = response.json() or {}
+            payload = None
+            try:
+                payload = response.json() or {}
+            except (TypeError, ValueError):
+                payload = None
             if isinstance(payload, dict) and payload.get("success") and isinstance(payload.get("data"), dict) \
                     and payload["data"].get("id"):
                 return True, "连接成功"
@@ -120,7 +124,11 @@ class YemaSpider:
                 return False, "无法打开网站！"
             if response.status_code != 200:
                 return False, f"错误：{response.status_code} {response.reason}"
-            payload = response.json()
+            payload = None
+            try:
+                payload = response.json()
+            except (TypeError, ValueError):
+                payload = None
             if isinstance(payload, dict) and payload.get("success"):
                 return True, "连接成功"
             return False, "Cookie已过期"
@@ -290,7 +298,12 @@ class YemaSpider:
             logger.warning(f"{self._name} 未配置 API AuthKey")
             return None
         if cat:
-            category_ids: List[Optional[int]] = [int(category) for category in cat.split(",")]
+            # 分类 ID 必须是正整数——脏输入直接报错，别让 int() 抛裸 ValueError。
+            category_ids = [
+                int(part) for part in cat.split(",") if part.strip().isdigit() and int(part) > 0
+            ]
+            if not category_ids:
+                raise ValueError("YemaPT 分类须填写正整数 ID，多个用逗号分隔")
         else:
             category_ids = self._search_category_ids(mtype)
         return [

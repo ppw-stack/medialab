@@ -378,6 +378,10 @@ class SiteParserBase(metaclass=ABCMeta):
     def _prepare_html_text(html_text: SitePage) -> str:
         """
         处理掉HTML中的干扰部分。
+
+        :param html_text: 页面文本或 API JSON 对象
+        :return: 去掉 id 与像素尺寸后的文本
+        :raises TypeError: 传入 dict（API 响应应先取 JSON 文本）
         """
         if isinstance(html_text, dict):
             raise TypeError("expected string or bytes-like object, got 'dict'")

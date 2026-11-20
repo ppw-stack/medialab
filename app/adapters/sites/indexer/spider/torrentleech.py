@@ -125,7 +125,14 @@ class TorrentLeech:
         统一判定搜索响应状态并按请求媒体类型投影 TorrentLeech 结果。
         """
         if res and res.status_code == 200:
-            results = res.json().get('torrentList') or []
+            try:
+                results = res.json().get('torrentList') or []
+            except (TypeError, ValueError):
+                # 站点在 Cookie 失效 / 限流时仍回 200，但 body 不是 JSON。
+                logger.warning(
+                    f"{self._indexer.get('name')} 搜索响应解析失败：{self._indexer.get('domain')}"
+                )
+                return True, []
             return False, self.__parse_result(results, mtype)
         if res is not None:
             logger.warn(f"{self._indexer.get('name')} 搜索失败，错误码：{res.status_code}")

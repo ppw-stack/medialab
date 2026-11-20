@@ -137,7 +137,7 @@ class UrlUtils:
             new_url_parts = url_parts._replace(query=query_string)
             complete_url = urlunparse(new_url_parts)
             return str(complete_url)
-        except Exception:
+        except (TypeError, ValueError):
             return None
 
     @staticmethod
@@ -157,7 +157,7 @@ class UrlUtils:
             if not mime_type:
                 return default_type
             return mime_type
-        except Exception:
+        except (TypeError, ValueError):
             return default_type
 
     @staticmethod
@@ -194,7 +194,7 @@ class UrlUtils:
             path = parsed.path or "/"
 
             return protocol, hostname, port, path
-        except Exception:
+        except ValueError:
             return None
 
 

@@ -31,13 +31,19 @@ class NexusHhanclubSiteUserInfo(NexusPhpSiteUserInfo):
         html = etree.HTML(html_text)
 
         try:
-            # 上传、下载、分享率
-            upload_match = re.search(r"[_<>/a-zA-Z-=\"'\s#;]+([\d,.\s]+[KMGTPI]*B)",
-                                     html.xpath('//*[@id="user-info-panel"]/div[2]/div[2]/div[4]/text()')[0])
-            download_match = re.search(r"[_<>/a-zA-Z-=\"'\s#;]+([\d,.\s]+[KMGTPI]*B)",
-                                       html.xpath('//*[@id="user-info-panel"]/div[2]/div[2]/div[5]/text()')[0])
-            ratio_match = re.search(r"分享率][:：_<>/a-zA-Z-=\"'\s#;]+([\d,.\s]+)",
-                                    html.xpath('//*[@id="user-info-panel"]/div[2]/div[1]/div[1]/div/text()')[0])
+            # 上传、下载、分享率。页面结构变了就取不到文本——此时退回基类解析，
+            # 不能让 IndexError 把整个用户数据刷新打挂。
+            panel = html.xpath('//*[@id="user-info-panel"]')
+            if not panel:
+                return
+            upload_text = panel[0].xpath('div[2]/div[2]/div[4]/text()')
+            download_text = panel[0].xpath('div[2]/div[2]/div[5]/text()')
+            ratio_text = panel[0].xpath('div[2]/div[1]/div[1]/div/text()')
+            if not (upload_text and download_text and ratio_text):
+                return
+            upload_match = re.search(r"[_<>/a-zA-Z-=\"'\s#;]+([\d,.\s]+[KMGTPI]*B)", upload_text[0])
+            download_match = re.search(r"[_<>/a-zA-Z-=\"'\s#;]+([\d,.\s]+[KMGTPI]*B)", download_text[0])
+            ratio_match = re.search(r"分享率][:：_<>/a-zA-Z-=\"'\s#;]+([\d,.\s]+)", ratio_text[0])
 
             # 计算分享率
             self.upload = size_tools.parse_size(upload_match.group(1).strip()) if upload_match else 0

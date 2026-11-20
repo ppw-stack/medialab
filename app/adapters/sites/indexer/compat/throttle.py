@@ -32,7 +32,8 @@ def _domain_of(url: str) -> str:
         from urllib.parse import urlsplit
 
         return (urlsplit(url).hostname or url).lower()
-    except Exception:
+    except ValueError:
+        # urlsplit 对非法 IPv6 之类会抛 ValueError。
         return str(url)
 
 

@@ -140,7 +140,7 @@ class NexusAudiencesSiteUserInfo(NexusPhpSiteUserInfo):
         elif unread_msg_links and not self.message_unread:
             self.message_unread = len(unread_msg_links)
         for msg_link in unread_msg_links:
-            logger.debug(f"{self._site_name} 信息链接 {msg_link}")
+            logger.debug("%s 信息链接 %s", self._site_name, msg_link)
             head, date, content = self._parse_message_content(
                 self._get_page_content(
                     urljoin(self._base_url, msg_link),
@@ -149,7 +149,7 @@ class NexusAudiencesSiteUserInfo(NexusPhpSiteUserInfo):
                 )
             )
             head, date, content = self.__fill_empty_message_content_from_list(msg_link, head, date, content)
-            logger.debug(f"{self._site_name} 标题 {head} 时间 {date} 内容 {content}")
+            logger.debug("%s 标题 %s 时间 %s 内容 %s", self._site_name, head, date, content)
             if self.__is_empty_message_content(head, date, content):
                 logger.warn(f"{self._site_name} 信息链接 {msg_link} 解析结果为空，跳过消息通知")
                 continue
