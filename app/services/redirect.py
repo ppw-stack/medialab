@@ -45,10 +45,20 @@ async def _persist_refreshed_credential(driver_id: int, cred: Any) -> None:
     :func:`app.services.driver_service.persist_guangya_credential`。
 
     写回失败**不影响本次请求**（内存里的新 token 仍然有效），只记日志。
+
+    **降级在本层显式做**（try/except + logger.exception），不依赖被调方
+    的实现细节：写回失败是「凭据持久化」问题，**绝不能让 302 播放请求
+    失败**（与「直链缓存读写失败必须降级，不能让播放 500」同一条铁律）。
+
+    Raises:
+        无。写回失败只记日志，不中断本次请求。
     """
     from app.services.driver_service import persist_guangya_credential
 
-    await persist_guangya_credential(driver_id, cred)
+    try:
+        await persist_guangya_credential(driver_id, cred)
+    except Exception:
+        logger.exception("写回刷新的光鸭凭据失败（本次请求不受影响）")
 
 
 class RedirectError(Exception):

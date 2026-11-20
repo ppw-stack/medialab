@@ -574,7 +574,16 @@ class GuangyaDriver:
         return result if isinstance(result, dict) else {}
 
     async def _recover_unauthorized(self, method: str, exc: Exception) -> None:
-        """401 之后强制刷新 token（刷新不了就把鉴权错误抛出去）。"""
+        """401 之后强制刷新 token（刷新不了就把鉴权错误抛出去）。
+
+        **写回失败不会走到这里**：``on_token_refresh`` 回调与
+        :meth:`_notify_token_refresh` 两层都已把写回异常吞掉（只记日志），
+        所以本方法抛出的**只可能是刷新本身的失败**。
+
+        Raises:
+            DriverError: 强制刷新失败（无 ``refresh_token`` / 刷新请求失败）
+                → 翻译成鉴权错误（kind="auth"）。
+        """
         logger.warning("光鸭接口 %s 返回 401，强制刷新 token 后重试一次", method)
         try:
             await self._ensure_token(force=True)
