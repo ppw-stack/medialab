@@ -21,6 +21,11 @@ class FakeUploader:
     def __init__(self, *, fail: bool = False, fail_reason: str = "假上传失败") -> None:
         #: 传过的文件：``[(name, size)]``
         self.uploaded: list[tuple[str, int]] = []
+        #: 传过的文件与其**落点目录 id**：``[(parent_id, name, size)]``
+        #:
+        #: 用来断言「文件传到了哪个目录」（如聚合模式的任务级目标子目录
+        #: 会在落点目录前多出一层前缀）。
+        self.uploaded_paths: list[tuple[str, str, int]] = []
         #: 删过的 fileId
         self.deleted: list[str] = []
         #: 模拟失败
@@ -51,6 +56,7 @@ class FakeUploader:
         size = path.stat().st_size
         self._counter += 1
         self.uploaded.append((file_name, size))
+        self.uploaded_paths.append((str(parent_id), file_name, size))
         if progress is not None:
             progress(size)
         from app.adapters.drivers.guangya_upload import UploadResult

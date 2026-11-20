@@ -358,6 +358,10 @@ class DbBootstrap:
                 # 目标聚合组（2026-11-19）：非空 = 「本地同步到网盘聚合」，
                 # 落点由分配器在组内副盘之间自动挑选。
                 ("aggregate_group_id", "INTEGER", None),
+                # 目标子目录（2026-11-20）：聚合模式下作为**组映射的子路径
+                # 覆盖**。可空 + 无默认值 → 不回填、不改写现有行；存量行
+                # 全是 NULL → 行为与引入前完全一致。
+                ("aggregate_sub_path", "TEXT", None),
             ),
         )
         await self._drop_column("upload_tasks", "watch_subdir")

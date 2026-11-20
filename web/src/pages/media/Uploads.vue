@@ -29,6 +29,9 @@
                       <a-tag v-if="item.aggregate_group_id" color="purple">
                         聚合组
                       </a-tag>
+                      <a-tag v-if="item.aggregate_sub_path" color="cyan">
+                        子目录 {{ item.aggregate_sub_path }}
+                      </a-tag>
                       <a-tag :color="item.listening ? 'blue' : 'orange'">
                         {{ item.listening ? "监听中" : "未监听" }}
                       </a-tag>
@@ -250,6 +253,22 @@
           </div>
         </a-form-item>
 
+        <a-form-item v-if="form.mode === 'aggregate'" label="目标子目录（可选）">
+          <a-space direction="vertical" style="width: 100%">
+            <a-input
+              v-model:value="form.aggregate_sub_path"
+              placeholder="留空 = 归拢目标目录根；例：电影/外语"
+              allow-clear
+            />
+            <a-button size="small" @click="openSubPathPicker">从主盘目录选</a-button>
+            <div class="muted hint">
+              文件先落在副盘缓冲根的该子目录里，再由归拢作业搬到主盘「{{
+                selectedGroup?.target_dir_path || "归拢目标目录"
+              }}」下的同名子目录。
+            </div>
+          </a-space>
+        </a-form-item>
+
         <a-form-item label="监听目录（本地）" required>
           <div class="target-picker">
             <DirBrowser
@@ -319,6 +338,27 @@
         </a-form-item>
       </a-form>
     </a-modal>
+
+    <!-- 目标子目录浏览器（从主盘归拢目标目录往下钻） -->
+    <a-modal
+      v-model:open="subPathOpen"
+      title="选择目标子目录"
+      ok-text="使用此目录"
+      cancel-text="取消"
+      @ok="confirmSubPath"
+    >
+      <DirBrowser
+        title="主盘归拢目标目录"
+        :stack="subPathStack"
+        :dirs="subPathDirs"
+        :loading="loadingSubPath"
+        @open="openSubPath"
+        @go="goSubPath"
+      />
+      <div class="muted hint" style="margin-top: 8px">
+        选中的目录会作为主盘「归拢目标目录」下的相对子路径；回到起点 = 不覆盖。
+      </div>
+    </a-modal>
   </div>
 </template>
 
@@ -339,6 +379,7 @@ import type {
   UploadTask,
 } from "../../types"
 import { formatBytes } from "../../utils/format"
+import { useSubPathPicker } from "../../composables/useSubPathPicker"
 
 const tasks = ref<UploadTask[]>([])
 const drivers = ref<Driver[]>([])
@@ -360,6 +401,8 @@ const form = reactive({
   mode: "driver" as "driver" | "aggregate",
   driver_id: undefined as number | undefined,
   aggregate_group_id: undefined as number | undefined,
+  /** 目标子目录（聚合模式专属）：组映射的子路径覆盖，空 = 不覆盖 */
+  aggregate_sub_path: "",
   watch_root: "",
   include_subdirs: true,
   enabled: true,
@@ -382,6 +425,7 @@ const loadingTarget = ref(false)
 /** 可选的聚合组（「本地同步到网盘聚合」的目标） */
 const aggregateGroups = ref<AggregateTargetGroup[]>([])
 
+
 let timer: number | undefined
 
 /**
@@ -400,6 +444,18 @@ const targetDrivers = computed(() =>
 const selectedGroup = computed(() =>
   aggregateGroups.value.find((g) => g.group_id === form.aggregate_group_id),
 )
+
+/** 目标子目录浏览器（从**主盘归拢目标目录**往下钻） */
+const {
+  subPathOpen,
+  subPathStack,
+  subPathDirs,
+  loadingSubPath,
+  openSubPathPicker,
+  openSubPath,
+  goSubPath,
+  applySubPath,
+} = useSubPathPicker(() => selectedGroup.value)
 
 /** 候选落点表格的列 */
 const candidateColumns = [
@@ -563,6 +619,7 @@ function openCreate(): void {
   form.mode = "driver"
   form.driver_id = targetDrivers.value[0]?.id
   form.aggregate_group_id = undefined
+  form.aggregate_sub_path = ""
   form.watch_root = ""
   localStack.value = [{ id: "/", name: "/" }]
   localDirs.value = []
@@ -586,6 +643,7 @@ function openEdit(task: UploadTask): void {
   form.mode = task.aggregate_group_id ? "aggregate" : "driver"
   form.driver_id = task.driver_id
   form.aggregate_group_id = task.aggregate_group_id ?? undefined
+  form.aggregate_sub_path = task.aggregate_sub_path ?? ""
   form.watch_root = task.watch_root
   localStack.value = [{ id: task.watch_root, name: task.watch_root }]
   localDirs.value = []
@@ -617,6 +675,7 @@ function onModeChange(): void {
     }
   } else {
     form.aggregate_group_id = undefined
+    form.aggregate_sub_path = ""
     form.driver_id = targetDrivers.value[0]?.id
     void loadTargetDirs("")
   }
@@ -642,6 +701,7 @@ async function save(): Promise<void> {
         ? {
             name: form.name,
             aggregate_group_id: form.aggregate_group_id,
+            aggregate_sub_path: form.aggregate_sub_path.trim() || null,
             watch_root: form.watch_root,
             include_subdirs: form.include_subdirs,
             enabled: form.enabled,
@@ -673,6 +733,11 @@ async function save(): Promise<void> {
   } finally {
     saving.value = false
   }
+}
+
+/** 确认「目标子目录」：把面包屑转成相对子路径写进表单。 */
+function confirmSubPath(): void {
+  form.aggregate_sub_path = applySubPath()
 }
 
 // ---- 目标网盘目录浏览 ----

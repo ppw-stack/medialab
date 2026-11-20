@@ -455,3 +455,75 @@ class TestCrud:
         assert body["task_id"] == task_id
         assert body["listening"] is False
         assert "logs" in body
+
+
+class TestAggregateSubPath:
+    """任务级「目标子目录」（组映射的子路径覆盖）的接口行为。"""
+
+    async def test_创建带子目录并透出(
+        self, client, db_session, aggregate_group, tmp_path
+    ) -> None:
+        """归一化后的子目录随响应透出。"""
+        watch = tmp_path / "watch"
+        watch.mkdir()
+        resp = await client.post(
+            "/api/upload-tasks",
+            json={
+                "name": "聚合任务",
+                "aggregate_group_id": aggregate_group,
+                "watch_root": str(watch),
+                "aggregate_sub_path": "/电影//外语/",
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["aggregate_sub_path"] == "电影/外语"
+
+    async def test_指定存储源模式带子目录被拒(
+        self, client, db_session, tmp_path
+    ) -> None:
+        """没有组映射可覆盖 → 400（显式拒绝，不静默忽略）。"""
+        watch = tmp_path / "watch"
+        watch.mkdir()
+        driver_id = await _add_driver(db_session, name="普通盘")
+        resp = await client.post(
+            "/api/upload-tasks",
+            json={
+                "name": "普通任务",
+                "driver_id": driver_id,
+                "target_file_id": "root-1",
+                "watch_root": str(watch),
+                "aggregate_sub_path": "电影",
+            },
+        )
+        assert resp.status_code == 400, resp.text
+
+    async def test_可清空子目录(
+        self, client, db_session, aggregate_group, tmp_path
+    ) -> None:
+        """显式传 ``aggregate_sub_path=null`` → 清空覆盖。"""
+        watch = tmp_path / "watch"
+        watch.mkdir()
+        created = await client.post(
+            "/api/upload-tasks",
+            json={
+                "name": "聚合任务",
+                "aggregate_group_id": aggregate_group,
+                "watch_root": str(watch),
+                "aggregate_sub_path": "电影",
+            },
+        )
+        task_id = created.json()["id"]
+        patched = await client.patch(
+            f"/api/upload-tasks/{task_id}",
+            json={"aggregate_sub_path": None},
+        )
+        assert patched.status_code == 200, patched.text
+        assert patched.json()["aggregate_sub_path"] is None
+
+    async def test_聚合目标端点下发归拢目录id(
+        self, client, aggregate_group
+    ) -> None:
+        """前端目录浏览器的起点（主盘归拢目标目录 id）。"""
+        resp = await client.get("/api/upload-tasks/aggregate-targets")
+        assert resp.status_code == 200
+        assert resp.json()["groups"][0]["target_dir_id"] == "target-dir"

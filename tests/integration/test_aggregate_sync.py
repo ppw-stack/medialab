@@ -1425,3 +1425,36 @@ async def test_leftover_is_claimed_on_retry(
     rows = await aggregate_staging.list_staging(group_id=group_id)
     assert rows[0].state == "done"
     assert source.deleted == ["f1"]
+
+
+async def test_sync_lands_in_master_subdir(
+    db, fast_watcher, fake_drivers
+) -> None:
+    """台账带**子目录前缀** → 主盘落点目录带上它。
+
+    这是「任务级目标子目录」的落点承诺：归拢引擎**零改动**，它按台账的
+    相对路径（相对副盘缓冲根）原样搬 → 子目录自动跟着走。
+    """
+    master, _source = fake_drivers
+    group_id, _master_id, _secondary_id = await _setup(db, size=100)
+    master.landed_size = 100
+
+    async with session_scope() as db_session:
+        row = (
+            await db_session.execute(
+                select(SecondaryStaging).where(
+                    SecondaryStaging.group_id == group_id
+                )
+            )
+        ).scalar_one()
+        row.source_dir = "电影/外语"
+        row.target_dir = "电影/外语"
+        await db_session.commit()
+
+    result = await aggregate_sync.sync_group_now(group_id)
+    assert result.synced == 1
+    # 主盘侧逐层建出了子目录（归拢目标目录 → 电影 → 外语）
+    assert "电影" in master.dirs
+    assert "外语" in master.dirs
+    # 文件仍按原名落地
+    assert ("landed-1", "a.mkv") in master.renamed

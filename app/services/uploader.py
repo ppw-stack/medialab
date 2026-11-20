@@ -209,6 +209,9 @@ class SyncContext:
             ``None`` = 不用这层探测（普通存储源目标）。
             ⚠️ 返回类型是 :class:`StagedHit`（**不是** ``CloudEntry``——
             消费方要读它的 ``note`` 字段）。
+            ⚠️ 传入的 ``rel_dir`` 是**云端口径**（含 :attr:`dir_prefix`）。
+        dir_prefix: **云端相对路径的固定前缀**（聚合模式的任务级「目标
+            子目录」，见 :meth:`cloud_dir`）。普通任务恒为空。
     """
 
     driver: Any
@@ -221,6 +224,29 @@ class SyncContext:
     conflict_policy: int = CONFLICT_KEEP_LARGER
     #: 组级幂等探测（见属性说明）。普通任务为 None。
     staged_lookup: Any = None
+    #: 云端相对路径的固定前缀（聚合模式的任务级「目标子目录」）。
+    dir_prefix: str = ""
+
+    def cloud_dir(self, rel_dir: str) -> str:
+        """把**监听口径**的相对目录转成**云端口径**。
+
+        ⚠️ **两个口径必须分清**（本项目最容易踩的坑之一）：
+
+        - **监听口径**：相对本地监听根。``SyncOutcome.rel_path`` 用它
+          （本地清理、进度展示、事件流都依赖它）——**永远不要改**。
+        - **云端口径**：相对落点目录。``index`` / ``staged_lookup`` 用它。
+
+        普通任务两者相同（监听目录的相对结构直接铺到云端目标目录）。
+        聚合模式的任务级「目标子目录」会把两者**整体错开一层**：
+        监听 ``剧名/S01E01.mkv`` → 云端 ``<子目录>/剧名/S01E01.mkv``。
+        """
+        prefix = self.dir_prefix.strip("/")
+        rel = rel_dir.strip("/")
+        if not prefix:
+            return rel
+        if not rel:
+            return prefix
+        return f"{prefix}/{rel}"
 
 
 async def sync_file(
@@ -256,12 +282,18 @@ async def sync_file(
 
     rel_dir = parent_dir(rel_path)
     file_name = base_name(rel_path)
+    # **云端口径**：普通任务 = 监听口径；聚合模式的任务级「目标子目录」
+    # 会把整体下移一层（见 :meth:`SyncContext.cloud_dir`）。
+    #
+    # 下面所有**云端**操作（index / staged_lookup）都用它；``rel_path``
+    # 仍是监听口径（本地清理、进度展示）。
+    cloud_dir = ctx.cloud_dir(rel_dir)
 
     # ⓪ **组级幂等探测**（聚合模式）：文件可能已经在**另一个副盘**的缓冲
     # 里，或**已经归拢到主盘**——落点会换盘，不能只看当前落点目录。
     # 命中即视为「已同步」，不重复上传（白耗上行带宽与云添加额度）。
     if ctx.staged_lookup is not None:
-        staged = await ctx.staged_lookup(rel_dir, file_name, size)
+        staged = await ctx.staged_lookup(cloud_dir, file_name, size)
         if staged is not None:
             outcome = _unchanged_outcome(
                 ctx,
@@ -276,7 +308,7 @@ async def sync_file(
             return outcome
 
     try:
-        dir_id, existing = await ctx.index.resolve(rel_dir)
+        dir_id, existing = await ctx.index.resolve(cloud_dir)
     except DriverError as exc:
         return SyncOutcome(RESULT_FAILED, rel_path, f"解析云端目录失败：{exc}")
 
@@ -359,7 +391,7 @@ async def sync_file(
         except DriverError as exc:
             return SyncOutcome(RESULT_FAILED, rel_path, f"删除云端旧文件失败：{exc}")
 
-        gone = await _wait_absent(ctx, rel_dir, file_name)
+        gone = await _wait_absent(ctx, cloud_dir, file_name)
         if not gone:
             return SyncOutcome(
                 RESULT_FAILED,
@@ -367,7 +399,7 @@ async def sync_file(
                 reason="删除云端旧文件后它仍然存在（已放弃，避免产出重名副本）",
                 size=size,
             )
-        await ctx.index.note_removed(rel_dir, file_name)
+        await ctx.index.note_removed(cloud_dir, file_name)
 
     # ④ 传
     try:
@@ -377,7 +409,7 @@ async def sync_file(
     except DriverError as exc:
         return SyncOutcome(RESULT_FAILED, rel_path, f"上传失败：{exc}", size=size)
 
-    await ctx.index.note_uploaded(rel_dir, result.name, result.size, result.file_id)
+    await ctx.index.note_uploaded(cloud_dir, result.name, result.size, result.file_id)
 
     status = RESULT_OVERWRITTEN if remote is not None else RESULT_UPLOADED
     outcome = SyncOutcome(

@@ -68,6 +68,8 @@ class UploadTaskView:
     conflict_policy: int = CONFLICT_KEEP_LARGER
     #: 目标**聚合组**（None = 目标是某个具体存储源）
     aggregate_group_id: int | None = None
+    #: 目标**子目录**（聚合模式专属）：组映射的子路径覆盖，None = 无覆盖
+    aggregate_sub_path: str | None = None
     #: 运行态（监听中？正在传什么？）
     listening: bool = False
     current: str = ""
@@ -98,6 +100,7 @@ def to_task_view(row: UploadTaskRow) -> UploadTaskView:
         concurrency=row.concurrency,
         conflict_policy=row.conflict_policy,
         aggregate_group_id=row.aggregate_group_id,
+        aggregate_sub_path=row.aggregate_sub_path,
         created_at=row.created_at,
         updated_at=row.updated_at,
         listening=runtime.listening,
@@ -237,6 +240,7 @@ async def create_task(
     delete_after_upload: bool = False,
     conflict_policy: int = CONFLICT_KEEP_LARGER,
     aggregate_group_id: int | None = None,
+    aggregate_sub_path: str | None = None,
 ) -> UploadTaskRow:
     """创建上传任务。
 
@@ -246,20 +250,31 @@ async def create_task(
     引擎接管搬运。此时 ``driver_id`` / ``target_file_id`` 由后端写入
     **落点快照**（粘性——重启后恢复）。
 
+    ``aggregate_sub_path`` = 任务级的「目标子目录」（**组映射的子路径
+    覆盖**，仅聚合模式有效）：文件最终落在主盘「归拢目标目录」下的这个
+    子目录里。
+
     Raises:
         UploadTaskError: 存储源不支持上传 / 路径非法 / 目录不存在 /
-            聚合组不可用。
+            聚合组不可用 / 目标子目录非法。
     """
     from app.adapters.drivers.upload_base import is_uploadable
     from app.db.models import Driver
 
     if aggregate_group_id is not None:
         landing = await _resolve_aggregate_landing(aggregate_group_id)
+        aggregate_sub_path = _normalize_sub_path(aggregate_sub_path, aggregate=True)
         driver_id = landing.driver_id
         target_file_id = landing.root_id
         target_path = landing.root_path or ""
+        if aggregate_sub_path:
+            # 展示值与运行时的落点快照保持一致（副盘缓冲根 + 子目录）
+            target_path = f"{target_path}/{aggregate_sub_path}"
     elif driver_id is None:
         raise UploadTaskError("必须选择目标存储源", status_code=400, kind="config")
+    else:
+        # 「指定存储源」模式：没有组映射可覆盖 → 传了子目录就是配置错误
+        aggregate_sub_path = _normalize_sub_path(aggregate_sub_path, aggregate=False)
 
     driver = (
         await db.execute(select(Driver).where(Driver.id == driver_id))
@@ -286,6 +301,7 @@ async def create_task(
         concurrency=max(1, int(concurrency)),
         conflict_policy=max(0, min(1, int(conflict_policy))),
         aggregate_group_id=aggregate_group_id,
+        aggregate_sub_path=aggregate_sub_path,
         created_at=now,
         updated_at=now,
     )
@@ -303,6 +319,38 @@ async def create_task(
         ),
     )
     return row
+
+
+def _normalize_sub_path(raw: str | None, *, aggregate: bool) -> str | None:
+    """归一化任务级的「目标子目录」（**组映射的子路径覆盖**）。
+
+    Args:
+        raw: 用户填的子目录（空串 / None = 不覆盖）。
+        aggregate: 任务是否处于**网盘聚合模式**。指定存储源模式没有组
+            映射可覆盖 → 传了子目录就是配置错误。
+
+    Returns:
+        归一化后的相对路径；``None`` = 不覆盖。
+
+    Raises:
+        UploadTaskError: 路径非法 / 模式不匹配。
+    """
+    from app.services import aggregate_upload
+    from app.services.errors import ServiceError
+
+    if raw is None or not str(raw).strip():
+        return None
+    if not aggregate:
+        raise UploadTaskError(
+            "「目标子目录」只适用于网盘聚合模式——"
+            "指定存储源模式没有组映射可覆盖",
+            status_code=400,
+            kind="config",
+        )
+    try:
+        return aggregate_upload.normalize_sub_path(raw)
+    except ServiceError as exc:
+        raise UploadTaskError(str(exc), status_code=400, kind="config") from exc
 
 
 async def _resolve_aggregate_landing(group_id: int) -> Any:
@@ -362,6 +410,16 @@ async def update_task(db: Any, task_id: int, **fields: Any) -> UploadTaskRow:
         fields.pop("target_file_id", None)
         fields.pop("target_path", None)
 
+    # 目标子目录（组映射的子路径覆盖）：**只在聚合模式下有效**。
+    # 切回「指定存储源」模式 → 没有组映射可覆盖 → **一律清空**
+    #（哪怕这次没传该字段——旧值留着就是脏数据）。
+    if new_group is None:
+        fields["aggregate_sub_path"] = None
+    elif "aggregate_sub_path" in fields:
+        fields["aggregate_sub_path"] = _normalize_sub_path(
+            fields["aggregate_sub_path"], aggregate=True
+        )
+
     for key in (
         "name",
         "driver_id",
@@ -380,6 +438,10 @@ async def update_task(db: Any, task_id: int, **fields: Any) -> UploadTaskRow:
     # 聚合组：**显式**赋值——``None`` 表示「退回存储源模式」
     if "aggregate_group_id" in fields:
         row.aggregate_group_id = fields["aggregate_group_id"]
+
+    # 目标子目录：**显式**赋值——``None`` 表示「不覆盖」（清空）
+    if "aggregate_sub_path" in fields:
+        row.aggregate_sub_path = fields["aggregate_sub_path"]
 
     row.updated_at = bj_now()
     await db.commit()
@@ -506,6 +568,9 @@ async def aggregate_targets() -> dict[str, Any]:
                     info["master_driver_id"], ""
                 ),
                 "target_dir_path": group.target_dir_path,
+                # 主盘归拢目标目录的 fileId——前端用它作为「目标子目录」
+                # 浏览器的**起点**（子目录是它下面的相对路径）
+                "target_dir_id": group.target_dir_id,
                 "candidates": [
                     cand.to_dict() for cand in info["candidates"]
                 ],
