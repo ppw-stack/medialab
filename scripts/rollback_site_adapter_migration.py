@@ -89,11 +89,18 @@ async def _run(db_path: Path, dry_run: bool) -> int:
         # 旧镜像的 ORM 读写这四列会直接 OperationalError: no such column。
         async with engine.begin() as conn:
             restored = await restore_adapter_values(conn=conn)
-            logger.info("已还原 %d 个站点的 adapter 值", restored)
-
             added = await readd_site_user_data_hourly_bonus_columns(conn=conn)
-            logger.info("已加回 %d 个时魔列", added)
+        # 成功日志必须在事务提交**之后**再打：engine.begin() 只有在块正常
+        # 退出时才 commit。块内打「已还原 / 已加回」，一旦第二步失败被回滚，
+        # 日志里仍留着成功记录——运维会误判回滚已落盘而手工补跑。
+        logger.info("已还原 %d 个站点的 adapter 值", restored)
+        logger.info("已加回 %d 个时魔列", added)
         return 0
+    except Exception:
+        # 事务未提交即失败 → 整笔回滚，库没有任何改动。记清这一点，
+        # 免得运维把「事务回滚」误读成「已改了一半」。
+        logger.exception("回滚失败——事务已整体回滚，数据库未发生任何改动")
+        raise
     finally:
         await engine.dispose()
 
