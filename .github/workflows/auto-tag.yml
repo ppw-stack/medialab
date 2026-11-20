@@ -7,51 +7,37 @@ name: auto-tag
 #
 # 产出的 tag 形如 v1.0.4（只自增 patch），落在 **main 的 HEAD** 上。
 #
-# ⚠️⚠️ 头号坑：用默认 GITHUB_TOKEN 推的 tag **不会触发新的 workflow run**
-#   （GitHub 官方限制：GITHUB_TOKEN 触发的事件不创建新的 workflow run）。
-#   若本 workflow 用 GITHUB_TOKEN 推 tag：
-#     · ci.yml 的 `push: tags: ['v*']` **收不到** → 闸门不跑
-#     · → docker-image.yml 的 workflow_run **不触发** → 镜像一个都没推
-#     · → **workflow 全绿、tag 打上了、镜像没有**——极难发现
-#   故此处**必须用 PAT**（`secrets.RELEASE_TOKEN`）：PAT 推送会正常触发
-#   workflow，与手动 `git push origin v1.0.4` 完全同一条链路：
-#     PAT 推 v* tag → ci.yml(push tags) → 绿 → workflow_run → docker-image.yml
-#     → git tag --points-at 认到 v* semver → 推镜像 latest + 1.0.4 + 1.0
+# ════════════════════════════════════════════════════════════════════
+# ⚠️⚠️⚠️ 核心机制：为什么不能用「推 tag」来触发后续 workflow
+# ════════════════════════════════════════════════════════════════════
 #
-# ⚠️⚠️⚠️ 二号坑（2026-11-20 实测两次）：**token 必须带「触发 workflow」的能力**，
-#   否则 tag 照样推成功、但**什么都不触发**（同样静默）。实测矩阵：
+# GitHub **一律不触发**由 Actions 内部发起的 push（防递归：workflow A 推
+# tag → 触发 workflow B → B 又推 tag → …）。这条抑制**与用什么凭据无关**，
+# 不是权限问题。2026-11-20 实测矩阵（同一 tag、同一 commit、只换凭据）：
 #
-#   | 凭据                                   | scopes / 权限                          | ci 被触发？ |
-#   |----------------------------------------|----------------------------------------|------------|
-#   | classic PAT（ghp_）                    | repo + **workflow**                    | ✅          |
-#   | fine-grained PAT（github_pat_）        | Contents: Read and write               | ❌          |
-#   | fine-grained PAT（github_pat_）        | Contents + **Workflows: Read and write**| ❌ 仍不行   |
+#   | 推 tag 的位置         | 凭据                            | ci 被触发？ |
+#   |-----------------------|---------------------------------|------------|
+#   | **本机手工推**        | classic token (repo+workflow)   | ✅          |
+#   | **Actions runner 内** | fine-grained PAT（+Workflows）  | ❌          |
+#   | **Actions runner 内** | classic PAT / gh CLI token      | ❌          |
 #
-#   → 「推 tag 用 PAT」还不够，**且 fine-grained PAT 实测不可用**（加了
-#     Workflows 权限后重测依然不触发）。**必须用 classic PAT**，scopes 勾
-#     `repo` + `workflow`。
+# → 「换 PAT / 加权限」全是白费力气，**位置**才是变量。
 #
-#   GitHub 文档对应的官方说法：PAT 推送要触发 workflow，token 需要
-#   `workflow` scope（classic）；fine-grained 的 "Workflows" 权限管的是
-#   「修改 .github/workflows/*.yml」，**不含**触发 workflow。
+# GitHub 官方留了两个例外：`workflow_dispatch` 与 **`repository_dispatch`**。
+# 本 workflow 用后者把「发布」交给 docker-image.yml：
 #
-#   本 workflow 末尾有「校验 ci 是否被触发」步骤：没触发就 **::error:: 明确
-#   报错退出**，不再让「tag 打上了、镜像没有」这种事无声发生。
+#   auto-tag（GITHUB_TOKEN 推 tag，不触发任何 workflow）
+#     → POST /repos/{owner}/{repo}/dispatches（event_type=release-tag）
+#       → ★ repository_dispatch 会创建 workflow run ★
+#         → docker-image.yml 检出该 commit → 构建并推送镜像
 #
-# PAT 准备（仓库 ppw-stack/medialab）：
-#   1. GitHub → Settings → Developer settings → **Tokens (classic)**
-#   2. Note 写「medialab 发布用」，Expiration 按需（最长 1 年，勾
-#      "No expiration" 则 gh CLI 的 classic token 不会自动过期）
-#   3. Scopes 勾 **repo** + **workflow**（★ 少了 workflow 不触发）
-#   4. 生成后把 token 存到 **environment `tag`** 的 secret：
-#      **RELEASE_TOKEN**（Settings → Environments → tag → Environment secrets）
-#      → Actions 权限需允许 Actions 创建 workflow run（默认允许）
+# → **全程零外部凭据**：不需要 PAT、不需要 secret、不会过期。
+#    （environment `tag` 现在只作发布门禁 + 审计记录，不再存 token。）
 #
-# ⚠️ RELEASE_TOKEN 存在 **environment 级**（不是 repository 级）→ 本 job
-#    **必须**声明 `environment: tag`，否则读不到它（会拿到空串）。
-#
-# ⚠️ 本 workflow 跑在**默认分支（main）**的代码上（GitHub 的既定行为）——
-#   默认分支的内容必须始终可信。
+# ⚠️ 由此带来的语义变化：**tag push 不再触发 ci.yml**（本来也触发不了）。
+#   故推 tag **之前**多一道闸：main HEAD 必须已有**成功的 ci run**
+#   （main push 时 ci.yml 已经跑过同一个 commit → 闸门覆盖到了）。
+#   见下面的「Gate: CI must be green」步骤。
 
 on:
   schedule:
@@ -61,7 +47,7 @@ on:
     - cron: '17 3 * * *'
   # 手动触发（改完 workflow 想立刻验证、或需要临时补一次发布）：
   #   dry_run=true → 只打印会打什么 tag，不推
-  #   force=true  → 即使今天已发过 / 无新提交也照打
+  #   force=true  → 忽略「今天已发过」「无新提交」「ci 未绿」三个跳过条件
   workflow_dispatch:
     inputs:
       dry_run:
@@ -69,20 +55,20 @@ on:
         type: boolean
         default: false
       force:
-        description: '忽略「今天已发过」与「无新提交」两个跳过条件'
+        description: '忽略「今天已发过」「无新提交」「ci 未绿」三个跳过条件'
         type: boolean
         default: false
 
 permissions:
-  contents: write
-  # actions: read —— 末尾「校验 ci 是否被触发」步骤要读 actions/runs
-  actions: read
+  contents: write   # 推 tag + 发 repository_dispatch
+  actions: read     # 查 actions/runs（前置 ci 闸门 + 末尾的触发校验）
 
 jobs:
   tag:
-    # ⚠️ 必须声明 environment ——RELEASE_TOKEN 存在 **environment `tag`** 的
-    # secret 里（environment 级 secret 只有声明了该 environment 的 job
-    # 才能读到；不声明 → ${{ secrets.RELEASE_TOKEN }} 是空串）。
+    # environment 只作**发布门禁 + 审计记录**（分支策略限死 main，
+    # 防从任意分支手动触发；deployment 记录留下「谁在什么时候发了版」）。
+    # ⚠️ 这里**不再需要任何 secret**——推 tag 用的是 checkout 自带的
+    #    GITHUB_TOKEN（persist-credentials 默认开），不需要 PAT。
     environment: tag
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -98,6 +84,9 @@ jobs:
           # fetch-depth: 0 —— 要全部历史与 tag：算版本号、查最新 tag、
           # 算「相对最新 tag 有几个新提交」都依赖完整仓库
           fetch-depth: 0
+          # persist-credentials 默认 true → .git/config 里带 GITHUB_TOKEN
+          # 的 Authorization 头 → 后面 `git push origin` 直接可用，
+          # **无需任何 PAT / secret**。
 
       - name: Compute next tag
         id: ver
@@ -169,75 +158,116 @@ jobs:
         run: |
           echo "::notice::dry-run：将创建并推送 tag ${{ steps.ver.outputs.tag }}（本次未推）"
 
+      - name: "Gate: CI must be green"
+        id: gate
+        if: steps.ver.outputs.tag != '' && (inputs.dry_run != true)
+        env:
+          FORCE: ${{ inputs.force }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # tag push **不再触发 ci.yml**（Actions 内发起的 push 一律不触发），
+          # 故这里补一道闸：发布的那个 commit 必须**已经**有一个成功的
+          # ci run（main push 时 ci.yml 跑的就是同一个 commit → 覆盖到了）。
+          #
+          # 不补这道闸的后果：main 的 ci 红了照样发版、照样出镜像 →
+          # 「闸门」名存实亡。
+          SHA=$(git rev-parse HEAD)
+          CI_RUN=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${SHA}&status=success&per_page=20" \
+            --jq '[.workflow_runs[] | select(.name == "ci")] | .[0].id' 2>/dev/null || true)
+          if [ -n "$CI_RUN" ]; then
+            echo "✓ 该 commit 已有成功的 ci run：${CI_RUN}"
+            echo "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${CI_RUN}"
+          elif [ "$FORCE" = "true" ]; then
+            echo "::warning::该 commit 没有成功的 ci run，但 force=true → 继续发布"
+          else
+            echo "::error::该 commit（${SHA}）没有成功的 ci run → 拒绝发布"
+            echo "::error::（main push 时 ci.yml 会跑同一个 commit；闸门红了不该发版）"
+            echo "::error::确认无误可 force=true 绕过"
+            exit 1
+          fi
+
       - name: Create and push tag
         if: steps.ver.outputs.tag != '' && (inputs.dry_run != true)
         env:
           TAG: ${{ steps.ver.outputs.tag }}
-          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -z "${RELEASE_TOKEN}" ]; then
-            echo "::error::secrets.RELEASE_TOKEN 未配置——PAT 缺失，打不了 tag。"
-            echo "::error::（用 GITHUB_TOKEN 推 tag 不会触发 ci.yml，镜像不会推，故不接受降级）"
-            exit 1
-          fi
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$TAG" -m "auto-tag $TAG"
-          # ⚠️ 必须用 PAT（不是 GITHUB_TOKEN）——见文件头说明
-          git push "https://x-access-token:${RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-            "refs/tags/${TAG}"
+          # 用 checkout 自带的 GITHUB_TOKEN 推（凭据在 .git/config 里）。
+          # ⚠️ 这个 push **不会**触发任何 workflow —— GitHub 抑制 Actions
+          #    内部发起的 push。后续靠下面的 repository_dispatch 接力。
+          git push origin "refs/tags/${TAG}"
           echo "✓ 已推送 ${TAG}"
-          echo "→ 将触发 ci.yml(push tags v*) → 绿后 docker-image.yml 推镜像"
 
-      - name: Verify CI was triggered
+      - name: Dispatch release build
+        id: dispatch
+        if: steps.ver.outputs.tag != '' && (inputs.dry_run != true)
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # repository_dispatch 是 GitHub 官方对「Actions 内发起的动作」留的
+          # **例外**（GITHUB_TOKEN 触发的事件里，只有 workflow_dispatch 与
+          # repository_dispatch 会创建 workflow run）→ 靠它把「发布」交给
+          # docker-image.yml。
+          #
+          # client_payload 带上 tag 与它指向的 commit —— docker-image.yml
+          # 靠这俩算镜像 tag（latest / 1.0.7 / 1.0）。
+          SHA=$(git rev-list -n 1 "$TAG")
+          echo "→ dispatch release-tag：tag=${TAG} sha=${SHA}"
+          # ⚠️ 用 herestring（<<<）而不是 heredoc（<<EOF）：heredoc 的结束
+          #    标记必须顶格，写在 YAML 的 run 块里会破坏缩进。
+          PAYLOAD=$(printf '{"event_type":"release-tag","client_payload":{"tag":"%s","sha":"%s"}}' \
+            "$TAG" "$SHA")
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/dispatches" \
+            --input - <<< "$PAYLOAD"
+          echo "✓ repository_dispatch 已发出"
+
+      - name: Verify release build was triggered
         id: verify
         if: steps.ver.outputs.tag != '' && (inputs.dry_run != true)
         env:
           TAG: ${{ steps.ver.outputs.tag }}
           # gh CLI 读 GH_TOKEN 环境变量认证。⚠️ 不能写 "$GITHUB_TOKEN"——
-          # Actions 不注入该环境变量（见下方注释），set -u 下会 unbound
-          # variable → 校验永远查不到 → 假阴性。
+          # Actions 不注入该环境变量（它只在 github.token 上下文里），
+          # set -u 下会 unbound variable → 校验永远查不到 → 假阴性。
           GH_TOKEN: ${{ github.token }}
+          STARTED_AT: ${{ github.run_started_at }}
         run: |
           set -euo pipefail
-          # 把「tag 推成功但 workflow 没被触发」从**静默失败**变成**显式失败**。
+          # 把「tag 推了但镜像构建没被触发」从**静默失败**变成**显式失败**。
           #
-          # 为什么要查：PAT 缺「触发 workflow」的权限（fine-grained 少了
-          # Workflows / classic 少了 workflow scope）时，git push **成功**、
-          # tag **在远端**，但 ci.yml 根本不会跑 → 镜像一个都没推 → 而本
-          # workflow 全绿。没人看日志就完全发现不了（2026-11-20 实测踩到）。
+          # 为什么要查：dispatch 没送达 / 被拒 / workflow 没匹配 event_type
+          # 时，tag **在远端**、但镜像构建根本不会跑 → 没人看日志就完全
+          # 发现不了（2026-11-20 实测踩过同类坑）。
           #
-          # 判定：GitHub 收到 push 后通常 5~15 秒内创建 run，轮询 60 秒。
-          #
-          # ⚠️ GITHUB_TOKEN **不是**自动注入的环境变量（Actions 只把它放在
-          #    `github.token` / `secrets.GITHUB_TOKEN` 上下文里）。直接写
-          #    "$GITHUB_TOKEN" 在 `set -u` 下会 unbound variable → 校验步骤
-          #    永远查不到 run → **假阴性**（2026-11-20 实测踩到：脚本 12 次
-          #    循环全部 unbound variable，最后误报「没被触发」）。
-          #    故必须用 env: 把 ${{ github.token }} 显式传进来。
+          # 判定：GitHub 收到 dispatch 后通常 5~15 秒内创建 run，轮询 60 秒。
+          # repository_dispatch 的 run 没有 tag 字段可比对 → 用「创建时间晚于
+          # 本次 run 开始时间」来认领（ISO8601 字符串比较即时间序）。
           RUN_ID=""
           for i in $(seq 1 12); do
             RUN_ID=$(gh api \
-              "repos/${GITHUB_REPOSITORY}/actions/runs?event=push&per_page=30" \
-              --jq '.workflow_runs[] | "\(.id) \(.head_branch) \(.name)"' \
-              2>/dev/null | awk -v t="$TAG" '$2 == t {print $1; exit}' || true)
+              "repos/${GITHUB_REPOSITORY}/actions/runs?event=repository_dispatch&per_page=10" \
+              --jq '.workflow_runs[] | "\(.id) \(.created_at) \(.name)"' \
+              2>/dev/null | awk -v t="$STARTED_AT" '$2 >= t {print $1; exit}' || true)
             if [ -n "$RUN_ID" ]; then
               break
             fi
             sleep 5
           done
           if [ -n "$RUN_ID" ]; then
-            echo "✓ ci 已被触发：run ${RUN_ID}（ref=${TAG}）"
+            echo "✓ 镜像构建已被触发：run ${RUN_ID}"
             echo "→ https://github.com/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
           else
-            echo "::error::tag ${TAG} 已推送，但 60 秒内没有任何 workflow 被触发（ref=${TAG}）"
-            echo "::error::→ 镜像不会推、闸门不会跑，而本 workflow 却是绿的——最坏的一类故障"
-            echo "::error::多半是推送用的 token 缺「触发 workflow」的能力（2026-11-20 实测）："
-            echo "::error::  · classic PAT（ghp_，scopes 含 **repo** + **workflow**）→ ✅ 触发"
-            echo "::error::  · fine-grained PAT（github_pat_，即使勾了 Contents+Workflows）→ ❌ 不触发"
-            echo "::error::→ 修法：把 environment 'tag' 的 RELEASE_TOKEN 换成 classic PAT"
-            echo "::error::修完重跑本 workflow（force=true 会打下一个 patch 版本）"
+            echo "::error::tag ${TAG} 已推送，但 60 秒内没有任何 workflow 因 repository_dispatch 被触发"
+            echo "::error::→ 镜像不会推，而本 workflow 却是绿的——最坏的一类故障"
+            echo "::error::检查：① docker-image.yml 是否声明了 repository_dispatch: types: [release-tag]"
+            echo "::error::      ② 该 workflow 是否存在**默认分支**（repository_dispatch 只认默认分支）"
             exit 1
           fi
 
@@ -254,6 +284,6 @@ jobs:
             fi
             echo "- 分支：\`main\` @ $(git rev-parse --short HEAD 2>/dev/null || echo '-')"
             if [ -n "${{ steps.ver.outputs.tag }}" ]; then
-              echo "- CI 触发校验：\`${{ steps.verify.outcome }}\`（success = ci 已被触发）"
+              echo "- 镜像构建触发校验：\`${{ steps.verify.outcome }}\`（success = 已触发）"
             fi
           } >> "$GITHUB_STEP_SUMMARY"

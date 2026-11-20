@@ -3,6 +3,11 @@ name: docker-image
 # 由 ci.yml 的**成功**结果触发（workflow_run）——镜像构建必须等静态检查
 # 与测试闸门全绿，否则「代码红了但镜像照样推、照样能部署到生产」。
 #
+# ★ 另有一条通道：**repository_dispatch**（来自 auto-tag.yml，见 `on:` 段
+#   注释）。自动发版时**不能**靠「推 tag 触发 workflow_run」——GitHub 一律
+#   不触发由 Actions 内部发起的 push（2026-11-20 实测：换凭据、换权限都
+#   不行，**位置**才是变量）。repository_dispatch 是官方留的例外。
+#
 # 为什么不用 push 触发 + workflow_run 的组合：
 #   · 本 workflow 只保留 workflow_run 一个触发器，**不**再自己响应 push
 #     ——否则会与 workflow_run 路径**重复构建推送**两次
@@ -18,10 +23,28 @@ name: docker-image
 # HEAD（不是被测 commit），context.ref 永远是 refs/heads/main——故
 # type=sha / type=semver 会产出**错误**的 tag。故此处**不用**
 # metadata-action，改为自行计算 tag 与标签（见 Compute image tags 步骤）。
+#
+# ⚠️ repository_dispatch 通道同理：github.sha 是默认分支 HEAD → 用
+#   client_payload.sha（auto-tag 传的是 tag 指向的那个 commit）。
 on:
   workflow_run:
     workflows: ['ci']
     types: [completed]
+  # ★ 发布通道：来自 auto-tag.yml 的 repository_dispatch。
+  #
+  # 为什么需要它：GitHub **一律不触发**由 Actions 内部发起的 push（防递归），
+  # 所以 auto-tag 推的 tag 不会触发本 workflow（2026-11-20 实测：无论用
+  # 什么凭据、什么权限，从 runner 内推的 tag 都不触发任何 workflow）。
+  # repository_dispatch 是官方对「Actions 内发起的动作」留的**例外**
+  # （GITHUB_TOKEN 触发的事件里，只有 workflow_dispatch 与
+  # repository_dispatch 会创建 workflow run）→ 用它接力。
+  #
+  # 两条通道并存：
+  #   · workflow_run      —— 手工推 tag v*（本地 git push）时走这条
+  #   · repository_dispatch —— auto-tag 自动打 tag 时走这条
+  # 两者产出的镜像完全一致（同一套 Compute image tags 逻辑）。
+  repository_dispatch:
+    types: ['release-tag']
 
 env:
   REGISTRY: docker.io
@@ -42,9 +65,25 @@ jobs:
     #   → v1.0.0 的镜像因此没构建（2026-11-18 生产踩到）。发布判定移到
     #   Compute 步骤（git tag --points-at + SEMVER），非发布 → 整个 job
     #   干净跳过（见 skip 步骤）。
+    #
+    # ★ 但**触发源**的 head_branch 是可以用的：ci run 由 tag push 触发时
+    #   head_branch = tag 名（v1.0.4），由 main push 触发时 = main。
+    #   本通道只认「tag push 触发的 ci」——即**手工推 tag**那条路。
+    #   main push 的 ci 走这里会与 auto-tag 的 repository_dispatch 通道
+    #   **重复构建同一个版本**（auto-tag 是在 ci 绿之后才补打 tag 的，
+    #   那个 tag 同样挂在 ci 的那个 commit 上 → --points-at 找得到它）。
+    #   故用 startsWith(head_branch, 'v') 把两条通道的职责切干净：
+    #     · workflow_run       → 手工 `git push origin v1.0.x` 发版
+    #     · repository_dispatch → auto-tag 自动发版
+    #
+    # ★ repository_dispatch 通道（auto-tag 自动发版）：没有 workflow_run，
+    #   「闸门红不构建」由 **auto-tag 侧的「Gate: CI must be green」** 把关
+    #   （它确认该 commit 已有成功的 ci run 才允许发 dispatch）。
     if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push'
+      github.event_name == 'repository_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -56,16 +95,20 @@ jobs:
       - name: Checkout
         # ⚠️ 必须用 workflow_run.head_sha，不是默认的 github.sha
         #    （那会 checkout 到默认分支 HEAD，可能是别的 commit）
+        #
+        # ★ repository_dispatch 通道：github.sha 是**默认分支 HEAD**，不是
+        #   发布的那次 commit → 必须用 client_payload.sha
+        #   （auto-tag 把 tag 指向的 commit sha 一并带上了）
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.event.workflow_run.head_sha || github.event.client_payload.sha }}
           # fetch-depth 0：拿全历史与 tag，供下面识别 v* semver tag
           fetch-depth: 0
 
       - name: Compute image tags
         id: meta
         env:
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.event.client_payload.sha }}
           IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
         run: |
           set -euo pipefail
