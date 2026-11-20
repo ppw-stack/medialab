@@ -457,9 +457,12 @@
   - **凭据加密可逆（固定 key + 固定 IV）**：`Credentials.db.credentials2.credentials` 是 AES-128-CBC/PKCS7，密钥来自 `@xbase/electron_auth_kit` 的 `EncryptionKeyUtility`（8 段字符串打散）。**key/iv 属凭据类敏感材料，禁止以字面量写入仓库**——由 `scripts/export_guangya_client_token.py` 在本机从已安装客户端的 `app.asar` 动态提取（或用 `GUANGYA_AES_KEY_HEX` / `GUANGYA_AES_IV_HEX` 环境变量覆盖）。**不绑设备、不绑 Keychain**——本机任何能读该库的进程都能解密
   - **覆盖层字段**（`GuangyaCredential` 新增，向后兼容）：`client_access_token` / `client_expires_at` / `client_device_id`。**只影响 `get_direct_link`**：扫描 / 列目录 / 上传仍走 Web token（Web token 失效才会拖死整个驱动）
   - **`get_direct_link` 优先级**：客户端 token 有效（留 5 分钟余量）→ 走 `POST https://api.guangyapan.com/userres/v1/get_res_download_url` + `dt=6` + `did/av/vc`；非鉴权错误（如 254）**直接抛**（回退也拿不到，只会掩盖原因）；鉴权错误（117）才回退 Web
-  - **不自动刷新客户端 token**：`guangyaclient.refresh_token()` 把 `client_id` 硬编码成 Web 值，与 token 的 `aud` 不匹配（是否绑 aud 未验证，**且刷新可能轮换 refresh_token 把客户端踢下线**）→ 过期就回退 Web，靠本机同步脚本保持新鲜
+  - ~~**不自动刷新客户端 token**~~（**已废止**，见下方「✅ 客户端 token 现在能自己续期」）：原结论是 `guangyaclient.refresh_token()` 把 `client_id` 硬编码成 Web 值 → 现在驱动自己用 `CLIENT_ID_MAC` 续期，不依赖本机同步脚本
   - 工具：`scripts/export_guangya_client_token.py`（本机只读解密，输出 JSON）+ `scripts/import_guangya_client_token.py`（容器内写覆盖层，`MEDIALAB_DRIVER_ID` / `GUANGYA_CLIENT_TOKEN_B64`）+ `scripts/sync_guangya_client_token.sh`（本机 cron/launchd 定时导出→ssh 导入）
-  - ⚠️ **旧代码会丢字段**：生产镜像若还是旧 `GuangyaCredential`（`from_json` 忽略未知键），Web token 刷新写回时会把 `client_*` 一起抹掉（约 2 小时一次）→ **必须部署新代码后才谈持久**
+  - ⚠️ **旧代码会丢字段（2026-11-20 生产事故，已修）**：旧镜像的凭据写回是**整串替换**——Web token 刷新写回（`migration.py` / `redirect.py` 的 `persist_guangya_credential`）会把 `client_*` 一起抹掉（约 2 小时一次）→ **客户端身份丢失** → 非会员副盘的**大文件直链全部 `code=254`**（文案「网页端非会员下载文件大小超过限制，请开通会员或使用客户端下载」）。表现：聚合归拢里**只有大视频**全部 `failed`（附件走分享转存照常成功），而**同一账号几小时前还搬得动几十 GB 大文件**——这个「时好时坏」是判据。
+    - 修复 = `driver_service.persist_guangya_credential` + `_merge_guangya_credential`（**合并两层写回**，commit `f4cc32c`），**v1.0.7 起随镜像发布**；**≤ v1.0.6 的镜像仍会抹**——只重新导入客户端 token 而不升级，只能撑到下一次老实例写回
+    - 排查顺序：看台账 `secondary_staging` 的 `last_error` 是否同一句 254 → 解密 `drivers.credential` 看 `client_access_token` 是否为空 → 空 = 客户端身份已被抹掉（不是账号掉了会员）
+    - 恢复：升级到 ≥ v1.0.7 后 `scripts/export_guangya_client_token.py`（本机）→ `scripts/import_guangya_client_token.py`（容器内，`MEDIALAB_DRIVER_ID`）；**先核对导出 token 的 `sub` == 目标驱动的 `account_id`**（`get_assets` / JWT `sub`），张冠李戴会把凭据写到别的账号上
   - 实测（驱动 5 = 小号3，`vipStatus=3` / 无 `directLinkFeature`）：导入客户端 token 后 1.07 GB 与 **19.6 GB** 文件都 `success`，URL 参数 `threshold=200` / `ms=th=204800`（与客户端任务库一致）；清空客户端 token 后同文件回退 Web → `254`
   - ✅ **客户端 token 现在能自己续期**（2026-11-19 实测，替代「只能靠本机定时同步」）：
     - `GuangyaCredential.client_refresh_token`（与 `client_access_token` / `client_expires_at` / `client_device_id` 同层）+ `GuangyaDriver._ensure_client_token()`
