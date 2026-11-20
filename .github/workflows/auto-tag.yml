@@ -1,0 +1,183 @@
+name: auto-tag
+
+# 定时自动打版本 tag（每天一次，UTC 03:17 → 北京时间 11:17）。
+#
+# 为什么单独一个 workflow：打 tag 是**发布的第一环**，它必须能在「没人
+# 盯着」的情况下自己跑完，且要能安全地失败而不产生半个版本。
+#
+# 产出的 tag 形如 v1.0.4（只自增 patch），落在 **main 的 HEAD** 上。
+#
+# ⚠️⚠️ 头号坑：用默认 GITHUB_TOKEN 推的 tag **不会触发新的 workflow run**
+#   （GitHub 官方限制：GITHUB_TOKEN 触发的事件不创建新的 workflow run）。
+#   若本 workflow 用 GITHUB_TOKEN 推 tag：
+#     · ci.yml 的 `push: tags: ['v*']` **收不到** → 闸门不跑
+#     · → docker-image.yml 的 workflow_run **不触发** → 镜像一个都没推
+#     · → **workflow 全绿、tag 打上了、镜像没有**——极难发现
+#   故此处**必须用 PAT**（`secrets.RELEASE_TOKEN`）：PAT 推送会正常触发
+#   workflow，与手动 `git push origin v1.0.4` 完全同一条链路：
+#     PAT 推 v* tag → ci.yml(push tags) → 绿 → workflow_run → docker-image.yml
+#     → git tag --points-at 认到 v* semver → 推镜像 latest + 1.0.4 + 1.0
+#
+# PAT 准备（仓库 ppw-stack/medialab）：
+#   1. GitHub → Settings → Developer settings → Fine-grained tokens
+#   2. Resource owner: ppw-stack，Repository access: Only select repositories
+#      → 选中 ppw-stack/medialab
+#   3. Repository permissions → **Contents: Read and write**（唯一必需项）
+#   4. 生成后把 token 存到 **environment `tag`** 的 secret：
+#      **RELEASE_TOKEN**（Settings → Environments → tag → Environment secrets）
+#      → Actions 权限需允许 Actions 创建 workflow run（默认允许）
+#
+# ⚠️ RELEASE_TOKEN 存在 **environment 级**（不是 repository 级）→ 本 job
+#    **必须**声明 `environment: tag`，否则读不到它（会拿到空串）。
+#
+# ⚠️ 本 workflow 跑在**默认分支（main）**的代码上（GitHub 的既定行为）——
+#   默认分支的内容必须始终可信。
+
+on:
+  schedule:
+    # ⚠️ UTC，不是北京时间。避开整点（GitHub 高负载时整点定时任务会明显
+    #    延迟甚至延后一小时；错开整点更稳）。'17 3 * * *' = UTC 03:17
+    #    = 北京时间 11:17。
+    - cron: '17 3 * * *'
+  # 手动触发（改完 workflow 想立刻验证、或需要临时补一次发布）：
+  #   dry_run=true → 只打印会打什么 tag，不推
+  #   force=true  → 即使今天已发过 / 无新提交也照打
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只演练，不创建也不推送 tag'
+        type: boolean
+        default: false
+      force:
+        description: '忽略「今天已发过」与「无新提交」两个跳过条件'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    # ⚠️ 必须声明 environment ——RELEASE_TOKEN 存在 **environment `tag`** 的
+    # secret 里（environment 级 secret 只有声明了该 environment 的 job
+    # 才能读到；不声明 → ${{ secrets.RELEASE_TOKEN }} 是空串）。
+    environment: tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      # 同名组串行：schedule 与手动触发不会并发推两个 tag
+      group: auto-tag
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: main
+          # fetch-depth: 0 —— 要全部历史与 tag：算版本号、查最新 tag、
+          # 算「相对最新 tag 有几个新提交」都依赖完整仓库
+          fetch-depth: 0
+
+      - name: Compute next tag
+        id: ver
+        env:
+          FORCE: ${{ inputs.force }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          echo "::group::环境"
+          echo "HEAD: $(git rev-parse HEAD)"
+          echo "今天（北京）: $(TZ=Asia/Shanghai date +%F)"
+          echo "::endgroup::"
+
+          # ---- 1. 算下一个版本号：只自增 patch --------------------------
+          # v1.0.3 → v1.0.4；v1.2.9 → v1.2.10
+          LATEST=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -1 || true)
+          if [ -z "$LATEST" ]; then
+            TAG="v0.0.1"
+          else
+            CORE=${LATEST#v}
+            MAJ=$(echo "$CORE" | cut -d. -f1)
+            MIN=$(echo "$CORE" | cut -d. -f2)
+            PAT=$(echo "$CORE" | cut -d. -f3)
+            PAT=${PAT:-0}
+            TAG="v${MAJ}.${MIN}.$((PAT + 1))"
+          fi
+          echo "最新 tag：${LATEST:-（无）} → 本次将打：${TAG}"
+
+          # ---- 2. 幂等闸：今天已发过版本 → 跳过 ------------------------
+          # 「每天 1 次」的落地：按**北京时间**判「今天」。
+          # tag 的创建时间用 `%(creatordate)`：annotated tag 取 tagger
+          # 时间、lightweight tag 取 commit 时间——两种 tag 都覆盖到，
+          # 且 git 的日期输出遵循 TZ 环境变量。
+          if [ -n "$LATEST" ] && [ "$FORCE" != "true" ]; then
+            LATEST_DATE=$(TZ=Asia/Shanghai git for-each-ref \
+              --format='%(creatordate:short)' "refs/tags/$LATEST" 2>/dev/null || true)
+            TODAY=$(TZ=Asia/Shanghai date +%F)
+            if [ -n "$LATEST_DATE" ] && [ "$LATEST_DATE" = "$TODAY" ]; then
+              echo "最新 tag $LATEST 就是今天（$TODAY 北京）打的 → 跳过"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          # ---- 3. 无新提交 → 跳过 --------------------------------------
+          # main 相对最新 tag 没有新 commit → 没什么可发布的，跳过。
+          if [ "$FORCE" != "true" ] && [ -n "$LATEST" ] \
+             && git rev-parse -q --verify "refs/tags/$LATEST" >/dev/null; then
+            AHEAD=$(git rev-list "$LATEST"..HEAD --count)
+            if [ "$AHEAD" = "0" ]; then
+              echo "main 相对 $LATEST 无新提交 → 跳过"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "相对 $LATEST 有 $AHEAD 个新提交 → 发布"
+          fi
+
+          # ---- 4. 同名 tag 已存在（并发/重算的保险）→ 跳过 -------------
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "tag $TAG 已存在 → 跳过"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Dry run
+        if: steps.ver.outputs.tag != '' && (inputs.dry_run == true)
+        run: |
+          echo "::notice::dry-run：将创建并推送 tag ${{ steps.ver.outputs.tag }}（本次未推）"
+
+      - name: Create and push tag
+        if: steps.ver.outputs.tag != '' && (inputs.dry_run != true)
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASE_TOKEN}" ]; then
+            echo "::error::secrets.RELEASE_TOKEN 未配置——PAT 缺失，打不了 tag。"
+            echo "::error::（用 GITHUB_TOKEN 推 tag 不会触发 ci.yml，镜像不会推，故不接受降级）"
+            exit 1
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "auto-tag $TAG"
+          # ⚠️ 必须用 PAT（不是 GITHUB_TOKEN）——见文件头说明
+          git push "https://x-access-token:${RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "refs/tags/${TAG}"
+          echo "✓ 已推送 ${TAG}"
+          echo "→ 将触发 ci.yml(push tags v*) → 绿后 docker-image.yml 推镜像"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### 自动打 tag 结果"
+            echo ""
+            if [ -n "${{ steps.ver.outputs.tag }}" ]; then
+              echo "- 本次版本：**${{ steps.ver.outputs.tag }}**"
+            else
+              echo "- 本次版本：跳过（${{ steps.ver.outputs.skip }})"
+            fi
+            echo "- 分支：\`main\` @ $(git rev-parse --short HEAD 2>/dev/null || echo '-')"
+          } >> "$GITHUB_STEP_SUMMARY"
