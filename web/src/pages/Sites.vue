@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { api, errMsg } from '../api'
 import type {
   FeedTestResult,
@@ -59,44 +59,6 @@ const testingAll = ref(false)
 const testResults = ref<Record<number, { status: string; detail: string }>>({})
 const modalOpen = ref(false)
 const formRef = ref<FormInstance>()
-
-// ---- 用户数据全局刷新 ----
-const refreshingUserData = ref(false)
-
-/**
- * 触发全局刷新（跑 `refresh_user_data` 作业重抓所有站点）。
- *
- * **POST 一返回后台作业就调度了**，数据要等作业跑完才更新——故延迟
- * 10s 再重新加载，期间按钮持续 loading（避免用户以为已结束却没动静）。
- */
-let userDataTimer: ReturnType<typeof setTimeout> | null = null
-
-async function refreshAllUserData() {
-  if (refreshingUserData.value) return
-  refreshingUserData.value = true
-  try {
-    await api.post('/scheduler/refresh_user_data/run')
-    message.success('已触发全局刷新，正在重新加载…')
-    if (userDataTimer) clearTimeout(userDataTimer)
-    userDataTimer = setTimeout(async () => {
-      try {
-        await load()
-      } finally {
-        refreshingUserData.value = false
-      }
-    }, 10000)
-  } catch (exc) {
-    message.error(exc instanceof Error ? exc.message : '触发失败')
-    refreshingUserData.value = false
-  }
-}
-
-onUnmounted(() => {
-  if (userDataTimer) {
-    clearTimeout(userDataTimer)
-    userDataTimer = null
-  }
-})
 
 const formState = reactive<Record<string, unknown>>({})
 
@@ -230,6 +192,21 @@ async function onTestAll() {
         detail: item.detail,
       }
     }
+
+    // 合并用户数据：只刷新「可达且已登录」的站（测连不通过的站不必再打一次）
+    const passing = r.results.filter((x) => x.reachable && x.logged_in)
+    let refreshed = 0
+    let refreshFailed = 0
+    for (const item of passing) {
+      try {
+        const ud = await api.post<{ ok: boolean }>(`/sites/${item.site_id}/user-data/refresh`)
+        if (ud.ok) refreshed += 1
+        else refreshFailed += 1
+      } catch {
+        refreshFailed += 1
+      }
+    }
+    if (passing.length) await loadSites()
     const { total, reachable, failed } = r.summary
     // ⚠️ summary.unauthorized = 可达但**未登录**（凭据失效）——单独提示，
     // 别混进「可达」（那会让失效的站看起来一切正常）
@@ -238,9 +215,13 @@ async function onTestAll() {
       const parts = [`共 ${total} 站`, `可达 ${reachable}`]
       if (failed > 0) parts.push(`失败 ${failed}`)
       if (unauthorized > 0) parts.push(`未登录 ${unauthorized}（凭据可能已失效）`)
+      if (passing.length) parts.push(`用户数据 ${refreshed} 成功${refreshFailed ? ` / ${refreshFailed} 失败` : ''}`)
       message.warning(parts.join('，'))
     } else {
-      message.success(`共 ${total} 站全部可达且已登录`)
+      message.success(
+        `共 ${total} 站全部可达且已登录` +
+        (passing.length ? `，用户数据已刷新 ${refreshed} 站` : '')
+      )
     }
   } catch (exc) {
     message.error(exc instanceof Error ? exc.message : '全部测连失败')
@@ -324,9 +305,6 @@ const columns = [
     >
       <template #actions>
         <a-space>
-          <a-button :loading="refreshingUserData" @click="refreshAllUserData">
-            刷新用户数据
-          </a-button>
           <a-button :loading="testingAll" @click="onTestAll">全部测连</a-button>
           <a-button type="primary" @click="onCreate">新增站点</a-button>
         </a-space>
