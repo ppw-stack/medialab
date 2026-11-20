@@ -318,7 +318,9 @@ async def persist_guangya_credential(driver_id: int, cred: Any) -> None:
             )
         logger.info("已写回刷新的光鸭凭据 driver_id=%s", driver_id)
     except Exception:
-        logger.exception("写回刷新的光鸭凭据失败（本次任务不受影响）")
+        logger.exception(
+            "写回刷新的光鸭凭据失败（driver_id=%s，本次任务不受影响）", driver_id
+        )
 
 
 def _decode_stored_guangya_credential(raw: str | None) -> Any:

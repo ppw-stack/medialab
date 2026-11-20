@@ -780,7 +780,9 @@ async def persist_guangya_credential(driver_id: int, cred: Any) -> None:
     try:
         await _persist(driver_id, cred)
     except Exception:
-        logger.exception("写回刷新的光鸭凭据失败（本次任务不受影响）")
+        logger.exception(
+            "写回刷新的光鸭凭据失败（driver_id=%s，本次任务不受影响）", driver_id
+        )
 
 
 # ================================================================ 目录浏览
