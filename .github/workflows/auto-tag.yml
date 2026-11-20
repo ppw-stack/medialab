@@ -18,11 +18,25 @@ name: auto-tag
 #     PAT 推 v* tag → ci.yml(push tags) → 绿 → workflow_run → docker-image.yml
 #     → git tag --points-at 认到 v* semver → 推镜像 latest + 1.0.4 + 1.0
 #
+# ⚠️⚠️⚠️ 二号坑（2026-11-20 实测踩到）：**PAT 必须带「触发 workflow」的权限**，
+#   否则 tag 照样推成功、但**什么都不触发**（同样静默）：
+#     · classic PAT          → scope 必须含 **`workflow`**
+#                              （`gh auth refresh -s workflow`）
+#     · fine-grained PAT     → Repository permissions 必须勾
+#                              **Workflows: Read and write**
+#   实测对照（同一 tag v1.0.4、同一 commit，只换推送凭据）：
+#     · fine-grained PAT（只勾 Contents: Read and write）→ **ci 没被触发**
+#     · classic token（scopes = gist, read:org, repo, **workflow**）→ ci 正常触发
+#   → 「推 tag 用 PAT」还不够，**PAT 还要有 Workflows 权限**。
+#   本 workflow 末尾有「校验 ci 是否被触发」步骤：没触发就 **::error:: 明确
+#   报错退出**，不再让「tag 打上了、镜像没有」这种事无声发生。
+#
 # PAT 准备（仓库 ppw-stack/medialab）：
 #   1. GitHub → Settings → Developer settings → Fine-grained tokens
 #   2. Resource owner: ppw-stack，Repository access: Only select repositories
 #      → 选中 ppw-stack/medialab
-#   3. Repository permissions → **Contents: Read and write**（唯一必需项）
+#   3. Repository permissions → **Contents: Read and write**
+#                              + **Workflows: Read and write**（★ 少了它不触发）
 #   4. 生成后把 token 存到 **environment `tag`** 的 secret：
 #      **RELEASE_TOKEN**（Settings → Environments → tag → Environment secrets）
 #      → Actions 权限需允许 Actions 创建 workflow run（默认允许）
@@ -55,6 +69,8 @@ on:
 
 permissions:
   contents: write
+  # actions: read —— 末尾「校验 ci 是否被触发」步骤要读 actions/runs
+  actions: read
 
 jobs:
   tag:
@@ -168,6 +184,45 @@ jobs:
           echo "✓ 已推送 ${TAG}"
           echo "→ 将触发 ci.yml(push tags v*) → 绿后 docker-image.yml 推镜像"
 
+      - name: Verify CI was triggered
+        id: verify
+        if: steps.ver.outputs.tag != '' && (inputs.dry_run != true)
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # 把「tag 推成功但 workflow 没被触发」从**静默失败**变成**显式失败**。
+          #
+          # 为什么要查：PAT 缺「触发 workflow」的权限（fine-grained 少了
+          # Workflows / classic 少了 workflow scope）时，git push **成功**、
+          # tag **在远端**，但 ci.yml 根本不会跑 → 镜像一个都没推 → 而本
+          # workflow 全绿。没人看日志就完全发现不了（2026-11-20 实测踩到）。
+          #
+          # 判定：GitHub 收到 push 后通常 5~15 秒内创建 run，轮询 60 秒。
+          RUN_ID=""
+          for i in $(seq 1 12); do
+            RUN_ID=$(GH_TOKEN="$GITHUB_TOKEN" gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs?event=push&per_page=30" \
+              --jq '.workflow_runs[] | "\(.id) \(.head_branch) \(.name)"' \
+              2>/dev/null | awk -v t="$TAG" '$2 == t {print $1; exit}' || true)
+            if [ -n "$RUN_ID" ]; then
+              break
+            fi
+            sleep 5
+          done
+          if [ -n "$RUN_ID" ]; then
+            echo "✓ ci 已被触发：run ${RUN_ID}（ref=${TAG}）"
+            echo "→ https://github.com/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
+          else
+            echo "::error::tag ${TAG} 已推送，但 60 秒内没有任何 workflow 被触发（ref=${TAG}）"
+            echo "::error::→ 镜像不会推、闸门不会跑，而本 workflow 却是绿的——最坏的一类故障"
+            echo "::error::多半是推送用的 PAT 缺「触发 workflow」的权限："
+            echo "::error::  · fine-grained PAT → Repository permissions 需勾 **Workflows: Read and write**"
+            echo "::error::  · classic PAT      → scope 需含 **workflow**（gh auth refresh -s workflow）"
+            echo "::error::修完权限后重跑本 workflow（force=true 会打下一个 patch 版本）"
+            exit 1
+          fi
+
       - name: Summary
         if: always()
         run: |
@@ -180,4 +235,7 @@ jobs:
               echo "- 本次版本：跳过（${{ steps.ver.outputs.skip }})"
             fi
             echo "- 分支：\`main\` @ $(git rev-parse --short HEAD 2>/dev/null || echo '-')"
+            if [ -n "${{ steps.ver.outputs.tag }}" ]; then
+              echo "- CI 触发校验：\`${{ steps.verify.outcome }}\`（success = ci 已被触发）"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
