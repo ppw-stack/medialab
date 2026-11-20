@@ -754,26 +754,35 @@ def _pickcode_from_task(item: dict[str, Any]) -> str:
 
 
 async def persist_guangya_credential(driver_id: int, cred: Any) -> None:
-    """光鸭 Token 刷新后写回 DB（不写回则重启后 401）。"""
-    from app.adapters.drivers.guangya_credential import SCHEME, GuangyaCredential
-    from app.services.driver_service import store_credential
+    """光鸭 Token 刷新后写回 DB（不写回则重启后 401）。
 
-    if not isinstance(cred, GuangyaCredential):
-        return
+    真正的实现放在 :func:`app.services.driver_service.persist_guangya_credential`
+    ——**合并**「Web 层 + 客户端覆盖层」后再写回（整串替换会把另一层抹掉，
+    2026-11-20 生产事故）。这里保留本函数只是为了兼容既有调用点。
+
+    **降级在本层显式做**（try/except + logger.exception），不依赖被调方的
+    实现细节：写回失败（DB 错误等）只记日志，**不向上抛**——本函数被
+    ``_on_refresh`` / ``_on_refresh_source`` / ``_guangya_refresh_callback``
+    当作 ``on_token_refresh`` 回调用，调用方依赖「写回失败不影响本次任务」
+    这条约定（内存里的新 token 仍然有效）。驱动侧
+    :meth:`GuangyaDriver._notify_token_refresh` 还有一层兜底。
+
+    ⚠️ **别改成向上抛**：写回发生在服务端已经轮换 token 之后，上抛会让
+    驱动实例随操作失败被丢弃 → 内存里的新 token 一起丢，而 DB 里只剩
+    已被作废的旧 token → **账号彻底掉线，必须重新扫码**。实测依据见
+    :func:`app.services.driver_service.persist_guangya_credential`。
+
+    Raises:
+        无。写回失败只记日志（``写回刷新的光鸭凭据失败``），不中断调用链。
+    """
+    from app.services.driver_service import persist_guangya_credential as _persist
+
     try:
-        async with session_scope() as db:
-            await store_credential(
-                db,
-                driver_id,
-                cred.to_json(),
-                scheme=SCHEME,
-                # Token 刷新是**同一个账号换 token**，登录态没变
-                # → 不能作废测连缓存（否则面板退回「未测连」）。
-                invalidate_cache=False,
-            )
-        logger.info("已写回刷新的光鸭凭据 driver_id=%s", driver_id)
+        await _persist(driver_id, cred)
     except Exception:
-        logger.exception("写回刷新的光鸭凭据失败（本次任务不受影响）")
+        logger.exception(
+            "写回刷新的光鸭凭据失败（driver_id=%s，本次任务不受影响）", driver_id
+        )
 
 
 # ================================================================ 目录浏览

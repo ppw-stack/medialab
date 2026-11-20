@@ -22,7 +22,7 @@ from app.adapters.drivers.guangya_credential import (
 )
 from app.db.models import Driver
 from app.db.session import session_scope
-from app.services import driver_auth, driver_service
+from app.services import driver_auth, driver_service, redirect
 
 ENV = "CREDENTIAL_ENCRYPTION_SECRET"
 SECRET = "test-secret"
@@ -191,3 +191,127 @@ async def test_unexpected_error_bubbles_up(
         await driver_auth._store_guangya_credential(
             driver_id, _login_payload(), client_mode=False
         )
+
+
+async def test_refresh_writeback_keeps_client_layer(db: None) -> None:
+    """Token 刷新写回**不得抹掉**客户端覆盖层。
+
+    2026-11-20 生产事故：driver 5 的客户端 token 被一个「手里只有 Web
+    层」的老实例的刷新写回整串替换掉了 → 大文件直链能力丢失
+    （非会员账号取直链直接 ``254``）。
+
+    这里的场景正是老实例：它的凭据里**没有**客户端层。
+    """
+    driver_id = await _add_driver()
+    await _seed(
+        driver_id,
+        GuangyaCredential(
+            access_token="client-tok",
+            refresh_token="",
+            device_id="client-dev",
+            expires_at=9_999_999_999,
+            client_access_token="client-tok",
+            client_refresh_token="client-ref",
+            client_expires_at=9_999_999_999,
+            client_device_id="client-dev",
+        ),
+    )
+
+    # 老实例（只有 Web 层）刷新后写回
+    await driver_service.persist_guangya_credential(
+        driver_id,
+        GuangyaCredential(
+            access_token="fresh-web",
+            refresh_token="fresh-web-ref",
+            device_id="web-dev",
+            expires_at=9_999_999_999,
+        ),
+    )
+
+    cred = await _read_credential(driver_id)
+    assert cred is not None
+    # Web 层更新了
+    assert cred.access_token == "fresh-web"
+    assert cred.refresh_token == "fresh-web-ref"
+    # 客户端覆盖层原样保留 —— 这是本用例的全部意义
+    assert cred.client_access_token == "client-tok"
+    assert cred.client_refresh_token == "client-ref"
+    assert cred.client_device_id == "client-dev"
+
+
+async def test_client_refresh_writeback_updates_client_layer(db: None) -> None:
+    """客户端身份的实例刷新写回 → 客户端层 + 主 token 一起更新。"""
+    driver_id = await _add_driver()
+    await _seed(
+        driver_id,
+        GuangyaCredential(
+            access_token="old-client",
+            refresh_token="",
+            device_id="client-dev",
+            expires_at=1,
+            client_access_token="old-client",
+            client_refresh_token="client-ref",
+            client_expires_at=1,
+            client_device_id="client-dev",
+        ),
+    )
+
+    await driver_service.persist_guangya_credential(
+        driver_id,
+        GuangyaCredential(
+            access_token="fresh-client",
+            refresh_token="",
+            device_id="client-dev",
+            expires_at=9_999_999_999,
+            client_access_token="fresh-client",
+            client_refresh_token="client-ref",
+            client_expires_at=9_999_999_999,
+            client_device_id="client-dev",
+        ),
+    )
+
+    cred = await _read_credential(driver_id)
+    assert cred is not None
+    assert cred.access_token == "fresh-client"
+    assert cred.client_access_token == "fresh-client"
+    assert cred.client_refresh_token == "client-ref"
+    assert cred.client_expires_at == 9_999_999_999
+
+
+async def test_redirect_writeback_keeps_client_layer(db: None) -> None:
+    """302 中转的刷新写回**同样**不得抹掉客户端覆盖层。
+
+    中转是**最频繁**触发 token 刷新的路径（每次换直链都可能刷），
+    一旦它整串替换，客户端覆盖层会被迅速抹掉（2026-11-20 生产事故）。
+    """
+    driver_id = await _add_driver()
+    await _seed(
+        driver_id,
+        GuangyaCredential(
+            access_token="web",
+            refresh_token="web-ref",
+            device_id="web-dev",
+            expires_at=9_999_999_999,
+            client_access_token="client-tok",
+            client_refresh_token="client-ref",
+            client_expires_at=9_999_999_999,
+            client_device_id="client-dev",
+        ),
+    )
+
+    await redirect._persist_refreshed_credential(
+        driver_id,
+        GuangyaCredential(
+            access_token="fresh-web",
+            refresh_token="fresh-web-ref",
+            device_id="web-dev",
+            expires_at=9_999_999_999,
+        ),
+    )
+
+    cred = await _read_credential(driver_id)
+    assert cred is not None
+    assert cred.access_token == "fresh-web"
+    assert cred.client_access_token == "client-tok"
+    assert cred.client_refresh_token == "client-ref"
+    assert cred.client_device_id == "client-dev"

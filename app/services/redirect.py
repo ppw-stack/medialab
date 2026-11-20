@@ -25,7 +25,6 @@ from app.adapters.drivers.base import CloudDriver, DirectLink, DriverError
 from app.core.config import AppSettings
 from app.core.logging import get_logger
 from app.db.models import Driver, MediaFile
-from app.db.session import session_scope
 from app.services.driver_factory import build_driver
 from app.services.link_cache import LinkCache, parse_expires_at
 from app.services.signing import ua_hash, verify
@@ -40,32 +39,28 @@ async def _persist_refreshed_credential(driver_id: int, cred: Any) -> None:
     驱动只在内存里更新它——不落库的话，进程重启后又用旧 token，
     服务端返回 117 / 401，刷新也救不回来（refresh_token 可能已失效）。
 
-    写回失败**不影响本次请求**（内存里的新 token 仍然有效），只记日志。
-    """
-    from app.adapters.drivers.guangya_credential import (
-        SCHEME as GUANGYA_SCHEME,
-    )
-    from app.adapters.drivers.guangya_credential import (
-        GuangyaCredential,
-    )
-    from app.services.driver_service import store_credential
+    写回**必须合并**「Web 层 + 客户端覆盖层」——整串替换会把另一层抹掉
+    （2026-11-20 生产事故：driver 5 的客户端 token 被一个 Web 实例的
+    刷新写回抹掉了）。实现见
+    :func:`app.services.driver_service.persist_guangya_credential`。
 
-    if not isinstance(cred, GuangyaCredential):
-        return
+    写回失败**不影响本次请求**（内存里的新 token 仍然有效），只记日志。
+
+    **降级在本层显式做**（try/except + logger.exception），不依赖被调方
+    的实现细节：写回失败是「凭据持久化」问题，**绝不能让 302 播放请求
+    失败**（与「直链缓存读写失败必须降级，不能让播放 500」同一条铁律）。
+
+    Raises:
+        无。写回失败只记日志，不中断本次请求。
+    """
+    from app.services.driver_service import persist_guangya_credential
+
     try:
-        async with session_scope() as db:
-            await store_credential(
-                db,
-                driver_id,
-                cred.to_json(),
-                scheme=GUANGYA_SCHEME,
-                # Token 刷新是**同一个账号换 token**，登录态没变
-                # → 不能作废测连缓存（否则面板退回「未测连」）。
-                invalidate_cache=False,
-            )
-        logger.info("已写回刷新的光鸭凭据 driver_id=%s", driver_id)
+        await persist_guangya_credential(driver_id, cred)
     except Exception:
-        logger.exception("写回刷新的光鸭凭据失败（本次请求不受影响）")
+        logger.exception(
+            "写回刷新的光鸭凭据失败（driver_id=%s，本次请求不受影响）", driver_id
+        )
 
 
 class RedirectError(Exception):

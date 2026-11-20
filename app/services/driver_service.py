@@ -251,30 +251,128 @@ def _make_token_refresh_persist(driver_id: int) -> Callable[[Any], Any]:
 
     写回失败**不影响本次探测**（内存里的新 token 仍然有效），只记日志。
     """
-    from app.adapters.drivers.guangya_credential import (
-        SCHEME as GUANGYA_SCHEME,
-    )
     from app.adapters.drivers.guangya_credential import GuangyaCredential
 
     async def _persist(cred: Any) -> None:
         if not isinstance(cred, GuangyaCredential):
             return
-        try:
-            async with session_scope() as db:
-                await store_credential(
-                    db,
-                    driver_id,
-                    cred.to_json(),
-                    scheme=GUANGYA_SCHEME,
-                    # Token 刷新是**同一个账号换 token**，登录态没变
-                    # → 不能作废测连缓存（否则面板退回「未测连」）。
-                    invalidate_cache=False,
-                )
-            logger.info("探测中刷新的光鸭凭据已写回 driver_id=%s", driver_id)
-        except Exception:
-            logger.exception("写回刷新的光鸭凭据失败（本次探测不受影响）")
+        await persist_guangya_credential(driver_id, cred)
 
     return _persist
+
+
+async def persist_guangya_credential(driver_id: int, cred: Any) -> None:
+    """光鸭 Token 刷新后写回 DB（**合并**两层）。
+
+    **为什么必须合并，不能整串替换**：光鸭凭据 = 「Web 层 + 客户端覆盖层」。
+    刷新写回时，驱动实例手里可能只有一层（老实例 / Web 身份的实例）——
+    整串替换会把另一层**抹掉**（2026-11-20 生产事故：driver 5 的客户端
+    token 被一个老实例的刷新写回抹掉 → 大文件直链能力丢失）。
+
+    合并规则与扫码落盘
+    （:func:`app.services.driver_auth._store_guangya_credential`）一致：
+    - 实例带**客户端层** → 更新客户端层，主 token 跟着一起更新
+    - 实例只有 **Web 层** → 只更新 Web 层，**保留 DB 里已有的客户端层**
+
+    **异常口径**：写回失败（DB 错误等）在此被捕获并记日志，**不向上抛**
+    ——本函数是 ``on_token_refresh`` 回调，调用方依赖「写回失败不影响本次
+    任务」（内存里的新 token 仍然有效）。
+
+    ⚠️ **别改成向上抛**（2026-11-20 实测定论）：写回发生在**服务端已经
+    轮换 token 之后**（它是 :meth:`GuangyaDriver._refresh_web_token` 的
+    最后一步）。一旦向上抛：
+
+    - 本次业务操作作废，驱动实例被丢弃 → **内存里的新 token 一起丢**
+    - DB 里只剩**已被服务端作废**的旧 token → 重启后账号彻底掉线，
+      必须重新扫码（刷新接口轮换 ``refresh_token`` 后无法自救）
+    - 且异常是裸 ``RuntimeError``，接不住 :meth:`GuangyaDriver._recover_unauthorized`
+      的 ``except DriverError`` → 401 兜底路径丢失 ``kind="auth"`` 分类
+
+    吞掉的代价只是「重启后掉线」，抛出的代价是「**现在就掉**」。
+
+    Raises:
+        无。写回失败只记日志（``写回刷新的光鸭凭据失败``），不中断调用链。
+    """
+    from app.adapters.drivers.guangya_credential import (
+        SCHEME as GUANGYA_SCHEME,
+    )
+    from app.adapters.drivers.guangya_credential import (
+        GuangyaCredential as _GuangyaCredential,
+    )
+
+    if not isinstance(cred, _GuangyaCredential):
+        return
+    try:
+        async with session_scope() as db:
+            row = await get_driver(db, driver_id)
+            existing = _decode_stored_guangya_credential(row.credential)
+            merged = _merge_guangya_credential(existing, cred)
+            await store_credential(
+                db,
+                driver_id,
+                merged.to_json(),
+                scheme=GUANGYA_SCHEME,
+                # Token 刷新是**同一个账号换 token**，登录态没变
+                # → 不能作废测连缓存（否则面板退回「未测连」）。
+                invalidate_cache=False,
+            )
+        logger.info("已写回刷新的光鸭凭据 driver_id=%s", driver_id)
+    except Exception:
+        logger.exception(
+            "写回刷新的光鸭凭据失败（driver_id=%s，本次任务不受影响）", driver_id
+        )
+
+
+def _decode_stored_guangya_credential(raw: str | None) -> Any:
+    """解密 DB 里的光鸭凭据；解不开就按「没有旧凭据」处理。
+
+    降级必须留痕：否则解密层出问题没人知道，客户端 token 覆盖层会被
+    无声清空（与 :func:`app.services.driver_auth._store_guangya_credential`
+    同一口径）。
+    """
+    from app.adapters.drivers.credential_crypto import CredentialCryptoError
+    from app.adapters.drivers.guangya_credential import decode_credential
+
+    if not raw:
+        return None
+    try:
+        return decode_credential(raw)
+    except (CredentialCryptoError, ValueError, TypeError):
+        logger.warning(
+            "光鸭凭据解密失败，按新建凭据降级处理（driver 凭据）",
+            exc_info=True,
+        )
+        return None
+
+
+def _merge_guangya_credential(existing: Any, incoming: Any) -> Any:
+    """合并「DB 现有凭据」与「驱动手里刷新后的凭据」。"""
+    from app.adapters.drivers.guangya_credential import GuangyaCredential
+
+    merged = existing or GuangyaCredential(access_token=incoming.access_token)
+
+    if incoming.client_access_token:
+        # 客户端身份的实例：客户端层 + 主 token 一起更新。
+        # Web 的 refresh_token **跟着清空**（client 模式下主 token 就是
+        # 客户端那把；留着会被 Web 刷新刷成 Web aud → 客户端身份丢失）。
+        merged.access_token = incoming.access_token
+        merged.expires_at = incoming.expires_at
+        merged.device_id = incoming.device_id
+        merged.refresh_token = incoming.refresh_token
+        merged.client_access_token = incoming.client_access_token
+        merged.client_refresh_token = incoming.client_refresh_token
+        merged.client_expires_at = incoming.client_expires_at
+        merged.client_device_id = incoming.client_device_id
+        return merged
+
+    # Web 身份的实例：**只更新 Web 层**，客户端覆盖层原样保留。
+    merged.access_token = incoming.access_token
+    merged.expires_at = incoming.expires_at
+    merged.device_id = incoming.device_id
+    if incoming.refresh_token:
+        # 空的别覆盖——否则老实例会把 DB 里有效的 RT 抹掉
+        merged.refresh_token = incoming.refresh_token
+    return merged
 
 
 async def store_credential(

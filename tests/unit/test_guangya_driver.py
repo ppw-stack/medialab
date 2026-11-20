@@ -48,6 +48,10 @@ class FakeGuangyaClient:
     #: 注入业务错误码（模拟服务端拒绝）
     copy_code: int | None = None
     delete_code: int | None = None
+    #: ``fs_create_dir`` 的实现覆盖（None = 用默认实现）
+    fs_create_dir_impl: Callable[..., dict[str, Any]] | None = None
+    #: **模拟 HTTP 401**（token 被服务端判死）：前 N 次业务调用抛 401
+    unauthorized_times: ClassVar[int] = 0
 
     def __init__(
         self,
@@ -59,12 +63,37 @@ class FakeGuangyaClient:
         self.refresh_token_value = refresh_token
         self.device_id = device_id or "fake-device"
         self.refresh_calls = 0
+        #: 每次业务调用携带的 token（断言「续期后业务请求用的是新 token」）
+        self.seen_tokens: list[str] = []
 
     def fs_files(self, **kwargs: Any) -> dict[str, Any]:
+        self.seen_tokens.append(self.token)
         impl = type(self).fs_files_impl
         if impl is not None:
             return impl(self, **kwargs)
         return {"code": 0, "msg": "success", "data": {"total": 0, "list": []}}
+
+    def fs_create_dir(
+        self,
+        name: str,
+        parent_id: str | None = None,
+        fail_if_name_exist: bool = False,
+    ) -> dict[str, Any]:
+        """建目录（可注入 401——生产事故就挂在这里）。
+
+        Raises:
+            Exception: 注入的 401 未耗尽时抛 ``httpx.HTTPStatusError``。
+        """
+        self.seen_tokens.append(self.token)
+        if type(self).unauthorized_times > 0:
+            type(self).unauthorized_times -= 1
+            raise _http_401(
+                "https://api.guangyapan.com/nd.bizuserres.s/v1/file/create_dir"
+            )
+        impl = type(self).fs_create_dir_impl
+        if impl is not None:
+            return impl(self, name, parent_id=parent_id)
+        return {"code": 0, "data": {"fileId": "999"}}
 
     def download_url(self, file_id: str) -> dict[str, Any]:
         impl = type(self).download_url_impl
@@ -129,20 +158,37 @@ def fake_gyp(monkeypatch: pytest.MonkeyPatch):
     FakeGuangyaClient.download_url_impl = None
     FakeGuangyaClient.user_info_impl = None
     FakeGuangyaClient.cloud_task_list_impl = None
+    FakeGuangyaClient.fs_create_dir_impl = None
     FakeGuangyaClient.copy_calls = []
     FakeGuangyaClient.delete_calls = []
     FakeGuangyaClient.copy_code = None
     FakeGuangyaClient.delete_code = None
+    FakeGuangyaClient.unauthorized_times = 0
     monkeypatch.setattr(guangyaclient, "GuangyaClient", FakeGuangyaClient)
     yield
     FakeGuangyaClient.fs_files_impl = None
     FakeGuangyaClient.download_url_impl = None
     FakeGuangyaClient.user_info_impl = None
     FakeGuangyaClient.cloud_task_list_impl = None
+    FakeGuangyaClient.fs_create_dir_impl = None
     FakeGuangyaClient.copy_calls = []
     FakeGuangyaClient.delete_calls = []
     FakeGuangyaClient.copy_code = None
     FakeGuangyaClient.delete_code = None
+    FakeGuangyaClient.unauthorized_times = 0
+
+
+def _http_401(url: str) -> Exception:
+    """造一个「HTTP 401」异常（``guangyaclient`` 用 ``raise_for_status`` 抛的）。"""
+    import httpx
+
+    request = httpx.Request("POST", url)
+    response = httpx.Response(401, request=request)
+    return httpx.HTTPStatusError(
+        f"Client error '401 Unauthorized' for url '{url}'",
+        request=request,
+        response=response,
+    )
 
 
 def _credential_json(**kwargs: Any) -> str:
@@ -1017,3 +1063,130 @@ class TestClientTokenLink:
         # 只发了一次续期请求；Web 的 guangyaclient.refresh_token 没被调用
         assert len(calls) == 1
         assert calls[0]["path"] == "/v1/auth/token"
+
+
+class TestClientTokenBusinessSync:
+    """客户端身份续期后，**业务客户端必须用上新 token**。
+
+    2026-11-20 生产事故：driver 5 的 token 在 12:21 已续期并写回 DB，
+    13:11 的 ``fs_create_dir`` 仍 401——新 token 只进了凭据对象，
+    没进 ``guangyaclient`` 实例（它的 ``authorization`` 头在**构造时**
+    就写死了旧 token）。上传工厂恰好在构造期就把 client 取走 → 命中。
+    """
+
+    async def test_refresh_syncs_business_client(self) -> None:
+        """客户端身份续期后，**已缓存的业务客户端必须用上新 token**。"""
+        driver = gyp_module.GuangyaDriver(
+            _credential_json(
+                access_token="old-client",
+                refresh_token="",
+                expires_at=1,
+                client_access_token="old-client",
+                client_expires_at=1,
+                client_device_id="client-dev",
+                client_refresh_token="ref-same",
+            )
+        )
+        # ← 上传工厂（build_guangya_uploader）构造期就把 client 取走了
+        client = driver.client
+
+        with _mock_refresh_and_link(
+            {
+                "access_token": "fresh-client",
+                "refresh_token": "ref-same",
+                "expires_in": 7200,
+            }
+        ):
+            await driver.list_root()
+
+        assert client.token == "fresh-client"
+        assert client.seen_tokens == ["fresh-client"]
+
+    async def test_refresh_when_expiry_unknown(self) -> None:
+        """过期时间未知（=0）且有 RT → 主动续期。
+
+        旧实现把「未知」当成**永不过期** → token 死了也不续期，
+        只能靠撞 401（生产事故的一环）。
+        """
+        driver = gyp_module.GuangyaDriver(
+            _credential_json(
+                access_token="old-client",
+                refresh_token="",
+                expires_at=1,
+                client_access_token="old-client",
+                client_expires_at=0,
+                client_device_id="client-dev",
+                client_refresh_token="ref-same",
+            )
+        )
+        with _mock_refresh_and_link(
+            {
+                "access_token": "fresh-client",
+                "refresh_token": "ref-same",
+                "expires_in": 7200,
+            }
+        ):
+            await driver._ensure_token()
+
+        assert driver._cred is not None
+        assert driver._cred.access_token == "fresh-client"
+
+
+class TestUnauthorizedFallback:
+    """业务接口 401 → 强制刷新一次再重试。
+
+    2026-11-20 生产事故：上传任务 69 个文件全挂在同一处
+    ``fs_create_dir`` 401——服务端把 token 判死（账号在别处重新登录会
+    **立即作废**旧 token），而本地记录的过期时间还没到 → 不刷新 → 全挂。
+    """
+
+    async def test_401_refreshes_and_retries(self) -> None:
+        """业务调用遇 401 时强制刷新一次，并以新 token 重试。"""
+        FakeGuangyaClient.unauthorized_times = 1
+        driver = gyp_module.GuangyaDriver(
+            _credential_json(
+                access_token="tok", refresh_token="ref", expires_at=9_999_999_999
+            )
+        )
+        client = driver.client
+
+        payload = await driver._call("fs_create_dir", "Season 1", parent_id="123")
+
+        assert payload["code"] == 0
+        assert client.refresh_calls == 1
+        # 第一次带旧 token（被 401），重试带新 token
+        assert client.seen_tokens == ["tok", "new-token-1"]
+
+    async def test_401_without_refresh_token_raises_auth_error(self) -> None:
+        """刷新不了（没 RT）→ 明确报鉴权失败，别含糊成「接口调用失败」。"""
+        FakeGuangyaClient.unauthorized_times = 99
+        driver = gyp_module.GuangyaDriver(
+            _credential_json(
+                access_token="tok", refresh_token="", expires_at=9_999_999_999
+            )
+        )
+        with pytest.raises(DriverError) as exc:
+            await driver._call("fs_create_dir", "Season 1", parent_id="123")
+        assert exc.value.kind == "auth"
+        assert "401" in str(exc.value)
+
+    async def test_non_401_error_is_not_retried(self) -> None:
+        """非 401 的异常**不重试**（别把真 bug 变成重试风暴）。"""
+
+        def _boom(self: Any, name: str, parent_id: str | None = None) -> dict[str, Any]:
+            raise RuntimeError("boom")
+
+        FakeGuangyaClient.fs_create_dir_impl = _boom
+        driver = gyp_module.GuangyaDriver(
+            _credential_json(
+                access_token="tok", refresh_token="ref", expires_at=9_999_999_999
+            )
+        )
+        client = driver.client
+
+        with pytest.raises(DriverError) as exc:
+            await driver._call("fs_create_dir", "Season 1", parent_id="123")
+
+        assert "boom" in str(exc.value)
+        assert client.refresh_calls == 0
+        assert client.seen_tokens == ["tok"]

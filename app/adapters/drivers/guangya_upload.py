@@ -71,7 +71,7 @@ from typing import Any
 import httpx
 
 from app.adapters.drivers.base import DriverError
-from app.adapters.drivers.guangya import PROVIDER
+from app.adapters.drivers.guangya import PROVIDER, is_unauthorized_error
 from app.adapters.drivers.upload_base import UploadResult
 from app.core.logging import get_logger
 from app.core.rate_limit import rate_limiter
@@ -189,14 +189,41 @@ class GuangyaUploader:
     # -- 底层调用 --
 
     async def _call(self, method: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        """调一次业务接口（限速 + 错误映射）。"""
+        """调一次业务接口（限速 + 错误映射 + 401 兜底）。
+
+        **401 兜底**：token 被服务端判死时（本地记录的过期时间可能还没到）
+        让驱动强制刷新一次再重试——上传器的客户端与驱动是**同一个实例**，
+        驱动刷新后这里直接受益（2026-11-20 生产事故）。
+
+        Raises:
+            DriverError: 接口调用失败（非 401 直接抛）；401 且强制刷新也
+                失败时抛鉴权错误（kind="auth"）；刷新后重试仍失败同样抛
+                DriverError。
+        """
         await rate_limiter.acquire(PROVIDER)
         try:
             result = await asyncio.to_thread(
                 getattr(self._client, method), *args, **kwargs
             )
         except Exception as exc:
-            raise DriverError(f"光鸭接口 {method} 调用失败：{exc}") from exc
+            if not is_unauthorized_error(exc) or self._driver is None:
+                raise DriverError(f"光鸭接口 {method} 调用失败：{exc}") from exc
+            # 401 → 让驱动强制刷新（并同步 token）后重试一次
+            logger.warning("光鸭接口 %s 返回 401，刷新 token 后重试一次", method)
+            try:
+                await self._driver.force_refresh_token()
+            except Exception as refresh_exc:
+                raise DriverError(
+                    f"光鸭接口 {method} 鉴权失败（401）：{exc}", kind="auth"
+                ) from refresh_exc
+            try:
+                result = await asyncio.to_thread(
+                    getattr(self._client, method), *args, **kwargs
+                )
+            except Exception as retry_exc:
+                raise DriverError(
+                    f"光鸭接口 {method} 调用失败：{retry_exc}"
+                ) from retry_exc
         return result if isinstance(result, dict) else {}
 
     async def _call_oss(self, method: str, *args: Any, **kwargs: Any) -> Any:
