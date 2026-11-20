@@ -26,7 +26,7 @@ def under_challenge(html_text: str) -> bool:
     """页面标题或选择器命中已知挑战页时返回 True。"""
     if not html_text:
         return False
-    doc = Selector(text=html_text)
+    doc = Selector(text=html_text, type="html")
     title = (doc.css("title::text").get() or "").strip()
     if title.lower() in {t.lower() for t in CHALLENGE_TITLES}:
         return True

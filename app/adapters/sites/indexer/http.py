@@ -174,6 +174,11 @@ class RequestUtils:
             if response is not None:
                 response.close()
 
+    def update_headers(self, headers: dict[str, Any]) -> None:
+        """合并请求头（移植 spider 会在探测/促销补全时追加头）。"""
+        if headers:
+            self._client.headers.update(headers)
+
     def close(self) -> None:
         with contextlib.suppress(Exception):
             self._client.close()
@@ -295,6 +300,11 @@ class AsyncRequestUtils:
             return response.json()
         except ValueError:
             return None
+
+    def update_headers(self, headers: dict[str, Any]) -> None:
+        """合并请求头（与同步版本一致）。"""
+        if headers:
+            self._client.headers.update(headers)
 
     async def close(self) -> None:
         with contextlib.suppress(Exception):
