@@ -109,6 +109,23 @@
   含 `site_user_data.hourly_bonus*` 四列，已由 bootstrap `drop_column` 删除）。
   字幕由新增契约 `SiteAdapter.search_subtitles()` 提供（无配置返回 `[]`，
   失败抛 `SiteFetchError`）。旧 adapter 的 9 站细节段落保留在此仅供历史参考。
+
+- **规则包移植的遗留问题（2026-11-20 记录，待处理）**：
+  - ⚠️ **HDWinG 目前不识别任何免费种**（`engine.HDWING_PROMOTION_INJECTION = False`）。
+    站点 `ajax_promotion.php` 受 Cloudflare Turnstile 保护，**未过闸时对任意
+    id（含已过期、甚至不存在的）都返回兜底 `pro_free` 且 `timeout` 恒空** →
+    原实现把到期促销当永久免费。实测对照：`promotion.php?id=838960` 显示
+    免费窗口 2026-11-11 22:35 已结束，接口仍回 `pro_free`。
+    现状按「非免费」保守处理（宁可漏推，不误推付费种）。
+    **待办**：接回逐种 `GET /promotion.php?id={tid}` 权威查询（判定=有 `Free`
+    记录且截止时间 > 现在，截止为空=永久免费；404=无优惠；429=熔断），
+    由 service 层做**增量**（只查新增与已过期项），并发 5、单轮上限 200
+  - **API 站（m-team 等）下载走「换票配方」**：`get_torrent_url` 返回
+    `[base64]url` 形式的一次性请求配方（`app/adapters/sites/indexer/spider/*.py`
+    的 `get_download_url`），**不是**可直接 GET 的普通 URL。旧的逐站 token
+    下载路径已随 adapter 删除，下游消费方需按配方格式处理
+  - m-team 的种子 ID 只能从 `page_url` 的 `/detail/{id}` 提取（spider 不产出
+    `id` 键）——`generic._row_item_id()` 已做回退，取不到时下载/幂等键全失效
 - **hdwing 站点的免费判定（2026-11-16 实测改版，重要）**：
   - **列表页优惠标记是空占位** `<td class="discount"><span class="sp_state_placeholder" id="{tid}"></span></td>` —— FREE 徽章与倒计时由页面 JS 异步填充，**列表 HTML 里没有**。别再指望从列表行解析 `pro_*`（其它 8 站可以）
   - ⚠️ **填充它的 `ajax_promotion.php` 被 Cloudflare Turnstile 闸保护**：页面 JS 必须先 `POST ajax_turnstile.php` 带 `cf-turnstile-response` token。**未过闸的请求对任意 id 都返回兜底的 `pro_free` + 空 timeout**——实测连**根本不存在的 id（999999999）**都回「免费」。照它解析会把「限免 6 小时」误判成「永久免费」（`window_parser` 收到 `free_classes=['free']` + 无剩余时间 → 判 `PERMANENT`，窗口永不到期）
