@@ -337,6 +337,8 @@ def _to_feed_item(row: dict[str, Any], rule: dict[str, Any]) -> FeedItem:
         description=str(row.get("description") or ""),
         published_at=str(published) if published else None,
         download_factor=float(factor) if factor is not None else None,
+        seeders=int(row.get("seeders") or 0),
+        peers=int(row.get("peers") or 0),
         free_payload=_promo_payload(row, rule),
     )
 

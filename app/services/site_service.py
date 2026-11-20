@@ -176,6 +176,20 @@ class SiteSelfTestResult:
 
 
 @dataclass(frozen=True, slots=True)
+class SiteFeedTestItem:
+    """拉取测试里的一条解析结果（只读诊断，不落库）。"""
+
+    title: str
+    item_id: str | None = None
+    size: int = 0
+    seeders: int = 0
+    peers: int = 0
+    category: str | None = None
+    published_at: str | None = None
+    download_factor: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class SiteFeedTestResult:
     """站点种子列表拉取测试结果。"""
 
@@ -184,6 +198,8 @@ class SiteFeedTestResult:
     item_count: int = 0
     duration_ms: int = 0
     sample_titles: list[str] = field(default_factory=list)
+    #: 解析后的前 100 条明细（标题/体积/做种/发布时间/免费倍率）
+    items: list[SiteFeedTestItem] = field(default_factory=list)
     error: str = ""
 
 
@@ -780,5 +796,18 @@ async def test_site_feed(site_id: int) -> SiteFeedTestResult:
         item_count=len(result.items),
         duration_ms=result.duration_ms,
         sample_titles=[item.title for item in result.items[:5]],
+        items=[
+            SiteFeedTestItem(
+                title=item.title,
+                item_id=item.item_id,
+                size=item.size,
+                seeders=item.seeders,
+                peers=item.peers,
+                category=item.category,
+                published_at=item.published_at,
+                download_factor=item.download_factor,
+            )
+            for item in result.items[:100]
+        ],
         error=result.error,
     )

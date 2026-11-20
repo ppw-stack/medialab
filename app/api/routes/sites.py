@@ -119,6 +119,19 @@ class SiteSelfTestOut(BaseModel):
     self_test: dict[str, Any]
 
 
+class FeedTestItemOut(BaseModel):
+    """拉取测试里的一条解析结果。"""
+
+    title: str
+    item_id: str | None = None
+    size: int = 0
+    seeders: int = 0
+    peers: int = 0
+    category: str | None = None
+    published_at: str | None = None
+    download_factor: float | None = None
+
+
 class FeedTestResult(BaseModel):
     """站点连通性测试结果。"""
 
@@ -127,6 +140,7 @@ class FeedTestResult(BaseModel):
     item_count: int = 0
     duration_ms: int = 0
     sample_titles: list[str] = []
+    items: list[FeedTestItemOut] = []
     error: str = ""
 
 
@@ -298,5 +312,6 @@ async def test_feed(site_id: int) -> FeedTestResult:
         item_count=result.item_count,
         duration_ms=result.duration_ms,
         sample_titles=result.sample_titles,
+        items=[FeedTestItemOut(**asdict(item)) for item in result.items],
         error=result.error,
     )

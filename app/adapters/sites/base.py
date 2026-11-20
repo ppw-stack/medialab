@@ -68,6 +68,9 @@ class FeedItem:
     published_at: str | None = None
     description: str = ""
     download_factor: float | None = None
+    #: 当前做种/下载人数（供诊断展示，不参与推送决策）
+    seeders: int = 0
+    peers: int = 0
     free_payload: dict[str, object] | None = None
 
 

@@ -60,30 +60,8 @@ const testResults = ref<Record<number, { status: string; detail: string }>>({})
 const modalOpen = ref(false)
 const formRef = ref<FormInstance>()
 
-// ---- 用户数据汇总（跨站合计）----
+// ---- 用户数据全局刷新 ----
 const refreshingUserData = ref(false)
-
-/**
- * 跨站合计：做种数 / 上传量 / 下载量 / 时魔。
- *
- * 数据源是**站点列表本身**（`GET /sites` 已带出每站的 user_data 快照）——
- * 不额外发请求。
- */
-const userDataSummary = computed(() => {
-  const withData = data.value.filter((s) => s.has_data)
-  return {
-    total_seed: withData.reduce((s, d) => s + d.seeding_count, 0),
-    total_up: withData.reduce((s, d) => s + d.upload, 0),
-    total_dn: withData.reduce((s, d) => s + d.download, 0),
-    site_count: withData.length,
-  }
-})
-
-const summaryTiles = computed(() => [
-  { label: '做种中', value: String(userDataSummary.value.total_seed), hint: '跨站合计' },
-  { label: '总上传', value: fmtBytes(userDataSummary.value.total_up), hint: '累计' },
-  { label: '总下载', value: fmtBytes(userDataSummary.value.total_dn), hint: '累计' },
-])
 
 /**
  * 触发全局刷新（跑 `refresh_user_data` 作业重抓所有站点）。
@@ -200,9 +178,20 @@ async function onTestRow(s: Site) {
     const r = await api.post<{ reachable: boolean; logged_in: boolean; detail: string }>(
       `/sites/${s.id}/test`,
     )
+    let detail = r.detail
+    // 测连通过后顺手刷新用户数据（合并为一个动作，失败不影响测连结果）
+    if (r.reachable && r.logged_in) {
+      try {
+        const ud = await api.post<{ ok: boolean }>(`/sites/${s.id}/user-data/refresh`)
+        detail = `${detail} · 用户数据刷新${ud.ok ? '成功' : '失败'}`
+        if (ud.ok) await loadSites()
+      } catch (exc) {
+        detail = `${detail} · 用户数据刷新失败：${errMsg(exc)}`
+      }
+    }
     testResults.value[s.id] = {
       status: testStatus(r.reachable, r.logged_in),
-      detail: r.detail,
+      detail,
     }
   } catch (exc) {
     message.error(exc instanceof Error ? exc.message : '测连失败')
@@ -265,6 +254,23 @@ const feedTestId = ref<number | null>(null)
 const feedTestModalOpen = ref(false)
 const feedTestResult = ref<FeedTestResult | null>(null)
 
+const feedColumns = [
+  { title: '标题', dataIndex: 'title', key: 'title', ellipsis: true },
+  { title: '大小', key: 'size', width: 100 },
+  { title: '做种/下载', key: 'peers', width: 110 },
+  { title: '免费倍率', key: 'factor', width: 100 },
+  { title: '发布时间', key: 'published_at', width: 170 },
+]
+
+/** 免费倍率展示：0=免费、0.5=50%、1=正常。 */
+function factorLabel(v: number | null): string {
+  if (v === null || v === undefined) return '—'
+  if (v === 0) return '免费'
+  if (v < 1) return `${Math.round(v * 100)}%`
+  return `×${v}`
+}
+
+
 async function onFeedTest(s: Site) {
   feedTestId.value = s.id
   feedTestResult.value = null
@@ -278,6 +284,7 @@ async function onFeedTest(s: Site) {
       item_count: 0,
       duration_ms: 0,
       sample_titles: [],
+      items: [],
       error: exc instanceof Error ? exc.message : '请求失败',
     }
   } finally {
@@ -313,7 +320,7 @@ const columns = [
     <PageHeader
       eyebrow="站点 · SITES"
       title="站点适配器"
-      sub="凭据脱敏展示 · 支持 9 类私有种子站点"
+      sub="凭据脱敏展示 · 规则包驱动（184 站）"
     >
       <template #actions>
         <a-space>
@@ -328,16 +335,6 @@ const columns = [
 
     <hr class="divider-hairline" style="margin: 0" />
 
-    <section class="section">
-      <div class="label-caps" style="margin-bottom: var(--sp-3)">汇总 · SUMMARY</div>
-      <div class="summary-grid">
-        <div v-for="t in summaryTiles" :key="t.label" class="stat-tile">
-          <div class="stat-tile__label">{{ t.label }}</div>
-          <div class="stat-tile__value">{{ t.value }}</div>
-          <div class="stat-tile__hint">{{ t.hint }}</div>
-        </div>
-      </div>
-    </section>
 
     <section class="section">
       <div class="panel">
@@ -389,7 +386,7 @@ const columns = [
                 :loading="testingId === record.id"
                 @click="onTestRow(record)"
               >
-                测连
+                测连/刷新
               </a-button>
               <a-tooltip v-if="testResults[record.id]" :title="`${testResults[record.id].status} · ${testResults[record.id].detail}`">
                 <span
@@ -444,12 +441,27 @@ const columns = [
               <span style="color: var(--accent-red)">{{ feedTestResult.error }}</span>
             </a-descriptions-item>
           </a-descriptions>
-          <template v-if="feedTestResult.sample_titles.length">
-            <div class="label-caps" style="margin: var(--sp-3) 0 var(--sp-2)">样本标题（前 5 条）</div>
-            <ul class="feed-test-samples">
-              <li v-for="(t, i) in feedTestResult.sample_titles" :key="i">{{ t }}</li>
-            </ul>
+          <template v-if="feedTestResult.items.length">
+            <div class="label-caps" style="margin: var(--sp-3) 0 var(--sp-2)">
+              解析结果（共 {{ feedTestResult.item_count }} 条，显示前 {{ feedTestResult.items.length }} 条）
+            </div>
+            <a-table
+              :data-source="feedTestResult.items"
+              :columns="feedColumns"
+              row-key="title"
+              size="small"
+              :pagination="{ pageSize: 10, size: 'small' }"
+              :scroll="{ x: 820, y: 320 }"
+            >
+              <template #bodyCell="{ column, record }">
+                <template v-if="column.key === 'size'">{{ fmtBytes(record.size) }}</template>
+                <template v-else-if="column.key === 'peers'">{{ record.seeders }} / {{ record.peers }}</template>
+                <template v-else-if="column.key === 'factor'">{{ factorLabel(record.download_factor) }}</template>
+                <template v-else-if="column.key === 'published_at'">{{ record.published_at || '—' }}</template>
+              </template>
+            </a-table>
           </template>
+
         </template>
       </a-spin>
     </a-modal>
@@ -560,23 +572,4 @@ const columns = [
   box-shadow: 0 0 6px rgba(239, 68, 68, 0.4);
 }
 
-.feed-test-samples {
-  margin: 0;
-  padding-left: 1.2em;
-  font-size: var(--text-xs);
-  color: var(--text-secondary);
-}
-.feed-test-samples li {
-  margin: 2px 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 汇总卡网格（页面结构与设计 token 已在 global.css 统一定义） */
-.summary-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: var(--sp-3);
-}
 </style>

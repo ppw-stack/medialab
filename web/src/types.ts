@@ -143,12 +143,25 @@ export interface SiteSelfTest {
 }
 
 /** 站点种子列表拉取测试（`GET /sites/{id}/feed-test`）。 */
+export interface FeedTestItem {
+  title: string
+  item_id: string | null
+  size: number
+  seeders: number
+  peers: number
+  category: string | null
+  published_at: string | null
+  download_factor: number | null
+}
+
 export interface FeedTestResult {
   ok: boolean
   status: string
   item_count: number
   duration_ms: number
   sample_titles: string[]
+  /** 解析后的前 100 条明细（弹框表格用） */
+  items: FeedTestItem[]
   error: string
 }
 
