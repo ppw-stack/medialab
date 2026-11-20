@@ -52,7 +52,7 @@ async def client(
 
 async def _add_site(name: str = "s1", **kw: object) -> int:
     async with session_scope() as session:
-        s = Site(name=name, domain=f"{name}.test", adapter="hdsky", **kw)  # type: ignore[arg-type]
+        s = Site(name=name, domain=f"{name}.test", adapter="generic", **kw)  # type: ignore[arg-type]
         session.add(s)
         await session.flush()
         return s.id
@@ -157,13 +157,13 @@ async def test_list_sites(client: httpx.AsyncClient) -> None:
     data = resp.json()
     assert len(data) == 1
     assert data[0]["name"] == "s1"
-    assert data[0]["adapter"] == "hdsky"
+    assert data[0]["adapter"] == "generic"
 
 
 async def test_create_site(client: httpx.AsyncClient) -> None:
     resp = await client.post(
         "/api/v1/sites",
-        json={"name": "newsite", "adapter": "hdsky", "domain": "x.test"},
+        json={"name": "newsite", "adapter": "generic", "domain": "x.test"},
     )
     assert resp.status_code == 201
     assert resp.json()["name"] == "newsite"
@@ -173,7 +173,7 @@ async def test_create_site_duplicate_name_409(client: httpx.AsyncClient) -> None
     await _add_site("dup")
     resp = await client.post(
         "/api/v1/sites",
-        json={"name": "dup", "adapter": "hdsky", "domain": "y.test"},
+        json={"name": "dup", "adapter": "generic", "domain": "y.test"},
     )
     assert resp.status_code == 409
 
@@ -206,7 +206,7 @@ async def test_update_site_invalid_adapter_400(client: httpx.AsyncClient) -> Non
 
 async def test_create_site_valid_adapter_accepted(client: httpx.AsyncClient) -> None:
     """注册表里的 adapter 都能通过校验。"""
-    for i, adapter in enumerate(("mteam", "hdsky", "ourbits", "soulvoice")):
+    for i, adapter in enumerate(("generic",)):
         resp = await client.post(
             "/api/v1/sites",
             json={"name": f"site{i}", "adapter": adapter},
@@ -219,16 +219,16 @@ async def test_update_site_valid_adapter_accepted(client: httpx.AsyncClient) -> 
     site_id = await _add_site("s1")
     resp = await client.post(
         "/api/v1/sites/update",
-        json={"id": site_id, "adapter": "mteam"},
+        json={"id": site_id, "adapter": "generic"},
     )
     assert resp.status_code == 200
-    assert resp.json()["adapter"] == "mteam"
+    assert resp.json()["adapter"] == "generic"
 
 
 async def test_create_site_invalid_name_422(client: httpx.AsyncClient) -> None:
     resp = await client.post(
         "/api/v1/sites",
-        json={"name": "bad name!", "adapter": "hdsky"},
+        json={"name": "bad name!", "adapter": "generic"},
     )
     assert resp.status_code == 422
 
@@ -276,9 +276,23 @@ async def test_list_adapters(client: httpx.AsyncClient) -> None:
     resp = await client.get("/api/v1/sites/adapters")
     assert resp.status_code == 200
     names = {a["name"] for a in resp.json()}
-    assert "hdsky" in names
-    assert "mteam" in names
-    assert len(names) == 10
+    assert names == {"generic"}
+
+
+async def test_list_site_rules(client: httpx.AsyncClient) -> None:
+    """规则包目录：返回全部站点，字段够前端加站用。"""
+    resp = await client.get("/api/v1/sites/rules")
+    assert resp.status_code == 200
+    rules = resp.json()
+    assert len(rules) >= 180
+    by_id = {r["id"]: r for r in rules}
+    assert by_id["0ff"]["name"] == "自由农场"
+    assert by_id["0ff"]["domain"].startswith("https://")
+    assert by_id["0ff"]["userdata_schema"] == "NexusPhp"
+    assert all(
+        {"id", "name", "domain", "userdata_schema", "media_type", "has_subtitles"} <= set(r)
+        for r in rules
+    )
 
 
 # ------------------------------------------------------------------ 用户数据
@@ -293,12 +307,11 @@ async def test_list_sites_without_user_data(client: httpx.AsyncClient) -> None:
     assert row["has_data"] is False
     assert row["upload"] == 0
     assert row["seeding_count"] == 0
-    assert row["hourly_bonus"] is None
     assert row["user_data_seen_at"] is None
 
 
 async def test_list_sites_with_user_data(client: httpx.AsyncClient) -> None:
-    """站点列表带出 ``site_user_data`` 快照（列表页直接展示用量/时魔）。"""
+    """站点列表带出 ``site_user_data`` 快照。"""
     site_id = await _add_site("s1")
     async with session_scope() as session:
         session.add(
@@ -307,10 +320,6 @@ async def test_list_sites_with_user_data(client: httpx.AsyncClient) -> None:
                 upload=1024**3,
                 download=2 * 1024**3,
                 seeding_count=120,
-                hourly_bonus=92.9,
-                hourly_bonus_unit="魔力值",
-                hourly_bonus_capped=False,
-                hourly_bonus_progress=37.1,
                 last_seen_at="2026-10-30 12:00:00",
             )
         )
@@ -323,10 +332,6 @@ async def test_list_sites_with_user_data(client: httpx.AsyncClient) -> None:
     assert row["upload"] == 1024**3
     assert row["download"] == 2 * 1024**3
     assert row["seeding_count"] == 120
-    assert row["hourly_bonus"] == 92.9
-    assert row["hourly_bonus_unit"] == "魔力值"
-    assert row["hourly_bonus_capped"] is False
-    assert row["hourly_bonus_progress"] == 37.1
     assert row["user_data_seen_at"] == "2026-10-30 12:00:00"
 
 
@@ -1331,7 +1336,7 @@ async def test_push_without_default_downloader_400(
     from app.db.models import Site, TorrentIndex
 
     async with session_scope() as session:
-        session.add(Site(name="s1", domain="s1.test", adapter="hdsky"))
+        session.add(Site(name="s1", domain="s1.test", adapter="generic"))
         session.add(
             TorrentIndex(site_id=1, item_id="i1", name="t", free_type="freeleech_permanent")
         )

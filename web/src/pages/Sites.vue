@@ -2,48 +2,53 @@
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { api, errMsg } from '../api'
 import type {
-  AdapterInfo,
   FeedTestResult,
   Site,
+  SiteRuleInfo,
   SiteTestAllResult,
 } from '../types'
-import {
-  formatBytes as fmtBytes,
-  formatBonus as fmtBonus,
-  formatBonusTooltip as bonusTooltip,
-} from '../utils/format'
+import { formatBytes as fmtBytes } from '../utils/format'
 import { message } from 'ant-design-vue'
 import type { FormInstance } from 'ant-design-vue'
 import DataTable from '../components/DataTable.vue'
 import PageHeader from '../components/PageHeader.vue'
 
-// 硬编码 fallback（后端 /sites/adapters 不可用时使用）
-const ADAPTERS_FALLBACK: { value: string; label: string; domain: string }[] = [
-  { value: 'mteam', label: 'M-team', domain: 'm-team.io' },
-  { value: 'hhanclub', label: 'HHanClub', domain: 'hhanclub.net' },
-  { value: 'hdsky', label: 'HDSky', domain: 'hdsky.me' },
-  { value: 'ourbits', label: 'OurBits', domain: 'ourbits.club' },
-  { value: 'audiences', label: 'Audiences', domain: 'audiences.me' },
-  { value: 'springsunday', label: 'Springsunday', domain: 'springsunday.net' },
-  { value: 'hdhome', label: 'HDHome', domain: 'hdhome.org' },
-  { value: 'hddolby', label: 'HDDolby', domain: 'hddolby.com' },
-  { value: 'soulvoice', label: '聆音Club', domain: 'pt.soulvoice.club' },
-  { value: 'hdwing', label: 'HDWinG', domain: 'hdwing.org' },
-]
+//: 规则包站点目录（通用适配器加站时选择；后端 /sites/rules）
+const RULES = ref<SiteRuleInfo[]>([])
+const selectedRule = ref<string | null>(null)
 
-const ADAPTERS = ref<{ value: string; label: string; domain: string }[]>(ADAPTERS_FALLBACK)
-
-function domainFor(adapter: string): string {
-  return ADAPTERS.value.find((a) => a.value === adapter)?.domain ?? ''
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname
+  } catch {
+    return url.replace(/^https?:\/\//, '').replace(/\/$/, '')
+  }
 }
 
-async function loadAdapters() {
+const ruleOptions = computed(() =>
+  RULES.value.map((r) => ({
+    value: r.id,
+    label: `${r.name} · ${hostOf(r.domain)}${r.userdata_schema ? '' : '（仅搜索）'}`,
+  })),
+)
+
+async function loadRules() {
   try {
-    const list = await api.get<AdapterInfo[]>('/sites/adapters')
-    if (list.length > 0) {
-      ADAPTERS.value = list.map((a) => ({ value: a.name, label: a.label, domain: a.domain }))
-    }
-  } catch { /* keep fallback */ }
+    RULES.value = await api.get<SiteRuleInfo[]>('/sites/rules')
+  } catch { /* keep empty */ }
+}
+
+/**
+ * 选中规则：自动填名称与域名。
+ *
+ * 名称用规则 ID（后端要求 `^[a-zA-Z0-9_-]+$`；规则名是中文，不能直接用）。
+ */
+function onRuleChange(ruleId: string) {
+  selectedRule.value = ruleId
+  const rule = RULES.value.find((r) => r.id === ruleId)
+  if (!rule) return
+  formState.name = rule.id
+  formState.domain = hostOf(rule.domain)
 }
 
 const data = ref<Site[]>([])
@@ -70,8 +75,6 @@ const userDataSummary = computed(() => {
     total_seed: withData.reduce((s, d) => s + d.seeding_count, 0),
     total_up: withData.reduce((s, d) => s + d.upload, 0),
     total_dn: withData.reduce((s, d) => s + d.download, 0),
-    total_bonus: withData.reduce((s, d) => s + (d.hourly_bonus ?? 0), 0),
-    capped: withData.filter((d) => d.hourly_bonus_capped === true).length,
     site_count: withData.length,
   }
 })
@@ -80,13 +83,6 @@ const summaryTiles = computed(() => [
   { label: '做种中', value: String(userDataSummary.value.total_seed), hint: '跨站合计' },
   { label: '总上传', value: fmtBytes(userDataSummary.value.total_up), hint: '累计' },
   { label: '总下载', value: fmtBytes(userDataSummary.value.total_dn), hint: '累计' },
-  {
-    label: '时魔合计/小时',
-    value: userDataSummary.value.total_bonus.toFixed(1),
-    hint: userDataSummary.value.capped > 0
-      ? `${userDataSummary.value.capped} 站已封顶`
-      : '已封顶站越少越优先推',
-  },
 ])
 
 /**
@@ -127,7 +123,7 @@ onUnmounted(() => {
 const formState = reactive<Record<string, unknown>>({})
 
 async function load() {
-  await Promise.all([loadSites(), loadAdapters()])
+  await Promise.all([loadSites(), loadRules()])
 }
 
 async function loadSites() {
@@ -142,8 +138,9 @@ function onCreate() {
   editing.value = null
   creating.value = true
   modalOpen.value = true
+  selectedRule.value = null
   Object.assign(formState, {
-    adapter: 'mteam',
+    adapter: 'generic',
     enabled: true,
     name: '',
     domain: '',
@@ -151,13 +148,6 @@ function onCreate() {
     apikey: '',
     cookies: '',
   })
-}
-
-function onAdapterChange(adapter: string) {
-  formState.adapter = adapter
-  if (creating.value) {
-    formState.domain = domainFor(adapter)
-  }
 }
 
 function onEdit(s: Site) {
@@ -309,12 +299,10 @@ async function onToggleEnabled(s: Site, next: boolean) {
 
 const columns = [
   { title: '名称', key: 'name' },
-  { title: '适配器', key: 'adapter' },
   { title: '域名', key: 'domain' },
   { title: '凭据', key: 'credentials' },
   { title: '上传/下载', key: 'traffic', width: 170 },
   { title: '做种', key: 'torrents', width: 80 },
-  { title: '时魔/小时', key: 'bonus', width: 150 },
   { title: '启用', key: 'enabled', width: 80 },
   { title: '', key: 'action', width: 280 },
 ]
@@ -363,9 +351,6 @@ const columns = [
           <template v-if="column.key === 'name'">
             <span class="row-name">{{ record.name }}</span>
           </template>
-          <template v-else-if="column.key === 'adapter'">
-            <span class="mono dim">{{ record.adapter }}</span>
-          </template>
           <template v-else-if="column.key === 'domain'">
             <span class="mono code">{{ record.domain || '—' }}</span>
           </template>
@@ -387,15 +372,6 @@ const columns = [
             <span v-if="record.has_data" class="mono">
               {{ record.seeding_count }}
             </span>
-            <span v-else class="muted">—</span>
-          </template>
-          <template v-else-if="column.key === 'bonus'">
-            <a-tooltip v-if="record.has_data" :title="bonusTooltip(record)">
-              <a-space :size="4">
-                <span class="mono">{{ fmtBonus(record.hourly_bonus, record.hourly_bonus_unit) }}</span>
-                <a-tag v-if="record.hourly_bonus_capped === true" color="orange">已封顶</a-tag>
-              </a-space>
-            </a-tooltip>
             <span v-else class="muted">—</span>
           </template>
           <template v-else-if="column.key === 'enabled'">
@@ -486,12 +462,21 @@ const columns = [
       @ok="onSave"
     >
       <a-form ref="formRef" :model="formState" layout="vertical">
-        <a-form-item label="适配器（自动带出域名）" name="adapter" :rules="[{ required: true }]">
+        <a-form-item
+          v-if="creating"
+          label="站点规则（规则包 184 站）"
+        >
           <a-select
-            :value="formState.adapter"
-            @change="onAdapterChange"
-            :options="ADAPTERS.map(a => ({ value: a.value, label: a.label }))"
+            :value="selectedRule ?? undefined"
+            show-search
+            option-filter-prop="label"
+            :options="ruleOptions"
+            placeholder="输入站点名或域名搜索"
+            @change="onRuleChange"
           />
+          <div style="font-size: 12px; opacity: 0.65; margin-top: 4px">
+            选择后自动填入站点标识与域名；Cookie 仍需手动填写。
+          </div>
         </a-form-item>
         <a-space style="width: 100%" size="middle">
           <a-form-item

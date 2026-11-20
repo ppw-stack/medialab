@@ -1,4 +1,4 @@
-"""站点用户数据刷新作业集成测试（FR-1.6 + 时魔）。
+"""站点用户数据刷新作业集成测试（FR-1.6）。
 
 **锁住的核心契约**（2026-10-21 prod 事故的教训）：
 
@@ -12,8 +12,6 @@
 另外锁住：
 
 - 网络 IO 在事务外（并发抓取不持写锁）
-- 时魔字段缺失时**不覆盖**库里的旧值
-- 真实适配器 + 真实 fixture 走通整条链路（mybonus.php → 解析 → 落库）
 """
 
 from __future__ import annotations
@@ -31,7 +29,7 @@ from app.adapters.sites.base import (
     TorrentBrief,
     TorrentDetail,
 )
-from app.adapters.sites.user_data import HourlyBonus, SiteUserSnapshot
+from app.adapters.sites.user_data import SiteUserSnapshot
 from app.db.models import Site, SiteUserData
 from app.db.session import session_scope
 from app.services.factory import AdapterFactory
@@ -46,9 +44,7 @@ class _FakeUserAdapter(SiteAdapter):
 
     ``mode`` 决定 ``get_user_snapshot()`` 的行为：
 
-    - ``"ok"``      → 正常快照（带时魔）
-    - ``"capped"``  → 时魔已封顶
-    - ``"nobonus"`` → 正常快照但**没有时魔**（该站不支持）
+    - ``"ok"``      → 正常快照
     - ``"none"``    → 返回 None（该站不支持 / 无凭据）
     - ``"raise"``   → 抛 SiteFetchError（网络 / 解析故障）
 
@@ -86,22 +82,6 @@ class _FakeUserAdapter(SiteAdapter):
                         upload=1000,
                         download=2000,
                         seeding_count=3,
-                        hourly_bonus=HourlyBonus(
-                            amount=88.5, unit="魔力值", capped=False, progress=12.5
-                        ),
-                    )
-                case "capped":
-                    return SiteUserSnapshot(
-                        upload=1,
-                        download=2,
-                        seeding_count=3,
-                        hourly_bonus=HourlyBonus(
-                            amount=154.0, unit="爆米花", capped=True, progress=110.0
-                        ),
-                    )
-                case "nobonus":
-                    return SiteUserSnapshot(
-                        upload=5, download=6, seeding_count=7
                     )
                 case "none":
                     return None
@@ -174,7 +154,7 @@ def factory_with(monkeypatch: pytest.MonkeyPatch):
 async def _add_sites(*names: str) -> None:
     async with session_scope() as session:
         for n in names:
-            session.add(Site(name=n, domain=f"{n}.test", adapter="hdsky"))
+            session.add(Site(name=n, domain=f"{n}.test", adapter="generic"))
         await session.flush()
 
 
@@ -192,9 +172,7 @@ async def _rows() -> list[SiteUserData]:
 # ------------------------------------------------------------------ 正常
 
 
-async def test_success_writes_snapshot_with_hourly_bonus(
-    db: None, factory_with
-) -> None:
+async def test_success_writes_snapshot(db: None, factory_with) -> None:
     await _add_sites("s1")
     result = await refresh_all_sites(factory_with({"s1": "ok"}))
 
@@ -209,28 +187,7 @@ async def test_success_writes_snapshot_with_hourly_bonus(
     assert row.upload == 1000
     assert row.download == 2000
     assert row.seeding_count == 3
-    # 时魔落库
-    assert row.hourly_bonus == pytest.approx(88.5)
-    assert row.hourly_bonus_unit == "魔力值"
-    assert row.hourly_bonus_capped is False
-    assert row.hourly_bonus_progress == pytest.approx(12.5)
     assert row.last_seen_at
-
-
-async def test_capped_sites_counted(db: None, factory_with) -> None:
-    """已封顶的站要单独计数（前端能一眼看出哪站再投入也白搭）。"""
-    await _add_sites("s1", "s2")
-    result = await refresh_all_sites(
-        factory_with({"s1": "capped", "s2": "ok"})
-    )
-
-    assert result["capped"] == 1
-    step = next(s for s in result["steps"] if s.name == "时魔已封顶")
-    assert step.count == 1
-    rows = await _rows()
-    capped = [r for r in rows if r.hourly_bonus_capped is True]
-    assert len(capped) == 1
-    assert capped[0].hourly_bonus == pytest.approx(154.0)
 
 
 # ------------------------------------------------------------------ 失败
@@ -274,16 +231,6 @@ async def test_steps_含逐站明细(db: None, factory_with) -> None:
     assert by_name["s2"].detail
 
 
-async def test_steps_明细含时魔信息(db: None, factory_with) -> None:
-    """成功站的明细里带时魔值（用户最关心的数字）。"""
-    await _add_sites("s1")
-    result = await refresh_all_sites(factory_with({"s1": "ok"}))
-
-    step = next(s for s in result["steps"] if s.name == "拉取 user_data")
-    assert step.items is not None
-    assert "时魔" in (step.items[0].detail or "")
-
-
 async def test_failure_keeps_previous_snapshot(db: None, factory_with) -> None:
     """失败站**保留上一次的快照**（不覆盖成 0，也不清空）。"""
     await _add_sites("s1")
@@ -295,7 +242,6 @@ async def test_failure_keeps_previous_snapshot(db: None, factory_with) -> None:
     rows = await _rows()
     assert len(rows) == 1
     assert rows[0].upload == 1000
-    assert rows[0].hourly_bonus == pytest.approx(88.5)
 
 
 async def test_unsupported_site_skipped_not_written(db: None, factory_with) -> None:
@@ -307,23 +253,6 @@ async def test_unsupported_site_skipped_not_written(db: None, factory_with) -> N
     assert result["failed"] == 0
     assert result["ok"] == 0
     assert await _rows() == []
-
-
-# ------------------------------------------------------- 时魔缺失不覆盖旧值
-
-
-async def test_missing_hourly_bonus_keeps_old_value(db: None, factory_with) -> None:
-    """本周期没解析出时魔 → 保留库里的旧时魔（只更新 4 业务字段）。"""
-    await _add_sites("s1")
-    await refresh_all_sites(factory_with({"s1": "ok"}))
-
-    await refresh_all_sites(factory_with({"s1": "nobonus"}))
-
-    rows = await _rows()
-    assert len(rows) == 1
-    assert rows[0].upload == 5, "4 业务字段应更新"
-    assert rows[0].hourly_bonus == pytest.approx(88.5), "旧时魔应保留"
-    assert rows[0].hourly_bonus_unit == "魔力值"
 
 
 # ------------------------------------------------------------------ 并发
@@ -342,48 +271,3 @@ async def test_sites_are_fetched_concurrently(db: None, factory_with) -> None:
     assert state.max_concurrent > 1, "抓取没有并发"
 
 
-# ------------------------------------------------- 真实适配器 + 真实 fixture
-
-
-async def test_real_adapter_end_to_end(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """用真实 hhanclub 适配器 + 真实 mybonus fixture 走通整条链路。
-
-    比假适配器更可信：走真实的异常包装、真实解析、真实落库。
-    """
-    import httpx
-    import respx
-    from app.adapters.sites.hhanclub import HhanclubAdapter
-
-    html = (FIXTURES / "hhanclub_mybonus.html").read_text(encoding="utf-8")
-    await _add_sites("hhanclub_site")
-
-    factory = AdapterFactory()
-
-    def _site(row: Site, *, cookies: str | None = None) -> SiteAdapter:
-        return HhanclubAdapter(
-            SiteProfile(name=row.name, domain=row.domain), cookies="uid=1"
-        )
-
-    monkeypatch.setattr(factory, "site", _site)
-
-    with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
-        router.route(host="hhanclub_site.test").mock(
-            return_value=httpx.Response(200, text=html)
-        )
-        result = await refresh_all_sites(factory)
-
-    assert result["ok"] == 1
-    assert result["failed"] == 0
-
-    rows = await _rows()
-    assert len(rows) == 1
-    row = rows[0]
-    assert row.upload > 0
-    assert row.seeding_count > 0
-    # 时魔 = hhanclub 的**合计**（含官种 / 勋章加成），不是 headline 基础值
-    assert row.hourly_bonus is not None
-    assert row.hourly_bonus > 50
-    assert row.hourly_bonus_unit == "憨豆"
-    assert row.hourly_bonus_capped is False

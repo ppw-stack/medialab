@@ -120,7 +120,7 @@ async def _seed_disabled_site_task() -> int:
     """
     async with session_scope() as session:
         site = Site(
-            name="s1", domain="s1.test", adapter="hdsky", enabled=False
+            name="s1", domain="s1.test", adapter="generic", enabled=False
         )
         session.add(site)
         dl = DownloaderInstance(

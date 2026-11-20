@@ -3,8 +3,7 @@
 ## 必读文档
 1. `README.md` — 现状与命令。
 2. `docs/merge-strmmanger.md` — **合并 strmmanger 的方案与实施记录**（含冲突清单与返工范围）。
-3. `app/adapters/sites/user_data.py` + `app/adapters/sites/parsers/nexus_php.py` — FR-1.6 站点用户数据契约。
-4. `app/adapters/sites/parsers/attendance.py` — FR-3.6 站点签到解析 helper。
+3. `app/adapters/sites/user_data.py` + `app/adapters/sites/indexer/parser/nexus_php.py` — FR-1.6 站点用户数据契约（用户数据由规则包的 schema 解析器产出）。
 5. `docs/upload-bandwidth.md` — **数据同步上传的带宽瓶颈实测结论**（并发为何无效）。
 
 ## 项目定位
@@ -103,7 +102,13 @@
   - 光鸭源的目录浏览**从账号根开始**（根 id 是空串，`ROOT_DIR_IDS`）；`fullParentIds` 链首是**账号根的直接子目录**（不是媒体库根）→ `iter_tree_by_cid` 支持**任意目录**作根（扫描传 media_cid，迁移传选中的源目录）
   - 探针 `scripts/probe_guangya_migration.py`（`probe` = 单文件端到端；`engine` = 跑真实引擎 + 幂等复跑；未部署时可用 `MEDIALAB_APP_PATH` 指向注入的新代码，不动生产镜像）
 - **Bearer 长期凭据只用 `WEB_TOKEN`**（2026-10-30 加入）：`verify_bearer` 同时接受 API Token（`WEB_TOKEN`）与 session cookie 值两种口径，但 session cookie 值 24h 过期（`SESSION_MAX_AGE`）。CLI / 脚本长期使用应存 `WEB_TOKEN`，不可把 session cookie 值当长期 token 存储——后者会突然 401。session 值口径仅为面板/CLI 同源便利，非长期凭据。
-- **站点适配层保持 9 站独立文件**（2026-10-21 决定）：不抽公共基类，各站独立实现。重复代码接受现状。
+- **站点适配层只有一个通用实现（2026-11-20 全量替换）**：旧的 10 个站点专用 adapter
+  与 `parsers/`（含 `attendance.py`）**已删除**；站点差异全部由规则包
+  （`app/adapters/sites/indexer/rules/indexers.json`）表达，`_registry` 只有 `generic`。
+  随之移除的功能：签到（FR-3.6）、HDWing 逐种优惠查询、时魔（hourly bonus，
+  含 `site_user_data.hourly_bonus*` 四列，已由 bootstrap `drop_column` 删除）。
+  字幕由新增契约 `SiteAdapter.search_subtitles()` 提供（无配置返回 `[]`，
+  失败抛 `SiteFetchError`）。旧 adapter 的 9 站细节段落保留在此仅供历史参考。
 - **hdwing 站点的免费判定（2026-11-16 实测改版，重要）**：
   - **列表页优惠标记是空占位** `<td class="discount"><span class="sp_state_placeholder" id="{tid}"></span></td>` —— FREE 徽章与倒计时由页面 JS 异步填充，**列表 HTML 里没有**。别再指望从列表行解析 `pro_*`（其它 8 站可以）
   - ⚠️ **填充它的 `ajax_promotion.php` 被 Cloudflare Turnstile 闸保护**：页面 JS 必须先 `POST ajax_turnstile.php` 带 `cf-turnstile-response` token。**未过闸的请求对任意 id 都返回兜底的 `pro_free` + 空 timeout**——实测连**根本不存在的 id（999999999）**都回「免费」。照它解析会把「限免 6 小时」误判成「永久免费」（`window_parser` 收到 `free_classes=['free']` + 无剩余时间 → 判 `PERMANENT`，窗口永不到期）

@@ -96,7 +96,7 @@ async def _make_push_env(
 ) -> tuple[AdapterFactory, _FakeSiteAdapter, _FakeDownloader, int]:
     """建站点 + 下载器 + 索引行，注入假适配器。"""
     async with session_scope() as session:
-        session.add(Site(name="s1", domain="s1.test", adapter="hdsky"))
+        session.add(Site(name="s1", domain="s1.test", adapter="generic"))
         session.add(
             DownloaderInstance(
                 name="dl1",

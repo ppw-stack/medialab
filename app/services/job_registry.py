@@ -14,7 +14,6 @@
   辅种站巡查（落快照 + 暂停异常种子）→ 磁盘空间流转 → 孤儿文件扫描，
   三段顺序执行、每 3 小时一次
 - ``drain_task_queue`` — 排空任务队列：崩溃恢复（僵死 running 回收）+ 退避重试
-- ``daily_checkin`` — 对支持签到的站点执行每日签到
   （hhanclub / soulvoice / hdhome / hdsky / hdwing）
 - ``scrape_metadata`` — 媒体刮削（本地目录补 NFO / 图片）
 - ``organize_files`` — 下载整理（源目录 → 媒体库标准结构）
@@ -45,7 +44,6 @@ logger = get_logger(__name__)
 #: - ``*/30``  : push_free_torrents / refresh_user_data
 #: - ``5,15,…``: monitor_free_window（错开 fetch 与 push）
 #: - ``*/5``   : drain_task_queue
-#: - ``37 8``  : daily_checkin（每天 08:37，避开所有多 5 分钟的作业）
 #: - ``17 */3``: cross_seed_maintenance（辅种维护，合并巡查/磁盘/孤儿）
 DEFAULT_CRON: dict[str, str] = {
     "fetch_all_sites": "*/10 * * * *",
@@ -53,7 +51,6 @@ DEFAULT_CRON: dict[str, str] = {
     "monitor_free_window": "5,15,25,35,45,55 * * * *",
     "refresh_user_data": "*/30 * * * *",
     "drain_task_queue": "*/5 * * * *",
-    "daily_checkin": "37 8 * * *",
     # 辅种维护（2026-11-01 合并 scan_cross_seed + disk_rotation + scan_orphans）：
     # 巡查 → 磁盘流转 → 孤儿扫描，三段顺序执行。
     # 分钟位 17 避开所有多 5 分钟的作业（fetch_all_sites */10、push/refresh */30、
@@ -189,15 +186,6 @@ JOB_META: tuple[JobMeta, ...] = (
         make_func=lambda f: _job_fn(lambda: _run_drain_task_queue(f)),
     ),
     JobMeta(
-        name="daily_checkin",
-        title="每日签到",
-        description=(
-            "对支持签到的站点自动完成每日签到"
-            "（hhanclub / soulvoice / hdhome / hdsky）"
-        ),
-        make_func=lambda f: _job_fn(lambda: _run_daily_checkin(f)),
-    ),
-    JobMeta(
         name="cross_seed_maintenance",
         title="辅种维护",
         description=(
@@ -318,7 +306,6 @@ def preflight_job_imports() -> None:
         "app.services.monitor",         # _run_monitor_free_window
         "app.services.user_data",       # _run_refresh_user_data
         "app.services.task_drain",      # _run_drain_task_queue
-        "app.services.checkin",         # _run_daily_checkin
         "app.services.cross_seed_maintenance",  # _run_cross_seed_maintenance
         "app.services.scrape_jobs",     # _run_scrape_metadata（整理刮削迁移）
         "app.services.organize_service",  # _run_organize（整理刮削迁移）
@@ -375,13 +362,6 @@ async def _run_drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
     from app.services.task_drain import drain_task_queue
 
     return await drain_task_queue(factory)
-
-
-async def _run_daily_checkin(factory: AdapterFactory) -> dict[str, object]:
-    """执行站点每日签到。"""
-    from app.services.checkin import refresh_all_sites
-
-    return await refresh_all_sites(factory)
 
 
 async def _run_cross_seed_maintenance() -> dict[str, object]:

@@ -31,6 +31,13 @@ dependencies = [
     # 本地目录监听（上传任务）。此前靠 uvicorn[standard] 传递引入——
     # 直接 import 的库不该靠传递依赖，显式声明。
     "watchfiles>=1.0",
+    # 站点解析引擎（移植 MoviePilot 的 parser/spider）：选择器用 pyquery，
+    # 标题/副标题模板用 jinja2，日期规范化用 dateutil。
+    "pyquery>=2.0",
+    "jinja2>=3.1",
+    "python-dateutil>=2.9",
+    # 专站下载协议的 AES 解密（MoviePilot download.py 依赖）
+    "pycryptodome>=3.20",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +49,8 @@ dev = [
     "respx>=0.21",
     "ruff>=0.8",
     "mypy>=1.13",
+    # 站点规则包导入脚本：加密 pickle 里带 ruamel.yaml 标量类型
+    "ruamel.yaml>=0.18",
 ]
 
 # 115 驱动依赖。
@@ -90,6 +99,13 @@ ignore = ["S101", "B008", "B027", "B017", "RUF001", "RUF002", "RUF003", "ASYNC23
 "app/services/dav_auth.py" = ["E501"]
 # 一次性迁移脚本：docstring 里的示例命令行 + CASE WHEN SQL 天然超行宽
 "scripts/migrate_legacy_db.py" = ["E501"]
+# 站点解析引擎：parser/spider 是 MoviePilot 上游代码的移植（保持与上游
+# 一致，便于后续同步升级），不按本项目的风格规则重排。
+"app/adapters/sites/indexer/parser/*" = ["E501", "UP", "RUF", "SIM", "I001"]
+"app/adapters/sites/indexer/spider/*" = ["E501", "UP", "RUF", "SIM", "I001"]
+"app/adapters/sites/indexer/rss.py" = ["E501", "UP", "RUF", "SIM", "I001"]
+"app/adapters/sites/indexer/download.py" = ["E501", "UP", "RUF", "SIM", "I001"]
+"app/adapters/sites/indexer/compat/*" = ["E501", "UP", "RUF", "SIM", "I001"]
 # 测试代码：pytest 用例名（中文）+ 多个 fixture 参数很容易超行宽
 # ——不影响可读性，不强求
 "tests/*" = ["E501"]

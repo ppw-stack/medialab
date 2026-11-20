@@ -101,6 +101,27 @@ class AdapterInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class SiteRuleInfo:
+    """规则包里的一个站点（前端加站时选择）。
+
+    规则包由 :mod:`app.adapters.sites.indexer.rules` 提供；本 DTO 只暴露
+    加站需要的字段，不把整份选择器配置发给前端。
+    """
+
+    #: 规则 ID（也是通用适配器的站点标识；用作新增站点的名称建议值）
+    id: str
+    name: str
+    #: 站点主页 URL（``https://pt.0ff.cc/``）
+    domain: str
+    #: 用户数据解析框架（NexusPhp / Unit3d / …）；None = 只做搜索
+    userdata_schema: str | None
+    #: 站点媒体类型（movie / tv / music / None）
+    media_type: str | None
+    #: 是否提供字幕搜索配置
+    has_subtitles: bool
+
+
+@dataclass(frozen=True, slots=True)
 class SiteSnapshot:
     """站点配置快照（对外 DTO，敏感字段已脱敏）。"""
 
@@ -122,17 +143,13 @@ class SiteSnapshot:
     upload: int = 0
     download: int = 0
     seeding_count: int = 0
-    hourly_bonus: float | None = None
-    hourly_bonus_unit: str | None = None
-    hourly_bonus_capped: bool | None = None
-    hourly_bonus_progress: float | None = None
     #: 用户数据最近一次刷新时间（北京时间）；None = 从未刷新
     user_data_seen_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class SiteUserDataSnapshot:
-    """站点用户数据（3 字段 + 时魔 + 站点名）。"""
+    """站点用户数据（3 字段 + 站点名）。"""
 
     site_id: int
     site_name: str
@@ -140,14 +157,8 @@ class SiteUserDataSnapshot:
     upload: int = 0
     download: int = 0
     seeding_count: int = 0
-    #: 时魔（每小时获得的站点积分·合计口径）
-    hourly_bonus: float | None = None
-    #: 时魔单位（站点自称：魔力值 / 爆米花 / 茉莉 / 憨豆 / 积分）
-    hourly_bonus_unit: str | None = None
     #: 是否已达该站的获取上限（None = 该站无法判断）
-    hourly_bonus_capped: bool | None = None
     #: 站点进度百分比
-    hourly_bonus_progress: float | None = None
     last_seen_at: str | None = None
 
 
@@ -227,10 +238,6 @@ def _to_snapshot(
         upload=user_data.upload if user_data else 0,
         download=user_data.download if user_data else 0,
         seeding_count=user_data.seeding_count if user_data else 0,
-        hourly_bonus=user_data.hourly_bonus if user_data else None,
-        hourly_bonus_unit=user_data.hourly_bonus_unit if user_data else None,
-        hourly_bonus_capped=user_data.hourly_bonus_capped if user_data else None,
-        hourly_bonus_progress=user_data.hourly_bonus_progress if user_data else None,
         user_data_seen_at=user_data.last_seen_at if user_data else None,
     )
 
@@ -253,6 +260,33 @@ def validate_adapter(adapter: str) -> None:
             f"未注册的站点 adapter：{adapter!r}，可选：{list_available()}",
             status=400,
         )
+
+
+def list_site_rules() -> list[SiteRuleInfo]:
+    """返回规则包里的全部站点（按名称排序）。
+
+    数据源是随包分发的 ``indexers.json``（MoviePilot-Resources v3），
+    只读、不联网。
+    """
+    from app.adapters.sites.indexer.rules import load_site_rules
+
+    rules = load_site_rules()
+    result: list[SiteRuleInfo] = []
+    for rule in rules.indexers.values():
+        domain = str(rule.get("domain") or "")
+        schema = rule.get("schema")
+        media_type = rule.get("media_type")
+        result.append(
+            SiteRuleInfo(
+                id=str(rule.get("id") or ""),
+                name=str(rule.get("name") or rule.get("id") or ""),
+                domain=domain,
+                userdata_schema=str(schema) if schema else None,
+                media_type=str(media_type) if media_type else None,
+                has_subtitles=bool(rule.get("subtitles")),
+            )
+        )
+    return sorted(result, key=lambda item: item.name)
 
 
 def list_adapters() -> list[AdapterInfo]:
@@ -559,10 +593,6 @@ async def get_site_user_data(site_id: int) -> SiteUserDataSnapshot:
             upload=ud.upload,
             download=ud.download,
             seeding_count=ud.seeding_count,
-            hourly_bonus=ud.hourly_bonus,
-            hourly_bonus_unit=ud.hourly_bonus_unit,
-            hourly_bonus_capped=ud.hourly_bonus_capped,
-            hourly_bonus_progress=ud.hourly_bonus_progress,
             last_seen_at=ud.last_seen_at,
         )
 

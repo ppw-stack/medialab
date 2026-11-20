@@ -115,20 +115,11 @@ _ALTER_STATEMENTS: tuple[tuple[str, str], ...] = (
         "CREATE INDEX IF NOT EXISTS ix_site_user_data_site_seen "
         "ON site_user_data(site_id, last_seen_at)",
     ),
-    # 时魔字段 (FR-1.6 增补)：每小时获得的站点积分 + 是否封顶
-    ("add_column", "ALTER TABLE site_user_data ADD COLUMN hourly_bonus REAL"),
-    (
-        "add_column",
-        "ALTER TABLE site_user_data ADD COLUMN hourly_bonus_unit VARCHAR(16)",
-    ),
-    (
-        "add_column",
-        "ALTER TABLE site_user_data ADD COLUMN hourly_bonus_capped BOOLEAN",
-    ),
-    (
-        "add_column",
-        "ALTER TABLE site_user_data ADD COLUMN hourly_bonus_progress REAL",
-    ),
+    # 时魔字段已随「时魔」功能删除（2026-11-20）：旧库删列，新库无列即跳过。
+    ("drop_column", "ALTER TABLE site_user_data DROP COLUMN hourly_bonus"),
+    ("drop_column", "ALTER TABLE site_user_data DROP COLUMN hourly_bonus_unit"),
+    ("drop_column", "ALTER TABLE site_user_data DROP COLUMN hourly_bonus_capped"),
+    ("drop_column", "ALTER TABLE site_user_data DROP COLUMN hourly_bonus_progress"),
     # 辅种快照的暂停计数 (2026-10-24)：实际暂停数 ≠ 异常数
     # （已暂停的被跳过、失败的不算）——不存这两个字段前端只能说谎。
     (

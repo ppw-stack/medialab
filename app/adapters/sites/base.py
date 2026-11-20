@@ -8,7 +8,7 @@
 - get_torrent_detail: 种子详情查询
 - get_torrent_url: 实时返回 item 的可下载绝对 URL（push 时调用）
 - get_user_snapshot: 上传/下载/做种/下载中（FR-1.6 精简版）
-- checkin: 每日签到（FR-3.6 站点签到契约）
+- search_subtitles: 字幕搜索（可选能力，默认不支持）
 
 约束：适配层不写数据库、不操作下载器，保持可独立单测。
 窗口解析（FreeWindow）由业务层 :mod:`app.services.window_parser` 负责。
@@ -80,57 +80,34 @@ class SiteProfile:
 
 
 @dataclass(frozen=True, slots=True)
-class Promotion:
-    """单个种子的**当前生效**优惠（服务端渲染的优惠历史）。
+class SubtitleItem:
+    """站点字幕搜索结果（``search_subtitles`` 返回值）。
 
-    :attr:`end_at` 为 ``None`` = **永久优惠**（站点没给截止时间）。
+    字段与规则包的 ``subtitles.fields`` 对应；缺失字段为 ``None``。
     """
 
-    kind: str
-    start_at: str | None
-    end_at: str | None
+    title: str
+    #: 语言（站点页面声明的语言名，如「简体中文」）
+    language: str | None = None
+    #: 字幕文件下载地址（绝对 URL 或 magnet）
+    download_url: str | None = None
+    #: 字幕详情页
+    page_url: str | None = None
+    size: int = 0
+    published_at: str | None = None
+    uploader: str | None = None
+    #: 举报页面（站点提供时）
+    report_url: str | None = None
+    #: 语言图标（站点提供时）
+    language_icon: str | None = None
+    #: 关联种子的站内 ID（从下载链接参数里提取，可能为空）
+    torrent_id: str | None = None
+    #: 站点字幕 ID
+    subtitle_id: str | None = None
+    #: 下载文件名的建议值
+    file_name: str | None = None
 
 
-class CheckinStatus(StrEnum):
-    """每日签到的结果状态。
-
-    用带状态的枚举而**不是** ``None``：签到必须区分「该站不支持签到」
-    与「签到失败了」——前者是正常状态（跳过即可），后者是故障（必须计数）。
-
-    这与 :meth:`SiteAdapter.get_user_snapshot` 返回 ``None`` 的做法不同：
-    那个方法把「未实现」与「拉取失败」混在一起，是有意的简化；
-    签到需要区分，因为作业统计要能如实反映故障（参见
-    2026-10-21 prod 事故：拉取失败被吞成空结果，故障完全不可见）。
-    """
-
-    #: 今日签到成功
-    SUCCESS = "success"
-    #: 今日已签过（幂等，**不算失败**）
-    ALREADY = "already"
-    #: 该站不支持自动签到（无此功能 / 需人机验证，需人工）
-    UNSUPPORTED = "unsupported"
-    #: cookie 失效 / 未登录
-    AUTH_EXPIRED = "auth_expired"
-    #: 网络 / HTTP / 解析故障
-    FAILED = "failed"
-
-
-@dataclass(frozen=True, slots=True)
-class CheckinResult:
-    """单站签到结果。"""
-
-    status: CheckinStatus
-    #: 人话描述（进作业 summary / 前端步骤卡片）
-    message: str = ""
-    #: 累计签到次数（站点页面给出时才有）
-    total_count: int | None = None
-    #: 连续签到天数（站点页面给出时才有）
-    streak_days: int | None = None
-    #: 本次获得的魔力值 / 豆（站点页面给出时才有）
-    reward: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class TorrentDetail:
     """种子详情（get_torrent_detail 返回值）。
 
@@ -182,14 +159,6 @@ class SiteAdapter(ABC):
     adapter_type: str = "generic"
     #: HTTP 客户端由子类 __init__ 按站点 headers/cookies 创建
     _client: httpx.AsyncClient
-    #: 适配器是否支持「按种子查优惠详情」（``promotion.php`` 类接口）。
-    #:
-    #: 默认 False——多数 NexusPHP 站把 ``pro_*`` 优惠标记**直接 SSR 在列表
-    #: HTML 里**，adapter 解析列表时就拿到了。少数站（hdwing）优惠标记是
-    #: AJAX 占位符，只能逐种子查服务端渲染的优惠历史表；这类站置 True，
-    #: service 层据此做**增量**免费判定（只复查新增 / 已过期的条目）。
-    supports_promotion_lookup: bool = False
-
     def __init__(
         self,
         profile: SiteProfile,
@@ -261,19 +230,20 @@ class SiteAdapter(ABC):
     async def get_torrent_detail(self, item_id: str) -> TorrentDetail:
         """5. 种子详情查询。返回统一结构（含 download_url / free_payload / raw_html）。"""
 
-    async def get_promotion(self, item_id: str) -> Promotion | None:
-        """6b. 按种子查**当前生效**的优惠（可选能力，默认不支持）。
+    async def search_subtitles(
+        self,
+        query: dict[str, object],
+        *,
+        page_number: int = 1,
+    ) -> list[SubtitleItem]:
+        """字幕搜索（可选能力）。
 
-        多数 NexusPHP 站把 ``pro_*`` 优惠标记**直接 SSR 在列表 HTML 里**，
-        adapter 解析列表时就拿到了。只有优惠标记是 AJAX 占位符的站
-        （hdwing：``span.sp_state_placeholder``）才需要逐种子查服务端渲染的
-        优惠历史表——这类站置 ``supports_promotion_lookup = True``，
-        service 层据此做**增量**免费判定（只复查新增 / 已过期的条目）。
-
-        返回 ``None`` = 该种子当前**没有生效的优惠**（不是免费种；
-        不是「查失败」——失败必须抛 :class:`SiteFetchError`）。
+        ``query`` 键：``keyword`` / ``imdbid`` 等，适配器按站点能力取用。
+        默认返回 ``[]``：**该站没有字幕配置**（不是失败）。
+        拉取/解析失败必须抛 :class:`SiteFetchError`——与种子搜索同一契约，
+        不能把故障伪装成「没有字幕」。
         """
-        raise NotImplementedError
+        return []
 
     # ----------------------- FR-1.6 站点用户数据契约（精简版） -----------------------
 
@@ -295,29 +265,6 @@ class SiteAdapter(ABC):
         return None
 
     # ----------------------- FR-3.6 站点每日签到契约 -----------------------
-
-    async def checkin(self) -> CheckinResult:
-        """8. 执行每日签到。
-
-        默认实现：返回 ``UNSUPPORTED``（该站不支持自动签到）。
-
-        各适配器按需 override。已实现的 3 站（hhanclub / soulvoice / hdhome）
-        走 NexusPHP 的 ``/attendance.php``。
-
-        **失败必须抛异常**（``SiteFetchError`` / ``BreakerTripped``），
-        不能吞掉返回 ``FAILED``：网络故障与「站点今天没这个功能」是两回事，
-        吞掉会让作业统计报「全部成功」而实际漏掉了故障站
-        （参见 2026-10-21 prod 事故的教训）。
-
-        语义分层：
-
-        - ``SUCCESS`` / ``ALREADY`` —— 正常（今日已签过是幂等结果，不算失败）
-        - ``UNSUPPORTED`` —— 该站无签到功能，或需人工（Cloudflare Turnstile
-          等人机验证实测无法在服务端环境完成，见 AGENTS.md FR-3.6）
-        - ``AUTH_EXPIRED`` —— cookie 失效
-        - ``FAILED`` —— 站点返回了无法识别的页面（改版等）或验证码识别失败
-        """
-        return CheckinResult(CheckinStatus.UNSUPPORTED, "该站未实现自动签到")
 
     async def close(self) -> None:
         """释放 HTTP 连接池。子类按需覆盖。"""

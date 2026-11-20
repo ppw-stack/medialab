@@ -131,7 +131,17 @@ async def drop_obsolete_tables_once() -> None:
 
 #: 站点 adapter 迁移：从旧值映射到新值。空 dict 表示无迁移。
 ADAPTER_VALUE_MIGRATIONS: dict[str, str] = {
-    "generic": "mteam",  # 旧通用 adapter → m-team 专用 adapter（重构后唯一支持的实现）
+    # 旧版 10 个站点专用 adapter → 规则包驱动的通用 adapter（唯一实现）
+    "mteam": "generic",
+    "hhanclub": "generic",
+    "hdsky": "generic",
+    "ourbits": "generic",
+    "audiences": "generic",
+    "springsunday": "generic",
+    "hdhome": "generic",
+    "hddolby": "generic",
+    "soulvoice": "generic",
+    "hdwing": "generic",
 }
 
 

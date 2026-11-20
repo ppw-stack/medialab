@@ -23,6 +23,20 @@ export interface AdapterInfo {
   domain: string
 }
 
+/** 规则包站点（`GET /sites/rules`）。通用适配器加站时选择。 */
+export interface SiteRuleInfo {
+  /** 规则 ID（也是通用适配器的站点标识，可作名称建议值） */
+  id: string
+  name: string
+  /** 站点主页 URL */
+  domain: string
+  /** 用户数据解析框架；null = 该站只做搜索 */
+  userdata_schema: string | null
+  /** movie / tv / music；null = 综合站 */
+  media_type: string | null
+  has_subtitles: boolean
+}
+
 /**
  * 作业步骤内的一条**明细**（逐站 / 逐种 / 逐任务）。
  *
@@ -111,14 +125,6 @@ export interface Site {
   download: number
   /** 当前做种数 */
   seeding_count: number
-  /** 时魔：每小时获得的站点积分（合计口径）；null = 该站没有 */
-  hourly_bonus: number | null
-  /** 时魔单位（站点自称：魔力值 / 爆米花 / 茉莉 / 憨豆 / 积分） */
-  hourly_bonus_unit: string | null
-  /** 是否已达该站的获取上限（null = 该站页面不提供上限信号） */
-  hourly_bonus_capped: boolean | null
-  /** 站点进度百分比（>=100 表示封顶；口径由站点自己定） */
-  hourly_bonus_progress: number | null
   /** 用户数据最近一次刷新时间（北京时间）；null = 从未刷新 */
   user_data_seen_at: string | null
 }
@@ -171,13 +177,9 @@ export interface SiteUserDataSummary {
   download?: number
   seeding_count?: number
   /** 时魔：每小时获得的站点积分（合计口径）。 */
-  hourly_bonus?: number | null
   /** 时魔单位（站点自称：魔力值 / 爆米花 / 茉莉 / 憨豆 / 积分）。 */
-  hourly_bonus_unit?: string | null
   /** 是否已达该站的获取上限（null = 该站无法判断）。 */
-  hourly_bonus_capped?: boolean | null
   /** 站点进度百分比（>=100 表示封顶）。 */
-  hourly_bonus_progress?: number | null
   last_seen_at?: string | null
 }
 
@@ -192,13 +194,9 @@ export interface UserData {
   download: number
   seeding_count: number
   /** 时魔：每小时获得的站点积分（合计口径，含各项加成）。 */
-  hourly_bonus: number | null
   /** 时魔单位（站点自称：魔力值 / 爆米花 / 茉莉 / 憨豆 / 积分）。 */
-  hourly_bonus_unit: string | null
   /** 是否已达该站的获取上限（null = 该站无法判断）。 */
-  hourly_bonus_capped: boolean | null
   /** 站点进度百分比（>=100 表示封顶）。 */
-  hourly_bonus_progress: number | null
   last_seen_at: string | null
 }
 
@@ -213,13 +211,9 @@ export interface UserDataTrend {
   download: number
   seeding_count: number
   /** 时魔：每小时获得的站点积分（合计口径，含各项加成）。 */
-  hourly_bonus: number | null
   /** 时魔单位（站点自称：魔力值 / 爆米花 / 茉莉 / 憨豆 / 积分）。 */
-  hourly_bonus_unit: string | null
   /** 是否已达该站的获取上限（null = 该站无法判断）。 */
-  hourly_bonus_capped: boolean | null
   /** 站点进度百分比（>=100 表示封顶）。 */
-  hourly_bonus_progress: number | null
   last_seen_at: string | null
 }
 

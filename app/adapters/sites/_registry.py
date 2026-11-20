@@ -3,7 +3,7 @@
 设计：
 - 不扫描文件系统（避免恶意文件注入）
 - 启动时静态可分析
-- 添加新站点 = 1 行字典 + 1 个 .py 文件
+- 站点差异由规则包（indexer/rules/indexers.json）表达，注册表只保留 generic
 
 调用方：
 - :class:`app.services.factory.AdapterFactory.site` 缓存站点 adapter 实例
@@ -28,31 +28,15 @@ class AdapterMeta(NamedTuple):
 #: 已注册站点 adapter 白名单。
 #: 键 = Site.adapter 字段值（小写字母数字，下划线），值 = "module.path.ClassName"。
 _BUILTIN: dict[str, str] = {
-    "mteam": "app.adapters.sites.mteam.MteamAdapter",
-    "hhanclub": "app.adapters.sites.hhanclub.HhanclubAdapter",
-    "hdsky": "app.adapters.sites.hdsky.HdskyAdapter",
-    "ourbits": "app.adapters.sites.ourbits.OurbitsAdapter",
-    "audiences": "app.adapters.sites.audiences.AudiencesAdapter",
-    "springsunday": "app.adapters.sites.springsunday.SpringsundayAdapter",
-    "hdhome": "app.adapters.sites.hdhome.HdhomeAdapter",
-    "hddolby": "app.adapters.sites.hddolby.HddolbyAdapter",
-    "soulvoice": "app.adapters.sites.soulvoice.SoulvoiceAdapter",
-    "hdwing": "app.adapters.sites.hdwing.HdwingAdapter",
+    # 唯一的站点实现：规则包驱动的通用适配器。
+    # 站点差异全部由 indexer/rules/indexers.json 里的选择器配置表达。
+    "generic": "app.adapters.sites.generic.GenericAdapter",
 }
 
 #: 展示用元数据（label + 默认域名）。键集合必须与 ``_BUILTIN`` 一致。
 #: 任何 _BUILTIN 变更需同步这里；启动期 check_meta_consistency 校验。
 _META: dict[str, AdapterMeta] = {
-    "mteam":        AdapterMeta("M-team",        "m-team.io"),
-    "hhanclub":     AdapterMeta("HHanClub",     "hhanclub.net"),
-    "hdsky":        AdapterMeta("HDSky",        "hdsky.me"),
-    "ourbits":      AdapterMeta("OurBits",      "ourbits.club"),
-    "audiences":    AdapterMeta("Audiences",    "audiences.me"),
-    "springsunday": AdapterMeta("Springsunday", "springsunday.net"),
-    "hdhome":       AdapterMeta("HDHome",       "hdhome.org"),
-    "hddolby":      AdapterMeta("HDDolby",      "hddolby.com"),
-    "soulvoice":    AdapterMeta("聆音Club",      "pt.soulvoice.club"),
-    "hdwing":       AdapterMeta("HDWinG",       "hdwing.org"),
+    "generic": AdapterMeta("通用(规则包)", ""),
 }
 
 # 启动时检查两个 dict 同步（开发期防御）

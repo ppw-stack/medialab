@@ -13,15 +13,11 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import timedelta
 
-import httpx
 import pytest
-import respx
 from app.adapters.sites.base import (
     FeedItem,
-    Promotion,
     SiteAdapter,
     SiteHealth,
     SiteProfile,
@@ -157,229 +153,8 @@ def factory_with(monkeypatch: pytest.MonkeyPatch):
 async def _add_sites(*names: str) -> None:
     async with session_scope() as session:
         for n in names:
-            session.add(Site(name=n, domain=f"{n}.test", adapter="hdsky"))
+            session.add(Site(name=n, domain=f"{n}.test", adapter="generic"))
         await session.flush()
-
-
-# ------------------------------------------- 优惠判定（hdwing 式「AJAX 占位符」站）
-
-class _PromoAdapter(_FakeAdapter):
-    """带优惠查询能力的假适配器（模拟 hdwing）。
-
-    hdwing 的优惠标记是列表页里的**空占位**（``span.sp_state_placeholder``），
-    免费判定只能逐种子查服务端的优惠历史表 → 适配器要声明
-    ``supports_promotion_lookup``，由 service 层做增量判定。
-    """
-
-    supports_promotion_lookup = True
-
-    def __init__(
-        self,
-        profile: SiteProfile,
-        *,
-        promo_by_id: dict[str, Promotion | None] | None = None,
-        promo_error_ids: set[str] | None = None,
-        **kwargs: object,
-    ) -> None:
-        super().__init__(profile, **kwargs)
-        self.promo_by_id = promo_by_id or {}
-        #: 这些 item_id 查优惠时抛 SiteFetchError（模拟单条故障）
-        self.promo_error_ids = promo_error_ids or set()
-        #: 被查过优惠的 item_id（增量判定的核心断言对象）
-        self.promo_calls: list[str] = []
-
-    async def search_torrents(
-        self,
-        query: dict[str, object],
-        *,
-        page_size: int = 100,
-        page_number: int = 1,
-    ) -> list[FeedItem]:
-        items = await super().search_torrents(
-            query, page_size=page_size, page_number=page_number
-        )
-        # 列表页**没有**优惠标记（hdwing 的真实形态）→ 不带 free_payload，
-        # description 也置空（副标题可能含「剩余」字样，会污染 window_parser
-        # 的文本兜底路径——hdwing 适配器就是这么做的）
-        return [replace(i, free_payload=None, description="") for i in items]
-
-    async def get_promotion(self, item_id: str) -> Promotion | None:
-        self.promo_calls.append(item_id)
-        if item_id in self.promo_error_ids:
-            from app.adapters.sites.base import SiteFetchError
-
-            raise SiteFetchError("优惠历史返回 500")
-        return self.promo_by_id.get(item_id)
-
-
-@pytest.fixture
-def promo_factory(monkeypatch: pytest.MonkeyPatch):
-    """构造工厂，注入带优惠查询能力的假适配器（按站名缓存实例）。
-
-    返回 ``(factory, adapters)``——``adapters`` 里能看到每个适配器被查过
-    哪些 item_id 的优惠。
-    """
-
-    def _make(
-        promo_by_id: dict[str, Promotion | None],
-        promo_error_ids: set[str] | None = None,
-    ) -> tuple[AdapterFactory, dict[str, _PromoAdapter]]:
-        f = AdapterFactory()
-        adapters: dict[str, _PromoAdapter] = {}
-
-        def _site(row: Site, *, cookies: str | None = None) -> _PromoAdapter:
-            ad = adapters.get(row.name)
-            if ad is None:
-                ad = _PromoAdapter(
-                    SiteProfile(name=row.name, domain=row.domain),
-                    promo_by_id=promo_by_id,
-                    promo_error_ids=promo_error_ids,
-                )
-                adapters[row.name] = ad
-            return ad
-
-        monkeypatch.setattr(f, "site", _site)
-        return (f, adapters)
-
-    return _make
-
-
-async def test_promotion_lookup_writes_real_free_window(
-    db: None, promo_factory
-) -> None:
-    """站点返回的优惠 → 落库成**限时免费 + 真实截止时间**。
-
-    这是 hdwing 改动的核心：以前免费标记来自那个被 Turnstile 闸住的
-    AJAX 接口（对任意 id 都回「免费」）→ 全被当成永久免费，窗口永不到期。
-    """
-    await _add_sites("s1")
-    end_at = format_bj(bj_now_dt() + timedelta(days=2))
-    factory, adapters = promo_factory(
-        {"0": Promotion(kind="Free", start_at=bj_now(), end_at=end_at)}
-    )
-    await fetch_all_sites(factory)
-
-    async with session_scope() as session:
-        row = (
-            await session.execute(select(TorrentIndex).where(TorrentIndex.item_id == "0"))
-        ).scalar_one()
-        assert row.free_type == "freeleech_timed"
-        assert row.free_end_at == end_at
-    # 三个条目都是新增 → 都查一遍（并发执行，顺序不保证）
-    assert sorted(adapters["s1"].promo_calls) == ["0", "1", "2"]
-
-
-async def test_promotion_lookup_marks_non_free_items(
-    db: None, promo_factory
-) -> None:
-    """没有生效的优惠 → 不是免费种（free_type=unknown，不进推送候选）。"""
-    await _add_sites("s1")
-    factory, adapters = promo_factory({})
-    await fetch_all_sites(factory)
-
-    async with session_scope() as session:
-        rows = (await session.execute(select(TorrentIndex))).scalars().all()
-        assert len(rows) == 3
-        assert all(r.free_type == "unknown" for r in rows)
-        assert all(r.free_end_at is None for r in rows)
-    assert sorted(adapters["s1"].promo_calls) == ["0", "1", "2"]
-
-
-async def test_promotion_lookup_is_incremental(db: None, promo_factory) -> None:
-    """第二轮**不再**查判定仍有效的条目——否则每轮都要打几百个请求。
-
-    增量规则：
-    - 判定仍有效（限时免费且窗口未过）→ 沿用旧值，**不发请求**
-    - 上轮判定为「不免费」→ 复查（可能新开了促销）
-    """
-    await _add_sites("s1")
-    end_at = format_bj(bj_now_dt() + timedelta(days=2))
-    factory, adapters = promo_factory(
-        {"0": Promotion(kind="Free", start_at=bj_now(), end_at=end_at)}
-    )
-    await fetch_all_sites(factory)
-    first_calls = sorted(adapters["s1"].promo_calls)
-    assert first_calls == ["0", "1", "2"]
-
-    # 第二轮：条目 0 判定仍有效 → 不再查；条目 1/2 上轮不免费 → 复查
-    await fetch_all_sites(factory)
-    all_calls = adapters["s1"].promo_calls
-    assert all_calls.count("0") == 1, "判定仍有效的条目不该再查优惠"
-    assert sorted(all_calls[3:]) == ["1", "2"], "上轮不免费的条目要复查"
-
-    async with session_scope() as session:
-        row = (
-            await session.execute(select(TorrentIndex).where(TorrentIndex.item_id == "0"))
-        ).scalar_one()
-        # 沿用旧判定：free_type / free_end_at 不能被 upsert 抹掉
-        assert row.free_type == "freeleech_timed"
-        assert row.free_end_at == end_at
-
-
-async def test_promotion_lookup_refreshes_expired_items(
-    db: None, promo_factory
-) -> None:
-    """窗口已过的条目要**复查**（可能不再免费，也可能又开了新窗口）。"""
-    await _add_sites("s1")
-    expired = format_bj(bj_now_dt() - timedelta(days=1))
-    async with session_scope() as session:
-        site = (
-            await session.execute(select(Site).where(Site.name == "s1"))
-        ).scalar_one()
-        session.add(
-            TorrentIndex(
-                site_id=site.id,
-                item_id="0",
-                name="old",
-                free_type="freeleech_timed",
-                free_end_at=expired,
-                first_seen_at=bj_now(),
-                last_seen_at=bj_now(),
-            )
-        )
-        await session.flush()
-
-    factory, adapters = promo_factory({})
-    await fetch_all_sites(factory)
-
-    # 过期条目被复查；其它条目（本轮新增）也查
-    assert "0" in adapters["s1"].promo_calls
-    async with session_scope() as session:
-        row = (
-            await session.execute(select(TorrentIndex).where(TorrentIndex.item_id == "0"))
-        ).scalar_one()
-        # 复查结果：当前没有生效优惠 → 免费判定被清掉
-        assert row.free_type == "unknown"
-        assert row.free_end_at is None
-
-
-async def test_promotion_lookup_failure_keeps_site_healthy(
-    db: None, promo_factory
-) -> None:
-    """单个条目的优惠判定失败 → 不影响整站（该条目不写免费标记）。
-
-    优惠判定是**附加信息**：查失败不能把整站记成故障，也不能让其它条目
-    跟着丢判定。
-    """
-    await _add_sites("s1")
-    end_at = format_bj(bj_now_dt() + timedelta(days=2))
-    factory, adapters = promo_factory(
-        {"1": Promotion(kind="Free", start_at=bj_now(), end_at=end_at)},
-        promo_error_ids={"0"},
-    )
-    result = await fetch_all_sites(factory)
-
-    assert result["failed_sites"] == 0, "单条优惠判定失败不该把站点记成故障"
-    assert result["total_written"] == 3
-    async with session_scope() as session:
-        rows = {
-            r.item_id: r
-            for r in (await session.execute(select(TorrentIndex))).scalars().all()
-        }
-        assert rows["0"].free_type == "unknown"  # 查失败 → 不写免费标记
-        assert rows["1"].free_type == "freeleech_timed"  # 其它条目照常
-        assert rows["1"].free_end_at == end_at
-    assert sorted(adapters["s1"].promo_calls) == ["0", "1", "2"]
 
 
 # ------------------------------------------------------------------ 正常
@@ -645,7 +420,7 @@ async def test_expired_breaker_is_ignored(db: None, factory_with) -> None:
     expired = format_bj(bj_now_dt() - timedelta(minutes=1))
     async with session_scope() as session:
         session.add(
-            Site(name="s1", domain="s1.test", adapter="hdsky", breaker_until=expired)
+            Site(name="s1", domain="s1.test", adapter="generic", breaker_until=expired)
         )
         await session.flush()
 
@@ -723,8 +498,8 @@ async def test_fetch_twice_upserts_not_duplicates(db: None, factory_with) -> Non
 async def test_disabled_site_is_skipped(db: None, factory_with) -> None:
     """enabled=0 的站不参与拉取。"""
     async with session_scope() as session:
-        session.add(Site(name="s1", domain="s1.test", adapter="hdsky", enabled=True))
-        session.add(Site(name="s2", domain="s2.test", adapter="hdsky", enabled=False))
+        session.add(Site(name="s1", domain="s1.test", adapter="generic", enabled=True))
+        session.add(Site(name="s2", domain="s2.test", adapter="generic", enabled=False))
         await session.flush()
 
     factory = factory_with({"s1": "ok", "s2": "ok"})
@@ -791,34 +566,4 @@ async def test_fetch_upsert_after_site_deleted_is_skipped_not_crashed(
         assert orphan == 0
 
 
-async def test_real_adapter_dns_failure_surfaces_as_failed_site(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """用真实 hdsky 适配器 + respx 模拟 DNS 失败，端到端验证统计。
 
-    比假适配器更可信：走真实的异常包装路径（SiteFetchError）。
-    """
-    from app.adapters.sites.hdsky import HdskyAdapter
-
-    await _add_sites("hdsky_site")
-
-    factory = AdapterFactory()
-    real_site = factory.site
-
-    def _site(row: Site, *, cookies: str | None = None) -> SiteAdapter:
-        return HdskyAdapter(
-            SiteProfile(name=row.name, domain=row.domain), cookies="uid=1"
-        )
-
-    monkeypatch.setattr(factory, "site", _site)
-    assert real_site is not None
-
-    with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
-        router.route().mock(
-            side_effect=httpx.ConnectError("Name or service not known")
-        )
-        result = await fetch_all_sites(factory)
-
-    assert result["failed_sites"] == 1
-    assert result["total_written"] == 0
-    assert "hdsky_site" in str(result["summary"])
