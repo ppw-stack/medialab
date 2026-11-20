@@ -57,6 +57,7 @@ __all__ = [
     "is_upload_quota_wall",
     "list_candidates",
     "mark_quota_exhausted",
+    "normalize_sub_path",
     "pick_candidate",
     "reset_quota_exhausted",
     "validate_group_target",
@@ -69,6 +70,73 @@ def current_month_key() -> str:
     月度额度的标记与它同键——**跨月自动失效**。
     """
     return bj_now()[:7]
+
+
+# --------------------------------------------------------------------------
+# 目标子目录（组映射的子路径覆盖）
+# --------------------------------------------------------------------------
+
+#: 子目录的最大段数（防御：过深的路径会让云端逐层建目录变慢）
+MAX_SUB_PATH_SEGMENTS = 8
+#: 单段长度上限（多数网盘的目录名限制）
+MAX_SUB_PATH_SEGMENT_LEN = 255
+#: 整体长度上限
+MAX_SUB_PATH_LEN = 1024
+
+
+def normalize_sub_path(raw: str | None) -> str | None:
+    """归一化任务级的「目标子目录」（**组映射的子路径覆盖**）。
+
+    语义：文件最终落在主盘「归拢目标目录」下的这个子目录里。
+
+    实现上它落在**副盘缓冲根**下的同名子目录——归拢引擎「相对结构原样
+    保留到主盘目标目录」，故主盘侧自动带上前缀（**归拢零改动**）。
+
+    Args:
+        raw: 用户填的子目录（可为空 / None）。
+
+    Returns:
+        归一化后的相对路径（不含首尾斜杠）；**None = 无覆盖**（直接落
+        归拢目标目录根）。
+
+    Raises:
+        ServiceError: 路径非法（``..`` / ``.`` / 超长 / 段数过多）。
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    # 反斜杠当分隔符处理（Windows 习惯输入）
+    segments = [seg for seg in text.replace("\\", "/").split("/") if seg]
+    if not segments:
+        return None
+    for seg in segments:
+        # ``..`` 是路径穿越、``.`` 语义不清——**一律拒绝**（网盘路径没
+        # 有穿越风险，但留着会让「相对路径」这件事变得不可推理）
+        if seg in (".", ".."):
+            raise ServiceError(
+                f"目标子目录不合法：{raw!r}（不能包含 {seg!r}）", status=400
+            )
+        if len(seg) > MAX_SUB_PATH_SEGMENT_LEN:
+            raise ServiceError(
+                f"目标子目录的单段太长（{len(seg)} 字符，上限 "
+                f"{MAX_SUB_PATH_SEGMENT_LEN}）：{seg[:32]}…",
+                status=400,
+            )
+    if len(segments) > MAX_SUB_PATH_SEGMENTS:
+        raise ServiceError(
+            f"目标子目录太深（{len(segments)} 段，上限 "
+            f"{MAX_SUB_PATH_SEGMENTS} 段）",
+            status=400,
+        )
+    path = "/".join(segments)
+    if len(path) > MAX_SUB_PATH_LEN:
+        raise ServiceError(
+            f"目标子目录太长（{len(path)} 字符，上限 {MAX_SUB_PATH_LEN}）",
+            status=400,
+        )
+    return path
 
 
 # --------------------------------------------------------------------------

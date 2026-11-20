@@ -1115,6 +1115,13 @@ export interface UploadTask {
    * （撞到月度上传限额就换下一个），上传成功后进归拢台账。
    */
   aggregate_group_id: number | null
+  /**
+   * 目标**子目录**（`null` = 不覆盖；**仅聚合模式**有意义）。
+   *
+   * 组映射的子路径覆盖：文件最终落在主盘「归拢目标目录」下的这个
+   * 子目录里（实现上先落副盘缓冲根的同名子目录，归拢时原样带过去）。
+   */
+  aggregate_sub_path: string | null
   created_at: string
   updated_at: string
   /** 运行态：监听器是否在跑 */
@@ -1166,6 +1173,8 @@ export interface AggregateTargetGroup {
   master_driver_name: string
   /** 主盘归拢目标目录（只读展示） */
   target_dir_path: string | null
+  /** 主盘归拢目标目录 id——「目标子目录」浏览器的**起点** */
+  target_dir_id: string | null
   /** 组内候选落点（按 driver id 升序——**不排序**） */
   candidates: AggregateCandidate[]
 }

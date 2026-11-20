@@ -977,6 +977,31 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
     事后从「重启后重传」倒查
     - ⚠️ 但**运行期**的偶发降级（台账登记撞锁）**不登记**：它可丢（兜底
       扫描会补），登记会让面板长期 degraded，反而淹没真正的降级
+- **任务级「目标子目录」= 组映射的子路径覆盖**（2026-11-20 加入）：
+  - **为什么有它**：目录映射（主盘落点 + 各副盘缓冲根）是**组级**配置（配
+    一次）；但「这个任务传到 `电影/外语`、那个任务传到 `电视剧/国产`」是
+    **任务级**需求 → `upload_tasks.aggregate_sub_path`（**仅聚合模式**有效）
+  - **实现口径：改上传、不改归拢**——子目录落在**副盘缓冲根**下的同名子
+    目录（`CloudDirIndex._resolve_dir` 沿途逐层建，不需预建）；台账的相对
+    路径（相对缓冲根）带上前缀 → 归拢引擎「相对结构原样保留到主盘目标
+    目录」自动把它带过去（**归拢零改动**）
+  - ⚠️ **三个口径必须分清**（本项目最易踩的坑）：
+    ① **监听口径**（相对本地监听根）→ `SyncOutcome.rel_path` / 本地清理 /
+    进度展示，**永远不要改**；② **缓冲根口径**（相对副盘缓冲根）→ 台账
+    `rel_dir` / 组级幂等索引键；③ **云端口径**（相对落点目录）→ `index` /
+    `staged_lookup`。聚合模式下 ②③ = ① + 子目录前缀
+  - **粘性落点语义不变**：`target_file_id` 仍存**缓冲根** id（子目录是上传
+    上下文的前缀，不是落点目录）→ 换盘 / 重启恢复逻辑不用改
+  - **非法路径显式拒绝**（400）：`..` / `.` / 超长段 / 超深层 → 归一化在
+    `aggregate_upload.normalize_sub_path`（单一真源）；「指定存储源」模式
+    传了子目录也 400（**没有组映射可覆盖**）→ 切回该模式时**一律清空**
+  - 前端：聚合模式下多一个「目标子目录（可选）」= **手填 + 从主盘归拢目标
+    目录起浏览**（`/drivers/{master_id}/browse-dirs`，相对路径取目录**名**
+    而非 id——云端路径由目录名拼出）
+  - 契约由 `tests/unit/test_aggregate_upload.py`（归一化）+
+    `tests/integration/test_aggregate_subpath.py`（落点 / 台账 / 幂等 / 换盘 /
+    重启）+ `tests/integration/test_aggregate_sync.py::test_sync_lands_in_master_subdir`
+    （归拢零改动）+ `tests/integration/test_upload_tasks_api.py`（API）固化
 - **启动期密钥闸门（2026-11-17，P0）**：`WEB_TOKEN` 与 `SIGNING_SECRET` 都是
   必填，lifespan 缺任一即 `RuntimeError` 拒绝启动；配置层拒绝 `change-me*`
   占位符，prod 还要求二者 ≥32 字符。`/metrics` 不再公开，抓取端要带

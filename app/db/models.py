@@ -977,6 +977,16 @@ class UploadTask(Base):
     aggregate_group_id: Mapped[int | None] = mapped_column(
         Integer, nullable=True
     )
+    #: 目标**子目录**（聚合模式专属）：**组映射的子路径覆盖**。
+    #:
+    #: 非空 = 文件最终落在主盘「归拢目标目录」下的这个子目录里
+    #: （例：``电影/外语``）。实现上落在**副盘缓冲根**下的同名子目录——
+    #: 归拢引擎「相对结构原样保留」，主盘侧自动带上前缀。
+    #:
+    #: NULL = 直接落在归拢目标目录根（引入本字段前的行为，存量行全是
+    #: NULL → 行为零变化）。「指定存储源」模式下恒为 NULL（没有组映射
+    #: 可覆盖）。
+    aggregate_sub_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
     updated_at: Mapped[str] = mapped_column(
         String(32), default=_bj_now, onupdate=_bj_now

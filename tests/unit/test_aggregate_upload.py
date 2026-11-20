@@ -5,12 +5,15 @@
 
 from __future__ import annotations
 
+import pytest
 from app.services.aggregate_upload import (
     LandingCandidate,
     candidate_ok,
     current_month_key,
     is_upload_quota_wall,
+    normalize_sub_path,
 )
+from app.services.errors import ServiceError
 
 
 def _cand(**kwargs) -> LandingCandidate:
@@ -72,3 +75,43 @@ class Test月份键:
         assert key[4] == "-"
         assert key[:4].isdigit()
         assert key[5:].isdigit()
+
+
+class Test目标子目录归一化:
+    """任务级「目标子目录」（组映射的子路径覆盖）的归一化与校验。"""
+
+    def test_空值表示不覆盖(self) -> None:
+        assert normalize_sub_path(None) is None
+        assert normalize_sub_path("") is None
+        assert normalize_sub_path("   ") is None
+        assert normalize_sub_path("/") is None
+
+    def test_去掉首尾斜杠与空段(self) -> None:
+        assert normalize_sub_path("/电影/外语/") == "电影/外语"
+        assert normalize_sub_path("//电影//外语//") == "电影/外语"
+
+    def test_反斜杠当分隔符(self) -> None:
+        """Windows 习惯输入的路径分隔符也要认。"""
+        assert normalize_sub_path(r"电影\外语") == "电影/外语"
+
+    def test_拒绝路径穿越(self) -> None:
+        """``..`` / ``.`` 一律拒绝——「相对路径」必须可推理。"""
+        for bad in ("..", "../etc", "电影/../..", "电影/./外语", "."):
+            with pytest.raises(ServiceError) as exc:
+                normalize_sub_path(bad)
+            assert exc.value.status == 400, bad
+
+    def test_拒绝过长的单段(self) -> None:
+        with pytest.raises(ServiceError) as exc:
+            normalize_sub_path("x" * 300)
+        assert exc.value.status == 400
+
+    def test_拒绝过深的层级(self) -> None:
+        with pytest.raises(ServiceError) as exc:
+            normalize_sub_path("/".join(["a"] * 20))
+        assert exc.value.status == 400
+
+    def test_多段合法路径原样保留(self) -> None:
+        assert normalize_sub_path("电视剧/国产/Season 01") == (
+            "电视剧/国产/Season 01"
+        )

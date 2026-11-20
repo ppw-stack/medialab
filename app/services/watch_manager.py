@@ -273,6 +273,11 @@ class _Landing:
     root_path: str | None
     delete_after_upload: bool
     conflict_policy: int
+    #: 任务级的「目标子目录」（组映射的子路径覆盖）——**空 = 无覆盖**。
+    #:
+    #: 落在副盘缓冲根下的同名子目录；归拢引擎「相对结构原样保留」→
+    #: 主盘侧自动落到「归拢目标目录」的同名子目录下（归拢零改动）。
+    sub_path: str = ""
     #: 候选缓存（按 driver id 升序的固定顺序）
     candidates: list[LandingCandidate] = field(default_factory=list)
     #: 候选缓存的取样时刻（monotonic）
@@ -308,6 +313,8 @@ class _StartParams:
     conflict_policy: int
     #: 目标聚合组（非空 = 「本地同步到网盘聚合」）
     aggregate_group_id: int | None = None
+    #: 目标子目录（聚合模式专属）：组映射的子路径覆盖，空 = 无覆盖
+    aggregate_sub_path: str = ""
 
 
 def get_watcher(task_id: int) -> Watcher | None:
@@ -342,6 +349,7 @@ async def start_all() -> None:
                     delete_after_upload=row.delete_after_upload,
                     conflict_policy=row.conflict_policy,
                     aggregate_group_id=row.aggregate_group_id,
+                    aggregate_sub_path=row.aggregate_sub_path or "",
                 )
                 for row in rows
             ]
@@ -365,6 +373,7 @@ async def start_all() -> None:
                 delete_after_upload=params.delete_after_upload,
                 conflict_policy=params.conflict_policy,
                 aggregate_group_id=params.aggregate_group_id,
+                aggregate_sub_path=params.aggregate_sub_path,
             )
         except Exception as exc:
             logger.exception("启动上传任务失败：%s（%s）", params.name, exc)
@@ -395,12 +404,17 @@ async def start_watcher(
     delete_after_upload: bool = False,
     conflict_policy: int = CONFLICT_KEEP_LARGER,
     aggregate_group_id: int | None = None,
+    aggregate_sub_path: str = "",
 ) -> Watcher:
     """为一个任务启动监听器 + 上传 worker（大文件 ×1 + 小文件 ×K）。
 
     ``aggregate_group_id`` 非空 = **「本地同步到网盘聚合」**：落点不在
     ``driver_id`` 上，而是由分配器在组内副盘之间挑选（撞到月度上传限额
     就换下一个），上传成功后**即时登记台账**，归拢引擎接管搬运。
+
+    ``aggregate_sub_path`` = 任务级的「目标子目录」（组映射的子路径覆盖，
+    仅聚合模式有效）：文件落在副盘缓冲根下的该子目录里，归拢后落到主盘
+    「归拢目标目录」的同名子目录下。
 
     Raises:
         DriverError: 存储源不可用 / 凭据缺失 / 聚合组不可用。
@@ -435,6 +449,7 @@ async def start_watcher(
             preferred_driver_id=driver_id,
             delete_after_upload=delete_after_upload,
             conflict_policy=conflict_policy,
+            sub_path=aggregate_sub_path,
         )
         driver, uploader = await _build_clients(landing.driver_id)
     else:
@@ -505,12 +520,15 @@ async def start_watcher(
             conflict_policy=landing.conflict_policy,
             # 组级幂等探测：文件可能已在别的副盘缓冲里 / 已归拢到主盘
             staged_lookup=_make_staged_lookup(landing),
+            # 任务级「目标子目录」→ 云端相对路径整体下移一层
+            dir_prefix=landing.sub_path,
         )
         # 落点快照写回 DB（粘性——重启后恢复，避免已传文件被重传）
         await _persist_landing(task_id, landing)
         runtime.log(
             f"🎯 聚合模式：组 {landing.group_id} → 副盘 {landing.driver_name}"
             f"（{landing.root_path or landing.root_id}）"
+            + (f" / 子目录「{landing.sub_path}」" if landing.sub_path else "")
         )
     else:
         ctx = SyncContext(
@@ -765,11 +783,15 @@ async def _resolve_landing(
     preferred_driver_id: int,
     delete_after_upload: bool,
     conflict_policy: int,
+    sub_path: str = "",
 ) -> _Landing:
     """解析聚合任务的落点。
 
     **粘性**：优先沿用当前落点（``preferred_driver_id``——即任务行里存的
     快照），它失效了（移出组 / 停用 / 本月额度耗尽）才重新挑。
+
+    ``sub_path`` = 任务级的「目标子目录」（组映射的子路径覆盖）——落点
+    换盘时**跟着任务走**（新副盘的缓冲根下建同名子目录）。
 
     Raises:
         DriverError: 组不可用（不存在 / 停用 / 无主盘 / 未配归拢目标 /
@@ -807,9 +829,22 @@ async def _resolve_landing(
         root_path=chosen.root_path,
         delete_after_upload=delete_after_upload,
         conflict_policy=conflict_policy,
+        sub_path=sub_path,
         candidates=candidates,
         candidates_at=time.monotonic(),
     )
+
+
+def _landing_display_path(landing: _Landing) -> str:
+    """落点的展示路径（**只读**——副盘缓冲根 + 任务级子目录）。
+
+    ⚠️ 这是**副盘侧**的路径（文件第一跳落点），不是主盘的最终落点——
+    最终落点是主盘「归拢目标目录」下的同名子目录（归拢引擎负责搬运）。
+    """
+    base = landing.root_path or landing.root_id
+    if landing.sub_path:
+        return f"{base}/{landing.sub_path}"
+    return base
 
 
 async def _persist_landing(task_id: int, landing: _Landing) -> None:
@@ -839,7 +874,7 @@ async def _persist_landing(task_id: int, landing: _Landing) -> None:
                 return
             row.driver_id = landing.driver_id
             row.target_file_id = landing.root_id
-            row.target_path = landing.root_path
+            row.target_path = _landing_display_path(landing)
             await db.commit()
     except SQLAlchemyError as exc:
         logger.warning("落点快照写回失败（task_id=%s）：%s", task_id, exc)
@@ -917,6 +952,8 @@ async def _switch_landing(task_id: int, candidate: LandingCandidate) -> None:
         delete_local=landing.delete_after_upload,
         conflict_policy=landing.conflict_policy,
         staged_lookup=_make_staged_lookup(landing),
+        # 换盘后子目录前缀**跟着任务走**（新副盘的缓冲根下同名子目录）
+        dir_prefix=landing.sub_path,
     )
     landing.driver_id = candidate.driver_id
     landing.driver_name = candidate.driver_name
@@ -977,7 +1014,15 @@ async def _register_after_upload(
     file_id = outcome.cloud_file_id
     if not file_id:
         return
-    rel_dir = parent_dir(rel_path)
+    # 台账口径 = **相对副盘缓冲根**（归拢时按它映射到主盘目标目录）。
+    # 任务级「目标子目录」是缓冲根下的真实前缀 → 必须带上，否则归拢会
+    # 把文件搬到主盘目标目录的根下（丢掉子目录）。
+    ctx = _CONTEXTS.get(task_id)
+    rel_dir = (
+        ctx.cloud_dir(parent_dir(rel_path))
+        if ctx is not None
+        else parent_dir(rel_path)
+    )
     file_name = base_name(rel_path)
     runtime = get_runtime(task_id)
     try:

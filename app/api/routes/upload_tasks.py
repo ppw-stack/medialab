@@ -58,6 +58,9 @@ class UploadTaskIn(BaseModel):
     #: 目标**聚合组**（非空 = 「本地同步到网盘聚合」：落点自动分配 +
     #: 上传后进归拢台账）。给了组就不用给盘。
     aggregate_group_id: int | None = None
+    #: 目标**子目录**（**仅聚合模式**）：组映射的子路径覆盖——文件最终落在
+    #: 主盘「归拢目标目录」下的这个子目录里。空 = 不覆盖。
+    aggregate_sub_path: str | None = Field(default=None, max_length=1024)
 
 
 class UploadTaskPatch(BaseModel):
@@ -78,6 +81,8 @@ class UploadTaskPatch(BaseModel):
     target_path: str | None = Field(default=None, max_length=1024)
     #: 目标聚合组（**显式传 null** = 退回「指定存储源」模式）
     aggregate_group_id: int | None = None
+    #: 目标子目录（**显式传 null** = 清空覆盖）。仅聚合模式有效。
+    aggregate_sub_path: str | None = Field(default=None, max_length=1024)
 
 
 class UploadTaskOut(BaseModel):
@@ -97,6 +102,8 @@ class UploadTaskOut(BaseModel):
     conflict_policy: int = 1
     #: 目标聚合组（None = 目标是某个具体存储源）
     aggregate_group_id: int | None = None
+    #: 目标子目录（None = 不覆盖；仅聚合模式有意义）
+    aggregate_sub_path: str | None = None
     created_at: str
     updated_at: str
     #: 运行态（监听中？正在传什么？）
@@ -128,6 +135,7 @@ def _to_out(row: UploadTaskView) -> UploadTaskOut:
         concurrency=row.concurrency,
         conflict_policy=row.conflict_policy,
         aggregate_group_id=row.aggregate_group_id,
+        aggregate_sub_path=row.aggregate_sub_path,
         created_at=row.created_at,
         updated_at=row.updated_at,
         listening=row.listening,
@@ -244,6 +252,7 @@ async def create_upload_task(payload: UploadTaskIn) -> UploadTaskOut:
             conflict_policy=payload.conflict_policy,
             target_path=payload.target_path,
             aggregate_group_id=payload.aggregate_group_id,
+            aggregate_sub_path=payload.aggregate_sub_path,
         )
     except UploadTaskError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -321,6 +330,7 @@ async def _maybe_restart(row: UploadTaskView) -> None:
             delete_after_upload=row.delete_after_upload,
             conflict_policy=row.conflict_policy,
             aggregate_group_id=row.aggregate_group_id,
+            aggregate_sub_path=row.aggregate_sub_path or "",
         )
     except Exception as exc:
         runtime.error = f"{type(exc).__name__}: {exc}"
