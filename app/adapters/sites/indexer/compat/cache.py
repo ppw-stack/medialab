@@ -19,7 +19,21 @@ class MemoryBackend:
         self._data: dict[Any, tuple[float, Any]] = {}
 
     def _expired(self, created: float) -> bool:
-        return self._ttl is not None and (time.time() - created) > self._ttl
+        """判断条目是否已过期。
+
+        :param created: 条目的写入时刻（``time.time()`` 口径）
+        :return: 条目是否已过期
+        """
+        if self._ttl is None:
+            return False
+        if self._ttl <= 0:
+            # ttl=0 的语义是「立即过期」：条目的有效期为零，读回必须算未命中。
+            # 不能靠「时钟有没有前进」判定——time.time() 在同一瞬间可能返回
+            # 完全相同的浮点值，那会让本该过期的条目被当成命中（测试随机翻车）。
+            return True
+        # 用 >= ：条目在恰好到达 TTL 边界时就到期（与本项目 sunnypt 的
+        # `time.monotonic() - cached_at >= ttl` 口径一致）。
+        return (time.time() - created) >= self._ttl
 
     def get(self, key: Any, region: str | None = None) -> Any:
         """读取缓存值。

@@ -81,6 +81,57 @@ class TestMemoryBackend:
         backend.set("key", "value")
         assert backend.get("key") is None
 
+    def test_zero_ttl_expires_even_when_clock_did_not_advance(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """冻结时钟：ttl=0 的条目必须立刻读成未命中。
+
+        旧实现用 ``time.time() - created > ttl`` 判定——时钟没前进时差值为 0，
+        ``0 > 0`` 为假，本该过期的条目会被当成命中。该用例随机翻车（实测
+        干净树上 30 次跑挂 3 次），故用冻结时钟把它钉成确定性用例。
+        """
+        from app.adapters.sites.indexer.compat import cache as cache_module
+
+        frozen = 1_700_000_000.0
+        monkeypatch.setattr(cache_module.time, "time", lambda: frozen)
+
+        backend = MemoryBackend(maxsize=8, ttl=0)
+        backend.set("key", "value")
+        assert backend.get("key") is None
+
+    def test_positive_ttl_keeps_entry_until_boundary(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """正 TTL：未到边界仍命中，到边界即过期（>= 语义）。"""
+        from app.adapters.sites.indexer.compat import cache as cache_module
+
+        now = 1_700_000_000.0
+        clock = [now]
+        monkeypatch.setattr(cache_module.time, "time", lambda: clock[0])
+
+        backend = MemoryBackend(maxsize=8, ttl=60)
+        backend.set("key", "value")
+        assert backend.get("key") == "value"
+
+        clock[0] = now + 59
+        assert backend.get("key") == "value"
+
+        clock[0] = now + 60
+        assert backend.get("key") is None
+
+    def test_none_ttl_never_expires(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """ttl=None 表示永不过期。"""
+        from app.adapters.sites.indexer.compat import cache as cache_module
+
+        now = 1_700_000_000.0
+        clock = [now]
+        monkeypatch.setattr(cache_module.time, "time", lambda: clock[0])
+
+        backend = MemoryBackend(maxsize=8)
+        backend.set("key", "value")
+        clock[0] = now + 10**9
+        assert backend.get("key") == "value"
+
 
 class TestRulesLoading:
     """规则包缺失 / 损坏时必须报出带路径的错误。"""
