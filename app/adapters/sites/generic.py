@@ -142,8 +142,10 @@ class GenericAdapter(SiteAdapter):
         """专站 spider 有 ``test_connection`` 时走 API 探测，否则返回 None。"""
         parser_name = str((self._rule or {}).get("parser") or "")
         cls = SPIDER_PARSER_CLASSES.get(parser_name)
-        tester = getattr(cls, "test_connection", None) if cls else None
-        if not callable(tester):
+        if cls is None:
+            return None
+        tester: Any = getattr(cls, "test_connection", None)
+        if tester is None:
             return None
         try:
             spider = cls(self._site_config())
@@ -210,8 +212,10 @@ class GenericAdapter(SiteAdapter):
         """专站 spider 自带 ``get_download_url`` 时优先使用（API 站必需）。"""
         parser_name = str((self._rule or {}).get("parser") or "")
         cls = SPIDER_PARSER_CLASSES.get(parser_name)
-        getter = getattr(cls, "get_download_url", None) if cls else None
-        if not callable(getter):
+        if cls is None:
+            return None
+        getter: Any = getattr(cls, "get_download_url", None)
+        if getter is None:
             return None
         try:
             spider = cls(self._site_config())

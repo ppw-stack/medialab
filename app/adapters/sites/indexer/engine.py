@@ -42,7 +42,7 @@ from app.adapters.sites.indexer.spider.torrentleech import TorrentLeech
 from app.adapters.sites.indexer.spider.yema import YemaSpider
 
 #: 专站爬虫（站点配置 ``parser`` 字段）
-SPIDER_PARSER_CLASSES: dict[str, type[Any]] = {
+SPIDER_PARSER_CLASSES: dict[str, type[Any] | None] = {
     "TNodeSpider": TNodeSpider,
     "TorrentLeech": TorrentLeech,
     "mTorrent": MTorrentSpider,

@@ -180,3 +180,28 @@ async def test_generic_subtitle_search_without_config_returns_empty() -> None:
     )
     assert await adapter.search_subtitles({"keyword": "测试"}) == []
     await adapter.close()
+
+
+def test_torrent_detail_is_a_frozen_dataclass() -> None:
+    """契约结构必须是 dataclass——否则 get_torrent_detail 一调就 TypeError。
+
+    曾因漏掉 ``@dataclass`` 装饰器，``TorrentDetail(item_id=...)`` 在运行时
+    抛 ``TypeError: takes no arguments``（静态检查同样报「unexpected keyword」）。
+    """
+    from dataclasses import fields, is_dataclass
+
+    from app.adapters.sites.base import TorrentDetail
+
+    assert is_dataclass(TorrentDetail)
+    assert {f.name for f in fields(TorrentDetail)} >= {
+        "item_id",
+        "title",
+        "size",
+        "download_url",
+        "free_payload",
+        "raw_html",
+        "error",
+    }
+    detail = TorrentDetail(item_id="123", title="片名", size=1024)
+    assert detail.item_id == "123"
+    assert detail.error is None

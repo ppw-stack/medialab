@@ -138,6 +138,18 @@ ignore_missing_imports = true
 module = ["wsgidav.*"]
 ignore_missing_imports = true
 
+# 从 MoviePilot 移植的站点解析子系统（engine/parser/spider/compat + 规则包）。
+# 属第三方代码风格：无类型标注、依赖 parsel/pyquery/lxml/bs4 的无存根调用，
+# 逐处补标注的收益远低于维护成本（且每次随规则包更新都要重打）。
+# 本项目自己的适配层（generic.py / base.py）仍走 strict。
+[[tool.mypy.overrides]]
+module = ["app.adapters.sites.indexer.*"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["pyquery.*", "parsel.*", "lxml.*", "bs4.*", "cloudscraper.*", "ruamel.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # pytest-asyncio 1.x：auto 模式免去每个 async 用例加 @pytest.mark.asyncio

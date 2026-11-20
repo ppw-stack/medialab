@@ -111,6 +111,7 @@ class SubtitleItem:
     file_name: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
 class TorrentDetail:
     """种子详情（get_torrent_detail 返回值）。
 
