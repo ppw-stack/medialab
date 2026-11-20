@@ -126,6 +126,8 @@ def _landing(group_id: int, driver_id: int, *, sub_path: str = "") -> Any:
 
 
 class Test配置校验:
+    """任务级目标子目录的配置校验：创建归一化落库、模式冲突与非法路径拒绝。"""
+
     async def test_创建时归一化并落库(self, db, group, tmp_path) -> None:
         """斜杠归一化后落库。"""
         grp, _master, _s1, _s2 = group
@@ -226,6 +228,8 @@ class Test配置校验:
 
 
 class Test上传落点:
+    """上传落点：子目录逐层建出、台账前缀、组级幂等与换盘后前缀保持。"""
+
     async def test_云端目录逐层建出并落在子目录下(
         self, db, group, tmp_path
     ) -> None:

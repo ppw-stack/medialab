@@ -425,7 +425,6 @@ const loadingTarget = ref(false)
 /** 可选的聚合组（「本地同步到网盘聚合」的目标） */
 const aggregateGroups = ref<AggregateTargetGroup[]>([])
 
-
 let timer: number | undefined
 
 /**
