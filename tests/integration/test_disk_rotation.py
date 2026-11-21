@@ -116,6 +116,7 @@ def _stat(
 
     hashes 必须是 40 位完整 hex（删除要用）。
     added_at: hash → unix 秒映射（可选；disk_rotation 同档先删旧的用）。
+    size_bytes: 精确字节数（可选；缺失时由 size_gb 推算，释放量断言用）。
     """
     payload: dict[str, object] = {
         "name": name,
