@@ -32,9 +32,11 @@ from app.domain.enums import PushStatus
 from app.services.downloader_query import get_default_downloader, get_downloader_by_id
 from app.services.task_executor import PushItemError, execute_add_torrent
 from app.services.task_queue import (
+    MAX_ATTEMPTS,
     TaskKind,
     TaskQueueBusyError,
     TaskQueueService,
+    TaskStatus,
     claim_with_retry,
     enqueue_with_retry,
     make_idem_key,
@@ -77,6 +79,10 @@ class PushOutcome:
     #: API 层据此返回 **202**，前端提示「已入队重试」而不是「推送失败」。
     #: 2026-11-21 prod：手动推送 12:05 报 502，队列 12:10 补推成功——
     #: 用户看到的「失败」与最终结果不一致，故引入本字段。
+    #:
+    #: ⚠️ **只用于「重试有意义」的失败**：站点的永久失败（凭据失效 / 详情页
+    #: 里没有下载地址）与「重试预算已用尽」都走 **502**——那种情况下报
+    #: 202「已入队自动重试」是**说谎**（队列里已经是死信，不会再自动跑）。
     deferred: bool = False
 
 
@@ -197,6 +203,25 @@ async def enqueue_index_entry(index_id: int, downloader_id: int | None) -> Enque
         ) from exc
     if not enq.created:
         # 幂等命中：已有等价任务（已推过 / 在推 / 待重试）
+        #
+        # **死信（failed）例外**：手动重推必须能重新执行——``enqueue`` 对
+        # 已存在的幂等键一律返回 created=False，死信会让用户「再点一次也
+        # 推不上去」（2026-11-21 Kody 审查发现：重试耗尽后任务已是死信，
+        # 再点只拿到 200「已在推送队列中（状态：failed）」）。
+        # 故显式重置死信任务（attempts 归零 + 回到 pending）再执行。
+        if enq.existing_status == TaskStatus.FAILED:
+            async with session_scope() as session:
+                requeued = await TaskQueueService(session).requeue_failed(
+                    enq.task_id
+                )
+            if requeued:
+                return EnqueueOutcome(
+                    state="enqueued",
+                    dl_id=dl_id,
+                    detail="上一轮推送失败（重试已用尽），已重置并重新入队",
+                    task_id=enq.task_id,
+                    payload=payload,
+                )
         return EnqueueOutcome(
             state="already_queued",
             dl_id=dl_id,
@@ -267,25 +292,41 @@ async def push_index_entry(
     try:
         result = await execute_add_torrent(payload, factory, category=category)
     except PushItemError as exc:
+        final_state: str
         async with session_scope() as session:
             tq = TaskQueueService(session)
             if exc.category == "fatal":
                 await tq.mark_failed_forever(task_id, str(exc))
-                final_state = "failed"
+                final_state = TaskStatus.FAILED
             else:
                 final_state = await tq.mark_failed(task_id, str(exc))
         if exc.category == "download":
-            # **下载失败是可重试的**（站点瞬时异常 / 网络抖动）：任务已在队列里，
-            # ``drain_task_queue`` 会按指数退避继续重试。实测这条链路会
-            # 「5 分钟后补推成功」（2026-11-21 prod：12:05 首轮失败 → 12:10 成功）。
-            # 若此刻向用户报「推送失败」+502，用户会以为种子丢了并反复点击——
-            # 因此改为 deferred（API 202 +「已入队重试」）。
-            exhausted = final_state == "failed"
-            detail = (
-                "站点下载失败且重试已用尽（5 次），可稍后手动重推"
-                if exhausted
-                else "站点暂时异常，已入队自动重试（最多 5 次），无需重复点击"
-            )
+            # **下载失败 = 瞬时故障**（网络抖动 / 站点临时错误页）：任务已
+            # 在队列里，``drain_task_queue`` 会按指数退避继续重试。实测这条
+            # 链路会「5 分钟后补推成功」（2026-11-21 prod：12:05 首轮失败 →
+            # 12:10 成功）。若此刻向用户报「推送失败」+502，用户会以为种子
+            # 丢了并反复点击——因此改为 deferred（API 202 +「已入队重试」）。
+            #
+            # ⚠️ 站点的**永久失败**（凭据失效 / 详情页里没有下载地址）已被
+            # 执行层判为 ``fatal``，不进这里——那种情况重试 5 次也不会成功，
+            # 报「已入队自动重试」是骗人。
+            if final_state == TaskStatus.FAILED:
+                # 重试预算用尽 → 任务已成**死信**，不会再自动重试。此时报
+                # 202「已入队自动重试」是**说谎**（队列里已经是 failed）→
+                # 走 502，并提示重新点击推送（入队时会重置死信任务，
+                # 见 :func:`enqueue_index_entry`）。
+                detail = (
+                    f"站点下载失败且重试已用尽（{MAX_ATTEMPTS} 次），"
+                    "再次点击「推送」可重试"
+                )
+                logger.warning(
+                    "手动推送 index_id=%d 下载失败且重试用尽，任务 %d 状态=%s：%s",
+                    index_id, task_id, final_state, exc,
+                )
+                raise PushError(
+                    f"{detail}：{str(exc)[:180]}", status=502, code="push_failed"
+                ) from exc
+            detail = "站点暂时异常，已入队自动重试（最多 5 次），无需重复点击"
             logger.warning(
                 "手动推送 index_id=%d 下载失败，任务 %d 状态=%s：%s",
                 index_id, task_id, final_state, exc,

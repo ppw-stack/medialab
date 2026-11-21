@@ -27,6 +27,7 @@ from app.adapters.sites.base import (
     SiteAdapter,
     SiteFetchError,
     SiteHealth,
+    SitePermanentError,
     SiteProfile,
     SubtitleItem,
     TorrentBrief,
@@ -66,6 +67,39 @@ _LOGGED_IN_RE = re.compile(
     r"(userdetails\.php|logout\.php|takelogout\.php|usercp\.php)",
     re.IGNORECASE,
 )
+
+#: 疑似「登录页」判定时读取的最大响应体（字节）。
+#:
+#: HTML 提示页 / 登录页远小于此；超大响应（误下到二进制）不必再解 HTML。
+_LOGIN_CHECK_MAX_BYTES = 256 * 1024
+
+#: 登录页的**表单特征**（只看正文前段，避开页脚里的「登录」链接）。
+#:
+#: 为什么不用「请登录」这类中文文案：正常错误页的页脚也可能有「登录」
+#: 链接，误判成凭据失效会把**瞬时**故障错报成永久失败（用户白等重试）。
+#: ``login.php`` 作为特征是安全的——已登录用户的导航栏是 ``logout.php``。
+_LOGIN_FORM_MARKERS = (
+    "login.php",
+    'type="password"',
+    "type='password'",
+    'name="passwd"',
+    "name='passwd'",
+)
+
+
+def _looks_like_login_response(resp: httpx.Response) -> bool:
+    """下载响应看起来是登录页吗（凭据失效的判据）。
+
+    比 :func:`_looks_like_login` 宽松一档：多认「带密码输入框的表单」
+    ——不少站点的「请登录后下载」提示页不带 login.php 链接。
+    """
+    if len(resp.content) > _LOGIN_CHECK_MAX_BYTES:
+        return False
+    text = resp.text
+    if _looks_like_login(text, resp.url):
+        return True
+    head = text[:2000].lower()
+    return any(marker in head for marker in _LOGIN_FORM_MARKERS)
 
 
 def _describe_torrent_response(resp: httpx.Response) -> str:
@@ -215,21 +249,46 @@ class GenericAdapter(SiteAdapter):
     async def download_torrent(self, item_id: str) -> bytes:
         """下载 .torrent 字节。
 
-        **非 .torrent 的 2xx 响应会重试一次**，原因见
-        :data:`_NON_TORRENT_RETRY_DELAY`——这类响应多为站点瞬时异常
-        （HTML 提示页 / 会话检查页），不是「种子真的拿不到」。
-        两次都不是 torrent 才抛 :class:`SiteFetchError`，且异常里带
-        status / content-type / 长度 / 正文前缀，便于事后定位
-        （此前只报一句「响应不是 bencoded」，无法区分登录页、限频页与
-        Cloudflare 挑战，2026-11-21 prod 排查时卡在这里）。
+        **失败分两类**（推送链路据此决定「入队重试」还是「直接报错」）：
+
+        - **瞬时**（:class:`SiteFetchError`）：网络抖动、站点返回非 .torrent
+          的临时页（HTML 提示页 / 会话检查页 / CF 挑战）→ 重试有意义。
+          非 .torrent 的 2xx 响应会**就地重试一次**（见
+          :data:`_NON_TORRENT_RETRY_DELAY`），两次都失败才抛异常；异常里
+          带 status / content-type / 长度 / 前 120 字节前缀，便于事后定位
+          （此前只报一句「响应不是 bencoded」，无法区分登录页、限频页与
+          Cloudflare 挑战，2026-11-21 prod 排查时卡在这里）。
+        - **永久**（:class:`SitePermanentError`）：登录态失效（详情页 /
+          下载响应是登录页）、详情页里根本没有下载地址 → **重试也不会
+          成功**，交上层报错给用户（而不是骗用户「已入队自动重试」）。
+
+        :raises SitePermanentError: 永久失败（凭据失效 / 无下载地址）
+        :raises SiteFetchError: 瞬时失败（网络抖动 / 响应不是 .torrent）
+        :raises BreakerTripped: 站点返回 403 / 429（触发熔断）
         """
-        url = await self.get_torrent_url(item_id)
+        url, reason = await self._resolve_download_url(item_id)
         if not url:
-            raise SiteFetchError(f"{self.profile.name} 无法解析下载地址（id={item_id}）")
+            if reason == "auth":
+                raise SitePermanentError(
+                    f"{self.profile.name} 登录态失效（详情页跳登录），"
+                    f"无法下载（id={item_id}）"
+                )
+            if reason == "no_link":
+                raise SitePermanentError(
+                    f"{self.profile.name} 详情页里没有下载地址（id={item_id}）"
+                )
+            raise SiteFetchError(
+                f"{self.profile.name} 无法解析下载地址（id={item_id}）"
+            )
 
         resp = await self._fetch_torrent_response(url)
         if resp.content.startswith(_TORRENT_MAGIC):
             return resp.content
+        if _looks_like_login_response(resp):
+            # 登录页 → 凭据失效，重试没有意义（不必浪费一次重试）
+            raise SitePermanentError(
+                f"{self.profile.name} 下载返回登录页，凭据已失效（id={item_id}）"
+            )
 
         first_desc = _describe_torrent_response(resp)
         logger.warning(
@@ -246,6 +305,10 @@ class GenericAdapter(SiteAdapter):
                 self.profile.name, item_id, first_desc,
             )
             return retry.content
+        if _looks_like_login_response(retry):
+            raise SitePermanentError(
+                f"{self.profile.name} 下载返回登录页，凭据已失效（id={item_id}）"
+            )
 
         raise SiteFetchError(
             f"{self.profile.name} 响应不是 bencoded torrent id={item_id}"
@@ -253,7 +316,12 @@ class GenericAdapter(SiteAdapter):
         )
 
     async def _fetch_torrent_response(self, url: str) -> httpx.Response:
-        """GET 下载地址并按统一契约检查状态码。"""
+        """GET 下载地址并按统一契约检查状态码。
+
+        :raises SiteFetchError: 网络请求抛出 ``httpx.HTTPError``，
+            或响应状态码 >= 400（403 / 429 由熔断分支先拦）。
+        :raises BreakerTripped: 站点返回 403 / 429，需要熔断。
+        """
         try:
             resp = await self._client.get(url, timeout=self._timeout)
         except httpx.HTTPError as exc:
@@ -263,20 +331,42 @@ class GenericAdapter(SiteAdapter):
 
     # ------------------------------------------------------------------ 3.5 下载地址
     async def get_torrent_url(self, item_id: str) -> str | None:
+        """实时返回可下载 URL（契约见基类）。
+
+        失败一律返回 ``None``（不抛）——**失败原因分类**保留在
+        :meth:`_resolve_download_url` 里，供推送链路区分永久 / 瞬时失败。
+        """
+        url, _ = await self._resolve_download_url(item_id)
+        return url
+
+    async def _resolve_download_url(self, item_id: str) -> tuple[str | None, str]:
+        """解析下载地址，并给出**失败原因分类**。
+
+        :return: ``(url, "")`` 成功；``(None, reason)`` 失败，``reason``：
+
+            - ``auth``：详情页跳登录页（凭据失效）→ **永久失败**
+            - ``unreachable``：详情页不可达（网络 / HTTP 错误）→ 瞬时失败
+            - ``no_link``：详情页正常但没有下载地址 → **永久失败**
+        """
         if not item_id:
-            return None
+            return None, "no_link"
         # API 站（m-team / hdarea / piggo）由专站 spider 生成下载配方
         api_url = await self._parser_download_url(item_id)
         if api_url:
-            return api_url
+            return api_url, ""
         detail_url = self._detail_url(item_id)
         try:
             resp = await self._client.get(detail_url, timeout=self._timeout)
         except httpx.HTTPError:
-            return None
-        if resp.status_code >= 400 or _looks_like_login(resp.text, resp.url):
-            return None
-        return _extract_download_url(resp.text, self._base_url_value, self._rule or {})
+            return None, "unreachable"
+        if resp.status_code >= 400:
+            return None, "unreachable"
+        if _looks_like_login(resp.text, resp.url):
+            return None, "auth"
+        url = _extract_download_url(resp.text, self._base_url_value, self._rule or {})
+        if not url:
+            return None, "no_link"
+        return url, ""
 
     async def _parser_download_url(self, item_id: str) -> str | None:
         """专站 spider 自带 ``get_download_url`` 时优先使用（API 站必需）。"""

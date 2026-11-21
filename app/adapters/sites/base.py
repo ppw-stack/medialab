@@ -144,6 +144,28 @@ class SiteFetchError(RuntimeError):
     之前各 adapter 的 ``search_torrents`` 把 ``httpx.HTTPError`` 吞掉返回
     ``[]``，导致 DNS 挂掉 / 站点被墙时作业照常报"全部成功"，
     故障完全不可见（prod 的 hddolby 就是这样被掩盖的）。
+
+    ⚠️ 本类**混合**了瞬时与永久故障（见 :class:`SitePermanentError`）。
+    拉取作业只关心「失败与否」，不需要区分；**推送链路**需要区分
+    （可重试 → 入队重试；不可重试 → 直接报错给用户）。
+    """
+
+
+class SitePermanentError(SiteFetchError):
+    """站点侧的**永久失败**（重试也不会成功）。
+
+    与 :class:`SiteFetchError` 的区别：后者混合了两类故障——
+
+    - **瞬时**：网络抖动、站点返回临时错误页、限频 → 重试有意义
+    - **永久**：登录态失效（cookie 过期 → 返回登录页）、页面里根本没有
+      下载地址 → 重试 5 次也不会成功
+
+    推送链路据此决定「入队自动重试」（HTTP 202）还是「直接报错给用户」
+    （HTTP 502）——否则会把「凭据过期」这种真故障伪装成「已入队重试，
+    无需重复点击」，用户干等 15 分钟才发现推不上去。
+
+    继承 :class:`SiteFetchError` 是为了兼容既有 ``except SiteFetchError``
+    的捕获点（拉取作业等）——它们不需要区分瞬时 / 永久。
     """
 
 

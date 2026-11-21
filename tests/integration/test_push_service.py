@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 from app.adapters.downloaders.base import AddTorrentPayload, DownloaderError
-from app.adapters.sites.base import SiteAdapter, SiteHealth, SiteProfile
+from app.adapters.sites.base import SiteAdapter, SiteHealth, SitePermanentError, SiteProfile
 from app.db.models import DownloaderInstance, Site, TorrentIndex
 from app.db.session import session_scope
 from app.domain.enums import PushStatus
@@ -43,12 +43,16 @@ class _FakeSiteAdapter(SiteAdapter):
         profile: SiteProfile,
         *,
         fail: bool = False,
+        permanent: bool = False,
         body: bytes | None = None,
         **_: object,
     ) -> None:
         super().__init__(profile)
         self.download_calls = 0
         self.fail = fail
+        #: True 时抛 ``SitePermanentError``（凭据失效 / 没有下载地址——
+        #: 重试也不会成功的那种）
+        self.permanent = permanent
         #: 非 None 时返回这段字节（用于模拟「站点返回了非 torrent 内容」）
         self.body = body
 
@@ -61,6 +65,8 @@ class _FakeSiteAdapter(SiteAdapter):
     async def download_torrent(self, item_id: str) -> bytes:
         self.download_calls += 1
         if self.fail:
+            if self.permanent:
+                raise SitePermanentError("站点登录态失效，无法下载")
             raise RuntimeError("站点下载失败")
         if self.body is not None:
             return self.body
@@ -104,6 +110,7 @@ async def _make_push_env(
     push_status: str | None = None,
     downloader_fail: str | None = None,
     site_fail: bool = False,
+    site_permanent_fail: bool = False,
     site_body: bytes | None = None,
 ) -> tuple[AdapterFactory, _FakeSiteAdapter, _FakeDownloader, int]:
     """建站点 + 下载器 + 索引行，注入假适配器。"""
@@ -135,7 +142,10 @@ async def _make_push_env(
         ).scalar_one()
 
     site_adapter = _FakeSiteAdapter(
-        SiteProfile(name="s1", domain="s1.test"), fail=site_fail, body=site_body
+        SiteProfile(name="s1", domain="s1.test"),
+        fail=site_fail,
+        permanent=site_permanent_fail,
+        body=site_body,
     )
     dl_adapter = _FakeDownloader(fail_with=downloader_fail)
     factory = AdapterFactory()
@@ -295,6 +305,86 @@ async def test_push_parse_failure_502(db: None) -> None:
         await push_index_entry(index_id, None, factory)
     assert exc.value.status == 502
     assert "infohash" in str(exc.value)
+
+
+async def test_push_permanent_download_failure_502(db: None) -> None:
+    """站点的**永久失败**（凭据失效 / 没有下载地址）→ 502，不是 202。
+
+    重试 5 次也不会成功——报「已入队自动重试，无需重复点击」是骗用户，
+    真故障（凭据过期）会被掩盖。
+    """
+    factory, _, _, index_id = await _make_push_env(
+        site_fail=True, site_permanent_fail=True
+    )
+    with pytest.raises(PushError) as exc:
+        await push_index_entry(index_id, None, factory)
+
+    assert exc.value.status == 502
+    assert "登录态失效" in str(exc.value)
+
+
+async def test_push_download_failure_exhausted_502(db: None, monkeypatch) -> None:
+    """重试预算用尽 → **502**（不是 202「已入队自动重试」）。
+
+    队列里已经是死信（``failed``），不会再自动重试——此时报 202 是说谎。
+    """
+    from app.services import task_queue as tq_mod
+
+    factory, _, _, index_id = await _make_push_env(site_fail=True)
+
+    # 模拟「重试预算已用尽」：队列直接返回终态 failed（不再退回 pending）
+    async def _mark_failed(self: object, task_id: int, error: str) -> str:
+        return tq_mod.TaskStatus.FAILED
+
+    monkeypatch.setattr(tq_mod.TaskQueueService, "mark_failed", _mark_failed)
+
+    with pytest.raises(PushError) as exc:
+        await push_index_entry(index_id, None, factory)
+
+    assert exc.value.status == 502
+    assert "重试已用尽" in str(exc.value)
+
+
+async def test_push_resets_dead_letter_task(db: None) -> None:
+    """死信任务上的手动重推 → **重置后重新执行**（不是「已在队列中」）。
+
+    ``enqueue`` 对已存在的幂等键一律返回 created=False——没有重置入口的
+    时候，用户再点一次只会拿到 200「已在推送队列中（状态：failed）」，
+    永远推不上去。
+    """
+    from app.db.models import TaskQueue
+    from app.services.task_queue import TaskKind, make_idem_key
+
+    factory, site, dl, index_id = await _make_push_env()
+    async with session_scope() as session:
+        session.add(
+            TaskQueue(
+                idem_key=make_idem_key(
+                    TaskKind.ADD_TORRENT,
+                    site_id=1,
+                    info_hash="i1",
+                    extra="dl=1",
+                ),
+                kind=TaskKind.ADD_TORRENT,
+                payload={"index_id": index_id, "downloader_id": 1},
+                status="failed",
+                attempts=5,
+                last_error="上一轮失败",
+            )
+        )
+
+    result = await push_index_entry(index_id, None, factory)
+
+    assert result.ok is True
+    assert result.deferred is False
+    assert len(dl.added) == 1, "死信应被重置并真正执行一次"
+    assert site.download_calls == 1
+
+    async with session_scope() as session:
+        rows = (await session.execute(select(TaskQueue))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].status == "done"
+    assert rows[0].attempts == 1
 
 
 # ------------------------------------------------------------------ TOCTOU

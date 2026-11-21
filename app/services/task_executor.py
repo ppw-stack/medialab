@@ -11,7 +11,8 @@
 错误分类（``PushItemError.category``）：
 - ``download`` / ``parse`` / ``add`` —— 瞬态失败，mark_failed 退避重试
 - ``fatal`` —— 站点**已停用**/不存在、下载器已禁用/不存在、索引行已不存在
-  等契约错误，mark_failed_forever 不重试（重试只会反复失败）
+  等契约错误，以及站点的**永久失败**（凭据失效 / 详情页里没有下载地址），
+  mark_failed_forever 不重试（重试只会反复失败）
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from sqlalchemy import CursorResult, or_, select, update
 
 from app.adapters.downloaders.base import AddTorrentPayload, DownloaderError
 from app.adapters.sites._bencode import infohash_from_torrent
+from app.adapters.sites.base import SitePermanentError
 from app.core.logging import get_logger
 from app.core.timeutils import bj_now
 from app.db.models import DownloaderInstance, Site, TorrentIndex
@@ -126,6 +128,10 @@ async def execute_add_torrent(
     site_adapter = factory.site(site_row)
     try:
         torrent_bytes = await site_adapter.download_torrent(item_id)
+    except SitePermanentError as exc:
+        # **永久失败**（凭据失效 / 详情页里没有下载地址）→ 重试也不会成功，
+        # 按 fatal 处理（死信 + 直接报错给用户），别再骗用户「已入队重试」。
+        raise PushItemError("fatal", f"download_torrent: {exc}") from exc
     except Exception as exc:
         raise PushItemError("download", f"download_torrent: {exc}") from exc
     if not torrent_bytes or not torrent_bytes.startswith(b"d"):
