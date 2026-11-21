@@ -180,13 +180,12 @@ get_user_snapshot   × 7    (7 站 15 行几乎一模一样)
 
 **已修**：路由层下沉为「参数校验 → 调 service → 结果转换」。
 
-新增 7 个 service 模块（每个对应一个路由域）：
+新增 6 个 service 模块（每个对应一个路由域）：
 
 | 模块 | 职责 |
 |---|---|
 | `app/services/site_service.py` | 站点 CRUD + 自检 + 拉取测试 + 用户数据 |
 | `app/services/downloader_service.py` | 下载器 CRUD + 测连 + 原生任务操作 |
-| `app/services/dashboard_service.py` | 仪表盘统计（站点/下载器/窗口/索引/在途） |
 | `app/services/index_service.py` | 拉取索引查询 + 统计 + 推送入口 |
 | `app/services/job_run_service.py` | 作业执行历史查询 |
 | `app/services/user_data_query.py` | 站点用户数据列表 / 趋势 |

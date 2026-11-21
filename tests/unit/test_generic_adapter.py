@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 import respx
-from app.adapters.sites.base import SiteProfile
+from app.adapters.sites.base import SiteFetchError, SitePermanentError, SiteProfile
 from app.adapters.sites.generic import GenericAdapter
 
 _LIST_HTML = """
@@ -91,6 +92,171 @@ async def test_generic_torrent_url_from_detail_page() -> None:
     await adapter.close()
 
     assert url == "https://pt.0ff.cc/download.php?id=12345&passkey=abc"
+
+
+async def test_generic_download_retries_non_torrent_response(monkeypatch) -> None:
+    """下载拿到非 .torrent 内容（站点瞬时异常）→ 短退避后重试一次即成功。"""
+    from app.adapters.sites import generic as generic_module
+
+    monkeypatch.setattr(generic_module, "_NON_TORRENT_RETRY_DELAY", 0)
+    adapter = GenericAdapter(
+        SiteProfile(name="自由农场", domain="pt.0ff.cc"),
+        cookies="uid=1",
+    )
+    torrent = b"d4:infod4:name4:testee"
+    with respx.mock(assert_all_called=False) as router:
+        router.get(url__startswith="https://pt.0ff.cc/details.php?id=12345").mock(
+            return_value=httpx.Response(200, text=_DETAIL_HTML)
+        )
+        router.get(url__startswith="https://pt.0ff.cc/download.php").mock(
+            side_effect=[
+                httpx.Response(
+                    200,
+                    text="<html>系统繁忙，请稍后再试</html>",
+                    headers={"content-type": "text/html; charset=utf-8"},
+                ),
+                httpx.Response(
+                    200,
+                    content=torrent,
+                    headers={"content-type": "application/x-bittorrent"},
+                ),
+            ]
+        )
+        data = await adapter.download_torrent("12345")
+    await adapter.close()
+
+    assert data == torrent
+
+
+async def test_generic_download_reports_non_torrent_diagnostics(monkeypatch) -> None:
+    """两次都不是 torrent → 异常里带 status / content-type / 正文前缀。
+
+    此前只报「响应不是 bencoded」，无法区分登录页、限频页与 CF 挑战；
+    2026-11-21 prod 排查时因此无法定位（只能事后复现确认站点已恢复）。
+    """
+    from app.adapters.sites import generic as generic_module
+
+    monkeypatch.setattr(generic_module, "_NON_TORRENT_RETRY_DELAY", 0)
+    adapter = GenericAdapter(
+        SiteProfile(name="HDWinG", domain="pt.0ff.cc"),
+        cookies="uid=1",
+    )
+    with respx.mock(assert_all_called=False) as router:
+        router.get(url__startswith="https://pt.0ff.cc/details.php?id=840968").mock(
+            return_value=httpx.Response(200, text=_DETAIL_HTML)
+        )
+        router.get(url__startswith="https://pt.0ff.cc/download.php").mock(
+            return_value=httpx.Response(
+                200,
+                text="<html>请登录后下载</html>",
+                headers={"content-type": "text/html; charset=utf-8"},
+            )
+        )
+        with pytest.raises(SiteFetchError) as exc:
+            await adapter.download_torrent("840968")
+    await adapter.close()
+
+    message = str(exc.value)
+    assert "不是 bencoded torrent" in message
+    assert "HTTP 200" in message
+    assert "text/html" in message
+    assert "请登录后下载" in message
+
+
+async def test_generic_download_login_page_is_permanent(monkeypatch) -> None:
+    """下载返回**登录页** → 永久失败（凭据失效），不是可重试。
+
+    凭据过期重试 5 次也不会成功——若仍按「可重试」处理，就会骗用户
+    「已入队自动重试，无需重复点击」，真故障被掩盖。
+    """
+    from app.adapters.sites import generic as generic_module
+
+    monkeypatch.setattr(generic_module, "_NON_TORRENT_RETRY_DELAY", 0)
+    adapter = GenericAdapter(
+        SiteProfile(name="HDWinG", domain="pt.0ff.cc"),
+        cookies="uid=1",
+    )
+    login_html = (
+        '<html><head><title>登录</title></head><body>'
+        '<form action="login.php"><input type="password" name="passwd">'
+        "</form></body></html>"
+    )
+    with respx.mock(assert_all_called=False) as router:
+        router.get(url__startswith="https://pt.0ff.cc/details.php?id=840968").mock(
+            return_value=httpx.Response(200, text=_DETAIL_HTML)
+        )
+        router.get(url__startswith="https://pt.0ff.cc/download.php").mock(
+            return_value=httpx.Response(
+                200,
+                text=login_html,
+                headers={"content-type": "text/html; charset=utf-8"},
+            )
+        )
+        with pytest.raises(SitePermanentError) as exc:
+            await adapter.download_torrent("840968")
+    await adapter.close()
+
+    assert "登录页" in str(exc.value)
+
+
+async def test_generic_download_detail_without_link_is_permanent(monkeypatch) -> None:
+    """详情页正常但**没有下载地址** → 永久失败（重试也不会有）。"""
+    adapter = GenericAdapter(
+        SiteProfile(name="HDWinG", domain="pt.0ff.cc"),
+        cookies="uid=1",
+    )
+    with respx.mock(assert_all_called=False) as router:
+        router.get(url__startswith="https://pt.0ff.cc/details.php?id=840968").mock(
+            return_value=httpx.Response(
+                200, text="<html><body>这个种子没有下载链接</body></html>"
+            )
+        )
+        with pytest.raises(SitePermanentError) as exc:
+            await adapter.download_torrent("840968")
+    await adapter.close()
+
+    assert "没有下载地址" in str(exc.value)
+
+
+async def test_generic_download_detail_login_redirect_is_permanent(monkeypatch) -> None:
+    """详情页跳登录页（cookie 失效）→ 永久失败。"""
+    adapter = GenericAdapter(
+        SiteProfile(name="HDWinG", domain="pt.0ff.cc"),
+        cookies="uid=1",
+    )
+    with respx.mock(assert_all_called=False) as router:
+        router.get(url__startswith="https://pt.0ff.cc/details.php?id=840968").mock(
+            return_value=httpx.Response(
+                200,
+                text='<html><head><title>登录</title></head><body>请先登录</body></html>',
+            )
+        )
+        with pytest.raises(SitePermanentError) as exc:
+            await adapter.download_torrent("840968")
+    await adapter.close()
+
+    assert "登录态失效" in str(exc.value)
+
+
+async def test_generic_download_detail_unreachable_is_transient(monkeypatch) -> None:
+    """详情页不可达（HTTP 500）→ **瞬时**失败（可重试）。
+
+    站点抽风是常见的，重试有意义——不能误判成永久失败。
+    """
+    adapter = GenericAdapter(
+        SiteProfile(name="HDWinG", domain="pt.0ff.cc"),
+        cookies="uid=1",
+    )
+    with respx.mock(assert_all_called=False) as router:
+        router.get(url__startswith="https://pt.0ff.cc/details.php?id=840968").mock(
+            return_value=httpx.Response(500, text="boom")
+        )
+        with pytest.raises(SiteFetchError) as exc:
+            await adapter.download_torrent("840968")
+    await adapter.close()
+
+    # 瞬时失败用 SiteFetchError（不是 SitePermanentError）
+    assert not isinstance(exc.value, SitePermanentError)
 
 
 async def test_mteam_connectivity_uses_api_tester() -> None:

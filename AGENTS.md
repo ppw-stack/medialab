@@ -4,6 +4,7 @@
 1. `README.md` — 现状与命令。
 2. `docs/merge-strmmanger.md` — **合并 strmmanger 的方案与实施记录**（含冲突清单与返工范围）。
 3. `app/adapters/sites/user_data.py` + `app/adapters/sites/indexer/parser/nexus_php.py` — FR-1.6 站点用户数据契约（用户数据由规则包的 schema 解析器产出）。
+4. `CHANGELOG.md` — **对外契约变更记录**（HTTP API 状态码 / 响应体语义）。改公开端点语义时必须在此登记（含 BREAKING CHANGE 与迁移步骤）。
 5. `docs/upload-bandwidth.md` — **数据同步上传的带宽瓶颈实测结论**（并发为何无效）。
 
 ## 项目定位
@@ -158,6 +159,16 @@
   - 站点没有 `site_user_data` 行（没抓过 / 抓失败）→ 落「无信号」档，行为与加此特性前**完全一致**（优雅降级）
   - **只推启用站点**（2026-11-12 修复 prod 故障「站点已停用却还在推对应站点的种子」）：站点停用（`sites.enabled=0`）只停止**拉取**、**不删** `torrent_index` 快照 → 旧快照仍落在 24h 新鲜度窗口内被选中。故两道闸：① 候选查询 **INNER JOIN `sites` + `enabled=1`**（`push_free._select_candidates`）② 执行层兜底 `execute_add_torrent` 查 `site.enabled`，停用 → `PushItemError("fatal")`（拦停用前已入队、被 `drain_task_queue` 重试的遗留任务；fatal = 不重试，站点停用时重试也不会成功）。手动推送走同一执行函数，故**停用站也不能手动推**——想推先重新启用站点
   - 契约由 `tests/integration/test_push_free.py`（候选过滤）+ `tests/integration/test_task_drain.py`（执行层死信）固化
+- **可重试的下载失败 = 202「已入队重试」，不是 502**（2026-11-21 加入，`push_service` / `generic` / `task_executor`）：
+  - **现象（prod）**：手动推送 HDWinG 种子首轮拿到非 `.torrent` 响应（2xx HTML）→ 报 502「响应不是 bencoded」；5 分钟后 `drain_task_queue` 用同一任务重试成功，种子确实进了下载器。用户看到的「失败」与最终结果不一致。
+  - **适配器层**：`generic.download_torrent` 首次非 `.torrent`（不以 `b"d"` 开头）→ 短退避（`_NON_TORRENT_RETRY_DELAY`，3s）后**重取一次**；两次都失败才抛 `SiteFetchError`，异常带 `HTTP status / content-type / 长度 / 前 120 字节前缀`（脱敏、折叠换行）。此前只有一句「响应不是 bencoded」，无法区分登录页 / 限频页 / CF 挑战。
+  - **永久失败必须与瞬时失败分开**（2026-11-21 Kody 审查）：新增 `SitePermanentError`（继承 `SiteFetchError`，`app/adapters/sites/base.py`）——**凭据失效 / 详情页里没有下载地址**属于「重试 5 次也不会成功」，若混进 `download` 类就等于骗用户「已入队自动重试，无需重复点击」，真故障（凭据过期）被掩盖。判据（`generic.py`）：详情页跳登录 / 下载响应是登录页（`_looks_like_login_response`：URL 含 `login.php`、标题是登录页、正文前段有密码输入框或 `login.php`）→ 永久；详情页正常但**没有下载地址** → 永久；网络抖动 / 临时错误页 → 瞬时。**「请登录后下载」这类中文文案不算判据**（正常错误页的页脚也有「登录」链接，误判会把瞬时故障错报成永久）。
+  - **服务层**：`PushItemError(category="download")` 不再抛 502，返回 `PushOutcome(deferred=True)`；任务留在队列按指数退避重试（最多 `MAX_ATTEMPTS=5` 次）。永久失败由执行层判为 **`fatal`**（死信 + 502，不退避重试）。**重试预算用尽**（`mark_failed` 返回 `failed`）时**不再报 202**（队列里已是死信，报「已入队自动重试」是说谎）→ 走 **502**，文案提示「再次点击『推送』可重试」。
+  - **死信任务可重置**（手动重推入口）：`task_queue.enqueue` 对已存在的 `idem_key` 一律返回 `created=False` → 死信会让用户「再点一次也推不上去」（只拿到 200「已在推送队列中（状态：failed）」）。故 `TaskQueueService.requeue_failed()` 把死信**重置**为 pending（`attempts` 归零 + 清错误），`enqueue_index_entry` 在幂等命中且状态为 `failed` 时调用它 → 状态回到 `enqueued`。**只重置终态 failed**（pending / running / done 不动）。自动推送（`push_free`）**不走**这条路径（死信不自动复活，避免无限重试烧额度）。**重置时必须同步清掉索引行的 `push_status`**（`_clear_push_failure`）——否则重推会命中 `execute_add_torrent` 的幂等短路而「假成功」（种子压根没进下载器，死信却被成功掩埋）；清空后索引行状态也与任务一致（重试在途不该还显示「失败」）。
+  - **API 层**：`POST /torrent-index/{id}/push` 在 `deferred` 时返回 **202**（`deferred=true`），前端提示「已入队自动重试」。**解析失败（parse）/ 致命错误（fatal）/ 永久失败 / 重试已用尽仍走 502**——这几类重试也不会成功。
+  - **BREAKING CHANGE（对外 HTTP 契约）**：`POST /torrent-index/{id}/push` 的**可重试下载失败**由 **502** 改为 **202 + `deferred=true`**。破坏点：按「5xx = 推送失败」分支处理的调用方，会把「已入队、几分钟内会推成功」误判成失败（正是 2026-11-21 prod 事故的根因）。迁移步骤：① 判定「是否失败」改看响应体 `deferred` 字段（`true` = **已受理，不是失败**）；② 要最终结果就轮询任务队列 / 看拉取索引行的 `push_status`（`pushed` = 已推成功）；③ **502 仍保留**给解析失败 / 致命错误 / 永久失败 / 重试已用尽——按 5xx 分支处理「真失败」的调用方无需改动。受影响消费者：面板「拉取索引」页推送按钮（`web/src/pages/TorrentIndex.vue`，已适配 `deferred`）、批量推送端点（只入队、不受影响）、外部调用该端点的脚本（按 5xx 判失败的需改）。
+  - **Versioning & Deprecation**：按语义化版本，本次属 **major（v2.0.0）**——「可重试下载失败」的**状态码语义**变了（502 → 202），外部脚本的「5xx = 失败」判定会**静默失效**（脚本不报错，只是把「已入队」当成失败），不能按 minor 让运维以为可无痛升级。弃用时间线：旧 502 语义自 v2.0.0 起**不再返回**，无兼容期（面板自托管、前后端同版本发布，面板前端已在本 PR 内适配）；**外部脚本须在升级镜像前改完**。镜像 tag：`v2.0.0` → `2.0.0` / `2.0`（`DEPLOY.md`）。迁移说明与变更记录见 [`CHANGELOG.md`](CHANGELOG.md) 的「Unreleased」小节。
+  - 契约由 `tests/unit/test_generic_adapter.py` + `tests/integration/test_push_service.py` + `tests/integration/test_torrent_index_push.py` 固化
 - **站点拉取失败必须抛错**（2026-10-21 prod 事故后确立）：
   - `search_torrents` 返回 `[]` = 站点确实没种子；抛 `SiteFetchError` = 故障（DNS / 连接 / HTTP）
   - 两者混用会让作业统计报"全部成功"而实际漏掉故障站（prod 的 hddolby DNS 失败就是这样被掩盖的）
@@ -268,7 +279,7 @@
     - **为什么合并**：`disk_rotation` 读 `cross_seed_snapshot` 判磁盘使用率，而快照由巡查产出——分开跑可能读到**旧快照**。合并后依赖顺序天然正确，且省一次辅种站全量抓取（20s+）
     - 三段**各自容错**：某段失败不影响其余，失败进 `steps`（前端步骤卡片逐段展示）
   - `cross_seed_snapshot` 表是**当前快照**（`downloader_id` UNIQUE），不做历史；FK **不带** `ON DELETE CASCADE`（当守卫：漏删会 IntegrityError，宁可失败也不留孤儿行）——删下载器 / 取消辅种标记时必须显式删快照
-  - **前端读快照，不打下载器接口**：辅种页与仪表盘「在途任务」都读快照；实时端点 `GET /cross-seed-monitor/downloaders/{id}/scan` 保留作调试用
+  - **前端读快照，不打下载器接口**：辅种页的「在途任务」读快照；实时端点 `GET /cross-seed-monitor/downloaders/{id}/scan` 保留作调试用
   - **辅种页是两层 Tab**（2026-10-26）：外层 = **下载器**（数据维度），内层 = **内容分区**（概览 / 分组 / 异常 / 孤儿，功能维度）
     - 为什么是两层而不是二级菜单：用户的真实心智是「我要看 <tr-下载器> 这个下载器怎么样」——那是数据维度，不该被功能维度打散。若按功能拆成独立页面，每个页面都得重放一遍下载器 Tab
     - 为什么内层要拆：原本 4 块内容纵向堆叠，实测 **3727 px / 4.1 屏**，其中 2 屏是 2237 行的分组表。拆分后概览 **921 px（1 屏）**，分组 3069 px / 异常 1950 px / 孤儿 720 px ——各块互不干扰（异常与孤儿各有独立空间，不会互相误点删除按钮）

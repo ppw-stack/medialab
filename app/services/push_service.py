@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.core.logging import get_logger
 from app.db.models import DownloaderInstance, Site, TorrentIndex
@@ -32,9 +32,11 @@ from app.domain.enums import PushStatus
 from app.services.downloader_query import get_default_downloader, get_downloader_by_id
 from app.services.task_executor import PushItemError, execute_add_torrent
 from app.services.task_queue import (
+    MAX_ATTEMPTS,
     TaskKind,
     TaskQueueBusyError,
     TaskQueueService,
+    TaskStatus,
     claim_with_retry,
     enqueue_with_retry,
     make_idem_key,
@@ -70,6 +72,18 @@ class PushOutcome:
     detail: str = ""
     #: True = 幂等命中（已推过 / 下载器报 duplicate），未实际重复添加
     idempotent: bool = False
+    #: True = 请求已受理但**尚未完成**：任务留在队列里按退避自动重试
+    #: （1/2/4/8 分钟，最多 ``MAX_ATTEMPTS`` 次）。
+    #:
+    #: 典型场景 = 站点瞬时返回非 .torrent 内容（HTML 提示页 / 会话检查页）。
+    #: API 层据此返回 **202**，前端提示「已入队重试」而不是「推送失败」。
+    #: 2026-11-21 prod：手动推送 12:05 报 502，队列 12:10 补推成功——
+    #: 用户看到的「失败」与最终结果不一致，故引入本字段。
+    #:
+    #: ⚠️ **只用于「重试有意义」的失败**：站点的永久失败（凭据失效 / 详情页
+    #: 里没有下载地址）与「重试预算已用尽」都走 **502**——那种情况下报
+    #: 202「已入队自动重试」是**说谎**（队列里已经是死信，不会再自动跑）。
+    deferred: bool = False
 
 
 async def resolve_downloader(
@@ -79,17 +93,28 @@ async def resolve_downloader(
 
     - 指定了 downloader_id → 用它（不存在 → 404，已禁用 → 400）
     - 未指定 → 用 ``is_default=True`` 且 enabled 的（没有 → 400）
+
+    :raises PushError: 下载器不存在（``status=404`` /
+        ``code=downloader_not_found``）/ 下载器已禁用（``status=400`` /
+        ``code=downloader_disabled``）/ 未配置默认下载器（``status=400`` /
+        ``code=no_default_downloader``）
     """
     if downloader_id is not None:
         dl = await get_downloader_by_id(downloader_id)
         if dl is None:
-            raise PushError("下载器不存在", status=404)
+            raise PushError(
+                "下载器不存在", status=404, code="downloader_not_found"
+            )
         if not dl.enabled:
-            raise PushError("下载器已禁用", status=400)
+            raise PushError(
+                "下载器已禁用", status=400, code="downloader_disabled"
+            )
         return dl
     dl = await get_default_downloader()
     if dl is None:
-        raise PushError("未配置默认下载器", status=400)
+        raise PushError(
+            "未配置默认下载器", status=400, code="no_default_downloader"
+        )
     return dl
 
 
@@ -118,9 +143,12 @@ async def enqueue_index_entry(index_id: int, downloader_id: int | None) -> Enque
     - 批量推送：只入队，由 ``drain_task_queue`` 按队列节流消化（一次几百条
       不能挂住 HTTP 请求）
 
-    :raises PushError: 索引条目不存在（``code=not_found``）/ 缺 item_id
-        （``code=no_link``）/ 站点不存在（``code=site_missing``）/ 下载器
-        不可用（``code=downloader_unavailable``）
+    :raises PushError: 索引条目不存在（``status=404`` /
+        ``code=not_found``）/ 缺 item_id（``status=400`` /
+        ``code=no_link``）/ 站点不存在（``status=404`` /
+        ``code=site_missing``）/ 站点已停用（``status=400`` /
+        ``code=site_disabled``）/ 队列繁忙（``status=503`` /
+        ``code=db_busy``）/ 下载器不可用（见 :func:`resolve_downloader`）
     """
     # 1) 读索引 + 站点
     async with session_scope() as session:
@@ -189,6 +217,35 @@ async def enqueue_index_entry(index_id: int, downloader_id: int | None) -> Enque
         ) from exc
     if not enq.created:
         # 幂等命中：已有等价任务（已推过 / 在推 / 待重试）
+        #
+        # **死信（failed）例外**：手动重推必须能重新执行——``enqueue`` 对
+        # 已存在的幂等键一律返回 created=False，死信会让用户「再点一次也
+        # 推不上去」（2026-11-21 Kody 审查发现：重试耗尽后任务已是死信，
+        # 再点只拿到 200「已在推送队列中（状态：failed）」）。
+        # 故显式重置死信任务（attempts 归零 + 回到 pending）再执行。
+        if enq.existing_status == TaskStatus.FAILED:
+            async with session_scope() as session:
+                requeued = await TaskQueueService(session).requeue_failed(
+                    enq.task_id
+                )
+            if requeued:
+                # 重置死信时**同步清掉索引行上的旧推送状态**。
+                #
+                # ① 防止「假成功」：索引行若留着 ``push_status='pushed'``，
+                #    重推会在 execute_add_torrent 的幂等短路处直接返回
+                #    成功——种子压根没进下载器，死信却被「成功」掩埋。
+                # ② 状态一致：重试在途时索引行不该还显示「失败」。
+                #
+                # 只清「失败 / 未推过」的行——``pushed`` 的行在第 2 步
+                # （已推过 → 幂等成功）就返回了，根本走不到这里。
+                await _clear_push_failure(index_id)
+                return EnqueueOutcome(
+                    state="enqueued",
+                    dl_id=dl_id,
+                    detail="上一轮推送失败（重试已用尽），已重置并重新入队",
+                    task_id=enq.task_id,
+                    payload=payload,
+                )
         return EnqueueOutcome(
             state="already_queued",
             dl_id=dl_id,
@@ -202,6 +259,20 @@ async def enqueue_index_entry(index_id: int, downloader_id: int | None) -> Enque
         task_id=task_id,
         payload=payload,
     )
+
+async def _clear_push_failure(index_id: int) -> None:
+    """清掉索引行的「推送失败」标记（手动重推死信时调用）。
+
+    只清 ``push_status`` / ``pushed_at``：``info_hash`` 留着（它是种子自身
+    的属性，与推送成败无关）。
+    """
+    async with session_scope() as session:
+        await session.execute(
+            update(TorrentIndex)
+            .where(TorrentIndex.id == index_id)
+            .values(push_status=None, pushed_at=None)
+        )
+
 
 async def push_index_entry(
     index_id: int,
@@ -224,6 +295,18 @@ async def push_index_entry(
     因此崩溃恢复 / 幂等 / 退避 / TOCTOU 防御全部一致。
 
     前 3 步抽到 :func:`enqueue_index_entry`——批量推送复用同一份逻辑。
+
+    :returns: :class:`PushOutcome`。**失败也可能是返回值而不是异常**：
+        可重试的下载失败返回 ``ok=False, deferred=True``（API 据此回
+        202，任务留在队列里继续重试）。
+    :raises PushError: 索引条目不存在（``status=404`` /
+        ``code=not_found``）/ 缺 item_id（``status=400`` /
+        ``code=no_link``）/ 站点不存在（``status=404`` /
+        ``code=site_missing``）/ 站点已停用（``status=400`` /
+        ``code=site_disabled``）/ 队列繁忙（``status=503`` /
+        ``code=db_busy``）/ 下载器不可用（见 :func:`resolve_downloader`）/
+        推送失败（``status=502`` / ``code=push_failed``——含解析失败、
+        站点永久失败、重试预算耗尽；这几种重试也不会成功）
     """
     enq = await enqueue_index_entry(index_id, downloader_id)
     if enq.state in ("already_pushed", "already_queued"):
@@ -259,12 +342,51 @@ async def push_index_entry(
     try:
         result = await execute_add_torrent(payload, factory, category=category)
     except PushItemError as exc:
+        final_state: str
         async with session_scope() as session:
             tq = TaskQueueService(session)
             if exc.category == "fatal":
                 await tq.mark_failed_forever(task_id, str(exc))
+                final_state = TaskStatus.FAILED
             else:
-                await tq.mark_failed(task_id, str(exc))
+                final_state = await tq.mark_failed(task_id, str(exc))
+        if exc.category == "download":
+            # **下载失败 = 瞬时故障**（网络抖动 / 站点临时错误页）：任务已
+            # 在队列里，``drain_task_queue`` 会按指数退避继续重试。实测这条
+            # 链路会「5 分钟后补推成功」（2026-11-21 prod：12:05 首轮失败 →
+            # 12:10 成功）。若此刻向用户报「推送失败」+502，用户会以为种子
+            # 丢了并反复点击——因此改为 deferred（API 202 +「已入队重试」）。
+            #
+            # ⚠️ 站点的**永久失败**（凭据失效 / 详情页里没有下载地址）已被
+            # 执行层判为 ``fatal``，不进这里——那种情况重试 5 次也不会成功，
+            # 报「已入队自动重试」是骗人。
+            if final_state == TaskStatus.FAILED:
+                # 重试预算用尽 → 任务已成**死信**，不会再自动重试。此时报
+                # 202「已入队自动重试」是**说谎**（队列里已经是 failed）→
+                # 走 502，并提示重新点击推送（入队时会重置死信任务，
+                # 见 :func:`enqueue_index_entry`）。
+                detail = (
+                    f"站点下载失败且重试已用尽（{MAX_ATTEMPTS} 次），"
+                    "再次点击「推送」可重试"
+                )
+                logger.warning(
+                    "手动推送 index_id=%d 下载失败且重试用尽，任务 %d 状态=%s：%s",
+                    index_id, task_id, final_state, exc,
+                )
+                raise PushError(
+                    f"{detail}：{str(exc)[:180]}", status=502, code="push_failed"
+                ) from exc
+            detail = "站点暂时异常，已入队自动重试（最多 5 次），无需重复点击"
+            logger.warning(
+                "手动推送 index_id=%d 下载失败，任务 %d 状态=%s：%s",
+                index_id, task_id, final_state, exc,
+            )
+            return PushOutcome(
+                ok=False,
+                downloader_id=enq.dl_id,
+                detail=f"{detail}：{str(exc)[:180]}",
+                deferred=True,
+            )
         logger.warning("手动推送 index_id=%d 失败：%s", index_id, exc)
         raise PushError(str(exc), status=502, code="push_failed") from exc
 

@@ -11,7 +11,8 @@
 错误分类（``PushItemError.category``）：
 - ``download`` / ``parse`` / ``add`` —— 瞬态失败，mark_failed 退避重试
 - ``fatal`` —— 站点**已停用**/不存在、下载器已禁用/不存在、索引行已不存在
-  等契约错误，mark_failed_forever 不重试（重试只会反复失败）
+  等契约错误，以及站点的**永久失败**（凭据失效 / 详情页里没有下载地址），
+  mark_failed_forever 不重试（重试只会反复失败）
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from sqlalchemy import CursorResult, or_, select, update
 
 from app.adapters.downloaders.base import AddTorrentPayload, DownloaderError
 from app.adapters.sites._bencode import infohash_from_torrent
+from app.adapters.sites.base import SitePermanentError
 from app.core.logging import get_logger
 from app.core.timeutils import bj_now
 from app.db.models import DownloaderInstance, Site, TorrentIndex
@@ -64,6 +66,15 @@ async def execute_add_torrent(
         手动推送是 ``manual-push``（供用户在下载器里区分来源）。
     :return: ``{"info_hash": str, "name": str, "idempotent": bool}``；
         ``idempotent=True`` 表示幂等命中（已推过 / duplicate），未实际重复添加。
+    :raises PushItemError: 按 ``category`` 分类，调用方据此决定**退避重试**
+        还是**死信**（``fatal`` 不重试）：
+
+        - ``fatal``：索引行已不存在 / 缺 item_id / 站点不存在或已停用 /
+          下载器不存在或已禁用 / **站点的永久失败**（凭据失效、详情页里
+          没有下载地址——重试也不会成功）
+        - ``download``：下载 .torrent 失败（网络抖动、站点返回临时错误页）
+        - ``parse``：infohash 解析失败（字节不是合法 torrent）
+        - ``add``：下载器拒绝（duplicate 已被当成幂等成功，不在此列）
     """
     index_id = int(payload["index_id"])
     downloader_id = int(payload["downloader_id"])
@@ -126,10 +137,23 @@ async def execute_add_torrent(
     site_adapter = factory.site(site_row)
     try:
         torrent_bytes = await site_adapter.download_torrent(item_id)
+    except SitePermanentError as exc:
+        # **永久失败**（凭据失效 / 详情页里没有下载地址）→ 重试也不会成功，
+        # 按 fatal 处理（死信 + 直接报错给用户），别再骗用户「已入队重试」。
+        raise PushItemError("fatal", f"download_torrent: {exc}") from exc
     except Exception as exc:
         raise PushItemError("download", f"download_torrent: {exc}") from exc
     if not torrent_bytes or not torrent_bytes.startswith(b"d"):
-        raise PushItemError("download", "响应不是 bencoded torrent")
+        # 适配器自己会带响应细节（generic 已做）；这里是最后一道防线——
+        # 仍然把长度与前缀带上，避免「响应不是 bencoded」这种无信息量的报文。
+        raw = torrent_bytes or b""
+        prefix = (
+            raw[:80].decode("utf-8", "replace").replace("\r", " ").replace("\n", " ")
+        )
+        raise PushItemError(
+            "download",
+            f"响应不是 bencoded torrent（{len(raw)} bytes，前缀={prefix!r}）",
+        )
 
     # 3) 解析 info_hash
     info_hash = infohash_from_torrent(torrent_bytes)

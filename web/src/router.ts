@@ -7,7 +7,7 @@ import { useAuthStore } from './stores/auth'
  * **两个业务域的页面在同一�� SPA 里**：
  *
  * - 辅种域 —— `/sites` `/downloaders` `/torrent-index`
- *   `/cross-seed` `/settings`
+ *   `/cross-seed` `/settings`（`/` 重定向到 `/sites`）
  * - 媒体库域 —— `/drivers` `/library` `/migrations` `/uploads` `/health`
  *   `/dav-users` `/media-settings`
  *
@@ -31,7 +31,8 @@ const routes: RouteRecordRaw[] = [
     component: () => import('./layouts/MainLayout.vue'),
     children: [
       // -- 辅种域 --
-      { path: '', name: 'dashboard', component: () => import('./pages/Dashboard.vue') },
+      // 无「总览」页：根路径直接落到列表页（站点是辅种域的第一个页面）。
+      { path: '', redirect: '/sites' },
       { path: 'sites', name: 'sites', component: () => import('./pages/Sites.vue') },
       { path: 'downloaders', name: 'downloaders', component: () => import('./pages/Downloaders.vue') },
       { path: 'torrent-index', name: 'torrent-index', component: () => import('./pages/TorrentIndex.vue') },

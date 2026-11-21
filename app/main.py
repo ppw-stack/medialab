@@ -325,7 +325,6 @@ def _mount_routes(app: FastAPI) -> None:
     from app.api.routes import (
         aggregate,
         cross_seed,
-        dashboard,
         dav_users,
         downloaders,
         drivers,
@@ -347,7 +346,6 @@ def _mount_routes(app: FastAPI) -> None:
 
     # -- 辅种域（/api/v1/*）--
     for router in (
-        dashboard.router,
         sites.router,
         downloaders.router,
         scheduler.router,

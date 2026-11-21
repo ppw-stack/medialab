@@ -619,6 +619,13 @@ export interface PushResponse {
   detail: string
   info_hash: string | null
   downloader_id: number | null
+  /**
+   * 已受理但尚未完成（HTTP 202）：任务在队列里会自动重试。
+   *
+   * 下载失败属于可重试类（站点瞬时异常），后端不再报「推送失败」——
+   * 否则用户会以为种子丢了，而实测多在几分钟内补推成功。
+   */
+  deferred: boolean
 }
 
 /**
@@ -762,23 +769,6 @@ export interface EnvSettingItem {
 /** 环境变量配置响应。 */
 export interface EnvSettingsView {
   items: EnvSettingItem[]
-}
-
-// ==================================================================== 仪表盘
-
-/** 仪表盘总览（`GET /dashboard`）。 */
-export interface DashboardSnap {
-  sites: { total: number; enabled: number }
-  downloaders: { total: number; enabled: number }
-  free_ending_soon: number | null
-  free_index_total: number | null
-  inflight_torrents: number | null
-  /**
-   * 在途数据的抓取时刻（辅种部分来自定时快照，非实时）。
-   *
-   * null = 还没有辅种快照（辅种下载器未被标记或尚未抓过）。
-   */
-  inflight_snapshot_at: string | null
 }
 
 // ==================================================================== 媒体库域

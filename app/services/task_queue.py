@@ -249,6 +249,29 @@ class TaskQueueService:
             .values(status=TaskStatus.FAILED, last_error=error[:500])
         )
 
+    async def requeue_failed(self, task_id: int) -> bool:
+        """把**死信任务**（failed）重置为 pending，重新排队。
+
+        手动重推入口：:meth:`enqueue` 对已存在的 ``idem_key`` 一律返回
+        ``created=False``，死信任务会让用户「再点一次也推不上去」
+        （2026-11-21 Kody 审查发现）。故显式重置：``attempts`` 归零 +
+        回到 pending + 清掉上次的错误，重新走一遍退避重试预算。
+
+        **只重置终态 failed**：pending（待重试）/ running（在推）/ done
+        一律不动——否则会把正在重试的任务重复排队。
+
+        :return: True = 已重置（该任务原本是死信）；False = 不存在 / 不是死信
+        """
+        row = await self._session.get(TaskQueue, task_id)
+        if row is None or row.status != TaskStatus.FAILED:
+            return False
+        row.status = TaskStatus.PENDING
+        row.attempts = 0
+        row.run_at = bj_now()
+        row.last_error = None
+        await self._session.flush()
+        return True
+
     async def requeue_stale(self, stale_before: str) -> int:
         """回收僵死 running 任务（updated_at < stale_before）为 pending。
 
