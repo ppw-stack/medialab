@@ -4,6 +4,11 @@
  *
  * 明细（`items`）**默认折叠**——monitor 这类作业可能几百条，
  * 默认展开会把详情面板撑爆。点击「明细（N）」才展开。
+ *
+ * 子步骤（`children`）**总是展开**：编排型作业（cross_seed_maintenance）
+ * 把子作业的 5 条步骤折成一句 summary 后，页面上只剩三个大段——排查时
+ * 必须能看到「写入快照 / 检测异常 / 自动暂停」这些真实环节。子步骤最多
+ * 5 条，展开不会撑爆面板。
  */
 import { ref, watch } from 'vue'
 import type { JobStep } from '../types'
@@ -103,6 +108,21 @@ function truncated(step: JobStep): boolean {
       -->
       <span v-if="s.detail" class="step-detail">{{ s.detail }}</span>
 
+      <!-- 子步骤（编排型作业）：总是展开，视觉上缩进一级 -->
+      <div v-if="s.children && s.children.length" class="step-children">
+        <div
+          v-for="(c, k) in s.children"
+          :key="k"
+          class="step-child"
+          :class="stepClass(c.status)"
+        >
+          <span class="step-child__icon">{{ statusIcon(c.status) }}</span>
+          <span class="step-child__name">{{ c.name }}</span>
+          <span v-if="c.count != null" class="step-child__count mono">{{ c.count }}</span>
+          <span v-if="c.detail" class="step-child__detail">{{ c.detail }}</span>
+        </div>
+      </div>
+
       <!-- 明细展开按钮（默认折叠） -->
       <button
         v-if="s.items && s.items.length"
@@ -192,6 +212,48 @@ function truncated(step: JobStep): boolean {
   overflow: visible;
   word-break: break-word;
   line-height: 1.5;
+}
+
+/* 子步骤（缩进一级，与父步骤的 detail 区分开） */
+.step-children {
+  flex: 0 0 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: var(--sp-1);
+  padding-left: var(--sp-2);
+  border-left: 1px solid var(--border-hairline);
+}
+.step-child {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+.step-child__icon {
+  font-weight: 700;
+  width: 12px;
+  flex: 0 0 12px;
+  text-align: center;
+}
+.step-child--ok .step-child__icon { color: var(--success-text, #52c41a); }
+.step-child--warn .step-child__icon { color: var(--warning-text, #d97706); }
+.step-child--skip .step-child__icon { color: var(--text-tertiary); }
+.step-child--fail .step-child__icon { color: var(--error-text, #f5222d); }
+.step-child__name {
+  color: var(--text-secondary);
+  flex: 0 0 auto;
+}
+.step-child__count {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+.step-child__detail {
+  color: var(--text-tertiary);
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-word;
 }
 
 /* 明细展开按钮 */
