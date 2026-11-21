@@ -299,7 +299,6 @@ def test_default_cron_covers_all_registered_jobs() -> None:
     assert set(DEFAULT_CRON) == {
         "fetch_all_sites",
         "push_and_monitor_free",
-        "refresh_user_data",
         "drain_task_queue",
         "cross_seed_maintenance",
         "scrape_metadata",
@@ -614,7 +613,7 @@ def test_preflight_job_imports_loads_all_lazy_modules() -> None:
         "app.services.jobs",
         "app.services.push_free",
         "app.services.monitor",
-        "app.services.user_data",
+        "app.services.push_and_monitor",
         "app.services.task_drain",
         "app.services.cross_seed_maintenance",
     ):

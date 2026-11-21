@@ -645,7 +645,7 @@ async def _write_strm_batch(
 
     2026-11-12 prod 事故：扫描的事务横跨「写 strm + 等附件下载」，
     写锁被持有几十秒 → ``drain_task_queue`` / ``push_and_monitor_free``
-    / ``refresh_user_data`` 连续撞 ``database is locked``。WAL 只解决
+    / ``refresh_user_data``（已于 2026-11-22 移除）连续撞 ``database is locked``。WAL 只解决
     **读写**互斥，写-写互斥依旧 → 根治只能缩短写锁窗口。
 
     铁律：**flush 之后、commit 之前，不做任何非 DB 的 await**

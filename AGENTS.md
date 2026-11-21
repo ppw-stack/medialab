@@ -140,7 +140,7 @@
   - `SiteUserData` 表是**当前快照**（UNIQUE site_id），不做历史；如需时间序列需先建 `site_user_data_history` 表再迁
   - 适配器单方法 `get_user_snapshot`：**返回 `None` 只表示"该站不支持 / 无凭据"**（service 记 skipped）；**拉取/解析失败必须抛 `SiteFetchError`**（service 记 failed 并点名，**不写 0 兜底**——写 0 等于把故障伪装成"上传 0 / 做种 0"）
   - 抓取页用 `/mybonus.php`（navbar 带 3 业务字段 + 时魔，**一页拿全**）；navbar 解析不出 3 字段时回退 `/userdetails.php`
-  - `refresh_user_data` cron `*/30 * * * *`（与 `push_free_torrents` 同分钟位错峰不冲突）
+  - **刷新时机是按需的**（2026-11-22 起）：`refresh_user_data` 周期作业**已移除**——面板「站点」页打开时自动跑一次「全部测连」，可达且已登录的站各刷一次用户数据（单站「测连」也会顺手刷）。panel 关着时 `site_user_data` 会变旧，只影响选种排序的档位，不影响推不推
   - **网络 IO 在事务外**：短事务读站点 → 并发抓取（上限 5）→ 短事务批量 upsert；写锁不能横跨网络往返
   - 暂不接告警推送；只落库 + UI 展示
 - **时魔（每小时获得的站点积分，2026-10-22 加入）**：
@@ -194,7 +194,7 @@
   - **全部字段带默认值 → 向后兼容**：现有 60+ 处 `JobStep(...)` 调用零改动
   - **必须限流**：`build_items()` 上限 50 条/步（`monitor` 可能命中几百个种子），超限丢**最早**的（明细按执行顺序产生）
   - 前端**默认折叠**（点击「明细（N）」展开）——默认展开会把详情面板撑爆
-  - 7 个作业全填：`fetch_all_sites`（逐站）/ `push_free_torrents`（逐种 + 逐档站名）/ `monitor_free_window`（逐 hash 动作）/ `refresh_user_data`（逐站 + 时魔值）/ `drain_task_queue`（逐 task）/ `daily_checkin`（逐站状态）/ `cross_seed_maintenance`（逐下载器）
+  - 各作业全填：`fetch_all_sites`（逐站）/ `push_and_monitor_free`（逐种 + 逐档站名 + 逐 hash 动作）/ `drain_task_queue`（逐 task）/ `cross_seed_maintenance`（逐下载器）。`refresh_user_data`（逐站 + 时魔值）随周期作业移除（2026-11-22），其明细仍在「站点页全部测连」的返回里
   - 顺手干掉硬截断：`user_data.py` / `checkin.py` 的 `[:200]`（完整原因进明细，summary 只给一句人话）
   - 契约由 `tests/unit/test_scheduler.py` + 各作业的 integration 测试固化
   - **站点进度是「百分数」，不是 0~1 的小数**（2026-11-03 修正）：
@@ -266,10 +266,17 @@
   - **语义是「触发时机」不是「数据正确性前提」**：上游失败时下游照旧按自己的 cron 跑（不级联失败）；只有**成功**才触发下游
   - **三道防重复闸**：`_running` 集合（check→add 之间无 await，单事件循环原子；cron/upstream/手动共享）、门槛（基准是**上次开始**时间，用结束时间会让周期漂移成「门槛+耗时」）、`task_queue` 三层幂等（`idem_key` / 认领 / `push_status`）
   - **频率不变密**：fetch 每小时 6 次成功，门槛只放行 2 次 → 推送仍 ≈2 次/小时，只是相位对齐拉取完成（「入库 → 推送」延迟从 ≤30 分钟降到 ≤10 分钟）
-  - **刻意不挂边的四个**：`drain_task_queue`（退避到期是时间的函数）、`monitor_free_window`（临期判定，需独立节奏）、`refresh_user_data`（弱边：push 每轮自读时魔）、`cross_seed_maintenance`（旁支，内部已是三段流水线；串进链会重演 2026-11-01「最重节点绑架全链」）
+  - **刻意不挂边的**：`drain_task_queue`（退避到期是时间的函数）、`cross_seed_maintenance`（旁支，内部已是三段流水线；串进链会重演 2026-11-01「最重节点绑架全链」）
   - **图校验在 `register_jobs` 末尾**（`scheduler_center.validate_graph()`）：逐条注册时校验会因注册顺序误报「上游未注册」；拼错/成环在启动即炸
   - **任务认领已改为条件更新**（2026-11-22 加固，`task_queue.claim_one` / `claim_due`）：`UPDATE ... WHERE status='pending'` + `RETURNING`，不再「先读状态再改」——否则 push 的就地认领与 drain 的批量认领可能双双执行同一 task。依赖 SQLite ≥3.35 的 `RETURNING`
   - 契约由 `tests/unit/test_scheduler.py`（成功才触发 / 失败不触发 / 门槛 / 停用或运行中不触发 / 环检测 / 下下发字段）+ `tests/unit/test_task_queue.py`（两 session 认领只有一个成功）+ `tests/integration/test_api.py` 固化
+- **站点用户数据改为「打开页面时刷新」**（2026-11-22 加入）：
+  - **移除** `refresh_user_data` 周期作业（原 `*/30 * * * *`）。它服务的是一张**纯展示/排序用**的快照表（上传/下载/做种/时魔），无人值守时每 30 分钟打一遍 9 个站不值当
+  - **替代**：面板「站点」页 `onMounted` 自动调 `POST /sites/test-all`（全部测连），并对「可达且已登录」的站各调一次 `POST /sites/{id}/user-data/refresh`——2 次请求/站，只在有人看时发生
+  - **自动模式有 5 分钟冷却**（`sessionStorage` 时间戳）：站点对短时间重复请求敏感（后端测连并发也压到 3），来回切页面不该打出一串请求。**手动「全部测连」按钮不受冷却限制**
+  - **自动模式成功时静默**（不弹 toast）——每次打开页面弹「全部正常」是噪音；失败/未登录仍 `message.warning`
+  - **代价（写清）**：面板关着时 `site_user_data` 会变旧 → `push_and_monitor_free` 的「时魔封顶档」排序最多滞后到「上次打开站点页」。档位只影响先推哪站，不影响推不推；单站无快照时照旧落「无信号」档（优雅降级）
+  - 契约由 `tests/unit/test_scheduler.py`（作业清单不再含 `refresh_user_data`）+ `tests/integration/test_user_data_job.py`（`refresh_all_sites` 服务本身）+ `tests/integration/test_api.py`（`/sites/test-all`）固化
 - **免费种推送 + 窗口监测已合并为一个作业**（2026-11-22，`app/services/push_and_monitor.py`）：
   - 作业名 **`push_and_monitor_free`**，cron **10 分钟心跳**（`5,15,…,55`）：监测每轮都跑（临期暂停是安全动作，不能被节流）；推送由**作业内部节流**到 ≥30 分钟一次（`PUSH_MIN_INTERVAL_SEC`，站点有限频）
   - **顺序「先监测后推送」**：监测先暂停临期种子腾出下载器位置，再推新的

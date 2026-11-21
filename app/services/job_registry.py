@@ -12,7 +12,6 @@
 - ``push_and_monitor_free`` — **免费种推送 + 窗口监测**（2026-11-22 合并）：
   巡检已推免费种（临期/非免费自动暂停）＋ 把新免费种推到默认下载器
   （cron 10 分钟心跳；推送内部节流 ≥30 分钟）
-- ``refresh_user_data`` — 拉取 9 站用户数据（上传/下载/做种数）
 - ``cross_seed_maintenance`` — **辅种维护**（2026-11-01 合并）：
   辅种站巡查（落快照 + 暂停异常种子）→ 磁盘空间流转 → 孤儿文件扫描，
   三段顺序执行、每 3 小时一次
@@ -65,7 +64,6 @@ logger = get_logger(__name__)
 #: 分钟位刻意错开——避免多个作业在同一分钟并发抢资源：
 #:
 #: - ``*/10``  : fetch_all_sites（站点拉取）
-#: - ``*/30``  : refresh_user_data
 #: - ``5,15,…``: push_and_monitor_free（监测的 10 分钟心跳；推送内部节流）
 #: - ``*/5``   : drain_task_queue
 #: - ``17 */3``: cross_seed_maintenance（辅种维护，合并巡查/磁盘/孤儿）
@@ -79,7 +77,6 @@ DEFAULT_CRON: dict[str, str] = {
     # 默认 10 分钟），它不能等——而推送本身有站点限频，10 分钟一轮
     # 只会把限频摊薄，故用内部节流，不用两条 cron 硬凑。
     "push_and_monitor_free": "5,15,25,35,45,55 * * * *",
-    "refresh_user_data": "*/30 * * * *",
     "drain_task_queue": "*/5 * * * *",
     # 辅种维护（2026-11-01 合并 scan_cross_seed + disk_rotation + scan_orphans）：
     # 巡查 → 磁盘流转 → 孤儿扫描，三段顺序执行。
@@ -217,16 +214,6 @@ JOB_META: tuple[JobMeta, ...] = (
             f" (pre_pause={_current_pre_pause_minutes()}min"
             f"，推送间隔={PUSH_MIN_INTERVAL_SEC // 60}min)"
         ),
-    ),
-    JobMeta(
-        name="refresh_user_data",
-        title="站点信息获取",
-        description=(
-            "拉取 9 站上传/下载/做种数/下载中数 + 时魔（每小时站点积分）"
-            "→ 写入 site_user_data 表"
-        ),
-        make_func=lambda f: _job_fn(lambda: _run_refresh_user_data(f)),
-        module="seed",
     ),
     JobMeta(
         name="drain_task_queue",
@@ -370,7 +357,6 @@ def preflight_job_imports() -> None:
         "app.services.push_and_monitor",  # _run_push_and_monitor（合并作业）
         "app.services.push_free",       # 合并作业内部调 PushFreeService
         "app.services.monitor",         # 合并作业内部调 MonitorFreeWindowService
-        "app.services.user_data",       # _run_refresh_user_data
         "app.services.task_drain",      # _run_drain_task_queue
         "app.services.cross_seed_maintenance",  # _run_cross_seed_maintenance
         "app.services.scrape_jobs",     # _run_scrape_metadata（整理刮削迁移）
@@ -403,13 +389,6 @@ async def _run_push_and_monitor(factory: AdapterFactory) -> dict[str, object]:
 
 
 # ============================================================ 作业入口
-async def _run_refresh_user_data(factory: AdapterFactory) -> dict[str, object]:
-    """执行站点用户数据刷新。"""
-    from app.services.user_data import refresh_all_sites
-
-    return await refresh_all_sites(factory)
-
-
 async def _run_drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
     """排空任务队列（崩溃恢复 + 退避重试）。"""
     from app.services.task_drain import drain_task_queue

@@ -485,7 +485,7 @@ class CrossSeedOrphan(Base):
 class SiteUserData(Base):
     """站点用户数据快照（FR-1.6 站点用户数据契约·精简版）。
 
-    ``refresh_user_data`` 作业每 30 分钟调一次各适配器的
+    站点页「全部测连」/ 单站测连时调一次各适配器的
     :meth:`SiteAdapter.get_user_snapshot`，把 3 业务字段
     upload / download / seeding_count upsert 到本表（``site_id`` UNIQUE）。
 
