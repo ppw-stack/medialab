@@ -38,10 +38,19 @@ class _FakeSiteAdapter(SiteAdapter):
 
     adapter_type = "fake"
 
-    def __init__(self, profile: SiteProfile, *, fail: bool = False, **_: object) -> None:
+    def __init__(
+        self,
+        profile: SiteProfile,
+        *,
+        fail: bool = False,
+        body: bytes | None = None,
+        **_: object,
+    ) -> None:
         super().__init__(profile)
         self.download_calls = 0
         self.fail = fail
+        #: 非 None 时返回这段字节（用于模拟「站点返回了非 torrent 内容」）
+        self.body = body
 
     async def check_reachability(self) -> SiteHealth:
         return SiteHealth(reachable=True)
@@ -53,6 +62,8 @@ class _FakeSiteAdapter(SiteAdapter):
         self.download_calls += 1
         if self.fail:
             raise RuntimeError("站点下载失败")
+        if self.body is not None:
+            return self.body
         return _make_torrent_bytes()
 
     async def get_torrent_url(self, item_id: str) -> str | None:
@@ -93,6 +104,7 @@ async def _make_push_env(
     push_status: str | None = None,
     downloader_fail: str | None = None,
     site_fail: bool = False,
+    site_body: bytes | None = None,
 ) -> tuple[AdapterFactory, _FakeSiteAdapter, _FakeDownloader, int]:
     """建站点 + 下载器 + 索引行，注入假适配器。"""
     async with session_scope() as session:
@@ -123,7 +135,7 @@ async def _make_push_env(
         ).scalar_one()
 
     site_adapter = _FakeSiteAdapter(
-        SiteProfile(name="s1", domain="s1.test"), fail=site_fail
+        SiteProfile(name="s1", domain="s1.test"), fail=site_fail, body=site_body
     )
     dl_adapter = _FakeDownloader(fail_with=downloader_fail)
     factory = AdapterFactory()
@@ -244,27 +256,45 @@ async def test_push_disabled_downloader_400(db: None) -> None:
     assert exc.value.status == 400
 
 
-async def test_push_site_download_failure_502(db: None) -> None:
-    """站点下载 .torrent 失败 → 502（可重试类错误）。"""
+async def test_push_site_download_failure_is_deferred(db: None) -> None:
+    """站点下载失败 → **deferred**（API 202）：任务留在队列里自动重试，不报 502。
+
+    2026-11-21 prod：手动推送 12:05 报 502，队列 12:10 补推成功——
+    用户看到的「失败」与最终结果不一致（种子其实已经推上了）。
+    故可重试的下载失败改为「已入队」，由 ``drain_task_queue`` 继续重试。
+    """
     factory, _, _, index_id = await _make_push_env(site_fail=True)
-    with pytest.raises(PushError) as exc:
-        await push_index_entry(index_id, None, factory)
-    assert exc.value.status == 502
+    outcome = await push_index_entry(index_id, None, factory)
+
+    assert outcome.deferred is True
+    assert outcome.ok is False
+    assert "自动重试" in outcome.detail
 
 
-async def test_push_failure_marks_task_failed(db: None) -> None:
-    """失败的任务要落终态（不能停在 running）。"""
+async def test_deferred_download_failure_keeps_task_pending(db: None) -> None:
+    """deferred 的任务必须停在 pending（退避重试），不能是死信。"""
     from app.db.models import TaskQueue
 
     factory, _, _, index_id = await _make_push_env(site_fail=True)
-    with pytest.raises(PushError):
-        await push_index_entry(index_id, None, factory)
+    await push_index_entry(index_id, None, factory)
 
     async with session_scope() as session:
         rows = (await session.execute(select(TaskQueue))).scalars().all()
     assert len(rows) == 1
-    assert rows[0].status in ("pending", "failed")
+    assert rows[0].status == "pending"
     assert rows[0].last_error
+
+
+async def test_push_parse_failure_502(db: None) -> None:
+    """响应是合法 bencode 但不是 torrent（缺 info）→ 解析失败 → 502。
+
+    解析失败不是「站点瞬时异常」，继续重试大概率仍失败，故不走 deferred。
+    """
+    factory, _, _, index_id = await _make_push_env(site_body=b"d4:name4:teste")
+    with pytest.raises(PushError) as exc:
+        await push_index_entry(index_id, None, factory)
+    assert exc.value.status == 502
+    assert "infohash" in str(exc.value)
 
 
 # ------------------------------------------------------------------ TOCTOU

@@ -70,6 +70,14 @@ class PushOutcome:
     detail: str = ""
     #: True = 幂等命中（已推过 / 下载器报 duplicate），未实际重复添加
     idempotent: bool = False
+    #: True = 请求已受理但**尚未完成**：任务留在队列里按退避自动重试
+    #: （1/2/4/8 分钟，最多 ``MAX_ATTEMPTS`` 次）。
+    #:
+    #: 典型场景 = 站点瞬时返回非 .torrent 内容（HTML 提示页 / 会话检查页）。
+    #: API 层据此返回 **202**，前端提示「已入队重试」而不是「推送失败」。
+    #: 2026-11-21 prod：手动推送 12:05 报 502，队列 12:10 补推成功——
+    #: 用户看到的「失败」与最终结果不一致，故引入本字段。
+    deferred: bool = False
 
 
 async def resolve_downloader(
@@ -263,8 +271,31 @@ async def push_index_entry(
             tq = TaskQueueService(session)
             if exc.category == "fatal":
                 await tq.mark_failed_forever(task_id, str(exc))
+                final_state = "failed"
             else:
-                await tq.mark_failed(task_id, str(exc))
+                final_state = await tq.mark_failed(task_id, str(exc))
+        if exc.category == "download":
+            # **下载失败是可重试的**（站点瞬时异常 / 网络抖动）：任务已在队列里，
+            # ``drain_task_queue`` 会按指数退避继续重试。实测这条链路会
+            # 「5 分钟后补推成功」（2026-11-21 prod：12:05 首轮失败 → 12:10 成功）。
+            # 若此刻向用户报「推送失败」+502，用户会以为种子丢了并反复点击——
+            # 因此改为 deferred（API 202 +「已入队重试」）。
+            exhausted = final_state == "failed"
+            detail = (
+                "站点下载失败且重试已用尽（5 次），可稍后手动重推"
+                if exhausted
+                else "站点暂时异常，已入队自动重试（最多 5 次），无需重复点击"
+            )
+            logger.warning(
+                "手动推送 index_id=%d 下载失败，任务 %d 状态=%s：%s",
+                index_id, task_id, final_state, exc,
+            )
+            return PushOutcome(
+                ok=False,
+                downloader_id=enq.dl_id,
+                detail=f"{detail}：{str(exc)[:180]}",
+                deferred=True,
+            )
         logger.warning("手动推送 index_id=%d 失败：%s", index_id, exc)
         raise PushError(str(exc), status=502, code="push_failed") from exc
 

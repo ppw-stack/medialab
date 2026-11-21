@@ -114,7 +114,12 @@ async function doPush() {
       `/torrent-index/${pushItem.value.id}/push`,
       { downloader_id: pushDownloaderId.value },
     )
-    if (r.ok) {
+    if (r.deferred) {
+      // 202：任务已入队，后台会自动重试——不是失败，别吓用户
+      message.info(r.detail || '站点暂时异常，已入队自动重试')
+      pushModalOpen.value = false
+      await load({ reset: true })
+    } else if (r.ok) {
       message.success(r.detail || '推送成功')
       pushModalOpen.value = false
       await load({ reset: true })

@@ -129,7 +129,16 @@ async def execute_add_torrent(
     except Exception as exc:
         raise PushItemError("download", f"download_torrent: {exc}") from exc
     if not torrent_bytes or not torrent_bytes.startswith(b"d"):
-        raise PushItemError("download", "响应不是 bencoded torrent")
+        # 适配器自己会带响应细节（generic 已做）；这里是最后一道防线——
+        # 仍然把长度与前缀带上，避免「响应不是 bencoded」这种无信息量的报文。
+        raw = torrent_bytes or b""
+        prefix = (
+            raw[:80].decode("utf-8", "replace").replace("\r", " ").replace("\n", " ")
+        )
+        raise PushItemError(
+            "download",
+            f"响应不是 bencoded torrent（{len(raw)} bytes，前缀={prefix!r}）",
+        )
 
     # 3) 解析 info_hash
     info_hash = infohash_from_torrent(torrent_bytes)

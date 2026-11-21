@@ -285,3 +285,36 @@ async def test_single_push_of_disabled_site_is_rejected(
 
     assert resp.status_code == 400
     assert "已停用" in resp.json()["detail"]
+
+
+async def test_single_push_deferred_returns_202(
+    client: httpx.AsyncClient, monkeypatch
+) -> None:
+    """下载失败（可重试类）→ **202 + deferred=true**，而不是 502。
+
+    2026-11-21 prod：手推 12:05 报 502，队列 12:10 补推成功——用户看到的
+    「失败」与实际结果不一致。可重试的下载失败必须表达为「已入队重试」。
+    """
+    from app.services import index_service
+    from app.services.push_service import PushOutcome
+
+    ids = await _seed(count=1)
+
+    async def _fake_push(
+        index_id: int, downloader_id: int | None = None
+    ) -> PushOutcome:
+        return PushOutcome(
+            ok=False,
+            downloader_id=1,
+            deferred=True,
+            detail="站点暂时异常，已入队自动重试（最多 5 次），无需重复点击",
+        )
+
+    monkeypatch.setattr(index_service, "push_entry", _fake_push)
+
+    resp = await client.post(f"/api/v1/torrent-index/{ids[0]}/push", json={})
+
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["deferred"] is True
+    assert "自动重试" in body["detail"]

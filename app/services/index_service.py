@@ -350,7 +350,9 @@ async def push_entry(
 
     - 未指定 downloader_id → 用 is_default=True 且 enabled 的下载器
     - 已推送过（push_status == pushed）→ 直接返回已存在
-    - 下载 .torrent 失败 → 502
+    - 下载 .torrent 失败（**可重试类**）→ ``deferred=True``（API 返回 202，
+      任务留在队列里由 ``drain_task_queue`` 自动重试），见
+      :class:`~app.services.push_service.PushOutcome`
 
     实现：走 :func:`app.services.push_service.push_index_entry`——
     与自动推送（``push_free``）**同一条队列 + 同一个执行器**

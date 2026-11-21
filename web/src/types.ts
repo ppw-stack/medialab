@@ -619,6 +619,13 @@ export interface PushResponse {
   detail: string
   info_hash: string | null
   downloader_id: number | null
+  /**
+   * 已受理但尚未完成（HTTP 202）：任务在队列里会自动重试。
+   *
+   * 下载失败属于可重试类（站点瞬时异常），后端不再报「推送失败」——
+   * 否则用户会以为种子丢了，而实测多在几分钟内补推成功。
+   */
+  deferred: boolean
 }
 
 /**

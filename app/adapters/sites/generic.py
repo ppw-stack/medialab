@@ -50,11 +50,41 @@ _DEFAULT_DETAIL_PATH = "details.php?id={item_id}"
 #: 列表页/详情页的促销 class（用于把倍率翻译成现有的免费窗口输入）
 _PROMO_CLASS_BY_FACTOR = {0: "free", 0.5: "halfdown", 0.3: "thirtypercent"}
 
+#: 合法 .torrent 的首字节（bencode 顶层必须是 dict）。
+_TORRENT_MAGIC = b"d"
+
+#: 「下载响应不是 .torrent」时的即时重试间隔（秒）。
+#:
+#: 实测（2026-11-21 prod）：HDWinG 偶发对 ``download.php`` 返回 2xx 的 HTML
+#: （站点瞬时异常 / 会话检查页），紧接着重试即成功。故首次拿到非 torrent
+#: 内容不直接判死，短暂退避后**重取一次**——把这类瞬时故障消化在适配器内，
+#: 避免用户看到「推送失败」而任务其实在 5 分钟后才被队列补推成功。
+_NON_TORRENT_RETRY_DELAY = 3.0
+
 _LOGIN_MARKERS_RE = re.compile(r"(login\.php|登录|請登入|请登录)", re.IGNORECASE)
 _LOGGED_IN_RE = re.compile(
     r"(userdetails\.php|logout\.php|takelogout\.php|usercp\.php)",
     re.IGNORECASE,
 )
+
+
+def _describe_torrent_response(resp: httpx.Response) -> str:
+    """把下载响应压成一行可诊断描述（status / content-type / 长度 / 前缀）。
+
+    ⚠️ 只取**前 120 字节**且折叠换行——足够看出是登录页 / 限频提示 /
+    Cloudflare 挑战，又不会把整页 HTML 或凭据写进日志。
+    """
+    content_type = resp.headers.get("content-type", "-")
+    prefix = (
+        resp.content[:120]
+        .decode("utf-8", "replace")
+        .replace("\r", " ")
+        .replace("\n", " ")
+    )
+    return (
+        f"HTTP {resp.status_code}, content-type={content_type}, "
+        f"{len(resp.content)} bytes, 前缀={prefix!r}"
+    )
 
 
 @lru_cache(maxsize=1)
@@ -183,15 +213,53 @@ class GenericAdapter(SiteAdapter):
 
     # ------------------------------------------------------------------ 3. 下载
     async def download_torrent(self, item_id: str) -> bytes:
+        """下载 .torrent 字节。
+
+        **非 .torrent 的 2xx 响应会重试一次**，原因见
+        :data:`_NON_TORRENT_RETRY_DELAY`——这类响应多为站点瞬时异常
+        （HTML 提示页 / 会话检查页），不是「种子真的拿不到」。
+        两次都不是 torrent 才抛 :class:`SiteFetchError`，且异常里带
+        status / content-type / 长度 / 正文前缀，便于事后定位
+        （此前只报一句「响应不是 bencoded」，无法区分登录页、限频页与
+        Cloudflare 挑战，2026-11-21 prod 排查时卡在这里）。
+        """
         url = await self.get_torrent_url(item_id)
         if not url:
             raise SiteFetchError(f"{self.profile.name} 无法解析下载地址（id={item_id}）")
+
+        resp = await self._fetch_torrent_response(url)
+        if resp.content.startswith(_TORRENT_MAGIC):
+            return resp.content
+
+        first_desc = _describe_torrent_response(resp)
+        logger.warning(
+            "%s 下载 id=%s 返回非 .torrent（%s），%.0fs 后重试一次",
+            self.profile.name, item_id, first_desc, _NON_TORRENT_RETRY_DELAY,
+        )
+        if _NON_TORRENT_RETRY_DELAY > 0:
+            await asyncio.sleep(_NON_TORRENT_RETRY_DELAY)
+
+        retry = await self._fetch_torrent_response(url)
+        if retry.content.startswith(_TORRENT_MAGIC):
+            logger.info(
+                "%s 下载 id=%s 重试成功（首次：%s）",
+                self.profile.name, item_id, first_desc,
+            )
+            return retry.content
+
+        raise SiteFetchError(
+            f"{self.profile.name} 响应不是 bencoded torrent id={item_id}"
+            f"（重试后：{_describe_torrent_response(retry)}；首次：{first_desc}）"
+        )
+
+    async def _fetch_torrent_response(self, url: str) -> httpx.Response:
+        """GET 下载地址并按统一契约检查状态码。"""
         try:
             resp = await self._client.get(url, timeout=self._timeout)
         except httpx.HTTPError as exc:
             raise SiteFetchError(f"{self.profile.name} 下载失败：{exc}") from exc
         self._check_status_code(resp)
-        return resp.content
+        return resp
 
     # ------------------------------------------------------------------ 3.5 下载地址
     async def get_torrent_url(self, item_id: str) -> str | None:

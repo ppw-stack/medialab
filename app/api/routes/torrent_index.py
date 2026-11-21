@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from fastapi import Query as QueryParam
 from pydantic import BaseModel, Field
 
@@ -82,6 +82,11 @@ class PushResponse(BaseModel):
     detail: str = ""
     info_hash: str | None = None
     downloader_id: int | None = None
+    #: True = 已入队、后台自动重试，尚未完成（HTTP 202）。
+    #:
+    #: 下载失败属于可重试类（站点瞬时异常）——不能报「失败」，
+    #: 否则用户会以为种子丢了（2026-11-21 prod 实测：报 502 后 5 分钟补推成功）。
+    deferred: bool = False
 
 
 class BatchPushRequest(BaseModel):
@@ -208,12 +213,17 @@ async def get_torrent_index(index_id: int) -> TorrentIndexItem:
 
 
 @router.post("/{index_id}/push", response_model=PushResponse)
-async def push_torrent_index(index_id: int, payload: PushRequest) -> PushResponse:
+async def push_torrent_index(
+    index_id: int, payload: PushRequest, response: Response
+) -> PushResponse:
     """把单条拉取索引推送到下载器。
 
     - 未指定 downloader_id → 用 is_default=True 且 enabled 的下载器
     - 已推送过（push_status == pushed）→ 直接返回已存在
-    - 下载 .torrent 失败 → 502
+    - **下载 .torrent 失败（可重试类）→ 202 + ``deferred=true``**：
+      任务已入队，``drain_task_queue`` 会按指数退避自动重试（最多 5 次）。
+      报 502 会让用户以为种子丢了，而实测多数会在几分钟内补推成功。
+    - 其它失败（站点停用 / 索引不存在 / 解析失败）→ 4xx / 502
 
     实现：走 :func:`app.services.push_service.push_index_entry`——
     与自动推送（``push_free``）**同一条队列 + 同一个执行器**
@@ -224,13 +234,20 @@ async def push_torrent_index(index_id: int, payload: PushRequest) -> PushRespons
     """
     outcome = await index_service.push_entry(index_id, payload.downloader_id)
 
+    if outcome.deferred:
+        # 202 Accepted：请求已受理，执行在后台队列继续
+        response.status_code = 202
     logger.info(
-        "手动推送 index_id=%d → downloader=%s：%s",
-        index_id, outcome.downloader_id, outcome.detail,
+        "手动推送 index_id=%d → downloader=%s%s：%s",
+        index_id,
+        outcome.downloader_id,
+        "（已入队重试）" if outcome.deferred else "",
+        outcome.detail,
     )
     return PushResponse(
         ok=outcome.ok,
         detail=outcome.detail,
         info_hash=outcome.info_hash,
         downloader_id=outcome.downloader_id,
+        deferred=outcome.deferred,
     )
