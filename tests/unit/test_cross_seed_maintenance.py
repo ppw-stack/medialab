@@ -25,7 +25,7 @@ class _Ok:
     def __init__(self, payload: dict[str, Any]) -> None:
         self.payload = payload
 
-    async def __call__(self) -> dict[str, Any]:
+    async def __call__(self, **_kw: Any) -> dict[str, Any]:
         return self.payload
 
 
@@ -35,7 +35,7 @@ class _Boom:
     def __init__(self, exc: Exception) -> None:
         self.exc = exc
 
-    async def __call__(self) -> dict[str, Any]:
+    async def __call__(self, **_kw: Any) -> dict[str, Any]:
         raise self.exc
 
 
@@ -45,7 +45,7 @@ async def test_三段顺序执行(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def _mk(tag: str, payload: dict[str, Any]) -> _Ok:
         class _Stage(_Ok):
-            async def __call__(self) -> dict[str, Any]:
+            async def __call__(self, **_kw: Any) -> dict[str, Any]:
                 order.append(tag)
                 return self.payload
 
@@ -220,3 +220,108 @@ async def test_阶段失败明细点名(monkeypatch: pytest.MonkeyPatch) -> None
     item = next(i for i in scan_step.items if i.name == "qb")
     assert item.status == "fail"
     assert "连接超时" in (item.detail or "")
+
+
+async def test_孤儿扫描失败标_warn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """③ 用 ``errors`` 表达失败 → 顶层步骤必须 ``warn``.
+
+    2026-11-21 修：``_run_stage`` 原先只认 ``failures`` /
+    ``failed_downloaders``，而孤儿扫描返回的是 ``errors``（「下载器名: 原因」
+    字符串）→ 扫盘全失败时作业历史**显示正常**（故障被伪装成正常）。
+    """
+
+    async def _fake_scan() -> dict[str, Any]:
+        return {"summary": "巡查完成", "scanned_downloaders": 1}
+
+    monkeypatch.setattr(
+        cross_seed_maintenance, "_run_scan_cross_seed", _fake_scan
+    )
+    monkeypatch.setattr(
+        "app.services.disk_rotation.run_disk_rotation",
+        _Ok({"summary": "未超阈", "deleted": 0}),
+    )
+    monkeypatch.setattr(
+        "app.services.cross_seed_orphan.run_scan_orphans",
+        _Ok({
+            "summary": "2 个下载器，0 个孤儿，2 个扫描失败",
+            "scanned_downloaders": 2,
+            "orphan_count": 0,
+            "errors": ["tr: 挂载不可读", "qb: 拉取超时"],
+        }),
+    )
+
+    result = await cross_seed_maintenance.run_cross_seed_maintenance()
+    orphan_step = result["steps"][2]
+    assert orphan_step.status == "warn", "孤儿扫描失败必须让步骤变 warn"
+    # 明细要点名「哪台 / 什么原因」
+    assert orphan_step.items is not None
+    names = {i.name for i in orphan_step.items}
+    assert {"tr", "qb"} <= names
+    assert all(i.status == "fail" for i in orphan_step.items)
+
+
+async def test_巡查失败的下载器传给磁盘流转(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """① 的失败名单必须传给 ②（快照没更新的下载器不许参与删除）.
+
+    顺序保证 ≠ 数据有效：① 抓取失败时**不写**快照，② 若无条件读就会按
+    几天前的 hash 列表执行不可逆删除。
+    """
+    seen: dict[str, Any] = {}
+
+    async def _fake_scan() -> dict[str, Any]:
+        return {
+            "summary": "1/2 个下载器成功",
+            "scanned_downloaders": 1,
+            "failures": [
+                {"downloader_id": 7, "downloader_name": "tr", "error": "连接超时"},
+            ],
+        }
+
+    async def _fake_rotation(**kw: Any) -> dict[str, Any]:
+        seen.update(kw)
+        return {"summary": "已跳过 tr", "deleted": 0}
+
+    monkeypatch.setattr(
+        cross_seed_maintenance, "_run_scan_cross_seed", _fake_scan
+    )
+    monkeypatch.setattr(
+        "app.services.disk_rotation.run_disk_rotation", _fake_rotation
+    )
+    monkeypatch.setattr(
+        "app.services.cross_seed_orphan.run_scan_orphans",
+        _Ok({"summary": "无孤儿", "orphan_count": 0}),
+    )
+
+    await cross_seed_maintenance.run_cross_seed_maintenance()
+
+    assert seen.get("skip_downloader_ids") == frozenset({7})
+
+
+async def test_无失败时不传多余参数(monkeypatch: pytest.MonkeyPatch) -> None:
+    """① 全部成功 → 调 ② 时不传 ``skip_downloader_ids``（保持原调用形态）."""
+
+    async def _fake_scan() -> dict[str, Any]:
+        return {"summary": "2/2 个下载器成功", "scanned_downloaders": 2}
+
+    seen: dict[str, Any] = {}
+
+    async def _fake_rotation(**kw: Any) -> dict[str, Any]:
+        seen.update(kw)
+        return {"summary": "未超阈", "deleted": 0}
+
+    monkeypatch.setattr(
+        cross_seed_maintenance, "_run_scan_cross_seed", _fake_scan
+    )
+    monkeypatch.setattr(
+        "app.services.disk_rotation.run_disk_rotation", _fake_rotation
+    )
+    monkeypatch.setattr(
+        "app.services.cross_seed_orphan.run_scan_orphans",
+        _Ok({"summary": "无孤儿", "orphan_count": 0}),
+    )
+
+    await cross_seed_maintenance.run_cross_seed_maintenance()
+
+    assert "skip_downloader_ids" not in seen

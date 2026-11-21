@@ -152,6 +152,17 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         note="删磁盘数据不可恢复，删除前会记审计日志",
     ),
     ParamSpec(
+        key="disk_rotation_dry_run",
+        label="命中时模式",
+        default=0,
+        min=0,
+        max=1,
+        job="cross_seed_maintenance",
+        options=((0, "实际执行"), (1, "仅预演（只记计划）")),
+        note="预演只计算「会删哪几组、能释放多少」并写日志，不发任何删除指令"
+        "——首次调阈值 / 改动作前先跑一轮",
+    ),
+    ParamSpec(
         key="scrape_enabled",
         label="启用刮削",
         default=0,

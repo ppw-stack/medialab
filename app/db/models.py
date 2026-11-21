@@ -408,10 +408,16 @@ class CrossSeedSnapshot(Base):
     #: 按下载目录分布（JSON 数组：
     #: ``[{dir, count, bytes, total_bytes}]``，bytes = 声明占用）
     by_dir: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
-    #: 分组统计明细（JSON 数组：``[{name, size_gb, count, sample_hash,
-    #: hashes, added_at}]``）。``added_at`` 是 ``{hash: unix秒}`` 映射，
-    #: 只存有时间的种子（disk_rotation 同档内先删旧的）；旧快照行没有
-    #: 该 key，排序时全部降级（行为与加此特性前一致）。
+    #: 分组统计明细（JSON 数组：``[{name, size_gb, size_bytes, count,
+    #: sample_hash, hashes, added_at}]``）。
+    #:
+    #: - ``size_bytes``：精确字节数（2026-11-21 加）——``size_gb`` 只有两位
+    #:   小数，disk_rotation 的删除预算/释放量记账按它算会累积舍入误差；
+    #:   旧快照行没有该 key，消费方回退 ``size_gb``（优雅降级）
+    #: - ``added_at``：``{hash: unix秒}`` 映射，只存有时间的种子
+    #:   （disk_rotation 同档内先删旧的）
+    #: - ``hashes``：完整 40 位 infohash 列表——**删除以组为单位**，整组
+    #:   一次下发（只删一半既释放不了空间，还会让余下副本 missingFiles）
     stats: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
     #: 异常种子明细（JSON 数组：``[{id, hash, name, size_gb, status,
     #: anomaly_type, error_code, error_string}]``）

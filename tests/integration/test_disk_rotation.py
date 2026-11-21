@@ -81,8 +81,13 @@ async def _add_snapshot(
     disk_free: int | None,
     disk_total: int | None,
     stats: list[dict[str, object]],
+    scanned_at: str | None = None,
 ) -> None:
-    """直接写一行 cross_seed_snapshot."""
+    """直接写一行 cross_seed_snapshot.
+
+    ``scanned_at`` 不传 = ORM 默认（当前北京时间，即"新鲜"）；
+    传旧时间可测「快照过期 → 跳过删除」。
+    """
     async with session_scope() as session:
         row = CrossSeedSnapshot(
             downloader_id=dl_id,
@@ -92,6 +97,7 @@ async def _add_snapshot(
             disk_free_bytes=disk_free,
             disk_total_bytes=disk_total,
             stats=stats,
+            **({"scanned_at": scanned_at} if scanned_at else {}),
         )
         session.add(row)
 
@@ -103,13 +109,14 @@ def _stat(
     hashes: list[str],
     *,
     added_at: dict[str, int] | None = None,
+    size_bytes: int | None = None,
 ) -> dict[str, object]:
     """构造一条 stats 项.
 
     hashes 必须是 40 位完整 hex（删除要用）。
     added_at: hash → unix 秒映射（可选；disk_rotation 同档先删旧的用）。
     """
-    return {
+    payload: dict[str, object] = {
         "name": name,
         "size_gb": size_gb,
         "count": count,
@@ -117,6 +124,9 @@ def _stat(
         "hashes": hashes,
         "added_at": added_at or {},
     }
+    if size_bytes is not None:
+        payload["size_bytes"] = size_bytes
+    return payload
 
 
 def _hash(prefix: str, idx: int) -> str:
@@ -645,3 +655,172 @@ async def test_bucket_priority_preserved_with_added_at(
     # 删独苗 A(10) 一次达标；多副本 B 不该被删
     assert result["deleted"] == 1
     assert adapter.removed[0][0] == [_hash("a", 1)], "档位优先：独苗先删"
+
+
+# ------------------------------------------------------------------ 15. 整组删（原子）
+async def test_multi_copy_group_deleted_atomically(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """多副本组必须**整组**一次删完，不许只删其中几个.
+
+    为什么要这样：同 ``(name, size)`` 的多个 infohash 指向**同一份磁盘数据**
+    （实测 4646 个种子 → 2237 份数据）。只删一个成员 → 一个字节都不释放；
+    删数据模式下删一个成员 → 共用文件被删，余下副本立刻 ``missingFiles``。
+
+    构造：total=100GB free=1GB → 需释放 89GB，候选只有 5GB + 10GB → 全删。
+    批量上限压到 2，让「1 个独苗 + 3 副本组」必须分成两批——锁住
+    「组不被切进两个批次」。
+    """
+    import app.services.disk_rotation as dr
+
+    monkeypatch.setattr(dr, "DELETE_BATCH_SIZE", 2)
+
+    multi = [_hash("m", 1), _hash("m", 2), _hash("m", 3)]
+    dl_id = await _add_downloader("dl1")
+    await _add_snapshot(
+        dl_id,
+        "dl1",
+        disk_free=1 * 1024**3,
+        disk_total=100 * 1024**3,
+        stats=[
+            _stat("Solo.A", 5.0, 1, [_hash("a", 1)]),
+            _stat("Multi.B", 10.0, 3, multi),
+        ],
+    )
+    adapter = _FakeAdapter()
+    _svc(_factory_with({dl_id: adapter}), monkeypatch)
+
+    result = await run_disk_rotation()
+
+    assert result["deleted_groups"] == 2
+    assert result["deleted"] == 4, "1 个独苗 + 3 个副本全删"
+    # 3 个副本在**同一次** remove 里（组没被拆开）
+    assert any(set(hashes) == set(multi) for hashes, _ in adapter.removed), (
+        f"多副本组应整组一次删：{adapter.removed}"
+    )
+
+
+# ------------------------------------------------------------------ 16. 释放上界 / 不可达
+async def test_release_is_capped_by_releasable_data(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """需释放量 > 辅种可释放量 → 只删能释放的，并标「目标不可达」.
+
+    分区被非辅种数据占满时（媒体库 / 备份），辅种全删光也补不上差额。
+    旧实现会把候选全删并把"需求"当释放量记账（幽灵数字）；
+    现在按 `min(need, max_releasable)` 收敛，并在结果里点名不可达。
+    """
+    size = 1 * 1024**3  # 1 GiB（需释放 9 GiB → 远远不够，构出"不可达"）
+    dl_id = await _add_downloader("dl1")
+    await _add_snapshot(
+        dl_id,
+        "dl1",
+        disk_free=1 * 1024**3,
+        disk_total=100 * 1024**3,
+        stats=[
+            _stat("Solo.A", 1.0, 1, [_hash("a", 1)], size_bytes=size),
+        ],
+    )
+    adapter = _FakeAdapter()
+    _svc(_factory_with({dl_id: adapter}), monkeypatch)
+
+    result = await run_disk_rotation()
+
+    assert result["unreachable_downloaders"] == 1
+    assert "不可达" in result["summary"]
+    assert result["deleted"] == 1
+    assert result["freed_bytes"] == size, "释放量只按真实删掉的数据记，不按需求记"
+    # 结果里保留**原始需求**（便于人工判断缺多少：need - max_releasable）
+    row = result["results"][0]
+    assert row["need_free_bytes"] > row["max_releasable_bytes"]
+    assert row["max_releasable_bytes"] == size
+    assert "缺" in result["summary"]
+
+
+# ------------------------------------------------------------------ 17. 预演模式
+async def test_dry_run_only_plans(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``disk_rotation_dry_run=1`` → 只算计划，不发任何删除指令."""
+    mgr = RuntimeParamManager()
+    mgr.set_memory("disk_rotation_threshold_pct", 90)
+    mgr.set_memory("disk_rotation_action", 1)
+    mgr.set_memory("disk_rotation_dry_run", 1)
+    mgr.set_memory("monitor_pre_pause_minutes", 10)
+    mgr.set_memory("monitor_delete_expired", 0)
+    mgr.set_memory("push_min_remaining_hours", 6)
+    mgr.set_memory("push_max_per_run", 20)
+    mgr.set_memory("push_download_interval_ms", 0)
+    set_runtime_params(mgr)
+
+    dl_id = await _add_downloader("dl1")
+    await _add_snapshot(
+        dl_id,
+        "dl1",
+        disk_free=1 * 1024**3,
+        disk_total=100 * 1024**3,
+        stats=[_stat("Solo.A", 10.0, 1, [_hash("a", 1)])],
+    )
+    adapter = _FakeAdapter()
+    _svc(_factory_with({dl_id: adapter}), monkeypatch)
+
+    result = await run_disk_rotation()
+
+    assert result["dry_run"] is True
+    assert result["planned_groups"] == 1
+    assert result["planned_torrents"] == 1
+    assert result["deleted"] == 0
+    assert adapter.removed == [], "预演不许发删除指令"
+    assert "[预演]" in result["summary"]
+
+
+# ------------------------------------------------------------------ 18. 快照过期
+async def test_stale_snapshot_skips_deletion(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """快照超过 6 小时 → 跳过删除（不可逆动作不赌陈旧判断）.
+
+    ① 巡查失败时**不写**快照：连续失败几天的话，② 手里的 hash 列表
+    可能完全过时（期间种子早就换过好几轮）。
+    """
+    dl_id = await _add_downloader("dl1")
+    await _add_snapshot(
+        dl_id,
+        "dl1",
+        disk_free=1 * 1024**3,
+        disk_total=100 * 1024**3,
+        stats=[_stat("Solo.A", 10.0, 1, [_hash("a", 1)])],
+        scanned_at="2026-11-01 03:17:00",  # 20 天前
+    )
+    adapter = _FakeAdapter()
+    _svc(_factory_with({dl_id: adapter}), monkeypatch)
+
+    result = await run_disk_rotation()
+
+    assert result["triggered_downloaders"] == 0
+    assert adapter.removed == [], "过期快照不许删任何东西"
+    errs = [r.get("error") or "" for r in result["results"]]
+    assert any("过期" in e for e in errs)
+
+
+# ------------------------------------------------------------------ 19. 本轮抓取失败
+async def test_skip_downloader_ids_respected(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """① 本轮抓取失败的下载器 → ② 跳过（快照没更新，按旧数据删不许）."""
+    dl_id = await _add_downloader("dl1")
+    await _add_snapshot(
+        dl_id,
+        "dl1",
+        disk_free=1 * 1024**3,
+        disk_total=100 * 1024**3,
+        stats=[_stat("Solo.A", 10.0, 1, [_hash("a", 1)])],
+    )
+    adapter = _FakeAdapter()
+    _svc(_factory_with({dl_id: adapter}), monkeypatch)
+
+    result = await run_disk_rotation(skip_downloader_ids=frozenset({dl_id}))
+
+    assert adapter.removed == []
+    errs = [r.get("error") or "" for r in result["results"]]
+    assert any("巡查抓取失败" in e for e in errs)
