@@ -137,6 +137,17 @@ class CandidateGroup:
     hashes: tuple[str, ...]
     #: 组内最早的加入时刻（unix 秒）；None = 组内缺时间（降级到无时间档）
     oldest_added_at: int | None = None
+    #: 组内**此刻不该被删**的 hash（校验中 / 下载中，来自快照）。
+    #:
+    #: 非空 → 整组本轮跳过：删组是整份数据的原子操作，组内有成员正在校验
+    #: 或下载时删它，既可能被下载器拒绝，也会丢半个任务（与 AGENTS
+    #: 「校验中的种子绝不删除」同口径）。
+    blocked_hashes: tuple[str, ...] = ()
+
+    @property
+    def deletable(self) -> bool:
+        """本轮能否删这个组（组内没有校验中/下载中的成员）。"""
+        return not self.blocked_hashes
 
     def sort_key(self) -> tuple[int, int, int, int, str]:
         """价值低→高排序键。
@@ -177,6 +188,8 @@ class RotationResult:
     unreachable: bool = False
     #: 候选组数（按价值排序后的组数，未截断）
     candidate_count: int = 0
+    #: 因「组内有成员在校验/下载」而本轮跳过的组数
+    blocked_groups: int = 0
     #: 计划删除的组数 / 种子数 / 字节（预演模式看这三个）
     planned_groups: int = 0
     planned_torrents: int = 0
@@ -206,6 +219,7 @@ class RotationResult:
             "max_releasable_bytes": self.max_releasable_bytes,
             "unreachable": self.unreachable,
             "candidate_count": self.candidate_count,
+            "blocked_groups": self.blocked_groups,
             "planned_groups": self.planned_groups,
             "planned_torrents": self.planned_torrents,
             "planned_bytes": self.planned_bytes,
@@ -383,6 +397,7 @@ async def run_disk_rotation(
     total_planned_groups = sum(r.planned_groups for r in results)
     total_planned_torrents = sum(r.planned_torrents for r in results)
     total_planned_bytes = sum(r.planned_bytes for r in results)
+    total_blocked_groups = sum(r.blocked_groups for r in results)
     # 点名：哪些下载器触发了 / 哪些没触发（用百分比）
     trigger_detail = ", ".join(
         f"{r.downloader_name} {r.usage_pct:.0f}%"
@@ -399,13 +414,20 @@ async def run_disk_rotation(
         else ""
     )
     unreachable_detail = (
-        "，目标不可达需人工介入（"
+        "，目标不可达（"
         + "、".join(
             f"{r.downloader_name} 缺 "
             f"{(r.need_free_bytes - r.max_releasable_bytes) / 1024**3:.2f} GB"
+            # 有冻结组时缺口可能是**临时**的（下轮解冻就能补上）——
+            # 不说清这一点会让人以为必须手工介入
+            + (
+                f"，其中 {r.blocked_groups} 组本轮冻结"
+                if r.blocked_groups
+                else ""
+            )
             for r in unreachable
         )
-        + "）"
+        + ("）" if all(r.blocked_groups for r in unreachable) else "，需人工介入）")
         if unreachable
         else ""
     )
@@ -446,6 +468,11 @@ async def run_disk_rotation(
         + (f"，{total_failed} 个删除失败" if total_failed else "")
         + unreachable_detail
         + skip_detail
+        + (
+            f"，{total_blocked_groups} 个组在校验/下载（本轮跳过）"
+            if total_blocked_groups
+            else ""
+        )
         + fail_detail
     )
     return {
@@ -460,6 +487,7 @@ async def run_disk_rotation(
         "planned_groups": total_planned_groups,
         "planned_torrents": total_planned_torrents,
         "planned_bytes": total_planned_bytes,
+        "blocked_groups": total_blocked_groups,
         "summary": summary,
         "results": [r.to_dict() for r in results],
         "failures": failures,
@@ -487,7 +515,12 @@ async def run_disk_rotation(
                 ),
                 total_planned_groups if dry_run else total_groups,
                 action_text
-                + (f"，{total_failed} 失败" if total_failed else ""),
+                + (f"，{total_failed} 失败" if total_failed else "")
+                + (
+                    f"，{total_blocked_groups} 组校验/下载中（跳过）"
+                    if total_blocked_groups
+                    else ""
+                ),
             ),
         ],
     }
@@ -543,15 +576,33 @@ async def _rotate_one(
 
     # 候选**组**过滤 + 价值排序
     groups = _select_groups(stats, downloader_name)
+    # 组内有成员在校验/下载 → 本轮整组跳过（删组是整份数据的原子操作）
+    blocked_groups = [g for g in groups if not g.deletable]
+    groups = [g for g in groups if g.deletable]
+    if blocked_groups:
+        logger.warning(
+            "disk_rotation 下载器=%s 跳过 %d 个组（组内有成员在 校验/下载）: %s",
+            downloader_name,
+            len(blocked_groups),
+            "、".join(g.name for g in blocked_groups[:5])
+            + ("…" if len(blocked_groups) > 5 else ""),
+        )
     if not groups:
+        # 区分两种「没候选」：真的没有可用组 vs 全被校验/下载冻结
+        reason = (
+            f"{len(blocked_groups)} 个候选组全部在校验/下载（本轮跳过，下轮再试）"
+            if blocked_groups
+            else "无候选种子（快照 stats 为空或没有完整 hash）"
+        )
         return RotationResult(
             downloader_id=downloader_id,
             downloader_name=downloader_name,
             usage_pct=usage_pct,
             triggered=True,
             need_free_bytes=need_free_raw,
+            blocked_groups=len(blocked_groups),
             dry_run=dry_run,
-            error="无候选种子（快照 stats 为空或没有完整 hash）",
+            error=reason,
         )
 
     # 可释放上界：只有**整组删空**才真的释放那份共享数据
@@ -591,6 +642,7 @@ async def _rotate_one(
             max_releasable_bytes=max_releasable,
             unreachable=unreachable,
             candidate_count=len(groups),
+            blocked_groups=len(blocked_groups),
             planned_groups=len(planned),
             planned_torrents=planned_torrents,
             planned_bytes=planned_bytes,
@@ -610,6 +662,7 @@ async def _rotate_one(
         max_releasable_bytes=max_releasable,
         unreachable=unreachable,
         candidate_count=len(groups),
+        blocked_groups=len(blocked_groups),
         planned_groups=len(planned),
         planned_torrents=planned_torrents,
         planned_bytes=planned_bytes,
@@ -711,12 +764,16 @@ def _select_groups(
             int(v) for k, v in added_map.items()
             if isinstance(v, (int, float)) and v
         ]
+        blocked = tuple(
+            str(h).lower() for h in (s.get("blocked_hashes") or [])
+        )
         groups.append(CandidateGroup(
             name=name,
             size_bytes=size_bytes,
             count=count,
             hashes=tuple(hashes),
             oldest_added_at=min(stamps) if stamps else None,
+            blocked_hashes=blocked,
         ))
 
     if skipped_bad:

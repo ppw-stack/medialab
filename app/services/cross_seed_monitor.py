@@ -100,6 +100,25 @@ def _detect_anomaly(error_code: int, error_string: str) -> str | None:
     return None
 
 
+#: **删除时要避开**的下载器状态（2026-11-21 加）。
+#:
+#: ``disk_rotation`` 删的是「同名同大小」的一整组数据（组内多个 infohash
+#: 共用同一份文件），所以只要组内有成员**此刻正在校验或下载**，整组都不该动：
+#:
+#: - ``CHECKING``：校验期完成度判定不可靠，且删数据后 qB/TR 可能重建文件
+#:   （与 AGENTS「校验中的种子绝不删除」同一条口径）
+#: - ``DOWNLOADING`` / ``STALLED_DL``：数据还没下完，删掉等于丢半个任务
+#:
+#: 刻意**不含** ``SEEDING`` / ``UPLOADING``——做种是辅种的正常稳态，
+#: 把它们算成"不可删"会让流转永远没有候选。也不含 ``PAUSED_*``：已暂停
+#: 的副本不参与传输，删它是安全的（暂停≠数据不可用）。
+_DELETE_BLOCKED_STATES: frozenset[TorrentState] = frozenset({
+    TorrentState.CHECKING,
+    TorrentState.DOWNLOADING,
+    TorrentState.STALLED_DL,
+})
+
+
 #: **不触发暂停**的异常类型。
 #:
 #: tracker 报错（HTTP 502/522）是**网络/服务端**问题，与本地数据无关——
@@ -188,6 +207,12 @@ class StatsRow:
     #: 一个两位小数值会累积误差。故另存一份精确值；旧快照行没有这个字段 →
     #: 消费方回退 ``size_gb``（优雅降级，与 ``added_at`` 同款）。
     size_bytes: int = 0
+    #: 该组内**此刻不该被删**的 hash（校验中 / 下载中）。
+    #:
+    #: ``disk_rotation`` 按组删数据——组内只要有一个成员正在校验或下载，
+    #: 整组跳过（删一半既释放不了空间，还会让余下副本 ``missingFiles``）。
+    #: 旧快照行没有这个字段 → 视为空（与加此特性前行为一致）。
+    blocked_hashes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -198,6 +223,7 @@ class StatsRow:
             "sample_hash": self.sample_hash,
             "hashes": self.hashes,
             "added_at": self.added_at,
+            "blocked_hashes": self.blocked_hashes,
         }
 
 
@@ -720,6 +746,9 @@ class CrossSeedMonitorService:
             if state.is_inflight:
                 inflight += 1
 
+            # 删除豁免：校验中 / 下载中的成员 → 该组本轮不许删
+            blocked = state in _DELETE_BLOCKED_STATES
+
             # 异常检测（**同时看 error 码与文案**——只看文案会漏掉
             # TR error=3「本地数据损坏」与 error=2「tracker 报错」，
             # 实测 156 个带 error 的种子会全部漏判）
@@ -760,10 +789,15 @@ class CrossSeedMonitorService:
                     # hash → added_at(unix 秒) 映射（disk_rotation 同档先删旧的）。
                     # 只存有时间的种子，缺失时间的不入映射（排序时回落到无时间档）
                     "added_at": {},
+                    # 组内**此刻不该被删**的 hash（校验中 / 下载中）——
+                    # disk_rotation 见到非空就整组跳过
+                    "blocked_hashes": [],
                 }
             groups[key]["count"] += 1
             if t_hash:
                 groups[key]["hashes"].append(t_hash)
+                if blocked:
+                    groups[key]["blocked_hashes"].append(t_hash)
                 # 加入时间归一：None / 0 都不入映射（与适配器层一致）
                 added_raw = t.get("added_at")
                 if isinstance(added_raw, (int, float)) and added_raw:

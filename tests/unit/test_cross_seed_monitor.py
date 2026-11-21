@@ -269,3 +269,81 @@ async def test_pause_mixes_exempt_and_normal(factory: object) -> None:
 
     assert stopped == 1
     assert spy.paused == [["a" * 40]]
+
+
+# ------------------------------------------------------------------ 删除豁免
+
+
+def _torrent(**kw: object) -> dict[str, object]:
+    """构造一条 ``list_torrents_with_errors`` 契约里的种子。"""
+    base: dict[str, object] = {
+        "id": 1,
+        "hash": "a" * 40,
+        "name": "Movie.X",
+        "size": 1024**3,
+        "status": 6,
+        "error_code": 0,
+        "error_string": "",
+        "state": "seeding",
+        "completed_bytes": 1024**3,
+        "added_at": 100,
+    }
+    base.update(kw)
+    return base
+
+
+def _result(torrents: list[dict[str, object]]):
+    """跑一遍 ``_build_result``（不碰 DB / 网络）。
+
+    ``_build_result`` 只用到 ``row.id`` / ``row.name``，故用 SimpleNamespace
+    当行对象，省掉建库。
+    """
+    from types import SimpleNamespace
+
+    from app.services.cross_seed_monitor import CrossSeedMonitorService
+
+    row = SimpleNamespace(id=1, name="dl1")
+    return CrossSeedMonitorService._build_result(object(), row, torrents)  # type: ignore[arg-type]
+
+
+def test_blocked_hashes_marks_checking_and_downloading() -> None:
+    """组内有成员在**校验 / 下载** → 记进 ``blocked_hashes``.
+
+    ``disk_rotation`` 删的是整组（多个 infohash 共用同一份文件），组内有人
+    正在校验或下载时整组都不该动：校验期完成度判定不可靠，删除可能被下载器
+    拒绝；下载中的删了等于丢半个任务。
+    """
+    h_check, h_seed, h_dl = "a" * 40, "b" * 40, "c" * 40
+    result = _result([
+        _torrent(hash=h_check, state="checking"),
+        _torrent(hash=h_seed, state="seeding", completed_bytes=1024**3),
+        _torrent(hash=h_dl, state="downloading", completed_bytes=1024**2),
+    ])
+
+    stats = result.stats[0]
+    assert set(stats.blocked_hashes) == {h_check, h_dl}
+    assert h_seed not in stats.blocked_hashes
+    # 组仍然是完整的（hashes 不受影响——删除方自己决定是否跳过）
+    assert set(stats.hashes) == {h_check, h_seed, h_dl}
+
+
+def test_blocked_hashes_ignores_seeding_and_paused() -> None:
+    """做种 / 已暂停**不算**冻结——否则流转永远没有候选。
+
+    辅种的正常稳态就是做种；已暂停的副本不参与传输，删它是安全的。
+    """
+    result = _result([
+        _torrent(hash="a" * 40, state="seeding", completed_bytes=1024**3),
+        _torrent(hash="b" * 40, state="pausedUP", completed_bytes=1024**3),
+        _torrent(hash="c" * 40, state="stalledDL", completed_bytes=0),
+    ])
+
+    stats = result.stats[0]
+    # 只有 stalledDL（没下完）被冻结
+    assert stats.blocked_hashes == ["c" * 40]
+
+
+def test_blocked_hashes_empty_for_legacy_snapshot_shape() -> None:
+    """旧快照风格（无 blocked_hashes 键）→ 组默认不冻结（行为与加此特性前一致）。"""
+    result = _result([_torrent(hash="a" * 40, state="seeding")])
+    assert result.stats[0].blocked_hashes == []

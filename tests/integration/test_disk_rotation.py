@@ -110,6 +110,7 @@ def _stat(
     *,
     added_at: dict[str, int] | None = None,
     size_bytes: int | None = None,
+    blocked_hashes: list[str] | None = None,
 ) -> dict[str, object]:
     """构造一条 stats 项.
 
@@ -126,6 +127,8 @@ def _stat(
     }
     if size_bytes is not None:
         payload["size_bytes"] = size_bytes
+    if blocked_hashes:
+        payload["blocked_hashes"] = blocked_hashes
     return payload
 
 
@@ -824,3 +827,65 @@ async def test_skip_downloader_ids_respected(
     assert adapter.removed == []
     errs = [r.get("error") or "" for r in result["results"]]
     assert any("巡查抓取失败" in e for e in errs)
+
+
+# ------------------------------------------------------------------ 20. 校验/下载中整组跳过
+async def test_group_with_checking_member_is_skipped(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """组内有成员在**校验中** → 整组本轮跳过，改删下一组.
+
+    删组是整份数据的原子操作：组内有人正在 recheck 时删它，完成度判定不可靠，
+    qB/TR 还可能重建文件（AGENTS：校验中的种子绝不删除）。
+    """
+    frozen = _hash("f", 1)
+    dl_id = await _add_downloader("dl1")
+    await _add_snapshot(
+        dl_id,
+        "dl1",
+        disk_free=1 * 1024**3,
+        disk_total=100 * 1024**3,
+        stats=[
+            # 独苗，但正在校验 → 跳过
+            _stat("Frozen.A", 20.0, 1, [frozen], blocked_hashes=[frozen]),
+            # 另一个独苗，正常 → 删它
+            _stat("Solo.B", 10.0, 1, [_hash("b", 1)]),
+        ],
+    )
+    adapter = _FakeAdapter()
+    _svc(_factory_with({dl_id: adapter}), monkeypatch)
+
+    result = await run_disk_rotation()
+
+    removed = [h for batch in adapter.removed for h in batch[0]]
+    assert frozen not in removed, "校验中的组不许删"
+    assert _hash("b", 1) in removed
+    assert result["blocked_groups"] == 1
+    assert "校验/下载" in result["summary"]
+
+
+# ------------------------------------------------------------------ 21. 全部冻结
+async def test_all_groups_blocked_reports_reason(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """候选全被冻结 → 一个都不删，且原因写清是「校验/下载」而不是「没候选」."""
+    frozen = _hash("f", 1)
+    dl_id = await _add_downloader("dl1")
+    await _add_snapshot(
+        dl_id,
+        "dl1",
+        disk_free=1 * 1024**3,
+        disk_total=100 * 1024**3,
+        stats=[
+            _stat("Frozen.A", 20.0, 1, [frozen], blocked_hashes=[frozen]),
+        ],
+    )
+    adapter = _FakeAdapter()
+    _svc(_factory_with({dl_id: adapter}), monkeypatch)
+
+    result = await run_disk_rotation()
+
+    assert adapter.removed == []
+    assert result["blocked_groups"] == 1
+    err = result["results"][0]["error"] or ""
+    assert "校验/下载" in err, err
