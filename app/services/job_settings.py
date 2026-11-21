@@ -36,6 +36,7 @@ __all__ = [
     "load_crons",
     "load_enabled_states",
     "load_job_settings",
+    "merge_job_settings",
     "migrate_renamed_job",
     "prune_orphaned_settings",
     "save_cron",
@@ -134,6 +135,79 @@ async def save_cron(job_name: str, cron: str) -> None:
             )
         else:
             row.cron = cron
+
+
+async def merge_job_settings(
+    old_names: list[str],
+    new_name: str,
+    known_jobs: set[str],
+) -> bool:
+    """把**多个**旧作业的启停状态合并到新作业（作业合并时用）。
+
+    例：``push_free_torrents`` + ``monitor_free_window`` → ``push_and_monitor_free``
+    （2026-11-22 合并）。
+
+    与 :func:`migrate_renamed_job` 的差别只有两点：
+
+    1. 旧名是**一组**；
+    2. 启停取 **AND**（任一旧作业被用户停用过 → 新作业也停用）。
+
+    **为什么是 AND 而不是 OR**：合并后的作业同时承担两边的动作，任一边
+    被停用都说明用户不想要那半边行为——而合并作业没有「只停半边」的开关。
+    取 AND = 「只有两边都开着才自动开」，宁可少跑一轮让用户显式打开，
+    也不要在用户不知情时恢复他关掉的行为（推送会占带宽/额度，监测会暂停
+    种子，两边都不该被静默复活）。
+
+    **不搬 cron**：合并后频率语义变了（原来是两条不同节奏的 cron），
+    沿用任何一条都是错的——用代码里的新默认值（10 分钟心跳 + 内部节流）。
+
+    目标行已存在 → **不覆盖**（用户可能已经在新作业上改过）。
+
+    Returns:
+        是否发生了迁移（有旧行被消费）。
+    """
+    from sqlalchemy import delete
+
+    try:
+        async with session_scope() as session:
+            rows = (
+                await session.execute(
+                    select(SchedulerJobSetting).where(
+                        SchedulerJobSetting.job_name.in_(old_names)
+                    )
+                )
+            ).scalars().all()
+            if not rows:
+                return False
+            if new_name not in known_jobs:
+                # 新作业还没注册 → 不动（等它真被注册时再说）
+                return False
+
+            enabled = all(bool(r.enabled) for r in rows)
+            target = await session.get(SchedulerJobSetting, new_name)
+            if target is None:
+                session.add(
+                    SchedulerJobSetting(
+                        job_name=new_name,
+                        enabled=enabled,
+                        cron=None,
+                    )
+                )
+            await session.execute(
+                delete(SchedulerJobSetting).where(
+                    SchedulerJobSetting.job_name.in_(old_names)
+                )
+            )
+            logger.info(
+                "作业配置已合并：%s → %s（enabled=%s，cron 用新默认值）",
+                " + ".join(sorted(old_names)),
+                new_name,
+                enabled,
+            )
+            return True
+    except Exception as exc:
+        logger.warning("合并作业配置失败（可忽略）：%s", exc)
+        return False
 
 
 async def prune_orphaned_settings(known_jobs: set[str]) -> int:

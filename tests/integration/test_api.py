@@ -994,6 +994,40 @@ async def test_scheduler_jobs_carry_title_and_description(
         for job in jobs:
             assert job["title"].strip(), f"{job['name']} 缺中文名"
             assert job["description"].strip(), f"{job['name']} 缺描述"
+            # 业务模块（「定时任务」页按它分组）——空串会落进「其它」块
+            assert job["module"].strip(), f"{job['name']} 缺 module"
+            assert job["module_title"].strip(), f"{job['name']} 缺 module_title"
+            # 数据流依赖：没依赖时必须是 None（不是缺字段）——前端据此画链路
+            assert "depends_on" in job, f"{job['name']} 缺 depends_on 字段"
+            assert "min_trigger_interval_sec" in job, (
+                f"{job['name']} 缺 min_trigger_interval_sec 字段"
+            )
+
+        # modules 与 jobs[].module 必须自洽（前端按 modules 的顺序分组）
+        body = resp.json()
+        modules = body["modules"]
+        assert modules, "modules 不能为空"
+        known = {m["key"] for m in modules}
+        for job in jobs:
+            assert job["module"] in known, (
+                f"{job['name']} 的 module {job['module']!r} 不在 modules 里"
+            )
+        for m in modules:
+            assert m["title"].strip()
+            assert m["job_count"] == sum(
+                1 for j in jobs if j["module"] == m["key"]
+            ), f"{m['key']} 的 job_count 与 jobs 不一致"
+
+        # 两个业务域的作业都在（分开展示的前提）
+        assert {"seed", "media"} <= known
+
+        # 免费种推送与监测已合并为一个作业（2026-11-22），且**不挂依赖边**：
+        # cron 心跳（10 分钟）比推送门槛（30 分钟）还细，挂边是永不生效的死边
+        by_name = {j["name"]: j for j in jobs}
+        assert "push_and_monitor_free" in by_name
+        assert "push_free_torrents" not in by_name
+        assert "monitor_free_window" not in by_name
+        assert [n for n, j in by_name.items() if j["depends_on"]] == []
 
         # 新增的作业也不能漏（回归点）
         titles = {j["name"]: j["title"] for j in jobs}
@@ -1185,10 +1219,10 @@ async def test_runtime_params_monitor_delete_expired_roundtrip(
     这个参数控制"命中条件时删除种子（含磁盘数据）"——不可逆操作，
     故必须能通过 API 改，且值域被限制在 0/1（1=开删除，0=仅暂停）。
     """
-    # 1) 归属 monitor_free_window 作业（前端按 job 渲染配置弹窗）
+    # 1) 归属免费种合并作业（前端按 job 渲染配置弹窗）
     from app.services.runtime_params import specs_for_job
 
-    keys = [s.key for s in specs_for_job("monitor_free_window")]
+    keys = [s.key for s in specs_for_job("push_and_monitor_free")]
     assert "monitor_delete_expired" in keys
 
     # 2) 默认值是 0（仅暂停）

@@ -253,6 +253,31 @@
   - **注册日志必须打生效值**（`scheduler_center.list_job_cron(name)`），不是 `DEFAULT_CRON` 里的默认值——打默认值会在用户改过 cron 后与实际行为矛盾
   - DB 写失败时 API 返 500（配置已在内存生效但没存住）——与 toggle 端点同一处理
   - 契约由 `tests/unit/test_scheduler.py` + `tests/integration/test_job_settings.py` + `tests/integration/test_api.py` 固化
+- **「定时任务」页按业务域分「辅种」「媒体库」两栏**（2026-11-22 加入）：
+  - 菜单拆成同级的 **`/scheduler`（定时任务）** 与 **`/settings`（设置 · 环境变量）**，同属新的「系统」一级菜单——此前两者是 `/settings` 页里的两个 tab，找调度得先进「设置」，与它作为日常高频页面的地位不符
+  - **域真源是后端**：`JobSpec.module`（`app/services/job_registry.py:JobMeta.module` **必填**）+ `JOB_MODULES`（`app/services/scheduler.py`，key →「辅种」/「媒体库」，**与侧栏一级菜单同名**）。`GET /scheduler` 增下发 `jobs[].module` / `jobs[].module_title` 与顶层 `modules[{key,title,job_count}]`
+  - **前端不硬编码 job → 模块映射，也不自己排模块顺序**——两处顺序约定必然漂移（同 title/description 的教训）；`list_modules()` 按注册顺序返回，页面照抄
+  - 新增作业忘了声明 module → 落进「其它」块（仍可展示，但分组意义丢了）→ `test_job_meta_covers_all_jobs` 用「必须是 `JOB_MODULES` 的键」把它挡在测试里
+  - 归属口径：**看作业读写的表/协议属于哪个域**——`drain_task_queue`（辅种推送队列）属辅种域；`cleanup_link_cache`（302 中转缓存）/ `purge_dav_auth_cache` 属媒体库域
+  - 契约由 `tests/unit/test_scheduler.py` + `tests/integration/test_api.py` + `tests/integration/test_spa.py`（`/scheduler` 深链回退）固化
+- **作业触发 = 数据流（`depends_on`）+ cron 兜底**（2026-11-22 加入，`docs/scheduler-dataflow.md`）：
+  - ⚠️ **当前没有作业声明 `depends_on`**：原唯一用户 `push_free_torrents` 当天就与 `monitor_free_window` 合并为 **`push_and_monitor_free`**（见下一条）。合并后 cron 心跳（10 分钟）比推送门槛（30 分钟）更细，挂边是「永不生效的死边」，故不挂。机制与测试**保留**，供将来「真依赖 + 更粗 cron」的作业使用
+  - ⚠️ **cron 必须显著宽于门槛，否则边是空操作**：若 cron 仍是 `*/30` 而门槛也是 30 分钟，上游成功的时刻永远差一点够不到门槛，而 30 分钟正是 cron 自己醒的时刻——收益为 0。这条坑写进了 `JobSpec.depends_on` 的 docstring
+  - **语义是「触发时机」不是「数据正确性前提」**：上游失败时下游照旧按自己的 cron 跑（不级联失败）；只有**成功**才触发下游
+  - **三道防重复闸**：`_running` 集合（check→add 之间无 await，单事件循环原子；cron/upstream/手动共享）、门槛（基准是**上次开始**时间，用结束时间会让周期漂移成「门槛+耗时」）、`task_queue` 三层幂等（`idem_key` / 认领 / `push_status`）
+  - **频率不变密**：fetch 每小时 6 次成功，门槛只放行 2 次 → 推送仍 ≈2 次/小时，只是相位对齐拉取完成（「入库 → 推送」延迟从 ≤30 分钟降到 ≤10 分钟）
+  - **刻意不挂边的四个**：`drain_task_queue`（退避到期是时间的函数）、`monitor_free_window`（临期判定，需独立节奏）、`refresh_user_data`（弱边：push 每轮自读时魔）、`cross_seed_maintenance`（旁支，内部已是三段流水线；串进链会重演 2026-11-01「最重节点绑架全链」）
+  - **图校验在 `register_jobs` 末尾**（`scheduler_center.validate_graph()`）：逐条注册时校验会因注册顺序误报「上游未注册」；拼错/成环在启动即炸
+  - **任务认领已改为条件更新**（2026-11-22 加固，`task_queue.claim_one` / `claim_due`）：`UPDATE ... WHERE status='pending'` + `RETURNING`，不再「先读状态再改」——否则 push 的就地认领与 drain 的批量认领可能双双执行同一 task。依赖 SQLite ≥3.35 的 `RETURNING`
+  - 契约由 `tests/unit/test_scheduler.py`（成功才触发 / 失败不触发 / 门槛 / 停用或运行中不触发 / 环检测 / 下下发字段）+ `tests/unit/test_task_queue.py`（两 session 认领只有一个成功）+ `tests/integration/test_api.py` 固化
+- **免费种推送 + 窗口监测已合并为一个作业**（2026-11-22，`app/services/push_and_monitor.py`）：
+  - 作业名 **`push_and_monitor_free`**，cron **10 分钟心跳**（`5,15,…,55`）：监测每轮都跑（临期暂停是安全动作，不能被节流）；推送由**作业内部节流**到 ≥30 分钟一次（`PUSH_MIN_INTERVAL_SEC`，站点有限频）
+  - **顺序「先监测后推送」**：监测先暂停临期种子腾出下载器位置，再推新的
+  - **空转不刷新节流时间戳**（`selected == 0` / 未配下载器）：否则用户刚配好下载器也要白等 30 分钟；节流状态是**进程内**的，重启后首轮会立刻推一次（刻意，链路幂等）
+  - **两段各自容错**：一段抛错不影响另一段，失败进 `steps`；子服务的 `steps` 挂成 `children`——**必须保留 JobStep 对象**（`_to_payload`），直接 `asdict` 会把子步骤变成 dict，`isinstance` 失败 → 前端看不到逐站/逐种明细
+  - **配置迁移**（`job_settings.merge_job_settings`，启动期在 `apply_overrides` 之前）：两条旧行合并为一条，**启停取 AND**（任一边被停用 → 新作业也停用，不静默复活用户关掉的行为），**cron 不搬**（旧节奏对新作业是错的）
+  - **BREAKING**：`push_free_torrents` / `monitor_free_window` 两个 job 名不再存在（`POST /scheduler/{job}/…` 调旧名会 404）
+  - 契约由 `tests/unit/test_push_and_monitor.py`（编排/节流/容错/children）+ `tests/integration/test_job_settings.py`（合并迁移 AND 语义）+ `tests/unit/test_scheduler.py` + `tests/integration/test_api.py` 固化
 - **环境变量配置全部落库**（2026-10-26 加入，`app/services/env_settings.py` + `app/db/models.py:AppEnvSetting`）：
   - 与「调度配置全部落库」同构，但服务**字符串型**配置（与 `app_runtime_params` 的整型运行参数互不混用——避免 `value_str` 那种「为未来扩展」但实际从没用过的列承担新职责破坏现有契约）
   - 当前注册 `cross_seed_scan_dirs`（辅种扫描目录，逗号分隔多目录）；未来其它 env→DB 的字符串设置可同样在此注册
@@ -261,7 +286,7 @@
   - 启动期 `init_env_settings_async()` 必须在调度作业跑之前调用（孤儿扫描作业会读它）；**不放在 `scheduler_enabled` 分支里**——API 端点在调度器关闭时仍要可用（与 `init_runtime_params_async` 同一处理）
   - API 写入路径：DB 先 → 内存后（commit 失败时内存未变，作业不会拿到一个重启后就消失的值）
   - API 路由 `app/api/routes/env_settings.py`：`GET/PUT /api/v1/env-settings`
-  - 前端「设置 → 环境变量」tab（`web/src/pages/settings/EnvTab.vue`）——直接表单（不弹框），字段少 + 改后立即生效，弹框徒增一次点击
+  - 前端「设置」页（`web/src/pages/settings/EnvTab.vue`，挂在 `/settings`）——直接表单（不弹框），字段少 + 改后立即生效，弹框徒增一次点击
   - 契约由 `tests/unit/test_env_settings.py` + `tests/integration/test_api.py` + `tests/integration/test_db_models.py` 固化
 - **FR-3.6 AI 读码**（2026-10-22 加入，`app/core/ai.py`）：
   - 用于 hdsky 的 6 位图形验证码。**必须先放大 6 倍**再送模型：站点原图仅 150×40，同一模型直接读 0/8、放大后 8/8

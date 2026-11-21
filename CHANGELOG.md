@@ -10,7 +10,62 @@
 
 ## [Unreleased]
 
-（暂无）
+### Added
+
+- **`GET /api/v1/scheduler` 新增业务域分栏字段**（纯新增，向后兼容）：
+  - `jobs[]` 增 `module`（`seed` / `media`，作业所属业务模块）与
+    `module_title`（页面展示名，如「辅种域」）；
+  - 顶层增 `modules: [{key, title, job_count}]`（顺序 = 作业注册顺序，
+    即页面上的分组顺序）。
+
+  用途：面板「定时任务」页按业务域分成「辅种」「媒体库」两栏展示，
+  不再混排成一张清单。`module_title` 与侧栏一级菜单同名（辅种 / 媒体库）。
+  旧客户端忽略未知字段即可。
+
+- **`GET /api/v1/scheduler` 新增数据流依赖字段**（纯新增，向后兼容）：
+  `jobs[]` 增 `depends_on`（上游作业名，无依赖为 `null`）与
+  `min_trigger_interval_sec`（依赖触发门槛）。用途：面板画「上游 → 下游」
+  链路并标注触发条件。旧客户端忽略未知字段即可。
+
+### Changed
+
+- **面板菜单拆分「设置」**：`/settings` 原为「调度作业 + 环境变量」两个
+  tab，现拆成两个平级菜单——`/scheduler`（定时任务，辅种 / 媒体库分栏）与
+  `/settings`（设置 · 环境变量），并移入新的「系统」一级菜单。
+  两者都是 SPA 深链接，刷新仍回退到 `index.html`（无 HTTP 契约变化）。
+
+- **免费种推送与免费窗口监测合并为一个作业**（`push_and_monitor_free`）：
+
+  - 原两个作业 `push_free_torrents`（推送）与 `monitor_free_window`
+    （监测）合并；cron 统一为 **10 分钟心跳**（监测要求），推送由作业
+    **内部节流到 ≥30 分钟一次**（站点限频决定，与合并前频率一致）。
+  - **面板变化**：「定时任务 → 辅种」少一个作业卡片，配置弹框里两个作业的
+    运行参数（推送 + 监测共 5 项）合并到同一个弹框。
+  - **配置迁移**（启动期自动执行）：`scheduler_job_settings` 里两条旧行合并为
+    一条，**启停取 AND**——任一边被用户停用过，新作业也停用（不静默复活用户
+    关掉的行为）；**cron 不搬**（旧节奏对新作业是错的），走代码默认值。
+  - **历史**：`job_runs` 里旧作业名的记录保留（仍可查），新作业从合并后开始记账。
+  - **依赖边变化**：`push_and_monitor_free` **不声明** `depends_on`——10 分钟心跳
+    已比 30 分钟推送门槛更细，上游触发不会带来更早推送。`depends_on` /
+    `min_trigger_interval_sec` 机制保留但当前无作业使用（`GET /scheduler` 仍下发，
+    值为 `null` / `0`）。
+  - **BREAKING（对调用 `POST /scheduler/{job}/...` 的脚本）**：`push_free_torrents`
+    / `monitor_free_window` 这两个 job 名不再存在，调用会 404；改用
+    `push_and_monitor_free`。`GET /scheduler` 的 `jobs[]` 里也不会再出现旧名。
+
+- **作业触发新增「数据流」能力**（`depends_on` + `min_trigger_interval_sec`）：
+
+  上游作业本轮**成功后**可主动唤醒下游（"数据流触发"），cron 退为兜底。语
+  义是**触发时机**而非数据正确性前提：上游失败时下游照旧按自己的 cron 跑。
+
+  **当前没有作业使用它**——原唯一用户 `push_free_torrents` 已与
+  `monitor_free_window` 合并为 `push_and_monitor_free`（见上一条），合并后
+  cron 心跳（10 分钟）比推送门槛（30 分钟）更细，挂边等于永不生效。机制与
+  测试保留，供将来「真依赖 + 更粗 cron」的作业使用。
+
+  **注意**：挂边时 `cron` 必须**显著宽于**门槛，否则边是空操作（上游成功
+  的时刻永远差一点够不到门槛，而那一刻 cron 自己也会醒）。`GET /scheduler`
+  会下发 `depends_on` / `min_trigger_interval_sec`，当前全为 `null` / `0`。
 
 ## [2.0.0] - 2026-11-21
 

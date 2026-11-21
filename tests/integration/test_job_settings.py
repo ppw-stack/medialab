@@ -20,6 +20,7 @@ from app.services.job_settings import (
     load_crons,
     load_enabled_states,
     load_job_settings,
+    merge_job_settings,
     migrate_renamed_job,
     prune_orphaned_settings,
     save_cron,
@@ -224,6 +225,53 @@ async def test_migrate_renamed_job_noop_when_source_missing(db: None) -> None:
 
 
 # ------------------------------------------------------------------ 孤儿清理
+
+
+# ------------------------------------------------------------------ 作业合并
+
+
+async def test_merge_job_settings_ands_enabled_states(db: None) -> None:
+    """两个旧作业合成一个：启停取 **AND**，cron 用新默认值。
+
+    2026-11-22 合并 `push_free_torrents` + `monitor_free_window`。任一边被
+    用户停用过 → 新作业也停用（合并作业没有「只停半边」的开关，宁可不跑
+    也不要静默复活用户关掉的行为）。
+    """
+    async with session_scope() as session:
+        session.add(
+            SchedulerJobSetting(
+                job_name="push_free_torrents", enabled=True, cron="0 */2 * * *"
+            )
+        )
+        session.add(
+            SchedulerJobSetting(
+                job_name="monitor_free_window",
+                enabled=False,
+                cron="5,15,25,35,45,55 * * * *",
+            )
+        )
+        await session.commit()
+
+    merged = await merge_job_settings(
+        ["push_free_torrents", "monitor_free_window"],
+        "push_and_monitor_free",
+        {"push_and_monitor_free"},
+    )
+    assert merged is True
+
+    rows = {r.job_name: r for r in await _rows()}
+    assert set(rows) == {"push_and_monitor_free"}
+    assert rows["push_and_monitor_free"].enabled is False
+    # cron 不搬（旧的节奏对新作业是错的）→ 留空 = 用代码默认值
+    assert rows["push_and_monitor_free"].cron is None
+
+
+async def test_merge_job_settings_noop_without_old_rows(db: None) -> None:
+    """旧行不存在（全新部署）→ 什么都没发生，也不凭空建行。"""
+    assert await merge_job_settings(
+        ["push_free_torrents"], "push_and_monitor_free", {"push_and_monitor_free"}
+    ) is False
+    assert await _rows() == []
 
 
 async def test_prune_orphaned_settings_removes_unknown_jobs(db: None) -> None:

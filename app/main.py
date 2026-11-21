@@ -159,6 +159,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from app.services.job_settings import (
             load_crons,
             load_enabled_states,
+            merge_job_settings,
             migrate_renamed_job,
             prune_orphaned_settings,
         )
@@ -169,6 +170,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         known_jobs = {meta.name for meta in JOB_META}
         await migrate_renamed_job(
             "scan_cross_seed", "cross_seed_maintenance", known_jobs
+        )
+        # 2026-11-22：免费种推送 + 窗口监测合并为一个作业（两旧 → 一新，
+        # 启停取 AND：任一边被停用过，新作业也停用——不静默复活用户关掉的
+        # 行为）。
+        await merge_job_settings(
+            ["push_free_torrents", "monitor_free_window"],
+            "push_and_monitor_free",
+            known_jobs,
         )
         await prune_orphaned_settings(known_jobs)
 

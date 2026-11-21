@@ -5,13 +5,14 @@ import type { EnvSettingsView } from '../../types'
 import { message } from 'ant-design-vue'
 
 /**
- * 环境变量配置 tab。
+ * 环境变量配置（「设置」页的主体内容）。
  *
- * 与 SchedulerTab 平行——本 tab 服务「字符串型」DB 持久化配置
- * （辅种扫描目录 / 未来其它 env→DB 字符串设置），SchedulerTab
- * 服务「调度作业」与「整型运行参数」。
+ * 服务「字符串型」DB 持久化配置（辅种扫描目录 / 未来其它 env→DB 字符串
+ * 设置）。2026-11-22 起与「定时任务」是**两个独立菜单**：作业调度在
+ * `/scheduler`（`pages/Scheduler.vue`，按业务模块分组），本组件留在
+ * `/settings`——它是部署级设置，不是作业级配置。
  *
- * 与 SchedulerConfigModal 的区别：本 tab 直接展示表单（不弹框）——
+ * 与 SchedulerConfigModal 的区别：本页直接展示表单（不弹框）——
  * 字段少（目前仅 cross_seed_scan_dirs 一项）+ 改后立即生效，弹框徒增
  * 一次点击。若未来字段增多（>5）可考虑改成弹框。
  */

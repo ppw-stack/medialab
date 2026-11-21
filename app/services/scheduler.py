@@ -30,6 +30,32 @@ logger = get_logger(__name__)
 JobFn = Callable[[], Awaitable[object | None]]
 
 
+#: 作业所属**业务域** → 页面展示名（「定时任务」页按它分栏）。
+#:
+#: 两个业务域一个面板（见 AGENTS.md「一个应用装下两个业务域」），作业也
+#: 天然分成两堆：辅种（站点 / 推送 / 辅种维护）与媒体库（刮削 / 整理 /
+#: 聚合 / 直链与 DAV 缓存清理）。混在一张清单里时，用户要在一堆「自己不
+#: 关心的作业」里找目标那一个。
+#:
+#: **展示名与侧栏一级菜单同名**（辅种 / 媒体库），页面上的「辅种」tab
+#: 与左侧「辅种」菜单指同一个域——用「辅种域」这种叫法会多一层翻译。
+#:
+#: **键是登记用的稳定标识**（只用于分组，不落库），值是页面上的中文名
+#: ——新增业务域在这里加一行即可。
+JOB_MODULES: dict[str, str] = {
+    "seed": "辅种",
+    "media": "媒体库",
+}
+
+#: 未知模块的回退名（``module`` 为空或未登记时不至于显示空白）。
+JOB_MODULE_FALLBACK = "其它"
+
+
+def job_module_title(module: str) -> str:
+    """模块 key → 页面展示名（未登记返回回退名，不抛错）。"""
+    return JOB_MODULES.get(module, JOB_MODULE_FALLBACK)
+
+
 @dataclass(slots=True)
 class JobSpec:
     """作业定义。"""
@@ -48,6 +74,30 @@ class JobSpec:
     title: str = ""
     #: 一句话说明这个作业做什么（前端展示在标题下方）
     description: str = ""
+    #: 所属业务模块（:data:`JOB_MODULES` 的键，如 ``"seed"`` / ``"media"``）。
+    #:
+    #: 「定时任务」页按它分组——两个业务域的作业各自成块，不再混排。
+    #: 空串 = 未归类（归入「其它」，页面仍能展示，只是排在最后）。
+    module: str = ""
+    #: **数据流上游**（作业名）：上游本轮**成功后**，若本作业距上次开始
+    #: 已满 :attr:`min_trigger_interval_sec`，则立即补跑一次。
+    #:
+    #: 语义是「触发时机」，**不是「数据正确性前提」**——上游失败时本作业
+    #: 照旧按自己的 cron 跑（优雅降级，不级联失败）。
+    #:
+    #: .. warning::
+    #:
+    #:    ``cron`` 必须**显著宽于** ``min_trigger_interval_sec``（典型做法：
+    #:    cron 当兜底、门槛当节奏）。否则这条边是**空操作**——上游在
+    #:    12:10 成功时，若门槛 30 分钟且上次是 12:00 跑的，要等到 12:30
+    #:    才够门槛，而 12:30 正是 cron 自己会醒的时刻。
+    depends_on: str | None = None
+    #: 依赖触发的最小间隔（秒），0 = 不限制（每个上游成功都触发）。
+    #:
+    #: **基准是「上次*开始*时间」而不是结束时间**：用结束时间会让实际
+    #: 周期漂移成「门槛 + 上一轮耗时」。长作业撞上触发会被 ``_running``
+    #: 自然挡掉（下一次上游成功再试），那是背压，不是重复执行。
+    min_trigger_interval_sec: int = 0
 
 
 @dataclass(slots=True)
@@ -199,6 +249,13 @@ class SchedulerCenter:
         self._cron_overrides: dict[str, str] = {}
         #: 停机期间置 False：拒绝新作业，只等在途作业收敛（FR-8.2）
         self.accepting_new_work = True
+        #: 各作业**上次开始**的单调时钟时刻（数据流触发的门槛基准）。
+        #:
+        #: 进程内状态：重启后为空 → 视为「从未跑过」，首个上游成功会补跑
+        #: 一次（刻意为之，让新进程尽快恢复推送；数据层幂等，不会重推）。
+        self._last_started_at: dict[str, float] = {}
+        #: 上游作业名 → 依赖它的作业名列表（注册时从 ``depends_on`` 重建）
+        self._downstream: dict[str, list[str]] = {}
 
     # ------------------------------------------------------------ 生命周期
     def start(self) -> None:
@@ -306,8 +363,50 @@ class SchedulerCenter:
         if spec.name in self._cron_overrides:
             spec.cron = self._cron_overrides[spec.name]
         self._specs[spec.name] = spec
+        self._rebuild_downstream()
         if self._scheduler is not None and spec.enabled:
             self._schedule(spec)
+
+    def _rebuild_downstream(self) -> None:
+        """从上各 ``spec.depends_on`` 重建「上游 → 下游列表」。
+
+        每次注册都整体重建（作业只有十几个，代价可忽略）——增量维护需要
+        处理「改依赖 / 删作业」的残留，容易漏。
+        """
+        index: dict[str, list[str]] = {}
+        for name, spec in self._specs.items():
+            if spec.depends_on:
+                index.setdefault(spec.depends_on, []).append(name)
+        self._downstream = index
+
+    def validate_graph(self) -> None:
+        """校验数据流依赖图：上游存在、无自环、无环。
+
+        **必须在全部作业注册完之后调用**（:func:`app.services.job_registry.
+        register_jobs` 末尾）——逐条注册时校验会因注册顺序误报「上游未注册」
+        （例如 push 先于 fetch 注册时）。
+
+        :raises ValueError: 依赖不合法（启动即炸，不带着坏图运行）
+        """
+        for name, spec in self._specs.items():
+            upstream = spec.depends_on
+            if not upstream:
+                continue
+            if upstream == name:
+                raise ValueError(f"作业 {name} 的 depends_on 指向自己")
+            if upstream not in self._specs:
+                raise ValueError(
+                    f"作业 {name} 的上游 {upstream!r} 未注册（depends_on 拼错了？）"
+                )
+            # 沿链走一遍，检测环（A→B→A）
+            seen = {name}
+            cursor: str | None = upstream
+            while cursor is not None:
+                if cursor in seen:
+                    raise ValueError(f"作业依赖成环：{name} → ... → {cursor}")
+                seen.add(cursor)
+                parent = self._specs.get(cursor)
+                cursor = parent.depends_on if parent is not None else None
 
     def _schedule(self, spec: JobSpec) -> None:
         assert self._scheduler is not None
@@ -368,8 +467,35 @@ class SchedulerCenter:
                 # 中文名 + 描述：前端直接展示，不再硬编码映射表
                 "title": spec.title,
                 "description": spec.description,
+                # 业务模块（+ 展示名）：前端按模块分组，同样是后端真源
+                "module": spec.module,
+                "module_title": job_module_title(spec.module),
+                # 数据流上游 + 触发门槛（前端画「拉取 → 推送」链路用）
+                "depends_on": spec.depends_on,
+                "min_trigger_interval_sec": spec.min_trigger_interval_sec,
             }
             for name, spec in self._specs.items()
+        ]
+
+    def list_modules(self) -> list[dict[str, object]]:
+        """已注册作业涉及的业务模块（按**首次出现顺序**，即注册顺序）。
+
+        前端分组顺序直接用它——不让前端自己排（否则前后端各有一份顺序
+        约定，加作业时容易让模块在页面上跳位）。
+        """
+        seen: list[str] = []
+        counts: dict[str, int] = {}
+        for spec in self._specs.values():
+            if spec.module not in seen:
+                seen.append(spec.module)
+            counts[spec.module] = counts.get(spec.module, 0) + 1
+        return [
+            {
+                "key": m,
+                "title": job_module_title(m),
+                "job_count": counts[m],
+            }
+            for m in seen
         ]
 
     def list_job_cron(self, name: str) -> str | None:
@@ -383,56 +509,128 @@ class SchedulerCenter:
 
     # ------------------------------------------------------------ 执行包装
     def _wrap(self, spec: JobSpec) -> JobFn:
+        """cron 触发入口：包一层触发器标记，执行体在 :meth:`_execute`。
+
+        **为什么要包**：APScheduler 只接受零参可调用；而执行体本身要区分
+        触发来源（cron / upstream）——来源进 ``job_runs.trigger``，前端
+        据此能看出「这次是上游喂过来的还是自己到点的」。
+        """
+
         async def _run() -> None:
-            # R8：单作业异常隔离，绝不让调度器整体崩掉
-            if not self.accepting_new_work:
-                return
-            if spec.name in self._running:
-                logger.debug("作业 %s 上一轮未结束，跳过本轮", spec.name)
-                return
-            self._running.add(spec.name)
-            task = asyncio.current_task()
-            if task is not None:
-                self._inflight.add(task)
-            wall_started = bj_now_dt()
-            started = asyncio.get_running_loop().time()
-            _ok = True
-            _err: str | None = None
-            _result: object = None
-            # 采集本次作业的 Python 日志（时序视角：哪步慢、中间发生了什么）。
-            # 采集器由**外部**创建——作业抛异常时也要能拿到已收集的日志。
-            collector = JobLogCollector()
-            try:
-                with capture_job_logs(collector):
-                    _result = await spec.func()
-            except asyncio.CancelledError:
-                logger.info("作业 %s 被取消", spec.name)
-                raise
-            except Exception as exc:
-                logger.exception("作业 %s 执行失败：%s", spec.name, exc)
-                _ok = False
-                _err = str(exc)
-            finally:
-                finished_dt = bj_now_dt()
-                stage_duration.labels(stage=spec.name).observe(
-                    asyncio.get_running_loop().time() - started
-                )
-                self._running.discard(spec.name)
-                if task is not None:
-                    self._inflight.discard(task)
-                _record_run(
-                    job_name=spec.name,
-                    trigger="cron",
-                    started_at=format_bj(wall_started),
-                    finished_at=format_bj(finished_dt),
-                    duration_ms=int((finished_dt - wall_started).total_seconds() * 1000),
-                    ok=_ok,
-                    error=_err,
-                    result=_result,
-                    logs=collector.entries(),
-                )
+            await self._execute(spec, trigger="cron")
 
         return _run
+
+    async def _execute(self, spec: JobSpec, *, trigger: str) -> None:
+        """执行单个作业（cron / 上游触发共用）。
+
+        - **R8 异常隔离**：异常在此吞掉并记失败历史，绝不让调度器整体崩掉。
+        - **同作业不重入**：``_running`` 的 check 与 add 之间**没有 await**，
+          单事件循环下是原子的（cron / 上游 / 手动三者共享同一集合）。
+        - **成功后唤醒下游**（数据流触发，见 :meth:`_trigger_downstream`）。
+        """
+        if not self.accepting_new_work:
+            return
+        if spec.name in self._running:
+            logger.debug("作业 %s 上一轮未结束，跳过本轮", spec.name)
+            return
+        self._running.add(spec.name)
+        # 门槛基准：**开始时刻**（不是结束——否则周期会漂移成
+        # 「门槛 + 上一轮耗时」）
+        self._last_started_at[spec.name] = asyncio.get_running_loop().time()
+        task = asyncio.current_task()
+        if task is not None:
+            self._inflight.add(task)
+        wall_started = bj_now_dt()
+        started = asyncio.get_running_loop().time()
+        _ok = True
+        _err: str | None = None
+        _result: object = None
+        # 采集本次作业的 Python 日志（时序视角：哪步慢、中间发生了什么）。
+        # 采集器由**外部**创建——作业抛异常时也要能拿到已收集的日志。
+        collector = JobLogCollector()
+        try:
+            with capture_job_logs(collector):
+                _result = await spec.func()
+        except asyncio.CancelledError:
+            logger.info("作业 %s 被取消", spec.name)
+            raise
+        except Exception as exc:
+            logger.exception("作业 %s 执行失败：%s", spec.name, exc)
+            _ok = False
+            _err = str(exc)
+        finally:
+            finished_dt = bj_now_dt()
+            stage_duration.labels(stage=spec.name).observe(
+                asyncio.get_running_loop().time() - started
+            )
+            self._running.discard(spec.name)
+            if task is not None:
+                self._inflight.discard(task)
+            _record_run(
+                job_name=spec.name,
+                trigger=trigger,
+                started_at=format_bj(wall_started),
+                finished_at=format_bj(finished_dt),
+                duration_ms=int((finished_dt - wall_started).total_seconds() * 1000),
+                ok=_ok,
+                error=_err,
+                result=_result,
+                logs=collector.entries(),
+            )
+            # 数据流触发：**只在成功时**唤醒下游（失败不级联——一次
+            # 站点 502 不该放大成整条链的红）
+            if _ok:
+                self._trigger_downstream(spec.name)
+
+    def _trigger_downstream(self, upstream: str) -> None:
+        """上游成功后，按门槛唤醒依赖它的作业（不排队、不重入、不递归）。
+
+        判定顺序（任一不满足即跳过）：
+
+        1. 作业不存在 / 已停用；
+        2. 调度器停机中（不再接新活）；
+        3. 该作业**正在运行**（``_running`` —— 背压，不排队堆积）；
+        4. 距它上次**开始**不足 ``min_trigger_interval_sec``。
+
+        通过后用 ``asyncio.create_task`` 异步发起——不等它跑完，避免上游
+        被下游耗时拖住（尤其 push 内有站点限频的 sleep）。
+        """
+        for name in self._downstream.get(upstream, ()):
+            spec = self._specs.get(name)
+            if spec is None or not spec.enabled:
+                continue
+            if not self.accepting_new_work:
+                return
+            if name in self._running:
+                logger.debug(
+                    "上游 %s 成功，但 %s 正在运行 → 跳过本次触发",
+                    upstream, name,
+                )
+                continue
+            interval = spec.min_trigger_interval_sec
+            last = self._last_started_at.get(name)
+            now = asyncio.get_running_loop().time()
+            if interval > 0 and last is not None:
+                waited = now - last
+                if waited < interval:
+                    logger.debug(
+                        "上游 %s 成功，但 %s 距上次开始仅 %.0fs < %.0fs → 跳过",
+                        upstream, name, waited, interval,
+                    )
+                    continue
+                logger.info(
+                    "上游 %s 成功 → 触发 %s（距上次开始 %.0fs ≥ 门槛 %ds）",
+                    upstream, name, waited, interval,
+                )
+            else:
+                logger.info("上游 %s 成功 → 触发 %s（无门槛）", upstream, name)
+            # 持引用（RUF006）：否则 task 可能在跑之前被 GC。
+            # 归到 _inflight（cron 同类）——停机会照常等在途收敛；
+            # _execute 内部也会自己 add/discard 一次（幂等）。
+            task = asyncio.create_task(self._execute(spec, trigger="upstream"))
+            self._inflight.add(task)
+            task.add_done_callback(self._inflight.discard)
 
     # ------------------------------------------------------------ 手动触发
     async def run_now(self, name: str) -> RunResult:
@@ -493,6 +691,9 @@ class SchedulerCenter:
             )
         started_dt = bj_now_dt()
         self._running.add(name)
+        # 手动作业同样刷新「上次开始」——否则手动推完 10 分钟后，上游触发
+        # 还会再叫一次 push（用户刚推过，不该紧接着再来一轮）
+        self._last_started_at[name] = asyncio.get_running_loop().time()
         # 手动触发的 task 加入 _manual_inflight（不是 _inflight）：
         # - 计入 inflight_count()，前端能正确显示"运行中"
         # - drain 停机时只等待不取消（取消会打断正在返回响应的 HTTP 请求）
@@ -560,6 +761,10 @@ class SchedulerCenter:
             ok=True, error=None, result=result,
             logs=collector.entries(),
         )
+        # **手动跑成功也要喂下游**：手动「立即执行 站点拉取」之后紧接着想看
+        # 推送结果（面板最常用的调试路径），不触发的话数据流只在 cron 上成立。
+        # 门槛照旧生效（手动推过一次后，30 分钟内不会被再触发一次）。
+        self._trigger_downstream(name)
         return RunResult(
             ok=True,
             started_at=started_str,

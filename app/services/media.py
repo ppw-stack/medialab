@@ -644,7 +644,7 @@ async def _write_strm_batch(
     抖动）就等于写锁被占住那么久，别人的写事务全被挡住。
 
     2026-11-12 prod 事故：扫描的事务横跨「写 strm + 等附件下载」，
-    写锁被持有几十秒 → ``drain_task_queue`` / ``push_free_torrents``
+    写锁被持有几十秒 → ``drain_task_queue`` / ``push_and_monitor_free``
     / ``refresh_user_data`` 连续撞 ``database is locked``。WAL 只解决
     **读写**互斥，写-写互斥依旧 → 根治只能缩短写锁窗口。
 

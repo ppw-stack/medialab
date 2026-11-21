@@ -73,11 +73,16 @@ class RunJobResult(BaseModel):
 
 @router.get("/scheduler", summary="调度作业状态")
 async def scheduler_status() -> dict[str, Any]:
-    """返回调度中心当前注册的作业列表。"""
+    """返回调度中心当前注册的作业列表 + 作业所属业务模块。
+
+    ``modules`` 与 ``jobs[].module`` 互为配套：前端按 ``modules`` 的顺序
+    渲染分组（模块名与顺序都是后端真源），``jobs[].module`` 决定归组。
+    """
     settings = get_settings()
     return {
         "enabled": settings.scheduler_enabled,
         "jobs": scheduler_center.list_jobs(),
+        "modules": scheduler_center.list_modules(),
         "inflight": scheduler_center.inflight_count(),
         "accepting_new_work": scheduler_center.accepting_new_work,
     }

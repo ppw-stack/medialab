@@ -4,22 +4,45 @@
 - :mod:`app.services.jobs` — 作业**业务逻辑**（站点拉取 + upsert）
 - 本模块 — 作业**注册**（JobSpec 定义、cron 配置、结果序列化）
 
-已注册作业：
+已注册作业（**按业务模块分组**——「定时任务」页据此分块展示）：
+
+辅种域（``module="seed"``）：
 
 - ``fetch_all_sites`` — 按站遍历所有启用站点拉取种子列表，写入 torrent_index
-- ``push_free_torrents`` — 选免费种自动推到默认下载器（经 task_queue 幂等入队）
-- ``monitor_free_window`` — 巡检已推免费种，临近窗口截止自动暂停
+- ``push_and_monitor_free`` — **免费种推送 + 窗口监测**（2026-11-22 合并）：
+  巡检已推免费种（临期/非免费自动暂停）＋ 把新免费种推到默认下载器
+  （cron 10 分钟心跳；推送内部节流 ≥30 分钟）
 - ``refresh_user_data`` — 拉取 9 站用户数据（上传/下载/做种数）
 - ``cross_seed_maintenance`` — **辅种维护**（2026-11-01 合并）：
   辅种站巡查（落快照 + 暂停异常种子）→ 磁盘空间流转 → 孤儿文件扫描，
   三段顺序执行、每 3 小时一次
 - ``drain_task_queue`` — 排空任务队列：崩溃恢复（僵死 running 回收）+ 退避重试
   （hhanclub / soulvoice / hdhome / hdsky / hdwing）
+
+媒体库域（``module="media"``）：
+
 - ``scrape_metadata`` — 媒体刮削（本地目录补 NFO / 图片）
 - ``organize_files`` — 下载整理（源目录 → 媒体库标准结构）
 - ``aggregate_sync`` — 网盘聚合归拢（副数据源 → 主数据源）
-- ``cleanup_link_cache`` — 清理过期直链缓存（L1 内存 + L2 表）
+- ``cleanup_link_cache`` — 清理过期直链缓存（L1 内存 + L2 表；302 中转用）
 - ``purge_dav_auth_cache`` — 淘汰过期的 WebDAV 认证失败缓存
+
+**数据流触发**（2026-11-22）：
+
+辅种域的作业不只是各自按 cron 醒，还按数据流串成一条链——
+
+```
+站点拉取 ──成功──▶ 免费种推送 ──入队──▶ 任务队列排空（兜底重试）
+（每 10 分钟）      （成功后触发，≥30 分钟一次；2 小时 cron 兜底）
+```
+
+- 边由 :attr:`JobMeta.depends_on` 声明，语义是**触发时机**（不是数据正确性
+  前提）：上游失败时下游照旧按自己的 cron 跑。
+- 门槛 :attr:`JobMeta.min_trigger_interval_sec` 保证频率不变密——推送仍是
+  ≈30 分钟一次，只是触发时刻对齐「拉取刚完成」。
+- ``cron`` 在这条链上退化为**兜底**：上游长期失败时才靠它保底跑一轮。
+- 只有这一条边。其余作业（窗口监测 / 站点信息 / 队列排空 / 辅种维护）
+  各有自己的节奏，**刻意不挂边**（理由见 docs/scheduler-dataflow.md §10）。
 """
 from __future__ import annotations
 
@@ -28,6 +51,7 @@ from dataclasses import dataclass
 
 from app.core.logging import get_logger
 from app.services.factory import AdapterFactory
+from app.services.push_and_monitor import PUSH_MIN_INTERVAL_SEC
 from app.services.scheduler import JobSpec, scheduler_center
 
 logger = get_logger(__name__)
@@ -41,14 +65,20 @@ logger = get_logger(__name__)
 #: 分钟位刻意错开——避免多个作业在同一分钟并发抢资源：
 #:
 #: - ``*/10``  : fetch_all_sites（站点拉取）
-#: - ``*/30``  : push_free_torrents / refresh_user_data
-#: - ``5,15,…``: monitor_free_window（错开 fetch 与 push）
+#: - ``*/30``  : refresh_user_data
+#: - ``5,15,…``: push_and_monitor_free（监测的 10 分钟心跳；推送内部节流）
 #: - ``*/5``   : drain_task_queue
 #: - ``17 */3``: cross_seed_maintenance（辅种维护，合并巡查/磁盘/孤儿）
 DEFAULT_CRON: dict[str, str] = {
     "fetch_all_sites": "*/10 * * * *",
-    "push_free_torrents": "*/30 * * * *",
-    "monitor_free_window": "5,15,25,35,45,55 * * * *",
+    # 免费种推送 + 窗口监测（2026-11-22 合并为一个作业）：
+    # **cron 走监测的 10 分钟心跳**，推送靠作业内部节流到 ≥30 分钟
+    # （`push_and_monitor.PUSH_MIN_INTERVAL_SEC`）。
+    #
+    # 为什么心跳必须是 10 分钟：监测要在窗口到期前执行暂停（pre_pause
+    # 默认 10 分钟），它不能等——而推送本身有站点限频，10 分钟一轮
+    # 只会把限频摊薄，故用内部节流，不用两条 cron 硬凑。
+    "push_and_monitor_free": "5,15,25,35,45,55 * * * *",
     "refresh_user_data": "*/30 * * * *",
     "drain_task_queue": "*/5 * * * *",
     # 辅种维护（2026-11-01 合并 scan_cross_seed + disk_rotation + scan_orphans）：
@@ -131,9 +161,24 @@ class JobMeta:
     title: str
     #: 一句话说明（页面标题下方）
     description: str
+    #: 所属业务模块（:data:`app.services.scheduler.JOB_MODULES` 的键）。
+    #:
+    #: **必填、无默认值**：新增作业必须显式声明它服务哪个业务域——这正是
+    #: 「定时任务」页分组展示的判据。留空会让作业落进「其它」块，虽然页面
+    #: 能看，但分组意义就丢了，所以用必填字段把它挡在编译期。
+    module: str
     #: 作业执行入口工厂：接收 :class:`AdapterFactory`（作业自己按需建
     #: adapter），返回一个**无参可调用**（调度器按零参调用它）。
     make_func: Callable[[AdapterFactory], Callable[[], Awaitable[object]]]
+    #: 数据流上游（作业名）：上游成功后按门槛触发本作业（详见
+    #: :attr:`app.services.scheduler.JobSpec.depends_on`）。
+    #:
+    #: **只给真依赖用**：上游产出正是本作业的输入时才挂。别把「时间上常常
+    #: 相邻」误当成依赖——那会把两个作业的频率耦死（`cross_seed_maintenance`
+    #: 合并的教训）。
+    depends_on: str | None = None
+    #: 依赖触发的最小间隔（秒）：0 = 上游每次成功都触发；>0 = 门槛。
+    min_trigger_interval_sec: int = 0
     #: 追加到注册日志末尾的补充说明（如参数回显）
     log_extra: str = ""
     #: 动态补充说明（**注册时求值**）——参数类回显要用它：
@@ -154,21 +199,24 @@ JOB_META: tuple[JobMeta, ...] = (
             "遍历所有启用站点拉取种子列表（API/HTML），写入 torrent_index 表"
         ),
         make_func=lambda f: _job_fn(lambda: _run_fetch_all_sites(f)),
+        module="seed",
     ),
     JobMeta(
-        name="push_free_torrents",
-        title="免费种推送",
-        description="从 torrent_index 选免费种 → 默认下载器（每 30 分钟）",
-        make_func=lambda f: _job_fn(lambda: _run_push_free(f)),
-    ),
-    JobMeta(
-        name="monitor_free_window",
-        title="免费窗口监测",
+        name="push_and_monitor_free",
+        title="免费种推送与监测",
         description=(
-            "巡检已推免费种，临近 free_end_at 自动暂停下载器（pre_pause=10 min）"
+            "巡检已推免费种（临期/非免费自动暂停）＋ 把新免费种推到默认"
+            "下载器（距上次推送 ≥30 分钟才推）"
         ),
-        make_func=lambda f: _job_fn(lambda: _run_monitor_free_window(f)),
-        log_extra=f" (pre_pause={_current_pre_pause_minutes()}min)",
+        make_func=lambda f: _job_fn(lambda: _run_push_and_monitor(f)),
+        module="seed",
+        # 合并后**不挂 depends_on**：cron 心跳已是 10 分钟，比推送门槛
+        # （30 分钟）还细，上游触发不会带来更早的推送——挂了就是永不生效
+        # 的边（详见 docs/scheduler-dataflow.md §5）。
+        log_extra_fn=lambda: (
+            f" (pre_pause={_current_pre_pause_minutes()}min"
+            f"，推送间隔={PUSH_MIN_INTERVAL_SEC // 60}min)"
+        ),
     ),
     JobMeta(
         name="refresh_user_data",
@@ -178,12 +226,14 @@ JOB_META: tuple[JobMeta, ...] = (
             "→ 写入 site_user_data 表"
         ),
         make_func=lambda f: _job_fn(lambda: _run_refresh_user_data(f)),
+        module="seed",
     ),
     JobMeta(
         name="drain_task_queue",
         title="任务队列排空",
         description="回收崩溃残留的僵死任务 + 重试退避到期的推送任务（每 5 分钟）",
         make_func=lambda f: _job_fn(lambda: _run_drain_task_queue(f)),
+        module="seed",
     ),
     JobMeta(
         name="cross_seed_maintenance",
@@ -193,6 +243,7 @@ JOB_META: tuple[JobMeta, ...] = (
             "（每 3 小时）"
         ),
         make_func=lambda f: _job_fn(_run_cross_seed_maintenance),
+        module="seed",
         log_extra="（巡查 → 磁盘流转 → 孤儿扫描，三段顺序执行）",
     ),
     JobMeta(
@@ -202,6 +253,7 @@ JOB_META: tuple[JobMeta, ...] = (
             "扫描本地媒体库目录，为未刮削的视频补齐 NFO 与图片（TMDB）"
         ),
         make_func=lambda f: _job_fn(_run_scrape_metadata),
+        module="media",
     ),
     JobMeta(
         name="organize_files",
@@ -211,6 +263,7 @@ JOB_META: tuple[JobMeta, ...] = (
             "媒体库，并触发刮削"
         ),
         make_func=lambda f: _job_fn(_run_organize),
+        module="media",
     ),
     JobMeta(
         name="aggregate_sync",
@@ -220,6 +273,7 @@ JOB_META: tuple[JobMeta, ...] = (
             "主盘确认落盘后自动清理副盘副本"
         ),
         make_func=lambda f: _job_fn(_run_aggregate_sync),
+        module="media",
         log_extra_fn=lambda: f" (单轮上限={_current_max_submissions()})",
     ),
     JobMeta(
@@ -227,12 +281,14 @@ JOB_META: tuple[JobMeta, ...] = (
         title="清理直链缓存",
         description="删除过期的直链缓存（L2 表 + L1 内存），防止缓存表单调增长（每天 03:47）",
         make_func=lambda f: _job_fn(_run_cleanup_link_cache),
+        module="media",
     ),
     JobMeta(
         name="purge_dav_auth_cache",
         title="清理 DAV 认证缓存",
         description="淘汰过期的 WebDAV 认证失败记录，防止进程内字典无界增长（每小时）",
         make_func=lambda f: _job_fn(_run_purge_dav_auth_cache),
+        module="media",
     ),
 )
 
@@ -249,6 +305,10 @@ def register_jobs(factory: AdapterFactory) -> None:
     """
     for meta in JOB_META:
         _register(meta, factory)
+    # 依赖图统一在**全部注册完之后**校验：逐条校验会因注册顺序误报
+    # 「上游未注册」（example: push 声明依赖 fetch，而 fetch 此刻还没进表）。
+    # 坏图（拼错 / 成环）在启动时就炸，不带着它跑。
+    scheduler_center.validate_graph()
 
 
 def _register(meta: JobMeta, factory: AdapterFactory) -> None:
@@ -266,6 +326,11 @@ def _register(meta: JobMeta, factory: AdapterFactory) -> None:
             # 中文名 + 描述随作业一起下发——前端不再硬编码映射表
             title=meta.title,
             description=meta.description,
+            # 业务模块随作业下发：「定时任务」页按它分组展示
+            module=meta.module,
+            # 数据流依赖（上游成功触发；门槛防变密）
+            depends_on=meta.depends_on,
+            min_trigger_interval_sec=meta.min_trigger_interval_sec,
         )
     )
     effective = scheduler_center.list_job_cron(meta.name)
@@ -302,8 +367,9 @@ def preflight_job_imports() -> None:
     for mod in (
         "app.services.runtime_params",  # _current_pre_pause_minutes
         "app.services.jobs",            # _run_fetch_all_sites
-        "app.services.push_free",       # _run_push_free
-        "app.services.monitor",         # _run_monitor_free_window
+        "app.services.push_and_monitor",  # _run_push_and_monitor（合并作业）
+        "app.services.push_free",       # 合并作业内部调 PushFreeService
+        "app.services.monitor",         # 合并作业内部调 MonitorFreeWindowService
         "app.services.user_data",       # _run_refresh_user_data
         "app.services.task_drain",      # _run_drain_task_queue
         "app.services.cross_seed_maintenance",  # _run_cross_seed_maintenance
@@ -325,28 +391,15 @@ async def _run_fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
     return await fetch_all_sites(factory)
 
 
-async def _run_push_free(factory: AdapterFactory) -> dict[str, object]:
-    """执行推送并把结果序列化为 dict（供 API 返回）。"""
-    from dataclasses import asdict
+async def _run_push_and_monitor(factory: AdapterFactory) -> dict[str, object]:
+    """执行「免费种推送 + 窗口监测」合并作业（2026-11-22）。
 
-    from app.services.push_free import PushFreeService
+    编排与节流在 :mod:`app.services.push_and_monitor` 里：监测每轮都跑，
+    推送按 30 分钟门槛节流，两段各自容错。
+    """
+    from app.services.push_and_monitor import run_push_and_monitor
 
-    svc = PushFreeService(factory)
-    result = await svc.run()
-    return asdict(result)
-
-
-async def _run_monitor_free_window(
-    factory: AdapterFactory,
-) -> dict[str, object]:
-    """执行免费窗口监测并把结果序列化为 dict（供 API 返回）。"""
-    from dataclasses import asdict
-
-    from app.services.monitor import MonitorFreeWindowService
-
-    svc = MonitorFreeWindowService(factory)
-    result = await svc.run()
-    return asdict(result)
+    return await run_push_and_monitor(factory)
 
 
 # ============================================================ 作业入口
