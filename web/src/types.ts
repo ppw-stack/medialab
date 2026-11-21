@@ -327,6 +327,11 @@ export interface CrossSeedDownloader {
 export interface CrossSeedStatsRow {
   name: string
   size_gb: number
+  /**
+   * 该组精确大小（字节）。`size_gb` 是两位小数的展示值，删除预算要用这个；
+   * 旧快照行没有该字段（消费方回退 `size_gb`）。
+   */
+  size_bytes?: number
   count: number
   /** 12 位截断的样本 hash（仅展示用，**不能**用于删除）。 */
   sample_hash: string

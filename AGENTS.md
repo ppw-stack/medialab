@@ -265,7 +265,8 @@
 - **辅种快照契约**（2026-10-24 加入，`app/services/cross_seed_monitor.py`）：
   - 辅种下载器种子量大（实测 3000+ 个），**实时拉一次要 20s+** → 改为**定时抓取 + 落库快照**
   - `cross_seed_maintenance` 作业（cron `17 */3 * * *`，**2026-11-01 合并** `scan_cross_seed` + `disk_rotation` + `scan_orphans`）：短事务读下载器 → 并发抓取（网络 IO 在事务外，上限 3）→ 短事务 upsert `cross_seed_snapshot` → 批量暂停异常 → 磁盘超阈删种子 → 孤儿扫描
-    - **为什么合并**：`disk_rotation` 读 `cross_seed_snapshot` 判磁盘使用率，而快照由巡查产出——分开跑可能读到**旧快照**。合并后依赖顺序天然正确，且省一次辅种站全量抓取（20s+）
+    - **为什么合并**：`disk_rotation` 读 `cross_seed_snapshot` 判磁盘使用率，而快照由巡查产出——分开跑可能读到**旧快照**。合并后依赖顺序天然正确
+      - ⚠️ 提交 `2a1f073` 当时还写了「省一次辅种站全量抓取」，**这条不成立**（② 本来就只读 DB 快照、③ 拉的是另一份 `files`）——2026-11-21 复核，详见下方「辅种维护作业的合并边界」
     - 三段**各自容错**：某段失败不影响其余，失败进 `steps`（前端步骤卡片逐段展示）
   - `cross_seed_snapshot` 表是**当前快照**（`downloader_id` UNIQUE），不做历史；FK **不带** `ON DELETE CASCADE`（当守卫：漏删会 IntegrityError，宁可失败也不留孤儿行）——删下载器 / 取消辅种标记时必须显式删快照
   - **前端读快照，不打下载器接口**：辅种页与仪表盘「在途任务」都读快照；实时端点 `GET /cross-seed-monitor/downloaders/{id}/scan` 保留作调试用
@@ -285,6 +286,22 @@
     - **`tracker_error` 豁免暂停**（`_PAUSE_EXEMPT_ANOMALIES`）：那是 tracker **服务端**的问题（HTTP 502/522），与本地数据无关——暂停只会白白损失上传，等 tracker 恢复即可。`local_data_missing` **要**暂停（数据没了，做种无意义）
     - 「跳过」要分两类说：此前已暂停 vs 豁免暂停（tracker 报错）——混在一起会让人以为漏暂停了
   - 契约由 `tests/unit/test_cross_seed_monitor.py` + `tests/integration/test_cross_seed_job.py` + `tests/integration/test_db_models.py` + `tests/integration/test_api.py` 固化
+- **磁盘流转按「数据组」删，不按「种子」删**（2026-11-21 修正，`app/services/disk_rotation.py`）：
+  - **删除的原子单位 = 同 `(name, size_bytes)` 的一组种子**。辅种的本质是**同一条数据被多个种子共享**（实测 4646 个种子 → 2237 份数据），组内多个 infohash 指向**同一份磁盘文件**——只删其中一个成员，磁盘一个字节都不释放（其余副本仍引用）；`delete_data=True` 时删一个成员会把共用文件一起删掉，余下 N-1 个副本立刻 `missingFiles`，要等下一轮巡查才被暂停（留下一批死种子，还把高价值组打成半残）
+  - 旧实现按**成员**拆候选、逐个累加 `size_gb` 当"已释放量" → **幽灵记账**：循环拿着假账往下走，目标永远达不成，越删越多。现在 `_select_groups()` 返回整组（全部 hash），一次 `remove` 下发，`freed_bytes` 按**组大小记一次**
+  - **批次绝不切开一个组**（`_pack_batches`）：第一批成功、第二批失败会留下"半个组"。单组超过 `DELETE_BATCH_SIZE` 时独占一批
+  - **释放量有上界**：`need_free` 由**整个分区**使用率算出，候选池只有辅种数据。分区被媒体库/备份占满时辅种全删光也补不上 → 取 `min(need_free, max_releasable)`，达不到就**停手**，结果标 `unreachable` 并在 summary 写「缺 X GB 需人工介入」，不把辅种删空
+  - **快照新鲜度守卫**（两道）：① `cross_seed_maintenance` 把 ① 巡查失败的 `downloader_id` 作为 `skip_downloader_ids` 传给 ②（① 失败时**不写**快照，"同轮顺序"≠"数据有效"）；② ② 自查 `scanned_at` 年龄，超过 `SNAPSHOT_MAX_AGE_HOURS`（6h = 2×作业周期）跳过并点名。`scanned_at` 解析不出时按**过期**处理（fail-safe）
+  - **预演模式** `disk_rotation_dry_run`（运行参数，默认 0）：只算「会删哪几组、能释放多少」并写日志，不发删除指令。首次调阈值 / 改动作前先跑一轮
+  - **`stats` 增加 `size_bytes`**（精确字节；`size_gb` 只有两位小数，删除预算按它算会累积舍入误差）。旧快照行没有该 key → 回退 `size_gb`（优雅降级，与 `added_at` 同款）
+  - ⚠️ **`disk_rotation.py` 旧注释声称"校验中（CHECKING）跳过"，实现里并没有**——快照 `stats` 不带 per-hash 状态，② 区分不出在途/校验中/已死副本。补这个要先把状态写进快照契约（`monitor.py:321` 的 CHECKING 保护只在免费种巡检那条链路上）
+  - 契约由 `tests/integration/test_disk_rotation.py`（整组删 / 释放上界 / 预演 / 快照过期 / 失败名单）+ `tests/unit/test_cross_seed_maintenance.py`（失败名单下传）固化
+- **辅种维护作业的合并边界**（2026-11-21 复核）：
+  - **只有 ①② 之间有真实依赖**（② 的候选池只来自 ① 的快照），③ 孤儿扫描的输入是自己的（下载器 `files` + 挂载盘扫盘），与 ① 无关
+  - 合并的代价是**频率被最重的段绑架**：① 从 `2,32 * * * *`（48 次/日）降到 8 次/日 → 快照新鲜度 30 分钟 → 3 小时（异常种子最长占 3 小时才被暂停，辅种页与仪表盘一起变旧）；③ 从 `7 4 * * *`（1 次/日）升到 8 次/日 → 每天多 7 次 TR 全量 `files` 拉取（27.5 MB）+ 7 次 CIFS 全盘 walk（39–60 s）
+  - 提交 `2a1f073` 里「省一次全量抓取」这条理由**不成立**：② 从 `e2ff1dc` 起就只读 DB 快照（不打下载器），③ 拉的是另一份数据 → 合并省下的网络调用是 0，反而同轮对同一台 TR 打了两次接口
+  - 要拆回独立频率时：① 独立 30 分钟、② 与 ① 同作业但**内部节流**到 2–3 小时、③ 独立日频——直接改 `job_registry` 即可，`cross_seed_maintenance` 删掉第三段
+  - **失败口径**：① 用 `failures` / `failed_downloaders`、③ 用 `errors`（「下载器名: 原因」）——`_run_stage` 三种都认（只认前两个时，扫盘全失败会显示 `ok`，故障被伪装成正常，2026-11-21 修）
 - **辅种空间统计**（2026-10-24 加入，`app/services/cross_seed_space.py`）：
   - **复用同一次全量拉取**：辅种站 4600+ 种子拉一次要 20s+，占用数据直接从 `list_torrents_with_errors()` 的返回值算（**不额外打接口**）；只有磁盘空间需要**额外一次**轻量调用（TR `free-space` / qB `sync/maindata`，毫秒级）
   - adapter 的 `list_torrents_with_errors()` 返回值新增 `completed_bytes`（实际占用）+ `save_path`（按目录分布）；`get_disk_space()` 是新增的基类方法（不支持时抛 `NotImplementedError`，与 `list_torrents_with_errors` 同模式）
@@ -332,7 +349,7 @@
     - qB 的 `/torrents/info` 本来就返回 `content_path` + `save_path` → **零额外请求**
     - `list_torrents_with_errors()` 与 `list_torrents()` **都不再拉 `files`/`fileStats`**（TR 的 `TorrentInfo` 没有这两个字段，拉了完全用不上）
   - **孤儿文件删除**（2026-10-26 加入，`app/services/orphan_deleter.py`）：
-    - 端点 `POST /cross-seed-monitor/orphans/scan`（**手动扫描**，不等 cron）——孤儿扫描默认**每天一次**（`7 4 * * *`），当天发现孤儿想现在清理等不到明天。**同步 await**（40–60 s），响应带上有孤儿表的新鲜统计 → 前端直接用，省一次请求
+    - 端点 `POST /cross-seed-monitor/orphans/scan`（**手动扫描**，不等 cron）——孤儿扫描是 `cross_seed_maintenance` 的第三段（`17 */3 * * *`，每 3 小时一轮；2026-11-01 合并后不再是独立的日频作业），当天发现孤儿想现在清理等不到下一轮。**同步 await**（40–60 s），响应带上有孤儿表的新鲜统计 → 前端直接用，省一次请求
     - 前端入口在「孤儿」分区的区块标题行：「立即扫描」按钮 + 扫描时间标记
     - 端点 `POST /cross-seed-monitor/orphans/delete`（body：`paths`）——删的是**磁盘文件**，不是下载器任务（孤儿本来就没任务）
     - **三道安全闸**（不只靠前端弹框）：
@@ -341,7 +358,7 @@
       3. **审计日志**：逐条记路径 + 大小（删磁盘数据不可逆 → 必须能回答「删了什么」）
     - 逐条删除，**单条失败不中断**其余条目；复核不通过的记 `skipped`、删除失败的记 `failed`
     - 挂载权限必须是 **rw**（`ro` 删不了）——compose 里已改
-    - **删除后自动重扫**（2026-10-26）：孤儿统计表是**每天一次**的作业快照，不重扫页面会一直显示旧数字（已删的还在列表里、且看不到新产生的孤儿）。故删除后**立即重扫**并把最新统计带在响应里（`orphans` 字段）→ 前端直接用，省一次请求
+    - **删除后自动重扫**（2026-10-26）：孤儿统计表是定时作业的快照（每 3 小时一轮），不重扫页面会一直显示旧数字（已删的还在列表里、且看不到新产生的孤儿）。故删除后**立即重扫**并把最新统计带在响应里（`orphans` 字段）→ 前端直接用，省一次请求
       - 重扫**失败不影响删除结果**（数据已删，只是统计没更新）→ 记 `rescan_error`，前端提示可稍后手动重扫
     - 契约由 `tests/unit/test_orphan_deleter.py` + `tests/integration/test_api.py` 固化
   - 实测：辅种站扫 1696 个顶层条目（1670 有主 / 63 孤儿，其中 39 空目录 + 24 有内容 612.85 GB），CIFS 全量扫 **约 40 秒**

@@ -598,7 +598,7 @@ onMounted(async () => {
           type="info"
           show-icon
           message="等待首次抓取"
-          description="辅种数据由定时作业「辅种巡查」抓取后落库（默认每 30 分钟一次：2,32 * * * *）。若一直没有数据，请到「设置 → 调度作业」确认该作业已启用，或点右上角「立即抓取」。"
+          description="辅种数据由定时作业「辅种维护」的第一段（辅种巡查）抓取后落库（每 3 小时一次：17 */3 * * *）。若一直没有数据，请到「设置 → 调度作业」确认该作业已启用，或点右上角「立即抓取」。"
         />
 
         <div v-else-if="snapshot">
@@ -946,9 +946,10 @@ onMounted(async () => {
             <div class="space-block__header">
               <div class="label-caps">孤儿文件 · ORPHANS</div>
               <!--
-                手动扫描入口（2026-10-26）：孤儿扫描默认**每天一次**
-                （cron 7 4 * * *）——当天发现孤儿想现在清理，等不到明天。
-                耗时 40–60 s，与「立即抓取」同一性质。
+                手动扫描入口（2026-10-26）：孤儿扫描是「辅种维护」作业的
+                第三段（cron 17 */3 * * *，每 3 小时一轮）——当天发现孤儿
+                想现在清理，等不到下一轮。耗时 40–60 s，与「立即抓取」
+                同一性质。
               -->
               <div class="space-block__actions">
                 <span v-if="currentOrphan" class="dim mono">
