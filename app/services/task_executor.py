@@ -66,6 +66,15 @@ async def execute_add_torrent(
         手动推送是 ``manual-push``（供用户在下载器里区分来源）。
     :return: ``{"info_hash": str, "name": str, "idempotent": bool}``；
         ``idempotent=True`` 表示幂等命中（已推过 / duplicate），未实际重复添加。
+    :raises PushItemError: 按 ``category`` 分类，调用方据此决定**退避重试**
+        还是**死信**（``fatal`` 不重试）：
+
+        - ``fatal``：索引行已不存在 / 缺 item_id / 站点不存在或已停用 /
+          下载器不存在或已禁用 / **站点的永久失败**（凭据失效、详情页里
+          没有下载地址——重试也不会成功）
+        - ``download``：下载 .torrent 失败（网络抖动、站点返回临时错误页）
+        - ``parse``：infohash 解析失败（字节不是合法 torrent）
+        - ``add``：下载器拒绝（duplicate 已被当成幂等成功，不在此列）
     """
     index_id = int(payload["index_id"])
     downloader_id = int(payload["downloader_id"])

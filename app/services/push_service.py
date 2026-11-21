@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.core.logging import get_logger
 from app.db.models import DownloaderInstance, Site, TorrentIndex
@@ -93,17 +93,28 @@ async def resolve_downloader(
 
     - 指定了 downloader_id → 用它（不存在 → 404，已禁用 → 400）
     - 未指定 → 用 ``is_default=True`` 且 enabled 的（没有 → 400）
+
+    :raises PushError: 下载器不存在（``status=404`` /
+        ``code=downloader_not_found``）/ 下载器已禁用（``status=400`` /
+        ``code=downloader_disabled``）/ 未配置默认下载器（``status=400`` /
+        ``code=no_default_downloader``）
     """
     if downloader_id is not None:
         dl = await get_downloader_by_id(downloader_id)
         if dl is None:
-            raise PushError("下载器不存在", status=404)
+            raise PushError(
+                "下载器不存在", status=404, code="downloader_not_found"
+            )
         if not dl.enabled:
-            raise PushError("下载器已禁用", status=400)
+            raise PushError(
+                "下载器已禁用", status=400, code="downloader_disabled"
+            )
         return dl
     dl = await get_default_downloader()
     if dl is None:
-        raise PushError("未配置默认下载器", status=400)
+        raise PushError(
+            "未配置默认下载器", status=400, code="no_default_downloader"
+        )
     return dl
 
 
@@ -132,9 +143,12 @@ async def enqueue_index_entry(index_id: int, downloader_id: int | None) -> Enque
     - 批量推送：只入队，由 ``drain_task_queue`` 按队列节流消化（一次几百条
       不能挂住 HTTP 请求）
 
-    :raises PushError: 索引条目不存在（``code=not_found``）/ 缺 item_id
-        （``code=no_link``）/ 站点不存在（``code=site_missing``）/ 下载器
-        不可用（``code=downloader_unavailable``）
+    :raises PushError: 索引条目不存在（``status=404`` /
+        ``code=not_found``）/ 缺 item_id（``status=400`` /
+        ``code=no_link``）/ 站点不存在（``status=404`` /
+        ``code=site_missing``）/ 站点已停用（``status=400`` /
+        ``code=site_disabled``）/ 队列繁忙（``status=503`` /
+        ``code=db_busy``）/ 下载器不可用（见 :func:`resolve_downloader`）
     """
     # 1) 读索引 + 站点
     async with session_scope() as session:
@@ -215,6 +229,16 @@ async def enqueue_index_entry(index_id: int, downloader_id: int | None) -> Enque
                     enq.task_id
                 )
             if requeued:
+                # 重置死信时**同步清掉索引行上的旧推送状态**。
+                #
+                # ① 防止「假成功」：索引行若留着 ``push_status='pushed'``，
+                #    重推会在 execute_add_torrent 的幂等短路处直接返回
+                #    成功——种子压根没进下载器，死信却被「成功」掩埋。
+                # ② 状态一致：重试在途时索引行不该还显示「失败」。
+                #
+                # 只清「失败 / 未推过」的行——``pushed`` 的行在第 2 步
+                # （已推过 → 幂等成功）就返回了，根本走不到这里。
+                await _clear_push_failure(index_id)
                 return EnqueueOutcome(
                     state="enqueued",
                     dl_id=dl_id,
@@ -235,6 +259,20 @@ async def enqueue_index_entry(index_id: int, downloader_id: int | None) -> Enque
         task_id=task_id,
         payload=payload,
     )
+
+async def _clear_push_failure(index_id: int) -> None:
+    """清掉索引行的「推送失败」标记（手动重推死信时调用）。
+
+    只清 ``push_status`` / ``pushed_at``：``info_hash`` 留着（它是种子自身
+    的属性，与推送成败无关）。
+    """
+    async with session_scope() as session:
+        await session.execute(
+            update(TorrentIndex)
+            .where(TorrentIndex.id == index_id)
+            .values(push_status=None, pushed_at=None)
+        )
+
 
 async def push_index_entry(
     index_id: int,
@@ -257,6 +295,18 @@ async def push_index_entry(
     因此崩溃恢复 / 幂等 / 退避 / TOCTOU 防御全部一致。
 
     前 3 步抽到 :func:`enqueue_index_entry`——批量推送复用同一份逻辑。
+
+    :returns: :class:`PushOutcome`。**失败也可能是返回值而不是异常**：
+        可重试的下载失败返回 ``ok=False, deferred=True``（API 据此回
+        202，任务留在队列里继续重试）。
+    :raises PushError: 索引条目不存在（``status=404`` /
+        ``code=not_found``）/ 缺 item_id（``status=400`` /
+        ``code=no_link``）/ 站点不存在（``status=404`` /
+        ``code=site_missing``）/ 站点已停用（``status=400`` /
+        ``code=site_disabled``）/ 队列繁忙（``status=503`` /
+        ``code=db_busy``）/ 下载器不可用（见 :func:`resolve_downloader`）/
+        推送失败（``status=502`` / ``code=push_failed``——含解析失败、
+        站点永久失败、重试预算耗尽；这几种重试也不会成功）
     """
     enq = await enqueue_index_entry(index_id, downloader_id)
     if enq.state in ("already_pushed", "already_queued"):

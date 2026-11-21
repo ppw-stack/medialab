@@ -372,6 +372,13 @@ async def test_push_resets_dead_letter_task(db: None) -> None:
                 last_error="上一轮失败",
             )
         )
+        # 索引行留着上一轮的「失败」标记
+        item = (
+            await session.execute(
+                select(TorrentIndex).where(TorrentIndex.id == index_id)
+            )
+        ).scalar_one()
+        item.push_status = PushStatus.FAILED
 
     result = await push_index_entry(index_id, None, factory)
 
@@ -382,9 +389,16 @@ async def test_push_resets_dead_letter_task(db: None) -> None:
 
     async with session_scope() as session:
         rows = (await session.execute(select(TaskQueue))).scalars().all()
+        item = (
+            await session.execute(
+                select(TorrentIndex).where(TorrentIndex.id == index_id)
+            )
+        ).scalar_one()
     assert len(rows) == 1
     assert rows[0].status == "done"
     assert rows[0].attempts == 1
+    # 旧标记被清掉 → 不会命中幂等短路「假成功」，状态也与任务一致
+    assert item.push_status == PushStatus.PUSHED
 
 
 # ------------------------------------------------------------------ TOCTOU
