@@ -117,6 +117,7 @@ def _stat(
     hashes 必须是 40 位完整 hex（删除要用）。
     added_at: hash → unix 秒映射（可选；disk_rotation 同档先删旧的用）。
     size_bytes: 精确字节数（可选；缺失时由 size_gb 推算，释放量断言用）。
+    blocked_hashes: 组内冻结 hash 列表（可选；组内成员正在校验/下载 → 非空，disk_rotation 整组本轮跳过）。
     """
     payload: dict[str, object] = {
         "name": name,
@@ -888,5 +889,5 @@ async def test_all_groups_blocked_reports_reason(
 
     assert adapter.removed == []
     assert result["blocked_groups"] == 1
-    err = result["results"][0]["error"] or ""
+    err = result["results"][0].get("error") or ""
     assert "校验/下载" in err, err
