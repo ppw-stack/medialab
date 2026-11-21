@@ -137,7 +137,6 @@ def _runtime_params() -> None:
     mgr.set_memory("push_min_remaining_hours", 6)
     mgr.set_memory("push_max_per_run", 20)
     mgr.set_memory("push_download_interval_ms", 0)
-    mgr.set_memory("push_within_bucket_order", 0)
     set_runtime_params(mgr)
     yield
     set_runtime_params(None)  # type: ignore[arg-type]
@@ -269,7 +268,6 @@ async def test_batch_delete_split(
     mgr.set_memory("push_min_remaining_hours", 6)
     mgr.set_memory("push_max_per_run", 20)
     mgr.set_memory("push_download_interval_ms", 0)
-    mgr.set_memory("push_within_bucket_order", 0)
     set_runtime_params(mgr)
 
     stats = [
@@ -316,7 +314,6 @@ async def test_batch_failure_does_not_stop(
     mgr.set_memory("push_min_remaining_hours", 6)
     mgr.set_memory("push_max_per_run", 20)
     mgr.set_memory("push_download_interval_ms", 0)
-    mgr.set_memory("push_within_bucket_order", 0)
     set_runtime_params(mgr)
 
     # 4 个独苗各 3 GB
@@ -438,7 +435,6 @@ async def test_delete_data_false(
     mgr.set_memory("push_min_remaining_hours", 6)
     mgr.set_memory("push_max_per_run", 20)
     mgr.set_memory("push_download_interval_ms", 0)
-    mgr.set_memory("push_within_bucket_order", 0)
     set_runtime_params(mgr)
 
     dl_id = await _add_downloader("dl1")

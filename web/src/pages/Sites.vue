@@ -1,49 +1,54 @@
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { api, errMsg } from '../api'
 import type {
-  AdapterInfo,
   FeedTestResult,
   Site,
+  SiteRuleInfo,
   SiteTestAllResult,
 } from '../types'
-import {
-  formatBytes as fmtBytes,
-  formatBonus as fmtBonus,
-  formatBonusTooltip as bonusTooltip,
-} from '../utils/format'
+import { formatBytes as fmtBytes } from '../utils/format'
 import { message } from 'ant-design-vue'
 import type { FormInstance } from 'ant-design-vue'
 import DataTable from '../components/DataTable.vue'
 import PageHeader from '../components/PageHeader.vue'
 
-// 硬编码 fallback（后端 /sites/adapters 不可用时使用）
-const ADAPTERS_FALLBACK: { value: string; label: string; domain: string }[] = [
-  { value: 'mteam', label: 'M-team', domain: 'm-team.io' },
-  { value: 'hhanclub', label: 'HHanClub', domain: 'hhanclub.net' },
-  { value: 'hdsky', label: 'HDSky', domain: 'hdsky.me' },
-  { value: 'ourbits', label: 'OurBits', domain: 'ourbits.club' },
-  { value: 'audiences', label: 'Audiences', domain: 'audiences.me' },
-  { value: 'springsunday', label: 'Springsunday', domain: 'springsunday.net' },
-  { value: 'hdhome', label: 'HDHome', domain: 'hdhome.org' },
-  { value: 'hddolby', label: 'HDDolby', domain: 'hddolby.com' },
-  { value: 'soulvoice', label: '聆音Club', domain: 'pt.soulvoice.club' },
-  { value: 'hdwing', label: 'HDWinG', domain: 'hdwing.org' },
-]
+//: 规则包站点目录（通用适配器加站时选择；后端 /sites/rules）
+const RULES = ref<SiteRuleInfo[]>([])
+const selectedRule = ref<string | null>(null)
 
-const ADAPTERS = ref<{ value: string; label: string; domain: string }[]>(ADAPTERS_FALLBACK)
-
-function domainFor(adapter: string): string {
-  return ADAPTERS.value.find((a) => a.value === adapter)?.domain ?? ''
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname
+  } catch {
+    return url.replace(/^https?:\/\//, '').replace(/\/$/, '')
+  }
 }
 
-async function loadAdapters() {
+const ruleOptions = computed(() =>
+  RULES.value.map((r) => ({
+    value: r.id,
+    label: `${r.name} · ${hostOf(r.domain)}${r.userdata_schema ? '' : '（仅搜索）'}`,
+  })),
+)
+
+async function loadRules() {
   try {
-    const list = await api.get<AdapterInfo[]>('/sites/adapters')
-    if (list.length > 0) {
-      ADAPTERS.value = list.map((a) => ({ value: a.name, label: a.label, domain: a.domain }))
-    }
-  } catch { /* keep fallback */ }
+    RULES.value = await api.get<SiteRuleInfo[]>('/sites/rules')
+  } catch { /* keep empty */ }
+}
+
+/**
+ * 选中规则：自动填名称与域名。
+ *
+ * 名称用规则 ID（后端要求 `^[a-zA-Z0-9_-]+$`；规则名是中文，不能直接用）。
+ */
+function onRuleChange(ruleId: string) {
+  selectedRule.value = ruleId
+  const rule = RULES.value.find((r) => r.id === ruleId)
+  if (!rule) return
+  formState.name = rule.id
+  formState.domain = hostOf(rule.domain)
 }
 
 const data = ref<Site[]>([])
@@ -55,79 +60,10 @@ const testResults = ref<Record<number, { status: string; detail: string }>>({})
 const modalOpen = ref(false)
 const formRef = ref<FormInstance>()
 
-// ---- 用户数据汇总（跨站合计）----
-const refreshingUserData = ref(false)
-
-/**
- * 跨站合计：做种数 / 上传量 / 下载量 / 时魔。
- *
- * 数据源是**站点列表本身**（`GET /sites` 已带出每站的 user_data 快照）——
- * 不额外发请求。
- */
-const userDataSummary = computed(() => {
-  const withData = data.value.filter((s) => s.has_data)
-  return {
-    total_seed: withData.reduce((s, d) => s + d.seeding_count, 0),
-    total_up: withData.reduce((s, d) => s + d.upload, 0),
-    total_dn: withData.reduce((s, d) => s + d.download, 0),
-    total_bonus: withData.reduce((s, d) => s + (d.hourly_bonus ?? 0), 0),
-    capped: withData.filter((d) => d.hourly_bonus_capped === true).length,
-    site_count: withData.length,
-  }
-})
-
-const summaryTiles = computed(() => [
-  { label: '做种中', value: String(userDataSummary.value.total_seed), hint: '跨站合计' },
-  { label: '总上传', value: fmtBytes(userDataSummary.value.total_up), hint: '累计' },
-  { label: '总下载', value: fmtBytes(userDataSummary.value.total_dn), hint: '累计' },
-  {
-    label: '时魔合计/小时',
-    value: userDataSummary.value.total_bonus.toFixed(1),
-    hint: userDataSummary.value.capped > 0
-      ? `${userDataSummary.value.capped} 站已封顶`
-      : '已封顶站越少越优先推',
-  },
-])
-
-/**
- * 触发全局刷新（跑 `refresh_user_data` 作业重抓所有站点）。
- *
- * **POST 一返回后台作业就调度了**，数据要等作业跑完才更新——故延迟
- * 10s 再重新加载，期间按钮持续 loading（避免用户以为已结束却没动静）。
- */
-let userDataTimer: ReturnType<typeof setTimeout> | null = null
-
-async function refreshAllUserData() {
-  if (refreshingUserData.value) return
-  refreshingUserData.value = true
-  try {
-    await api.post('/scheduler/refresh_user_data/run')
-    message.success('已触发全局刷新，正在重新加载…')
-    if (userDataTimer) clearTimeout(userDataTimer)
-    userDataTimer = setTimeout(async () => {
-      try {
-        await load()
-      } finally {
-        refreshingUserData.value = false
-      }
-    }, 10000)
-  } catch (exc) {
-    message.error(exc instanceof Error ? exc.message : '触发失败')
-    refreshingUserData.value = false
-  }
-}
-
-onUnmounted(() => {
-  if (userDataTimer) {
-    clearTimeout(userDataTimer)
-    userDataTimer = null
-  }
-})
-
 const formState = reactive<Record<string, unknown>>({})
 
 async function load() {
-  await Promise.all([loadSites(), loadAdapters()])
+  await Promise.all([loadSites(), loadRules()])
 }
 
 async function loadSites() {
@@ -142,8 +78,9 @@ function onCreate() {
   editing.value = null
   creating.value = true
   modalOpen.value = true
+  selectedRule.value = null
   Object.assign(formState, {
-    adapter: 'mteam',
+    adapter: 'generic',
     enabled: true,
     name: '',
     domain: '',
@@ -151,13 +88,6 @@ function onCreate() {
     apikey: '',
     cookies: '',
   })
-}
-
-function onAdapterChange(adapter: string) {
-  formState.adapter = adapter
-  if (creating.value) {
-    formState.domain = domainFor(adapter)
-  }
 }
 
 function onEdit(s: Site) {
@@ -210,9 +140,20 @@ async function onTestRow(s: Site) {
     const r = await api.post<{ reachable: boolean; logged_in: boolean; detail: string }>(
       `/sites/${s.id}/test`,
     )
+    let detail = r.detail
+    // 测连通过后顺手刷新用户数据（合并为一个动作，失败不影响测连结果）
+    if (r.reachable && r.logged_in) {
+      try {
+        const ud = await api.post<{ ok: boolean }>(`/sites/${s.id}/user-data/refresh`)
+        detail = `${detail} · 用户数据刷新${ud.ok ? '成功' : '失败'}`
+        if (ud.ok) await loadSites()
+      } catch (exc) {
+        detail = `${detail} · 用户数据刷新失败：${errMsg(exc)}`
+      }
+    }
     testResults.value[s.id] = {
       status: testStatus(r.reachable, r.logged_in),
-      detail: r.detail,
+      detail,
     }
   } catch (exc) {
     message.error(exc instanceof Error ? exc.message : '测连失败')
@@ -251,6 +192,21 @@ async function onTestAll() {
         detail: item.detail,
       }
     }
+
+    // 合并用户数据：只刷新「可达且已登录」的站（测连不通过的站不必再打一次）
+    const passing = r.results.filter((x) => x.reachable && x.logged_in)
+    let refreshed = 0
+    let refreshFailed = 0
+    for (const item of passing) {
+      try {
+        const ud = await api.post<{ ok: boolean }>(`/sites/${item.site_id}/user-data/refresh`)
+        if (ud.ok) refreshed += 1
+        else refreshFailed += 1
+      } catch {
+        refreshFailed += 1
+      }
+    }
+    if (passing.length) await loadSites()
     const { total, reachable, failed } = r.summary
     // ⚠️ summary.unauthorized = 可达但**未登录**（凭据失效）——单独提示，
     // 别混进「可达」（那会让失效的站看起来一切正常）
@@ -259,9 +215,13 @@ async function onTestAll() {
       const parts = [`共 ${total} 站`, `可达 ${reachable}`]
       if (failed > 0) parts.push(`失败 ${failed}`)
       if (unauthorized > 0) parts.push(`未登录 ${unauthorized}（凭据可能已失效）`)
+      if (passing.length) parts.push(`用户数据 ${refreshed} 成功${refreshFailed ? ` / ${refreshFailed} 失败` : ''}`)
       message.warning(parts.join('，'))
     } else {
-      message.success(`共 ${total} 站全部可达且已登录`)
+      message.success(
+        `共 ${total} 站全部可达且已登录` +
+        (passing.length ? `，用户数据已刷新 ${refreshed} 站` : '')
+      )
     }
   } catch (exc) {
     message.error(exc instanceof Error ? exc.message : '全部测连失败')
@@ -274,6 +234,22 @@ async function onTestAll() {
 const feedTestId = ref<number | null>(null)
 const feedTestModalOpen = ref(false)
 const feedTestResult = ref<FeedTestResult | null>(null)
+
+const feedColumns = [
+  { title: '标题', dataIndex: 'title', key: 'title', ellipsis: true },
+  { title: '大小', key: 'size', width: 100 },
+  { title: '做种/下载', key: 'peers', width: 110 },
+  { title: '免费倍率', key: 'factor', width: 100 },
+  { title: '发布时间', key: 'published_at', width: 170 },
+]
+
+/** 免费倍率展示：0=免费、0.5=50%、1=正常。 */
+function factorLabel(v: number | null): string {
+  if (v === null || v === undefined) return '—'
+  if (v === 0) return '免费'
+  if (v < 1) return `${Math.round(v * 100)}%`
+  return `×${v}`
+}
 
 async function onFeedTest(s: Site) {
   feedTestId.value = s.id
@@ -288,6 +264,7 @@ async function onFeedTest(s: Site) {
       item_count: 0,
       duration_ms: 0,
       sample_titles: [],
+      items: [],
       error: exc instanceof Error ? exc.message : '请求失败',
     }
   } finally {
@@ -309,12 +286,10 @@ async function onToggleEnabled(s: Site, next: boolean) {
 
 const columns = [
   { title: '名称', key: 'name' },
-  { title: '适配器', key: 'adapter' },
   { title: '域名', key: 'domain' },
   { title: '凭据', key: 'credentials' },
   { title: '上传/下载', key: 'traffic', width: 170 },
   { title: '做种', key: 'torrents', width: 80 },
-  { title: '时魔/小时', key: 'bonus', width: 150 },
   { title: '启用', key: 'enabled', width: 80 },
   { title: '', key: 'action', width: 280 },
 ]
@@ -325,13 +300,10 @@ const columns = [
     <PageHeader
       eyebrow="站点 · SITES"
       title="站点适配器"
-      sub="凭据脱敏展示 · 支持 9 类私有种子站点"
+      sub="凭据脱敏展示 · 规则包驱动（184 站）"
     >
       <template #actions>
         <a-space>
-          <a-button :loading="refreshingUserData" @click="refreshAllUserData">
-            刷新用户数据
-          </a-button>
           <a-button :loading="testingAll" @click="onTestAll">全部测连</a-button>
           <a-button type="primary" @click="onCreate">新增站点</a-button>
         </a-space>
@@ -340,16 +312,6 @@ const columns = [
 
     <hr class="divider-hairline" style="margin: 0" />
 
-    <section class="section">
-      <div class="label-caps" style="margin-bottom: var(--sp-3)">汇总 · SUMMARY</div>
-      <div class="summary-grid">
-        <div v-for="t in summaryTiles" :key="t.label" class="stat-tile">
-          <div class="stat-tile__label">{{ t.label }}</div>
-          <div class="stat-tile__value">{{ t.value }}</div>
-          <div class="stat-tile__hint">{{ t.hint }}</div>
-        </div>
-      </div>
-    </section>
 
     <section class="section">
       <div class="panel">
@@ -362,9 +324,6 @@ const columns = [
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'name'">
             <span class="row-name">{{ record.name }}</span>
-          </template>
-          <template v-else-if="column.key === 'adapter'">
-            <span class="mono dim">{{ record.adapter }}</span>
           </template>
           <template v-else-if="column.key === 'domain'">
             <span class="mono code">{{ record.domain || '—' }}</span>
@@ -389,15 +348,6 @@ const columns = [
             </span>
             <span v-else class="muted">—</span>
           </template>
-          <template v-else-if="column.key === 'bonus'">
-            <a-tooltip v-if="record.has_data" :title="bonusTooltip(record)">
-              <a-space :size="4">
-                <span class="mono">{{ fmtBonus(record.hourly_bonus, record.hourly_bonus_unit) }}</span>
-                <a-tag v-if="record.hourly_bonus_capped === true" color="orange">已封顶</a-tag>
-              </a-space>
-            </a-tooltip>
-            <span v-else class="muted">—</span>
-          </template>
           <template v-else-if="column.key === 'enabled'">
             <a-switch
               :checked="record.enabled"
@@ -413,7 +363,7 @@ const columns = [
                 :loading="testingId === record.id"
                 @click="onTestRow(record)"
               >
-                测连
+                测连/刷新
               </a-button>
               <a-tooltip v-if="testResults[record.id]" :title="`${testResults[record.id].status} · ${testResults[record.id].detail}`">
                 <span
@@ -468,11 +418,25 @@ const columns = [
               <span style="color: var(--accent-red)">{{ feedTestResult.error }}</span>
             </a-descriptions-item>
           </a-descriptions>
-          <template v-if="feedTestResult.sample_titles.length">
-            <div class="label-caps" style="margin: var(--sp-3) 0 var(--sp-2)">样本标题（前 5 条）</div>
-            <ul class="feed-test-samples">
-              <li v-for="(t, i) in feedTestResult.sample_titles" :key="i">{{ t }}</li>
-            </ul>
+          <template v-if="feedTestResult.items.length">
+            <div class="label-caps" style="margin: var(--sp-3) 0 var(--sp-2)">
+              解析结果（共 {{ feedTestResult.item_count }} 条，显示前 {{ feedTestResult.items.length }} 条）
+            </div>
+            <a-table
+              :data-source="feedTestResult.items"
+              :columns="feedColumns"
+              row-key="title"
+              size="small"
+              :pagination="{ pageSize: 10, size: 'small' }"
+              :scroll="{ x: 820, y: 320 }"
+            >
+              <template #bodyCell="{ column, record }">
+                <template v-if="column.key === 'size'">{{ fmtBytes(record.size) }}</template>
+                <template v-else-if="column.key === 'peers'">{{ record.seeders }} / {{ record.peers }}</template>
+                <template v-else-if="column.key === 'factor'">{{ factorLabel(record.download_factor) }}</template>
+                <template v-else-if="column.key === 'published_at'">{{ record.published_at || '—' }}</template>
+              </template>
+            </a-table>
           </template>
         </template>
       </a-spin>
@@ -486,12 +450,21 @@ const columns = [
       @ok="onSave"
     >
       <a-form ref="formRef" :model="formState" layout="vertical">
-        <a-form-item label="适配器（自动带出域名）" name="adapter" :rules="[{ required: true }]">
+        <a-form-item
+          v-if="creating"
+          label="站点规则（规则包 184 站）"
+        >
           <a-select
-            :value="formState.adapter"
-            @change="onAdapterChange"
-            :options="ADAPTERS.map(a => ({ value: a.value, label: a.label }))"
+            :value="selectedRule ?? undefined"
+            show-search
+            option-filter-prop="label"
+            :options="ruleOptions"
+            placeholder="输入站点名或域名搜索"
+            @change="onRuleChange"
           />
+          <div style="font-size: 12px; opacity: 0.65; margin-top: 4px">
+            选择后自动填入站点标识与域名；Cookie 仍需手动填写。
+          </div>
         </a-form-item>
         <a-space style="width: 100%" size="middle">
           <a-form-item
@@ -575,23 +548,4 @@ const columns = [
   box-shadow: 0 0 6px rgba(239, 68, 68, 0.4);
 }
 
-.feed-test-samples {
-  margin: 0;
-  padding-left: 1.2em;
-  font-size: var(--text-xs);
-  color: var(--text-secondary);
-}
-.feed-test-samples li {
-  margin: 2px 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 汇总卡网格（页面结构与设计 token 已在 global.css 统一定义） */
-.summary-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: var(--sp-3);
-}
 </style>

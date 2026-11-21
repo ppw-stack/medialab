@@ -66,7 +66,7 @@ async def _seed(
             Site(
                 name="site1",
                 domain="s1.test",
-                adapter="hdsky",
+                adapter="generic",
                 enabled=site_enabled,
             )
         )

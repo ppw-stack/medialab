@@ -49,7 +49,7 @@ from sqlalchemy import select
 
 async def _add_site(name: str = "s1", **kw: object) -> int:
     async with session_scope() as session:
-        s = Site(name=name, domain=f"{name}.test", adapter="hdsky", **kw)  # type: ignore[arg-type]
+        s = Site(name=name, domain=f"{name}.test", adapter="generic", **kw)  # type: ignore[arg-type]
         session.add(s)
         await session.flush()
         return s.id
@@ -76,9 +76,9 @@ async def test_site_list_empty(db: None) -> None:
 
 
 async def test_site_create_and_list(db: None) -> None:
-    snap = await site_service.create_site(name="s1", adapter="hdsky", domain="x.test")
+    snap = await site_service.create_site(name="s1", adapter="generic", domain="x.test")
     assert snap.name == "s1"
-    assert snap.adapter == "hdsky"
+    assert snap.adapter == "generic"
     assert snap.has_apikey is False
 
     rows = await site_service.list_sites()
@@ -87,9 +87,9 @@ async def test_site_create_and_list(db: None) -> None:
 
 
 async def test_site_create_duplicate_name_409(db: None) -> None:
-    await site_service.create_site(name="dup", adapter="hdsky")
+    await site_service.create_site(name="dup", adapter="generic")
     with pytest.raises(ServiceError) as exc:
-        await site_service.create_site(name="dup", adapter="hdsky")
+        await site_service.create_site(name="dup", adapter="generic")
     assert exc.value.status == 409
 
 
@@ -421,7 +421,7 @@ async def test_user_data_query_lists_all(db: None) -> None:
     rows = await user_data_query.list_user_data()
     assert len(rows) == 1
     assert rows[0].upload == 7
-    assert rows[0].adapter == "hdsky"
+    assert rows[0].adapter == "generic"
     assert rows[0].site_name == "s1"
 
     trends = await user_data_query.list_user_data_trends()

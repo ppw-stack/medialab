@@ -28,7 +28,7 @@ class SiteCreate(BaseModel):
     #: 站点适配器名。合法值由 :mod:`app.adapters.sites._registry` 决定，
     #: 在 service 层做运行时校验（**不**用 pydantic Literal——
     #: 那会让 9 站名单在这里维护第 3 份，漏改不会报错）。
-    adapter: str = Field(default="mteam", max_length=64)
+    adapter: str = Field(default="generic", max_length=64)
     domain: str | None = None
     rss_url: str | None = None
     apikey: str | None = Field(default=None, max_length=256)
@@ -64,6 +64,19 @@ class AdapterInfoOut(BaseModel):
     domain: str
 
 
+class SiteRuleOut(BaseModel):
+    """规则包里的站点（前端「通用适配器」加站时选择）。"""
+
+    id: str
+    name: str
+    domain: str
+    #: 用户数据解析框架；None = 该站只做搜索
+    userdata_schema: str | None = None
+    #: movie / tv / music；None = 综合站
+    media_type: str | None = None
+    has_subtitles: bool = False
+
+
 class SiteOut(BaseModel):
     id: int
     name: str
@@ -80,15 +93,11 @@ class SiteOut(BaseModel):
     upload: int = 0
     download: int = 0
     seeding_count: int = 0
-    hourly_bonus: float | None = None
-    hourly_bonus_unit: str | None = None
-    hourly_bonus_capped: bool | None = None
-    hourly_bonus_progress: float | None = None
     user_data_seen_at: str | None = None
 
 
 class SiteUserDataOut(BaseModel):
-    """站点用户数据（FR-1.6 精简版，3 字段 + 时魔）。"""
+    """站点用户数据（FR-1.6 精简版，3 字段）。"""
 
     site_id: int
     site_name: str
@@ -96,14 +105,8 @@ class SiteUserDataOut(BaseModel):
     upload: int = 0
     download: int = 0
     seeding_count: int = 0
-    #: 时魔（每小时获得的站点积分·合计口径）
-    hourly_bonus: float | None = None
-    #: 时魔单位（站点自称：魔力值 / 爆米花 / 茉莉 / 憨豆 / 积分）
-    hourly_bonus_unit: str | None = None
     #: 是否已达该站的获取上限（None = 该站无法判断）
-    hourly_bonus_capped: bool | None = None
     #: 站点进度百分比
-    hourly_bonus_progress: float | None = None
     last_seen_at: str | None = None
 
 
@@ -116,6 +119,19 @@ class SiteSelfTestOut(BaseModel):
     self_test: dict[str, Any]
 
 
+class FeedTestItemOut(BaseModel):
+    """拉取测试里的一条解析结果。"""
+
+    title: str
+    item_id: str | None = None
+    size: int = 0
+    seeders: int = 0
+    peers: int = 0
+    category: str | None = None
+    published_at: str | None = None
+    download_factor: float | None = None
+
+
 class FeedTestResult(BaseModel):
     """站点连通性测试结果。"""
 
@@ -124,6 +140,7 @@ class FeedTestResult(BaseModel):
     item_count: int = 0
     duration_ms: int = 0
     sample_titles: list[str] = []
+    items: list[FeedTestItemOut] = []
     error: str = ""
 
 
@@ -155,6 +172,12 @@ async def list_adapters() -> list[AdapterInfoOut]:
         AdapterInfoOut(name=a.name, label=a.label, domain=a.domain)
         for a in site_service.list_adapters()
     ]
+
+
+@router.get("/rules", summary="列出规则包里的站点（通用适配器加站用）")
+async def list_site_rules() -> list[SiteRuleOut]:
+    """返回随包分发的站点规则目录（只读，不含选择器配置）。"""
+    return [SiteRuleOut(**asdict(rule)) for rule in site_service.list_site_rules()]
 
 
 @router.post("/test-all", summary="全部站点测连")
@@ -289,5 +312,6 @@ async def test_feed(site_id: int) -> FeedTestResult:
         item_count=result.item_count,
         duration_ms=result.duration_ms,
         sample_titles=result.sample_titles,
+        items=[FeedTestItemOut(**asdict(item)) for item in result.items],
         error=result.error,
     )

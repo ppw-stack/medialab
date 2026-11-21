@@ -88,7 +88,7 @@ async def _setup(
     """
     hash_ = "a" * 40
     async with session_scope() as session:
-        session.add(Site(name="s1", domain="s1.test", adapter="hdsky"))
+        session.add(Site(name="s1", domain="s1.test", adapter="generic"))
         session.add(
             DownloaderInstance(
                 name="dl1",

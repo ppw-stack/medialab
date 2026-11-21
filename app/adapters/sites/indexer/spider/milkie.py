@@ -1,0 +1,250 @@
+"""
+通过 Milkie 接口搜索种子并转换为通用索引结果。
+"""
+
+from typing import Any, List, Optional, Tuple
+from urllib.parse import quote
+
+from app.adapters.sites.indexer.http import AsyncRequestUtils, RequestUtils
+from app.adapters.sites.indexer.compat import temporal as time_tools
+from app.adapters.sites.indexer.compat.log import logger
+from app.adapters.sites.indexer.compat.settings import get_runtime_setting
+from app.adapters.sites.indexer.compat.types import MediaType
+from app.core.timeutils import BJ_TZ
+
+
+class MilkieSpider:
+    """
+    Milkie JSON API 种子搜索适配器。
+    """
+
+    _size = 100
+    _timeout = 15
+    _proxy: Optional[dict[str, Any]] = None
+    _searchurl = "%sapi/v1/torrents"
+    _downloadurl = "%sapi/v1/torrents/%s/torrent?key=%s"
+    _pageurl = "%sbrowse/%s"
+
+    # 电影分类
+    _movie_category = "1"
+    # 电视剧分类
+    _tv_category = "2"
+    # 音乐分类
+    _music_category = "3"
+
+    # 站点分类到媒体类型的映射，未覆盖的分类不输出媒体类型
+    _category_mapping = {
+        1: MediaType.MOVIE,
+        2: MediaType.TV,
+        3: MediaType.MUSIC,
+    }
+
+    def __init__(self, indexer: dict[str, Any]):
+        """
+        使用站点配置初始化 Milkie 请求上下文。
+
+        :param indexer: 站点索引配置
+        :raises ValueError: 配置缺少必填的 ``domain``
+        """
+        indexer = indexer or {}
+        domain = str(indexer.get("domain") or "").strip()
+        if not domain:
+            raise ValueError("Milkie 站点配置缺少必填字段 domain")
+        self._indexerid = indexer.get('id')
+        self._domain = domain
+        self._searchurl = self._searchurl % self._domain
+        self._name = indexer.get('name')
+        if indexer.get('proxy'):
+            self._proxy = get_runtime_setting('PROXY')
+        self._apikey = indexer.get('apikey')
+        self._ua = indexer.get('ua')
+        self._timeout = indexer.get('timeout') or 15
+
+    @classmethod
+    def get_search_page_size(cls, keyword: Optional[str] = None) -> Optional[int]:
+        """
+        获取搜索接口单页容量。
+
+        :param keyword: 保留统一入口参数，不影响本站的分页容量
+        :return: 本站搜索接口的固定单页记录数
+        """
+        return cls._size
+
+    def test_connection(self) -> Tuple[bool, str]:
+        """
+        通过最小种子查询验证 Milkie API Key，空列表也是有效响应。
+
+        :return: 认证是否有效及连接或响应失败原因
+        """
+        user_agent = self._ua or get_runtime_setting("USER_AGENT")
+        with RequestUtils(headers={
+            "Accept": "application/json", "User-Agent": user_agent, "x-milkie-auth": self._apikey,
+        }, ua=user_agent, proxies=self._proxy or {}, timeout=self._timeout).response_manager(
+            method="GET", url=f"{str(self._domain).rstrip('/')}/api/v1/torrents?ps=1", allow_redirects=False,
+        ) as response:
+            if response is None:
+                return False, "无法打开网站！"
+            if response.status_code == 200:
+                payload = response.json()
+                if isinstance(payload, dict) and isinstance(payload.get("torrents"), list):
+                    return True, "连接成功"
+                return False, "站点返回了无效的种子数据"
+            if response.status_code in (401, 403):
+                return False, "API Key 无效或已过期"
+            return False, f"错误：{response.status_code} {response.reason}"
+
+    def __get_params(self, keyword: Optional[str] = None, mtype: Optional[MediaType] = None,
+                     page: Optional[int] = 0) -> dict[str, Any]:
+        """
+        获取搜索参数。
+        """
+        params = {
+            "pi": int(page or 0),
+            "ps": self._size,
+            "oby": "created_at",
+            "odir": "desc"
+        }
+        if keyword:
+            params["query"] = keyword
+            # 按媒体类型收敛分类，提高关键字搜索的准确度
+            if mtype == MediaType.MOVIE:
+                params["categories"] = self._movie_category
+            elif mtype == MediaType.TV:
+                params["categories"] = self._tv_category
+            elif mtype == MediaType.MUSIC:
+                params["categories"] = self._music_category
+        return params
+
+    def __parse_created_at(self, created_at: str) -> Optional[int]:
+        """
+        把站点 ISO8601 发布时间换算成 unix 秒（协议侧时刻）。
+
+        协议层不产出时间字符串——落库边界（``generic._published_at``）才转成
+        北京时间字符串，避免两套时间口径在中间层混用。站点时间没有时区标记
+        时按北京时间解释（与站点自身口径一致）。
+
+        :param created_at: 站点返回的发布时间文本
+        :return: unix 秒；无法解析时为 None
+        """
+        parsed = time_tools.parse_datetime(created_at)
+        if not parsed:
+            return None
+        try:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=BJ_TZ)
+            return int(parsed.timestamp())
+        except (OSError, OverflowError, ValueError):
+            return None
+
+    def __parse_result(self, results: List[dict[str, Any]]) -> List[dict[str, Any]]:
+        """
+        解析搜索结果。
+        """
+        torrents: List[dict[str, Any]] = []
+        if not results:
+            return torrents
+
+        for result in results:
+            category = self._category_mapping.get(result.get('category') or 0)
+            torrent = {
+                'title': result.get('releaseName'),
+                'description': result.get('id'),
+                # API Key 含 URL 保留字符，必须编码后拼入下载链接
+                'enclosure': self._downloadurl % (
+                    self._domain, result.get('id'), quote(self._apikey or "", safe="")
+                ),
+                'pubdate': self.__parse_created_at(result.get('createdAt') or ""),
+                'size': result.get('size'),
+                'seeders': result.get('seeders'),
+                'peers': result.get('leechers'),
+                'grabs': result.get('downloaded'),
+                # 站点无分享率考核，等效全站免费
+                'downloadvolumefactor': 0,
+                'uploadvolumefactor': 1,
+                'page_url': self._pageurl % (self._domain, result.get('id')),
+                'category': category.value if category else None
+            }
+            externals = result.get('externals') or {}
+            if externals.get('imdb'):
+                torrent['imdbid'] = externals.get('imdb')
+            torrents.append(torrent)
+
+        return torrents
+
+    def __process_response(self, res: Any) -> Tuple[bool, List[dict[str, Any]]]:
+        """
+        统一判定搜索响应状态并投影 Milkie 种子结果。
+        """
+        if res and res.status_code == 200:
+            try:
+                results = res.json().get("torrents") or []
+            except (TypeError, ValueError):
+                # 站点在 Cookie 失效 / 限流时仍回 200，但 body 不是 JSON。
+                logger.warning(
+                    "%s 搜索响应解析失败：%s", self._name, self._domain, exc_info=True
+                )
+                return True, []
+            return False, self.__parse_result(results)
+        if res is not None:
+            if res.status_code in (401, 403):
+                logger.warn(f"{self._name} 搜索失败，API Key 无效或已过期")
+            else:
+                logger.warn(f"{self._name} 搜索失败，错误码：{res.status_code}")
+            return True, []
+        logger.warn(f"{self._name} 搜索失败，无法连接 {self._domain}")
+        return True, []
+
+    def __get_headers(self) -> dict[str, str]:
+        """
+        构造带 API Key 认证的请求头。
+        """
+        return {
+            "x-milkie-auth": self._apikey or "",
+            "User-Agent": self._ua or ""
+        }
+
+    def search(self, keyword: str, mtype: Optional[MediaType] = None,
+               page: Optional[int] = 0) -> Tuple[bool, List[dict[str, Any]]]:
+        """
+        同步搜索 Milkie 种子。
+
+        :param keyword: 搜索关键词；为空时按站点接口规则浏览资源
+        :param mtype: 目标媒体类型，未指定时不额外限制媒体类型
+        :param page: 从 0 开始的搜索页码
+        :return: 是否发生错误及标准化资源列表；空列表也可能表示没有匹配资源
+        """
+        if not self._apikey:
+            logger.warn(f"{self._name} 未配置 API Key，无法搜索")
+            return True, []
+
+        params = self.__get_params(keyword, mtype, page)
+
+        res = RequestUtils(
+            headers=self.__get_headers(),
+            proxies=self._proxy,
+            timeout=self._timeout
+        ).get_res(url=self._searchurl, params=params)
+        return self.__process_response(res)
+
+    async def async_search(self, keyword: str, mtype: Optional[MediaType] = None,
+                           page: Optional[int] = 0) -> Tuple[bool, List[dict[str, Any]]]:
+        """
+        异步搜索 Milkie 种子。
+
+        :param keyword: 搜索关键词；为空时按站点接口规则浏览资源
+        :param mtype: 目标媒体类型，未指定时不额外限制媒体类型
+        :param page: 从 0 开始的搜索页码
+        :return: 是否发生错误及标准化资源列表；空列表也可能表示没有匹配资源
+        """
+        if not self._apikey:
+            logger.warn(f"{self._name} 未配置 API Key，无法搜索")
+            return True, []
+
+        params = self.__get_params(keyword, mtype, page)
+
+        res = await AsyncRequestUtils(
+            headers=self.__get_headers(),
+            proxies=self._proxy,
+            timeout=self._timeout
+        ).get_res(url=self._searchurl, params=params)
+        return self.__process_response(res)

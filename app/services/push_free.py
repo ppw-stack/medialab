@@ -12,46 +12,27 @@ freeleech_timed}``，且限时种 ``free_end_at - now > push_min_remaining_hours
 ``DownloaderAdapter.add_torrent(torrent_bytes=bytes)`` →
 更新 ``torrent_index.push_status = pushed``。
 
-选种优先级（FR-1.6 增补）：**时魔未封顶的站优先**。
+排序：按 ``torrent_index.last_seen_at DESC``（新条目优先）。
 
-NexusPHP 的魔力公式是 ``每小时魔力 = B0 × (1 − e^(−A/B0))``，A = 自己的
-做种 A 值总和。A 越大越逼近上限 B0，**多推一个种子的边际收益越小**；
-已封顶（时魔进度 ≥ 100%）的站再推也不涨时魔。
-
-所以推送名额（``push_max_per_run``）应优先给「离上限还远」的站：
-
-=====  ==================  ==========================================
-档位   含义                排序
-=====  ==================  ==========================================
-0     明确未封顶            最优先
-1     无上限信号（NULL）     次之
-2     已封顶                最后
-=====  ==================  ==========================================
-
-档内排序由运行时参数 ``push_within_bucket_order`` 决定：
-
-- ``0``（默认）——按各站时魔进度升序（同进度退化为 ``last_seen_at DESC``）
-- ``1`` —— 整个档内随机打乱（含站点顺序）
-
-档内随机在 **Python 侧**做（不用 SQL ``RANDOM()``）——SQL 的 ``RANDOM()``
-既不可 seed 也不可测；Python 侧用 ``random.Random``（生产不传 seed =
-真随机，测试传 seed = 确定性）。
+注：曾按「时魔封顶档」分档排序（未封顶 / 无信号 / 已封顶），档内再按运行时
+参数 ``push_within_bucket_order`` 选择「时魔进度升序」或「随机打乱」。该特性
+随「时魔」功能整体删除（2026-11-20），对应的运行时参数、档位常量与
+``SiteUserData`` 外连接一并移除——**当前只剩上面这一条排序口径**。
 """
 
 from __future__ import annotations
 
 import asyncio
 import random
-from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from sqlalchemy import case, func, or_, select, update
+from sqlalchemy import or_, select, update
 
 from app.core.logging import get_logger
 from app.core.timeutils import bj_now, bj_now_dt, format_bj
-from app.db.models import Site, SiteUserData, TorrentIndex
+from app.db.models import Site, TorrentIndex
 from app.db.session import session_scope
 from app.domain.enums import FreeType, PushStatus
 from app.services.downloader_query import get_default_downloader
@@ -63,19 +44,6 @@ if TYPE_CHECKING:
 
 
 logger = get_logger(__name__)
-
-#: 时魔封顶档位（选种优先级；见模块 docstring）。
-#:
-#: - 0 = 明确未封顶（``hourly_bonus_capped = 0``）→ 最优先
-#: - 1 = 无上限信号（``NULL``：该站不提供上限信号 / 还没抓到数据）→ 次之
-#: - 2 = 已封顶（``= 1``）→ 最后
-_BUCKET_OPEN = 0
-_BUCKET_UNKNOWN = 1
-_BUCKET_CAPPED = 2
-
-#: 档内排序模式（运行时参数 ``push_within_bucket_order``）。
-_ORDER_BY_PROGRESS = 0
-_ORDER_RANDOM = 1
 
 #: 候选**新鲜度下限**（小时）：``torrent_index.last_seen_at`` 早于这个时长的
 #: 条目一律不推送。
@@ -157,21 +125,6 @@ class PushFreeService:
         # 2) 选候选
         async with session_scope() as session:
             candidates = await self._select_candidates(session, downloader_id)
-            bucket_counts = await self._site_bucket_counts(session)
-
-        from app.services.runtime_params import get_runtime_params
-
-        order_mode = get_runtime_params().get_int("push_within_bucket_order")
-        bucket_open, bucket_unknown, bucket_capped, bucket_items = bucket_counts
-        bucket_step = JobStep(
-            "按时魔封顶排序",
-            "ok",
-            bucket_open + bucket_unknown + bucket_capped,
-            f"未封顶 {bucket_open} 站，无信号 {bucket_unknown} 站，"
-            f"已封顶 {bucket_capped} 站"
-            f"（档内：{'随机' if order_mode == _ORDER_RANDOM else '按进度升序'}）",
-            items=bucket_items,
-        )
 
         if not candidates:
             logger.info("push_free: 无新候选")
@@ -179,8 +132,7 @@ class PushFreeService:
                 summary="无新候选",
                 steps=(
                     JobStep("查询默认下载器", "ok", 1, default_dl.name),
-                    bucket_step,
-                    JobStep("查询候选免费种", "skip", 0, "无新候选"),
+                        JobStep("查询候选免费种", "skip", 0, "无新候选"),
                 ),
             )
 
@@ -367,7 +319,6 @@ class PushFreeService:
             ),
             steps=(
                 JobStep("查询默认下载器", "ok", 1, default_dl.name),
-                bucket_step,
                 JobStep(
                     "查询候选免费种",
                     "ok",
@@ -405,13 +356,9 @@ class PushFreeService:
     async def _select_candidates(
         self, session: AsyncSession, downloader_id: int
     ) -> list[_Candidate]:
-        """选候选免费种：未推过 + 剩余时间满足阈值 + **按时魔封顶档排序**。
+        """选候选免费种：未推过 + 剩余时间满足阈值 + **按新条目优先排序**。
 
-        排序（见模块 docstring）：主键是时魔封顶档（未封顶 → 无信号 → 已封顶），
-        档内按运行时参数 ``push_within_bucket_order``：
-
-        - 0（默认）——各站时魔进度升序（同进度退化为 ``last_seen_at DESC``）
-        - 1 —— 整个档内随机打乱（含站点顺序）
+        排序：按 ``last_seen_at DESC``（新条目优先）。
 
         注：不再从 torrent_index 读 URL——推送时实时调
         :meth:`SiteAdapter.download_torrent` 获取 .torrent bytes。
@@ -423,14 +370,6 @@ class PushFreeService:
         rp = get_runtime_params()
         min_remaining = timedelta(hours=rp.get_int("push_min_remaining_hours"))
         threshold = format_bj(bj_now_dt() + min_remaining)
-        order_mode = rp.get_int("push_within_bucket_order")
-
-        # 档位表达式：未封顶 → 无信号 → 已封顶
-        bucket = case(
-            (SiteUserData.hourly_bonus_capped.is_(False), _BUCKET_OPEN),
-            (SiteUserData.hourly_bonus_capped.is_(None), _BUCKET_UNKNOWN),
-            else_=_BUCKET_CAPPED,
-        )
 
         # 候选集：torrent_index 上 free_type ∈ 真免费/限时免费 且 item_id 非空
         #         且 push_status 未推过（NULL 或 != pushed）
@@ -442,7 +381,6 @@ class PushFreeService:
                 TorrentIndex.name,
                 TorrentIndex.free_type,
                 TorrentIndex.free_end_at,
-                bucket.label("bonus_bucket"),
             )
             # INNER JOIN sites：只推**启用**站点的种子。
             #
@@ -453,8 +391,6 @@ class PushFreeService:
             # 删站点会级联删 torrent_index）。
             .join(Site, Site.id == TorrentIndex.site_id)
             # LEFT JOIN：站点没有 site_user_data 行（没抓过 / 抓失败）时
-            # hourly_bonus_capped 为 NULL → 落「无信号」档，行为与改动前一致。
-            .outerjoin(SiteUserData, SiteUserData.site_id == TorrentIndex.site_id)
             .where(
                 # 只推启用站点（停用站点的种子一律不推）
                 Site.enabled.is_(True),
@@ -473,30 +409,13 @@ class PushFreeService:
                 # 陈旧快照不推（凭据失效期间攒下的条目免费状态不可信）
                 TorrentIndex.last_seen_at >= _freshness_cutoff(),
             )
-            .order_by(
-                bucket,
-                # 进度升序：离上限最远的站先（progress 是站点级，同站候选同值）
-                SiteUserData.hourly_bonus_progress.asc().nulls_last(),
-                TorrentIndex.last_seen_at.desc(),
-            )
+            .order_by(TorrentIndex.last_seen_at.desc())
         )
         rows = list((await session.execute(stmt)).all())
 
-        # 档内随机（模式 1）：把每个档的候选整组打乱。
-        #
-        # 为什么在 Python 侧做而不用 SQL ``RANDOM()``：SQL 的 RANDOM() 既不可
-        # seed 也不可测；Python 侧用 random.Random——生产传 None = 真随机，
-        # 测试传 seed = 确定性。
-        #
-        # 档内打乱**在过滤循环之前**做：循环仍会在凑满 push_max_per_run 时
-        # break，所以下面的「已推过」检查（每候选一次 DB 查询）次数不变——
-        # 不会因为扫全表变成 N+1。
-        if order_mode == _ORDER_RANDOM:
-            rows = _shuffle_within_buckets(rows, self._rng)
-
         candidates: list[_Candidate] = []
         for row in rows:
-            idx_id, site_id, item_id, name, free_type, free_end_at, _bucket = row
+            idx_id, site_id, item_id, name, free_type, free_end_at = row
             # is_not_null 已 WHERE 过滤，但 assert 在 `python -O` 下被剥离；
             # 用显式 if 跳过更安全（防御类型契约变化）。
             if item_id is None:
@@ -525,86 +444,6 @@ class PushFreeService:
             if len(candidates) >= rp.get_int("push_max_per_run"):
                 break
         return candidates
-
-    async def _site_bucket_counts(
-        self, session: AsyncSession
-    ) -> tuple[int, int, int, list[JobStepItem]]:
-        """统计启用站点按时魔封顶档的分布（未封顶 / 无信号 / 已封顶）。
-
-        用于作业步骤卡片——让用户看到「这次按什么优先级排的」。
-
-        按**站点**统计（不是候选数）：候选数会随抓取波动，站点数才反映
-        「有多少个站还有时魔可拿」。
-
-        :return: ``(未封顶数, 无信号数, 已封顶数, 逐站明细)``。明细让用户
-            能看到「哪个站在哪一档」，而不只是三个数字。
-        """
-        bucket = case(
-            (SiteUserData.hourly_bonus_capped.is_(False), _BUCKET_OPEN),
-            (SiteUserData.hourly_bonus_capped.is_(None), _BUCKET_UNKNOWN),
-            else_=_BUCKET_CAPPED,
-        )
-        stmt = (
-            select(bucket.label("bucket"), func.count().label("n"))
-            .select_from(Site)
-            .outerjoin(SiteUserData, SiteUserData.site_id == Site.id)
-            .where(Site.enabled.is_(True))
-            .group_by(bucket)
-        )
-        counts = {_BUCKET_OPEN: 0, _BUCKET_UNKNOWN: 0, _BUCKET_CAPPED: 0}
-        for bucket_value, n in (await session.execute(stmt)).all():
-            counts[int(bucket_value)] = int(n)
-
-        # 逐站明细：站名 + 档位 + 时魔进度
-        detail_stmt = (
-            select(
-                Site.name,
-                bucket.label("bucket"),
-                SiteUserData.hourly_bonus_progress,
-            )
-            .select_from(Site)
-            .outerjoin(SiteUserData, SiteUserData.site_id == Site.id)
-            .where(Site.enabled.is_(True))
-            .order_by(bucket, Site.id)
-        )
-        items: list[JobStepItem] = []
-        for site_name, bucket_value, progress in (
-            await session.execute(detail_stmt)
-        ).all():
-            b = int(bucket_value)
-            if b == _BUCKET_OPEN:
-                label = "未封顶"
-                status = "ok"
-            elif b == _BUCKET_UNKNOWN:
-                label = "无信号"
-                status = "skip"
-            else:
-                label = "已封顶"
-                status = "warn"
-            items.append(
-                JobStepItem(
-                    str(site_name),
-                    status,
-                    None,
-                    f"{label}"
-                    + (
-                        # ``progress`` **就是百分数**（契约见 HourlyBonus.progress：
-                        # ``>=100`` 表示封顶；解析侧 parse_progress_percent 直接
-                        # 返回 ``alt="NN%"`` 的数值）。曾在这里多乘 100 → 显示
-                        # 「进度 1645%」这种离谱值。**不要**再乘。
-                        f"，进度 {float(progress):.0f}%"
-                        if progress is not None
-                        else ""
-                    ),
-                )
-            )
-
-        return (
-            counts[_BUCKET_OPEN],
-            counts[_BUCKET_UNKNOWN],
-            counts[_BUCKET_CAPPED],
-            items,
-        )
 
     async def _is_already_pushed(
         self, session: AsyncSession, site_id: int, item_id: str
@@ -651,35 +490,6 @@ class PushFreeService:
                 "标记推送失败状态失败：index_id=%d（push_status 可能仍为 NULL）：%s",
                 index_id, exc,
             )
-
-
-def _shuffle_within_buckets[RowT: Sequence[Any]](
-    rows: list[RowT], rng: random.Random | None
-) -> list[RowT]:
-    """把每个时魔档位内的候选整组打乱（档位之间的顺序不变）。
-
-    SQL 的主排序是档位，所以同一档的行在结果里**天然连续**——按档切分
-    打乱即可，档与档之间的优先级（未封顶 → 无信号 → 已封顶）不受影响。
-
-    :param rows: 查询结果行，末位是档位（``bonus_bucket``）。
-    :param rng: 随机源；``None`` = 用系统熵新建一个（生产真随机）。
-    """
-    if not rows:
-        return rows
-    source = rng if rng is not None else random.Random()
-    out: list[RowT] = []
-    start = 0
-    total = len(rows)
-    while start < total:
-        bucket = rows[start][-1]
-        end = start + 1
-        while end < total and rows[end][-1] == bucket:
-            end += 1
-        group = list(rows[start:end])
-        source.shuffle(group)
-        out.extend(group)
-        start = end
-    return out
 
 
 @dataclass(frozen=True, slots=True)

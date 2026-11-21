@@ -26,15 +26,6 @@ cross_seed_added = Counter(
     registry=REGISTRY,
 )
 
-#: AI 读码次数（FR-3.6 站点签到）
-#: result: ok / failed（模型不可用或输出不可用）/ unavailable（未配置）
-ai_captcha_reads = Counter(
-    "seedhelper_ai_captcha_reads_total",
-    "AI 读码次数",
-    labelnames=("site", "result"),
-    registry=REGISTRY,
-)
-
 #: 免费种成功/中止数（按四分类与中止原因）
 free_seed_outcomes = Counter(
     "seedhelper_free_seed_outcomes_total",

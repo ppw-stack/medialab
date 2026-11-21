@@ -61,12 +61,15 @@ jobs:
 
       - name: Pytest
         # 覆盖率阈值在 pyproject 的 [tool.coverage.report] fail_under 里
-        # （当前 65 = 阻断）。这里显式再传一次，避免只看 workflow 的人误以为
+        # （当前 66 = 阻断）。这里显式再传一次，避免只看 workflow 的人误以为
         # 不阻断；只许升不许降。
+        #
+        # 2026-11-21：补齐「规则包驱动的通用适配器」移植层的纯函数与站点
+        # 解析器测试，实测 63.4% → 66.19%，门槛随之从 65 提到 66。
         #
         # 只出 term 报告（人看），**不生成 coverage.xml、不上传 artifact**：
         # 仓库没有 codecov 等消费者，artifact 每次 CI 堆一份没人看。
-        run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=65
+        run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=66
 
   frontend:
     name: frontend (vue-tsc + oxlint)

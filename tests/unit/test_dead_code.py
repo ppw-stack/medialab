@@ -43,7 +43,10 @@ def _py_files(root: Path) -> list[Path]:
 
 
 def _prod_sources() -> list[Path]:
-    return _py_files(APP_DIR)
+    #: 站点解析引擎（app/adapters/sites/indexer）是 MoviePilot 上游代码的
+    #: 移植，保留其原有写法（含 ``link=`` 等），不参与本项目的死代码扫描。
+    upstream = APP_DIR / "adapters" / "sites" / "indexer"
+    return [p for p in _py_files(APP_DIR) if upstream not in p.parents]
 
 
 def _test_sources() -> list[Path]:

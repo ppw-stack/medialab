@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Final, cast
 
 from sqlalchemy import CursorResult, delete, select
@@ -101,6 +102,27 @@ class AdapterInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class SiteRuleInfo:
+    """规则包里的一个站点（前端加站时选择）。
+
+    规则包由 :mod:`app.adapters.sites.indexer.rules` 提供；本 DTO 只暴露
+    加站需要的字段，不把整份选择器配置发给前端。
+    """
+
+    #: 规则 ID（也是通用适配器的站点标识；用作新增站点的名称建议值）
+    id: str
+    name: str
+    #: 站点主页 URL（``https://pt.0ff.cc/``）
+    domain: str
+    #: 用户数据解析框架（NexusPhp / Unit3d / …）；None = 只做搜索
+    userdata_schema: str | None
+    #: 站点媒体类型（movie / tv / music / None）
+    media_type: str | None
+    #: 是否提供字幕搜索配置
+    has_subtitles: bool
+
+
+@dataclass(frozen=True, slots=True)
 class SiteSnapshot:
     """站点配置快照（对外 DTO，敏感字段已脱敏）。"""
 
@@ -122,17 +144,13 @@ class SiteSnapshot:
     upload: int = 0
     download: int = 0
     seeding_count: int = 0
-    hourly_bonus: float | None = None
-    hourly_bonus_unit: str | None = None
-    hourly_bonus_capped: bool | None = None
-    hourly_bonus_progress: float | None = None
     #: 用户数据最近一次刷新时间（北京时间）；None = 从未刷新
     user_data_seen_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class SiteUserDataSnapshot:
-    """站点用户数据（3 字段 + 时魔 + 站点名）。"""
+    """站点用户数据（3 字段 + 站点名）。"""
 
     site_id: int
     site_name: str
@@ -140,14 +158,8 @@ class SiteUserDataSnapshot:
     upload: int = 0
     download: int = 0
     seeding_count: int = 0
-    #: 时魔（每小时获得的站点积分·合计口径）
-    hourly_bonus: float | None = None
-    #: 时魔单位（站点自称：魔力值 / 爆米花 / 茉莉 / 憨豆 / 积分）
-    hourly_bonus_unit: str | None = None
     #: 是否已达该站的获取上限（None = 该站无法判断）
-    hourly_bonus_capped: bool | None = None
     #: 站点进度百分比
-    hourly_bonus_progress: float | None = None
     last_seen_at: str | None = None
 
 
@@ -165,6 +177,20 @@ class SiteSelfTestResult:
 
 
 @dataclass(frozen=True, slots=True)
+class SiteFeedTestItem:
+    """拉取测试里的一条解析结果（只读诊断，不落库）。"""
+
+    title: str
+    item_id: str | None = None
+    size: int = 0
+    seeders: int = 0
+    peers: int = 0
+    category: str | None = None
+    published_at: str | None = None
+    download_factor: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class SiteFeedTestResult:
     """站点种子列表拉取测试结果。"""
 
@@ -173,6 +199,8 @@ class SiteFeedTestResult:
     item_count: int = 0
     duration_ms: int = 0
     sample_titles: list[str] = field(default_factory=list)
+    #: 解析后的前 100 条明细（标题/体积/做种/发布时间/免费倍率）
+    items: list[SiteFeedTestItem] = field(default_factory=list)
     error: str = ""
 
 
@@ -227,10 +255,6 @@ def _to_snapshot(
         upload=user_data.upload if user_data else 0,
         download=user_data.download if user_data else 0,
         seeding_count=user_data.seeding_count if user_data else 0,
-        hourly_bonus=user_data.hourly_bonus if user_data else None,
-        hourly_bonus_unit=user_data.hourly_bonus_unit if user_data else None,
-        hourly_bonus_capped=user_data.hourly_bonus_capped if user_data else None,
-        hourly_bonus_progress=user_data.hourly_bonus_progress if user_data else None,
         user_data_seen_at=user_data.last_seen_at if user_data else None,
     )
 
@@ -253,6 +277,43 @@ def validate_adapter(adapter: str) -> None:
             f"未注册的站点 adapter：{adapter!r}，可选：{list_available()}",
             status=400,
         )
+
+
+@lru_cache(maxsize=1)
+def _site_rule_infos() -> tuple[SiteRuleInfo, ...]:
+    """构建并排序规则包里的全部站点（进程内缓存）。
+
+    规则包在进程生命周期内只读不变，构建一次即可。
+    """
+    from app.adapters.sites.indexer.rules import load_site_rules
+
+    rules = load_site_rules()
+    result: list[SiteRuleInfo] = []
+    for rule in rules.indexers.values():
+        domain = str(rule.get("domain") or "")
+        schema = rule.get("schema")
+        media_type = rule.get("media_type")
+        result.append(
+            SiteRuleInfo(
+                id=str(rule.get("id") or ""),
+                name=str(rule.get("name") or rule.get("id") or ""),
+                domain=domain,
+                userdata_schema=str(schema) if schema else None,
+                media_type=str(media_type) if media_type else None,
+                has_subtitles=bool(rule.get("subtitles")),
+            )
+        )
+    return tuple(sorted(result, key=lambda item: item.name))
+
+
+def list_site_rules() -> list[SiteRuleInfo]:
+    """返回规则包里的全部站点（按名称排序）。
+
+    数据源是随包分发的 ``indexers.json``（MoviePilot-Resources v3），
+    只读、不联网。构建结果在进程内缓存；这里返回**副本**，调用方就地修改
+    不会污染缓存。
+    """
+    return list(_site_rule_infos())
 
 
 def list_adapters() -> list[AdapterInfo]:
@@ -559,10 +620,6 @@ async def get_site_user_data(site_id: int) -> SiteUserDataSnapshot:
             upload=ud.upload,
             download=ud.download,
             seeding_count=ud.seeding_count,
-            hourly_bonus=ud.hourly_bonus,
-            hourly_bonus_unit=ud.hourly_bonus_unit,
-            hourly_bonus_capped=ud.hourly_bonus_capped,
-            hourly_bonus_progress=ud.hourly_bonus_progress,
             last_seen_at=ud.last_seen_at,
         )
 
@@ -750,5 +807,18 @@ async def test_site_feed(site_id: int) -> SiteFeedTestResult:
         item_count=len(result.items),
         duration_ms=result.duration_ms,
         sample_titles=[item.title for item in result.items[:5]],
+        items=[
+            SiteFeedTestItem(
+                title=item.title,
+                item_id=item.item_id,
+                size=item.size,
+                seeders=item.seeders,
+                peers=item.peers,
+                category=item.category,
+                published_at=item.published_at,
+                download_factor=item.download_factor,
+            )
+            for item in result.items[:100]
+        ],
         error=result.error,
     )

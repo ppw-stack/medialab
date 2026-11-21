@@ -95,16 +95,6 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         job="push_free_torrents",
     ),
     ParamSpec(
-        key="push_within_bucket_order",
-        label="同档内排序",
-        default=0,
-        min=0,
-        max=1,
-        job="push_free_torrents",
-        options=((0, "按进度升序"), (1, "随机")),
-        note="档位（未封顶/无信号/已封顶）始终是主排序，本项只决定同档内怎么排",
-    ),
-    ParamSpec(
         key="aggregate_max_submissions",
         label="单轮提交上限（个）",
         default=20,

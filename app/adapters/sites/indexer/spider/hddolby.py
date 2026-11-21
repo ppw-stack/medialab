@@ -1,0 +1,326 @@
+"""
+通过 HDDolby 接口搜索种子并转换为通用索引结果。
+"""
+
+from typing import Any, List, Optional, Tuple
+from urllib.parse import urlparse
+
+from app.adapters.sites.indexer.http import AsyncRequestUtils, RequestUtils
+from app.adapters.sites.indexer.compat.configuration import get_configured_system_config
+from app.adapters.sites.indexer.compat import site_rules
+from app.adapters.sites.indexer.compat import text as text_tools
+from app.adapters.sites.indexer.compat.log import logger
+from app.adapters.sites.indexer.compat.settings import get_runtime_setting
+from app.adapters.sites.indexer.compat.types import MediaType
+
+
+class HddolbySpider:
+    """
+    通过 HDDolby API 搜索种子并生成带 downhash 的直接下载地址。
+    """
+    _indexerid = None
+    _domain = None
+    _domain_host = None
+    _name: Optional[str] = ""
+    _proxy = None
+    _cookie = None
+    _ua = None
+    _apikey = None
+    _size = 100
+    _pageurl = None
+    _timeout = 15
+    _searchurl = None
+
+    # 分类
+    _movie_category = [401, 405]
+    _tv_category = [402, 403, 404, 405]
+    # 音乐搜索同时覆盖高品质音频和音乐视频/演唱会分区。
+    _music_category = [406, 408]
+
+    # 标签
+    _labels = {
+        "gf": "官方",
+        "gy": "国语",
+        "yy": "粤语",
+        "ja": "日语",
+        "ko": "韩语",
+        "zz": "中文字幕",
+        "jz": "禁转",
+        "xz": "限转",
+        "diy": "DIY",
+        "sf": "首发",
+        "yq": "应求",
+        "m0": "零魔",
+        "yc": "原创",
+        "gz": "官字",
+        "db": "Dolby Vision",
+        "hdr10": "HDR10",
+        "hdrm": "HDR10+",
+        "tx": "特效",
+        "lz": "连载",
+        "wj": "完结",
+        "hdrv": "HDR Vivid",
+        "hlg": "HLG",
+        "hq": "高码率",
+        "hfr": "高帧率",
+    }
+
+    @classmethod
+    def get_search_page_size(cls, keyword: Optional[str] = None) -> Optional[int]:
+        """
+        获取搜索接口单页容量。
+
+        :param keyword: 保留统一入口参数，不影响本站的分页容量
+        :return: 本站搜索接口的固定单页记录数
+        """
+        return cls._size
+
+    def __init__(self, indexer: dict[str, Any]) -> None:
+        """
+        使用站点配置初始化 HDDolby API 请求上下文。
+
+        :param indexer: 合并认证信息的索引配置；api_url 可覆盖包含版本路径的 API 基础地址，
+            未配置时沿用旧站的 api 子域
+        """
+        self.systemconfig = get_configured_system_config()
+        if indexer:
+            self._indexerid = indexer.get('id')
+            self._domain = indexer.get('domain')
+            self._domain_host = site_rules.extract_domain(self._domain)
+            self._name = indexer.get('name')
+            if indexer.get('proxy'):
+                self._proxy = get_runtime_setting('PROXY')
+            self._cookie = indexer.get('cookie')
+            self._ua = indexer.get('ua')
+            self._apikey = indexer.get('apikey')
+            self._timeout = indexer.get('timeout') or 15
+            api_url = str(
+                indexer.get('api_url') or f"https://api.{self._domain_host}/api/v1"
+            ).rstrip('/')
+            self._api_url = api_url
+            self._searchurl = f"{api_url}/torrent/search"
+            self._pageurl = f"{self._domain}details.php?id=%s&hit=1"
+
+    def __get_params(self, keyword: str, mtype: Optional[MediaType] = None, page: Optional[int] = 0,
+                     cat: Optional[str] = None) -> dict[str, object]:
+        """
+        构造请求参数，显式站点分类优先于媒体类型预置分类。
+
+        :param keyword: 搜索关键词
+        :param mtype: 未指定站点分类时使用的媒体类型
+        :param page: 从 0 开始的搜索页码
+        :param cat: 逗号分隔的站点分类 ID，未指定时沿用媒体类型筛选
+        :return: HDDolby 搜索请求体
+        """
+        if cat:
+            categories = [int(category) for category in cat.split(",")]
+        elif mtype == MediaType.TV:
+            categories = self._tv_category
+        elif mtype == MediaType.MOVIE:
+            categories = self._movie_category
+        elif mtype == MediaType.MUSIC:
+            categories = self._music_category
+        else:
+            categories = list(set(self._movie_category + self._tv_category))
+
+        return {
+            "keyword": keyword,
+            "page_number": page,
+            "page_size": self._size,
+            "categories": categories,
+            "visible": 1,
+        }
+
+    def __parse_result(self, results: List[dict[str, Any]]) -> List[dict[str, Any]]:
+        """
+        解析搜索结果。
+
+        :param results: HDDolby API 返回的原始条目（``id`` / ``name`` /
+            ``small_descr`` / ``size`` / ``seeders`` / ``leechers`` /
+            ``times_completed`` / ``added`` / ``hr`` / ``tags`` 等）
+        :return: 统一后的资源字典（``title`` / ``description`` /
+            ``enclosure`` / ``pubdate`` / ``size`` / ``seeders`` / ``peers`` /
+            ``grabs`` / ``downloadvolumefactor`` / ``uploadvolumefactor`` /
+            ``freedate`` / ``page_url`` / ``labels`` / ``hit_and_run`` /
+            ``category``）
+        """
+        torrents = []
+        if not results:
+            return []
+
+        for result in results:
+            # 类别
+            category_value = result.get('category')
+            if category_value in self._music_category:
+                category = MediaType.MUSIC.value
+            elif category_value in self._tv_category:
+                category = MediaType.TV.value
+            elif category_value in self._movie_category:
+                category = MediaType.MOVIE.value
+            else:
+                category = MediaType.UNKNOWN.value
+            # 标签
+            torrentLabelIds = result.get('tags', "").split(";") or []
+            torrentLabels = []
+            for labelId in torrentLabelIds:
+                if self._labels.get(labelId) is not None:
+                    torrentLabels.append(self._labels.get(labelId))
+            # 种子信息
+            torrent = {
+                'title': result.get('name'),
+                'description': result.get('small_descr'),
+                'enclosure': self.__get_download_url(result.get('id'), result.get('downhash')),
+                'pubdate': result.get('added'),
+                'size': result.get('size'),
+                'seeders': result.get('seeders'),
+                'peers': result.get('leechers'),
+                'grabs': result.get('times_completed'),
+                'downloadvolumefactor': self.__get_downloadvolumefactor(result.get('promotion_time_type')),
+                'uploadvolumefactor': self.__get_uploadvolumefactor(result.get('promotion_time_type')),
+                'freedate': result.get('promotion_until'),
+                'page_url': self._pageurl % result.get('id') if self._pageurl else '',
+                'labels': torrentLabels,
+                'hit_and_run': text_tools.parse_bool(result.get('hr')),
+                'category': category
+            }
+            torrents.append(torrent)
+        return torrents
+
+    def __process_response(self, res: Any) -> Tuple[bool, List[dict[str, Any]]]:
+        """
+        统一判定搜索响应状态、业务错误并投影 HDDolby 结果。
+
+        连接错误只记录实际 API 主机，避免把接口故障误报为网页不可达或输出 URL 中的凭据。
+        """
+        if res and res.status_code == 200:
+            result = res.json()
+            if result.get("error"):
+                logger.warn(f"{self._name} 搜索失败，错误信息：{result.get('error').get('message')}")
+                return True, []
+            return False, self.__parse_result(result.get('data'))
+        if res is not None:
+            logger.warn(f"{self._name} 搜索失败，错误码：{res.status_code}")
+            return True, []
+        api_host = urlparse(self._searchurl or "").hostname
+        logger.warn(f"{self._name} 搜索失败，HDDolby API 主机 {api_host} 无法连接，请检查 API 地址及网络代理")
+        return True, []
+
+    def search(self, keyword: str, mtype: Optional[MediaType] = None, page: Optional[int] = 0,
+               cat: Optional[str] = None) -> Tuple[bool, List[dict[str, Any]]]:
+        """
+        同步搜索 HDDolby 种子。
+
+        :param keyword: 搜索关键词；为空时按站点接口规则浏览资源
+        :param mtype: 目标媒体类型，未指定时不额外限制媒体类型
+        :param page: 从 0 开始的搜索页码
+        :param cat: 逗号分隔的站点分类 ID，优先于媒体类型
+        :return: 是否发生错误及标准化资源列表；空列表也可能表示没有匹配资源
+        """
+
+        if not self._searchurl:
+            logger.warning(f"{self._name} 未配置搜索地址，无法搜索")
+            return True, []
+        params = self.__get_params(keyword, mtype, page, cat)
+
+        res = RequestUtils(
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/plain, */*",
+                "x-api-key": self._apikey
+            },
+            cookies=self._cookie,
+            proxies=self._proxy,
+            referer=f"{self._domain}",
+            timeout=self._timeout
+        ).post_res(url=self._searchurl, json=params)
+        return self.__process_response(res)
+
+    async def async_search(self, keyword: str, mtype: Optional[MediaType] = None, page: Optional[int] = 0,
+                           cat: Optional[str] = None) -> Tuple[bool, List[dict[str, Any]]]:
+        """
+        异步搜索 HDDolby 种子。
+
+        :param keyword: 搜索关键词；为空时按站点接口规则浏览资源
+        :param mtype: 目标媒体类型，未指定时不额外限制媒体类型
+        :param page: 从 0 开始的搜索页码
+        :param cat: 逗号分隔的站点分类 ID，优先于媒体类型
+        :return: 是否发生错误及标准化资源列表；空列表也可能表示没有匹配资源
+        """
+        if not self._searchurl:
+            logger.warning(f"{self._name} 未配置搜索地址，无法搜索")
+            return True, []
+        params = self.__get_params(keyword, mtype, page, cat)
+
+        res = await AsyncRequestUtils(
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/plain, */*",
+                "x-api-key": self._apikey
+            },
+            cookies=self._cookie,
+            proxies=self._proxy,
+            referer=f"{self._domain}",
+            timeout=self._timeout
+        ).post_res(url=self._searchurl, json=params)
+        return self.__process_response(res)
+
+    @staticmethod
+    def __get_downloadvolumefactor(discount: Optional[int]) -> float:
+        """
+        获取下载系数。
+        """
+        discount_dict = {
+            2: 0,
+            5: 0.5,
+            6: 1,
+            7: 0.3
+        }
+        if discount:
+            return discount_dict.get(discount, 1)
+        return 1
+
+    @staticmethod
+    def __get_uploadvolumefactor(discount: Optional[int]) -> float:
+        """
+        获取上传系数。
+        """
+        discount_dict = {
+            3: 2,
+            4: 2,
+            6: 2
+        }
+        if discount:
+            return discount_dict.get(discount, 1)
+        return 1
+
+    def __get_download_url(self, torrent_id: object, downhash: object) -> str:
+        """
+        生成直接下载地址，不将本站转换为两段式换票协议。
+
+        :param torrent_id: 站点返回的种子 ID
+        :param downhash: 当前种子的下载凭证
+        :return: 包含种子 ID 和 downhash 的下载地址
+        """
+        return f"{self._domain}download.php?id={torrent_id}&downhash={downhash}"
+
+    def test_connection(self) -> Tuple[bool, str]:
+        """
+        用资源声明的用户 API 验证认证，失败提示只展示接口主机而不泄露 URL 凭据。
+
+        :return: 账号是否可用及实际 API 主机的失败原因
+        """
+        api_host = urlparse(self._api_url).hostname
+        with RequestUtils(headers={
+            "Content-Type": "application/json", "Accept": "application/json, text/plain, */*", "x-api-key": self._apikey,
+        }, ua=self._ua or get_runtime_setting("USER_AGENT"), proxies=self._proxy or {},
+            timeout=self._timeout).response_manager(
+            method="GET", url=f"{self._api_url}/user/data", allow_redirects=False,
+        ) as response:
+            if response is None:
+                return False, f"HDDolby API 主机 {api_host} 无法连接，请检查 API 地址及网络代理"
+            if response.status_code == 200:
+                payload = response.json()
+                if isinstance(payload, dict) and payload.get("status") == 0:
+                    return True, "连接成功"
+                return False, "APIKEY已过期"
+            return False, f"HDDolby API 主机 {api_host} 返回 HTTP {response.status_code} {response.reason}"

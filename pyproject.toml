@@ -31,6 +31,19 @@ dependencies = [
     # 本地目录监听（上传任务）。此前靠 uvicorn[standard] 传递引入——
     # 直接 import 的库不该靠传递依赖，显式声明。
     "watchfiles>=1.0",
+    # 站点解析引擎（移植 MoviePilot 的 parser/spider）：选择器用 pyquery，
+    # 标题/副标题模板用 jinja2，日期规范化用 dateutil。
+    # 版本区间给出上限：**上限 = 当前已验证的下一个主版本**，避免后续无感大版本
+    # 跳变（供应链）；不刻意回退到更旧的主版本。
+    "pyquery>=2.0,<3",
+    "jinja2>=3.1,<4",
+    "python-dateutil>=2.9,<5",
+    # 专站下载协议的 AES 解密（MoviePilot download.py 依赖）
+    "pycryptodome>=3.20,<5",
+    # XML/HTML 解析（移植解析器直接 `from lxml import etree`）。
+    # **必须显式声明**——此前只靠 pyquery/parsel 的传递依赖，上游调整后会
+    # 在运行期抛 ImportError。
+    "lxml>=5.0,<7",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +55,8 @@ dev = [
     "respx>=0.21",
     "ruff>=0.8",
     "mypy>=1.13",
+    # 站点规则包导入脚本：加密 pickle 里带 ruamel.yaml 标量类型
+    "ruamel.yaml>=0.18,<1",
 ]
 
 # 115 驱动依赖。
@@ -90,6 +105,13 @@ ignore = ["S101", "B008", "B027", "B017", "RUF001", "RUF002", "RUF003", "ASYNC23
 "app/services/dav_auth.py" = ["E501"]
 # 一次性迁移脚本：docstring 里的示例命令行 + CASE WHEN SQL 天然超行宽
 "scripts/migrate_legacy_db.py" = ["E501"]
+# 站点解析引擎：parser/spider 是 MoviePilot 上游代码的移植（保持与上游
+# 一致，便于后续同步升级），不按本项目的风格规则重排。
+"app/adapters/sites/indexer/parser/*" = ["E501", "UP", "RUF", "SIM", "I001"]
+"app/adapters/sites/indexer/spider/*" = ["E501", "UP", "RUF", "SIM", "I001"]
+"app/adapters/sites/indexer/rss.py" = ["E501", "UP", "RUF", "SIM", "I001"]
+"app/adapters/sites/indexer/download.py" = ["E501", "UP", "RUF", "SIM", "I001"]
+"app/adapters/sites/indexer/compat/*" = ["E501", "UP", "RUF", "SIM", "I001"]
 # 测试代码：pytest 用例名（中文）+ 多个 fixture 参数很容易超行宽
 # ——不影响可读性，不强求
 "tests/*" = ["E501"]
@@ -122,6 +144,18 @@ ignore_missing_imports = true
 module = ["wsgidav.*"]
 ignore_missing_imports = true
 
+# 从 MoviePilot 移植的站点解析子系统（engine/parser/spider/compat + 规则包）。
+# 属第三方代码风格：无类型标注、依赖 parsel/pyquery/lxml/bs4 的无存根调用，
+# 逐处补标注的收益远低于维护成本（且每次随规则包更新都要重打）。
+# 本项目自己的适配层（generic.py / base.py）仍走 strict。
+[[tool.mypy.overrides]]
+module = ["app.adapters.sites.indexer.*"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["pyquery.*", "parsel.*", "lxml.*", "bs4.*", "cloudscraper.*", "ruamel.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # pytest-asyncio 1.x：auto 模式免去每个 async 用例加 @pytest.mark.asyncio
@@ -147,6 +181,10 @@ branch = true
 #
 # 每次补测试后：跑 `uv run pytest --cov=app` 看实际值，
 # 把这个数字往上调（不低于当前实测值）。
-fail_under = 65
+#
+# 2026-11-21：补齐「规则包驱动的通用适配器」移植层的纯函数与站点解析器
+# 测试（compat/*、download.py、parser/*），实测从 63.4% 抬到 66.19% →
+# 门槛相应提到 66。
+fail_under = 66
 show_missing = true
 exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "raise NotImplementedError"]

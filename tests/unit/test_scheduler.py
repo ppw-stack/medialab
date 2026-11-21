@@ -143,7 +143,6 @@ def test_default_cron_covers_all_registered_jobs() -> None:
         "monitor_free_window",
         "refresh_user_data",
         "drain_task_queue",
-        "daily_checkin",
         "cross_seed_maintenance",
         "scrape_metadata",
         "organize_files",
@@ -415,7 +414,6 @@ def test_preflight_job_imports_loads_all_lazy_modules() -> None:
         "app.services.monitor",
         "app.services.user_data",
         "app.services.task_drain",
-        "app.services.checkin",
         "app.services.cross_seed_maintenance",
     ):
         assert mod in sys.modules, f"预热漏了 {mod}"

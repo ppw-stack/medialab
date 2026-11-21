@@ -1,0 +1,464 @@
+"""
+通过 YemaPT 接口搜索种子并转换为通用索引结果。
+"""
+
+import base64
+import json
+from typing import Any, List, Optional, Tuple
+
+from app.adapters.sites.indexer.http import AsyncRequestUtils, RequestUtils
+from app.adapters.sites.indexer.compat import temporal as time_tools
+from app.adapters.sites.indexer.compat.log import logger
+from app.adapters.sites.indexer.compat.settings import get_runtime_setting
+from app.adapters.sites.indexer.compat.types import MediaType
+
+
+class YemaSpider:
+    """
+    YemaPT 开放 API 索引器。
+    """
+
+    # YemaPT 开放 API 使用更大的分页容量时会返回空结果。
+    _size = 40
+    _movie_category = [4]
+    _tv_category = [5, 6, 13, 14, 15, 17]
+    _music_category = [8, 16]
+
+    _labels = {
+        "1": "禁转",
+        "2": "首发",
+        "3": "官方",
+        "4": "自制",
+        "5": "国语",
+        "6": "中字",
+        "7": "粤语",
+        "8": "英字",
+        "9": "HDR10",
+        "10": "杜比视界",
+        "11": "分集",
+        "12": "完结",
+    }
+
+    def __init__(self, indexer: dict[str, Any]):
+        """
+        初始化 YemaPT 开放 API 索引器。
+
+        :param indexer: 合并站点认证信息后的索引配置
+        """
+        indexer = indexer or {}
+        self._connection_site = dict(indexer)
+        self._name = indexer.get("name") or "YemaPT"
+        self._site_url = str(indexer.get("domain") or "https://www.yemapt.org/").rstrip("/")
+        self._proxy = get_runtime_setting('PROXY') if indexer.get("proxy") else None
+        self._use_proxy = bool(indexer.get("proxy"))
+        self._user_agent = indexer.get("ua") or get_runtime_setting('USER_AGENT')
+        self._api_key = indexer.get("apikey")
+        self._timeout = indexer.get("timeout") or 15
+        self._search_url = f"{self._site_url}/openApi/torrent/fetchOpenTorrentList.json"
+        self._download_key_url = f"{self._site_url}/openApi/torrent/generateDownloadKey.json"
+
+    @classmethod
+    def get_search_page_size(cls, keyword: Optional[str] = None) -> Optional[int]:
+        """
+        获取搜索接口单页容量。
+
+        :param keyword: 搜索关键字，YemaPT 不按关键字改变分页容量
+        :return: 搜索接口单页容量
+        """
+        return cls._size
+
+    def _request_headers(self) -> dict[str, Any]:
+        """
+        构造开放 API 请求头。
+
+        :return: 不包含 Cookie 的 AuthKey 请求头
+        """
+        return {
+            "Authorization": self._api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/plain, */*",
+            "User-Agent": self._user_agent,
+        }
+
+    def test_connection(self) -> Tuple[bool, str]:
+        """
+        验证 AuthKey；主站未配置时在本适配器内兼容旧 Cookie 会话检测。
+
+        :return: 认证是否有效及可展示的连接或认证失败原因
+        """
+        if not self._api_key:
+            if self._connection_site.get("legacy_cookie_test"):
+                return self._test_cookie_connection()
+            return False, "未配置 AuthKey"
+        with RequestUtils(headers=self._request_headers(), ua=self._user_agent,
+                          proxies=self._proxy or {}, timeout=self._timeout).response_manager(
+            method="POST", url=f"{self._site_url}/openApi/user/fetchBasicInfo.json", json={}, allow_redirects=False,
+        ) as response:
+            if response is None:
+                return False, "无法打开网站！"
+            if response.status_code != 200:
+                return False, f"错误：{response.status_code} {response.reason}"
+            payload = None
+            try:
+                payload = response.json() or {}
+            except (TypeError, ValueError):
+                payload = None
+            if isinstance(payload, dict) and payload.get("success") and isinstance(payload.get("data"), dict) \
+                    and payload["data"].get("id"):
+                return True, "连接成功"
+            return False, payload.get("errorMessage") or "AuthKey 已过期或无效" if isinstance(payload, dict) else "AuthKey 已过期或无效"
+
+    def _test_cookie_connection(self) -> Tuple[bool, str]:
+        """
+        兼容主站旧 Cookie 登录接口，不把 AuthKey 认证失败回退成网页成功。
+
+        :return: 旧会话是否有效及失败原因
+        """
+        with RequestUtils(headers={
+            "User-Agent": self._user_agent, "Content-Type": "application/json", "Accept": "application/json, text/plain, */*",
+        }, cookies=self._connection_site.get("cookie") or "", ua=self._user_agent,
+            proxies=self._proxy or {}, timeout=self._timeout).response_manager(
+            method="GET", url=f"{self._site_url}/api/consumer/fetchSelfDetail", allow_redirects=False,
+        ) as response:
+            if response is None:
+                return False, "无法打开网站！"
+            if response.status_code != 200:
+                return False, f"错误：{response.status_code} {response.reason}"
+            try:
+                payload = response.json()
+            except (TypeError, ValueError) as err:
+                # 站点返回非 JSON（登录页 HTML / 维护页 / 限流页）与 Cookie 真正
+                # 失效是两种故障——别混成一句「Cookie已过期」，否则会误导用户
+                # 去重新登录，而真实原因（限流 / 站点改版）被掩盖。
+                logger.warning(
+                    "%s Cookie 连通性检测响应不是有效 JSON：%s", self._name, err
+                )
+                return False, "响应不是有效 JSON，请稍后重试或检查站点状态"
+            if isinstance(payload, dict) and payload.get("success"):
+                return True, "连接成功"
+            return False, "Cookie已过期"
+
+    def _build_params(
+        self,
+        keyword: Optional[str],
+        page: Optional[int],
+        category_id: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """
+        构造公开种子列表查询参数。
+
+        :param keyword: 搜索关键字
+        :param page: MoviePilot 从 0 开始的页码
+        :param category_id: 可选的站点分类 ID
+        :return: YemaPT 开放 API 请求体
+        """
+        params: dict[str, Any] = {
+            "pageParam": {
+                "current": int(page or 0) + 1,
+                "pageSize": self._size,
+            },
+            "sorter": {},
+        }
+        if keyword:
+            params["keyword"] = keyword
+        if category_id is not None:
+            params["categoryId"] = category_id
+        return params
+
+    def _search_category_ids(self, mtype: Optional[MediaType] = None) -> List[Optional[int]]:
+        """
+        返回当前媒体类型需要分别查询的站点分类。
+
+        YemaPT 分类参数不支持数组，音乐需要分别查询音频音乐和 MV/演唱会分类。
+        """
+        if mtype == MediaType.MOVIE:
+            return list(self._movie_category)
+        if mtype == MediaType.TV:
+            return list(self._tv_category)
+        if mtype == MediaType.MUSIC:
+            return list(self._music_category)
+        return [None]
+
+    @staticmethod
+    def _merge_search_results(
+        result_groups: List[List[dict[str, Any]]],
+    ) -> List[dict[str, Any]]:
+        """
+        按种子详情链接合并多个分类查询结果并保持首次出现顺序。
+        """
+        merged = []
+        seen = set()
+        for results in result_groups:
+            for torrent in results:
+                identity = torrent.get("page_url") or torrent.get("enclosure")
+                if identity and identity in seen:
+                    continue
+                if identity:
+                    seen.add(identity)
+                merged.append(torrent)
+        return merged
+
+    def _parse_result(self, results: List[dict[str, Any]]) -> List[dict[str, Any]]:
+        """
+        将开放 API 种子数据转换为 MoviePilot 标准字段。
+
+        :param results: 公开种子列表接口 data 数组
+        :return: MoviePilot 标准种子字典列表
+        """
+        torrents = []
+        for result in results or []:
+            if not isinstance(result, dict):
+                continue
+            category_value = result.get("categoryId")
+            if category_value in self._tv_category:
+                category = MediaType.TV.value
+            elif category_value in self._movie_category:
+                category = MediaType.MOVIE.value
+            elif category_value in self._music_category:
+                category = MediaType.MUSIC.value
+            else:
+                category = MediaType.UNKNOWN.value
+
+            labels = [
+                self._labels[label_id]
+                for label_id in result.get("tagList") or []
+                if label_id in self._labels
+            ]
+            torrent_id = result.get("id")
+            if not isinstance(torrent_id, int):
+                continue
+            torrents.append({
+                "title": result.get("showName"),
+                "description": result.get("shortDesc"),
+                "enclosure": self._build_download_url(torrent_id),
+                "pubdate": time_tools.normalize_datetime(result.get("listingTime")),
+                "size": result.get("fileSize"),
+                "seeders": result.get("seedNum"),
+                "peers": result.get("leechNum"),
+                "grabs": result.get("completedNum"),
+                "downloadvolumefactor": self._download_factor(
+                    str(result.get("downloadPromotion") or "")
+                ),
+                "uploadvolumefactor": self._upload_factor(
+                    str(result.get("uploadPromotion") or "")
+                ),
+                "freedate": time_tools.normalize_datetime(result.get("downloadPromotionEndTime")),
+                "page_url": f"{self._site_url}/#/torrent/detail/{torrent_id}/",
+                "labels": labels,
+                "hit_and_run": bool(result.get("hrPunishEnable")),
+                "category": category,
+            })
+        return torrents
+
+    def _process_search_response(
+        self, response: Any
+    ) -> Tuple[bool, List[dict[str, Any]]]:
+        """
+        校验开放 API 通用响应并解析搜索结果。
+
+        :param response: RequestUtils 返回的响应对象
+        :return: 是否失败及标准种子列表
+        """
+        if response is None:
+            logger.warning(f"{self._name} 搜索失败，无法连接开放 API")
+            return True, []
+        if response.status_code != 200:
+            logger.warning(f"{self._name} 搜索失败，HTTP 错误码：{response.status_code}")
+            return True, []
+        try:
+            payload = response.json() or {}
+        except (TypeError, ValueError) as err:
+            logger.warning(f"{self._name} 搜索响应不是有效 JSON：{str(err)}")
+            return True, []
+        if not isinstance(payload, dict):
+            logger.warning(f"{self._name} 搜索响应结构无效")
+            return True, []
+        if not payload.get("success"):
+            logger.warning(f"{self._name} 搜索失败：{payload.get('errorMessage') or '未知错误'}")
+            return True, []
+        results = payload.get("data")
+        if not isinstance(results, list):
+            logger.warning(f"{self._name} 搜索响应 data 不是数组")
+            return True, []
+        return False, self._parse_result(results)
+
+    def _prepare_search_requests(
+        self,
+        *,
+        keyword: Optional[str],
+        mtype: Optional[MediaType],
+        page: Optional[int],
+        cat: Optional[str] = None,
+    ) -> Optional[List[dict[str, Any]]]:
+        """
+        统一执行认证准入并生成各分类的搜索请求体。
+
+        :param keyword: 搜索关键词
+        :param mtype: 未指定站点分类时使用的媒体类型
+        :param page: 从 0 开始的搜索页码
+        :param cat: 逗号分隔的站点分类 ID，优先于媒体类型并逐分类查询
+        :return: 各分类的请求体；缺少认证信息时返回 None
+        :raises ValueError: cat 中含有非法（非正整数）分类 ID 时抛出
+        """
+        if not self._api_key:
+            logger.warning(f"{self._name} 未配置 API AuthKey")
+            return None
+        if cat:
+            # 分类 ID 必须是正整数——脏输入直接报错，别让 int() 抛裸 ValueError。
+            category_ids = [
+                int(part) for part in cat.split(",") if part.strip().isdigit() and int(part) > 0
+            ]
+            if not category_ids:
+                raise ValueError("YemaPT 分类须填写正整数 ID，多个用逗号分隔")
+        else:
+            category_ids = self._search_category_ids(mtype)
+        return [
+            self._build_params(keyword, page, category_id)
+            for category_id in category_ids
+        ]
+
+    def _finalize_search_responses(
+        self,
+        responses: List[Any],
+    ) -> Tuple[bool, List[dict[str, Any]]]:
+        """
+        统一投影各分类响应并合并去重后的搜索结果。
+        """
+        result_groups = []
+        errors = []
+        for response in responses:
+            error, results = self._process_search_response(response)
+            errors.append(error)
+            if not error:
+                result_groups.append(results)
+        return all(errors), self._merge_search_results(result_groups)
+
+    def search(
+        self,
+        keyword: Optional[str],
+        mtype: Optional[MediaType] = None,
+        page: Optional[int] = 0,
+        cat: Optional[str] = None,
+    ) -> Tuple[bool, List[dict[str, Any]]]:
+        """
+        同步搜索 YemaPT 公开种子。
+
+        :param keyword: 搜索关键字
+        :param mtype: MoviePilot 媒体类型，指定后按真实站点分类分别查询
+        :param page: MoviePilot 从 0 开始的页码
+        :param cat: 逗号分隔的站点分类 ID，优先于媒体类型并逐分类查询
+        :return: 是否失败及标准种子列表
+        """
+        payloads = self._prepare_search_requests(
+            keyword=keyword,
+            mtype=mtype,
+            page=page,
+            cat=cat,
+        )
+        if payloads is None:
+            return True, []
+        request = RequestUtils(
+            headers=self._request_headers(),
+            proxies=self._proxy,
+            timeout=self._timeout,
+        )
+        responses = [
+            request.post_res(
+                url=self._search_url,
+                json=payload,
+            )
+            for payload in payloads
+        ]
+        return self._finalize_search_responses(responses)
+
+    async def async_search(
+        self,
+        keyword: Optional[str],
+        mtype: Optional[MediaType] = None,
+        page: Optional[int] = 0,
+        cat: Optional[str] = None,
+    ) -> Tuple[bool, List[dict[str, Any]]]:
+        """
+        异步搜索 YemaPT 公开种子。
+
+        :param keyword: 搜索关键字
+        :param mtype: MoviePilot 媒体类型，指定后按真实站点分类分别查询
+        :param page: MoviePilot 从 0 开始的页码
+        :param cat: 逗号分隔的站点分类 ID，优先于媒体类型并逐分类查询
+        :return: 是否失败及标准种子列表
+        """
+        payloads = self._prepare_search_requests(
+            keyword=keyword,
+            mtype=mtype,
+            page=page,
+            cat=cat,
+        )
+        if payloads is None:
+            return True, []
+        request = AsyncRequestUtils(
+            headers=self._request_headers(),
+            proxies=self._proxy,
+            timeout=self._timeout,
+        )
+        responses = []
+        for payload in payloads:
+            responses.append(await request.post_res(
+                url=self._search_url,
+                json=payload,
+            ))
+        return self._finalize_search_responses(responses)
+
+    @staticmethod
+    def _download_factor(promotion: str) -> float:
+        """
+        转换下载促销类型。
+
+        :param promotion: 开放 API 下载促销枚举
+        :return: MoviePilot 下载系数
+        """
+        return {
+            "free": 0,
+            "half": 0.5,
+            "none": 1,
+        }.get(promotion, 1)
+
+    @staticmethod
+    def _upload_factor(promotion: str) -> float:
+        """
+        转换上传促销类型。
+
+        :param promotion: 开放 API 上传促销枚举
+        :return: MoviePilot 上传系数
+        """
+        return {
+            "none": 1,
+            "one_half": 1.5,
+            "double_upload": 2,
+        }.get(promotion, 1)
+
+    def _build_download_url(self, torrent_id: int) -> str:
+        """
+        构造先生成下载凭证再获取种子文件的两段式链接。
+
+        :param torrent_id: YemaPT 种子 ID
+        :return: Base64 请求配置与下载凭证接口 URL
+        """
+        request_config = {
+            "method": "post",
+            "cookie": False,
+            "header": {
+                "Authorization": self._api_key,
+                "Accept": "application/json",
+            },
+            "params": {"id": torrent_id},
+            "proxy": self._use_proxy,
+            "success": "success",
+            "result": "data",
+            "result_base_url": self._site_url,
+            "result_path": "api/torrent/download1",
+            "result_query_param": "token",
+        }
+        encoded_config = base64.b64encode(
+            json.dumps(request_config).encode("utf-8")
+        ).decode("ascii")
+        return f"[{encoded_config}]{self._download_key_url}"

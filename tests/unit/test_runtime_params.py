@@ -83,7 +83,6 @@ def test_enum_specs_are_the_zero_one_ones() -> None:
     enum_keys = {s.key for s in PARAM_SPECS if s.options is not None}
     assert enum_keys == {
         "monitor_delete_expired",
-        "push_within_bucket_order",
         "disk_rotation_action",
         "scrape_enabled",
         "scrape_policy",
@@ -122,24 +121,14 @@ def test_monitor_delete_expired_options() -> None:
     assert spec.note, "删除不可逆，必须有风险提示"
 
 
-def test_push_within_bucket_order_options() -> None:
-    """同档内排序的枚举：0=按进度升序（默认）/ 1=随机。"""
-    spec = lookup_spec("push_within_bucket_order")
-    assert spec is not None
-    assert spec.options == ((0, "按进度升序"), (1, "随机"))
-    assert spec.default == 0
-    assert spec.note, "档位是主排序这条说明不能丢"
-
-
 def test_specs_for_job_keeps_enum_options() -> None:
     """按作业取 spec 时，枚举信息不能丢（前端要靠它渲染 radio）。"""
     for spec in specs_for_job("monitor_free_window"):
         if spec.key == "monitor_delete_expired":
             assert spec.options is not None
             assert spec.note
-    for spec in specs_for_job("push_free_torrents"):
-        if spec.key == "push_within_bucket_order":
-            assert spec.options is not None
+    # 注：``push_within_bucket_order`` 已随「时魔」功能删除（2026-11-20），
+    # 推送作业不再有枚举型运行参数。
 
 
 # ------------------------------------------------------- 校验契约

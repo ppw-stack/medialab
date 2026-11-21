@@ -1,10 +1,10 @@
-"""站点用户数据刷新服务（FR-1.6 站点用户数据契约·精简版 + 时魔）。
+"""站点用户数据刷新服务（FR-1.6 站点用户数据契约·精简版）。
 
 ``refresh_user_data`` 周期性作业（``*/30 * * * *``）：
 
 1. 读取所有 ``Site.enabled = 1`` 的站点
 2. 按站拿到对应 :class:`SiteAdapter` 实例
-3. 调单方法 :meth:`SiteAdapter.get_user_snapshot`（4 业务字段 + 时魔）
+3. 调单方法 :meth:`SiteAdapter.get_user_snapshot`（3 业务字段）
 4. 单站失败不阻塞其他站（异常隔离）
 5. upsert 到 :class:`~app.db.models.SiteUserData`（``site_id`` UNIQUE）
 
@@ -80,22 +80,13 @@ async def _fetch_site(
 def _snapshot_payload(snap: SiteUserSnapshot) -> dict[str, object]:
     """把快照转成 upsert 载荷。
 
-    时魔缺失（该站不支持 / 本次没解析出）→ **不产出**时魔字段，
-    upsert 时就不会覆盖库里已知的旧值（保留上次快照）。
     """
-    payload: dict[str, object] = {
+    return {
         "upload": snap.upload,
         "download": snap.download,
         "seeding_count": snap.seeding_count,
         "last_seen_at": bj_now(),
     }
-    bonus = snap.hourly_bonus
-    if bonus is not None:
-        payload["hourly_bonus"] = bonus.amount
-        payload["hourly_bonus_unit"] = bonus.unit
-        payload["hourly_bonus_capped"] = bonus.capped
-        payload["hourly_bonus_progress"] = bonus.progress
-    return payload
 
 
 async def _upsert_user_data(
@@ -155,7 +146,7 @@ async def refresh_all_sites(factory: AdapterFactory) -> dict[str, object]:
     """刷新所有启用站点的 user_data。
 
     Returns: ``{"ok": N, "failed": M, "skipped": K, "total": T,
-    "capped": C, "steps": [...]}``。
+    "steps": [...]}``。
 
     三段式：**短事务读站点 → 并发抓取（网络 IO 在事务外）→ 短事务批量写**。
     """
@@ -185,7 +176,6 @@ async def refresh_all_sites(factory: AdapterFactory) -> dict[str, object]:
     ok = 0
     failed = 0
     skipped = 0
-    capped = 0
     failures: list[tuple[str, str]] = []
     to_write: list[tuple[int, SiteUserSnapshot]] = []
     # 逐站明细（前端「步骤卡片」展开后可见）——回答"哪个站没抓到 / 多少"
@@ -206,16 +196,10 @@ async def refresh_all_sites(factory: AdapterFactory) -> dict[str, object]:
             continue
         ok += 1
         to_write.append((res.site_id, res.snapshot))
-        bonus = res.snapshot.hourly_bonus
         detail = (
             f"上传 {res.snapshot.upload}，下载 {res.snapshot.download}，"
             f"做种 {res.snapshot.seeding_count}"
         )
-        if bonus is not None:
-            detail += f"，时魔 {bonus.amount:g} {bonus.unit}"
-            if bonus.capped:
-                capped += 1
-                detail += "（已封顶）"
         site_items.append(JobStepItem(res.site_name, "ok", None, detail))
 
     if to_write:
@@ -226,19 +210,18 @@ async def refresh_all_sites(factory: AdapterFactory) -> dict[str, object]:
                 )
 
     logger.info(
-        "refresh_user_data 完成：ok=%d failed=%d skipped=%d capped=%d total=%d",
-        ok, failed, skipped, capped, total,
+        "refresh_user_data 完成：ok=%d failed=%d skipped=%d total=%d",
+        ok, failed, skipped, total,
     )
     items, items_total = build_items(site_items)
     return {
         "ok": ok,
         "failed": failed,
         "skipped": skipped,
-        "capped": capped,
         "total": total,
-        "summary": _build_summary(total, ok, failed, skipped, capped, failures),
+        "summary": _build_summary(total, ok, failed, skipped, failures),
         "steps": _build_steps(
-            total, ok, failed, skipped, capped, failures, items, items_total,
+            total, ok, failed, skipped, failures, items, items_total,
         ),
     }
 
@@ -248,7 +231,6 @@ def _build_summary(
     ok: int,
     failed: int,
     skipped: int,
-    capped: int,
     failures: list[tuple[str, str]],
 ) -> str:
     """人话摘要（前端直接展示，避免前端硬编码字段名）。"""
@@ -258,8 +240,6 @@ def _build_summary(
     if failed:
         names = ", ".join(name for name, _ in failures)
         parts.append(f"{failed} 失败（{names}）")
-    if capped:
-        parts.append(f"{capped} 站已封顶")
     return "，".join(parts)
 
 
@@ -268,7 +248,6 @@ def _build_steps(
     ok: int,
     failed: int,
     skipped: int,
-    capped: int,
     failures: list[tuple[str, str]],
     items: list[JobStepItem] | None = None,
     items_total: int | None = None,
@@ -300,9 +279,6 @@ def _build_steps(
             f"{ok} 行 upsert" + (f"（{skipped} 站保留旧快照）" if skipped else ""),
         )
     )
-
-    if capped:
-        steps.append(JobStep("时魔已封顶", "warn", capped, f"{capped} 站已达获取上限"))
 
     if failures:
         steps.append(

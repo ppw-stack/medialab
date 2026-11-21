@@ -157,7 +157,6 @@ class RuntimeParamsUpdateIn(BaseModel):
     monitor_pre_pause_minutes: int | None = None
     monitor_delete_expired: int | None = None
     push_download_interval_ms: int | None = None
-    push_within_bucket_order: int | None = None
     disk_rotation_threshold_pct: int | None = None
     disk_rotation_action: int | None = None
     scrape_enabled: int | None = None

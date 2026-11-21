@@ -84,7 +84,7 @@ async def test_driver_media_exts_defaults(db: None) -> None:
 async def test_torrent_index_unique_site_item(db: None) -> None:
     """(site_id, item_id) 唯一——upsert 的基础。"""
     async with session_scope() as session:
-        site = Site(name="s1", domain="d1", adapter="hdsky")
+        site = Site(name="s1", domain="d1", adapter="generic")
         session.add(site)
         await session.flush()
         session.add(TorrentIndex(site_id=site.id, item_id="1", name="a"))
@@ -109,10 +109,30 @@ async def test_task_queue_idem_key_unique(db: None) -> None:
             session.add(TaskQueue(idem_key="k1", kind="add_torrent", payload={}))
 
 
+async def test_site_user_data_has_no_hourly_columns(db: None) -> None:
+    """时魔列已随功能删除：模型与建表都不应再有这四列。"""
+    from sqlalchemy import text
+
+    async with session_scope() as session:
+        columns = {
+            row[1]
+            for row in (await session.execute(text("PRAGMA table_info(site_user_data)"))).all()
+        }
+
+    assert columns
+    for name in (
+        "hourly_bonus",
+        "hourly_bonus_unit",
+        "hourly_bonus_capped",
+        "hourly_bonus_progress",
+    ):
+        assert name not in columns
+
+
 async def test_site_user_data_unique_site_id(db: None) -> None:
     """site_user_data 每站一行（UNIQUE site_id）——FR-1.6 当前快照语义。"""
     async with session_scope() as session:
-        site = Site(name="s1", domain="d1", adapter="hdsky")
+        site = Site(name="s1", domain="d1", adapter="generic")
         session.add(site)
         await session.flush()
         session.add(SiteUserData(site_id=site.id))
@@ -128,12 +148,12 @@ async def test_site_user_data_unique_site_id(db: None) -> None:
 
 async def test_site_name_unique(db: None) -> None:
     async with session_scope() as session:
-        session.add(Site(name="dup", domain="d", adapter="hdsky"))
+        session.add(Site(name="dup", domain="d", adapter="generic"))
         await session.flush()
 
     with pytest.raises(IntegrityError):
         async with session_scope() as session:
-            session.add(Site(name="dup", domain="d2", adapter="hdsky"))
+            session.add(Site(name="dup", domain="d2", adapter="generic"))
 
 
 # ------------------------------------------------------- 辅种快照 cross_seed
@@ -363,7 +383,7 @@ async def test_backfill_discount_pct_is_idempotent(db: None) -> None:
     from app.db.migrations import backfill_discount_pct
 
     async with session_scope() as session:
-        site = Site(name="s1", domain="d1", adapter="hdsky")
+        site = Site(name="s1", domain="d1", adapter="generic")
         session.add(site)
         await session.flush()
         session.add(
@@ -507,7 +527,7 @@ async def test_sites_has_breaker_until_column(db: None) -> None:
 async def test_breaker_until_defaults_to_null(db: None) -> None:
     """新建站点默认未熔断。"""
     async with session_scope() as session:
-        site = Site(name="s1", domain="d1", adapter="hdsky")
+        site = Site(name="s1", domain="d1", adapter="generic")
         session.add(site)
         await session.flush()
         assert site.breaker_until is None
@@ -515,7 +535,7 @@ async def test_breaker_until_defaults_to_null(db: None) -> None:
 
 async def test_breaker_until_is_persisted(db: None) -> None:
     async with session_scope() as session:
-        site = Site(name="s1", domain="d1", adapter="hdsky", breaker_until="2026-10-21 20:00:00")
+        site = Site(name="s1", domain="d1", adapter="generic", breaker_until="2026-10-21 20:00:00")
         session.add(site)
         await session.flush()
         site_id = site.id
