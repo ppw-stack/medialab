@@ -325,3 +325,85 @@ async def test_无失败时不传多余参数(monkeypatch: pytest.MonkeyPatch) -
     await cross_seed_maintenance.run_cross_seed_maintenance()
 
     assert "skip_downloader_ids" not in seen
+
+
+async def test_子步骤挂到父步骤(monkeypatch: pytest.MonkeyPatch) -> None:
+    """子作业自带的步骤要作为 ``children`` 挂到父步骤上.
+
+    2026-11-01 合并成三段后，巡查的 5 条步骤（扫描下载器 / 写入快照 /
+    统计种子总数 / 检测异常 / 自动暂停）只剩一句 summary——页面上看不到
+    「写入快照有没有成功」「暂停了几个」。``JobStep.children`` 让它们
+    重新可见（前端总是展开，最多 5 条，不撑面板）。
+    """
+
+    async def _fake_scan() -> dict[str, Any]:
+        return {
+            "summary": "1/1 个下载器，3000 种子，2 异常",
+            "scanned_downloaders": 1,
+            "steps": [
+                JobStep("扫描辅种下载器", "ok", 1, "1/1 个实例成功"),
+                JobStep("写入快照", "ok", 1, "1 行 cross_seed_snapshot"),
+                JobStep("自动暂停", "warn", 2, "已暂停 2 个"),
+            ],
+        }
+
+    monkeypatch.setattr(
+        cross_seed_maintenance, "_run_scan_cross_seed", _fake_scan
+    )
+    monkeypatch.setattr(
+        "app.services.disk_rotation.run_disk_rotation",
+        _Ok({"summary": "未超阈", "deleted": 0}),
+    )
+    monkeypatch.setattr(
+        "app.services.cross_seed_orphan.run_scan_orphans",
+        _Ok({"summary": "无孤儿", "orphan_count": 0}),
+    )
+
+    result = await cross_seed_maintenance.run_cross_seed_maintenance()
+
+    scan_step = result["steps"][0]
+    assert scan_step.children is not None
+    assert [c.name for c in scan_step.children] == [
+        "扫描辅种下载器",
+        "写入快照",
+        "自动暂停",
+    ]
+    # 子步骤保留自己的状态与描述（不是被拍平成一句话）
+    assert scan_step.children[2].status == "warn"
+    assert "已暂停 2 个" in (scan_step.children[2].detail or "")
+
+
+async def test_子步骤能落库(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``children`` 必须能过 **落库序列化**（``asdict`` → 可 JSON）.
+
+    作业结果进 ``job_runs.result_json`` 前会走 :func:`_jsonable`；
+    dataclass 里再嵌一层 dataclass 若没被递归处理，前端拿到的是字符串。
+    """
+    import json
+
+    from app.services.scheduler import _jsonable
+
+    async def _fake_scan() -> dict[str, Any]:
+        return {
+            "summary": "ok",
+            "scanned_downloaders": 1,
+            "steps": [JobStep("写入快照", "ok", 1, "1 行")],
+        }
+
+    monkeypatch.setattr(
+        cross_seed_maintenance, "_run_scan_cross_seed", _fake_scan
+    )
+    monkeypatch.setattr(
+        "app.services.disk_rotation.run_disk_rotation",
+        _Ok({"summary": "未超阈", "deleted": 0}),
+    )
+    monkeypatch.setattr(
+        "app.services.cross_seed_orphan.run_scan_orphans",
+        _Ok({"summary": "无孤儿", "orphan_count": 0}),
+    )
+
+    result = await cross_seed_maintenance.run_cross_seed_maintenance()
+    payload = _jsonable(result)
+    text = json.dumps(payload, ensure_ascii=False)  # 不抛 = 可落库
+    assert '"children"' in text
+    assert "写入快照" in text

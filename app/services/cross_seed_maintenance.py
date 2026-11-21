@@ -138,9 +138,15 @@ async def _run_stage(
         status = "warn"
     count = _extract_count(raw)
     items, items_total = build_items(_extract_items(raw))
+    # **子步骤挂上来**（2026-11-21）：子作业自带 5 条步骤（扫描下载器 /
+    # 写入快照 / 检测异常 / 自动暂停…），折成一句 summary 后用户在页面上
+    # 只看到一行，排查时得去翻详情 JSON。这里把原始 JobStep 直接挂成
+    # children——`asdict` 会递归序列化，落库不用额外处理。
+    children = [s for s in (raw.get("steps") or []) if isinstance(s, JobStep)]
     return raw, JobStep(
         name, status, count, detail or None,
         items=items or None, items_total=items_total,
+        children=children or None,
     )
 
 
@@ -190,6 +196,8 @@ def _extract_items(raw: dict[str, Any]) -> list[JobStepItem]:
             bits.append(f"删除 {r['deleted_groups']} 组")
         if r.get("deleted_count"):
             bits.append(f"删除 {r['deleted_count']} 个")
+        if r.get("blocked_groups"):
+            bits.append(f"{r['blocked_groups']} 组校验/下载中（跳过）")
         if r.get("unreachable"):
             bits.append("目标不可达")
         if r.get("orphan_count"):

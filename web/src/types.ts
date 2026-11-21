@@ -70,6 +70,14 @@ export interface JobStep {
    * 前端据此显示「显示 N / 共 M」。
    */
   items_total?: number | null
+  /**
+   * 子步骤（编排型作业用）。
+   *
+   * `cross_seed_maintenance` 把子作业的步骤（扫描下载器 / 写入快照 /
+   * 检测异常 / 自动暂停）挂成 children——否则页面上只看得到合并后的
+   * 三个大段，排查时得去翻详情 JSON。
+   */
+  children?: JobStep[] | null
 }
 
 /** 一条作业执行日志（`result.logs` 的元素）。 */

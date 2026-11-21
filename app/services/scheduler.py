@@ -101,6 +101,15 @@ class JobStep:
     #: ``len(items) < items_total`` 说明明细被截断了（前端据此显示
     #: 「显示 50 / 共 200」）。None = 未截断或无明细。
     items_total: int | None = None
+    #: **子步骤**（2026-11-21 加）——本身还是 :class:`JobStep`。
+    #:
+    #: 用途：编排型作业（如 ``cross_seed_maintenance``）把子作业的步骤
+    #: 拍平展示。以前子作业自带 5 条步骤，被编排层折成 1 条后用户在页面
+    #: 上只能看到「辅种巡查」一行，看不到「写入快照 / 检测异常 / 自动暂停」。
+    #:
+    #: 默认 None → 既有 60+ 处 ``JobStep(...)`` 调用零改动；``asdict``
+    #: 会递归序列化，落库无需额外处理。
+    children: list[JobStep] | None = None
 
 
 @dataclass(slots=True)
