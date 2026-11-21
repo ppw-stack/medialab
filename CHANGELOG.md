@@ -10,6 +10,10 @@
 
 ## [Unreleased]
 
+（暂无）
+
+## [2.0.0] - 2026-11-21
+
 ### Changed（BREAKING）
 
 - **手动推送端点：可重试的下载失败由 502 改为 202 + `deferred=true`**
