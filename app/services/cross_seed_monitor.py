@@ -181,11 +181,19 @@ class StatsRow:
     #: 旧快照行没有这个字段 → 排序时**全部回落**到 size 降序（与加此特性
     #: 前的行为一致，优雅降级）。
     added_at: dict[str, int] = field(default_factory=dict)
+    #: 该组精确大小（**字节**）。
+    #:
+    #: ``size_gb`` 是**两位小数**的展示值（1 GB 量级的舍入误差可达数 MB），
+    #: 而 disk_rotation 要按字节做删除预算与"释放了多少"的记账 → 两者共用
+    #: 一个两位小数值会累积误差。故另存一份精确值；旧快照行没有这个字段 →
+    #: 消费方回退 ``size_gb``（优雅降级，与 ``added_at`` 同款）。
+    size_bytes: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "size_gb": self.size_gb,
+            "size_bytes": self.size_bytes,
             "count": self.count,
             "sample_hash": self.sample_hash,
             "hashes": self.hashes,
@@ -741,6 +749,9 @@ class CrossSeedMonitorService:
                 groups[key] = {
                     "name": t_name,
                     "size_gb": round(t_size / 1024**3, 2),
+                    # 精确字节数（disk_rotation 的删除预算 / 释放量记账用；
+                    # size_gb 只是展示值，两位小数会累积舍入误差）
+                    "size_bytes": t_size,
                     "count": 0,
                     "sample_hash": t_hash[:12] if t_hash else "",
                     # 完整 40 位 hash 列表——删除该组时要用到

@@ -84,6 +84,7 @@ def test_enum_specs_are_the_zero_one_ones() -> None:
     assert enum_keys == {
         "monitor_delete_expired",
         "disk_rotation_action",
+        "disk_rotation_dry_run",
         "scrape_enabled",
         "scrape_policy",
         "organize_enabled",

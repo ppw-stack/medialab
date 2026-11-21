@@ -159,6 +159,8 @@ class RuntimeParamsUpdateIn(BaseModel):
     push_download_interval_ms: int | None = None
     disk_rotation_threshold_pct: int | None = None
     disk_rotation_action: int | None = None
+    #: 磁盘流转模式（0 = 实际执行 / 1 = 仅预演）
+    disk_rotation_dry_run: int | None = None
     scrape_enabled: int | None = None
     scrape_policy: int | None = None
     organize_enabled: int | None = None
