@@ -33,7 +33,6 @@ from app.db.models import (
 )
 from app.db.session import session_scope
 from app.services import (
-    dashboard_service,
     downloader_service,
     index_service,
     job_run_service,
@@ -825,37 +824,6 @@ async def test_disabled_downloader_rejected(db: None, monkeypatch, factory: Adap
     with pytest.raises(ServiceError) as exc:
         await downloader_service.list_downloader_torrents(dl_id)
     assert exc.value.status == 400
-
-
-# ==================================================================== 仪表盘
-
-
-async def test_dashboard_counts(db: None) -> None:
-    await _add_site("s1")
-    await _add_site("s2", enabled=False)
-    await _add_downloader("dl1")
-    await _add_downloader("dl2", enabled=False)
-
-    site_total, site_enabled, dl_total, dl_enabled = (
-        await dashboard_service.site_and_downloader_counts()
-    )
-    assert (site_total, site_enabled) == (2, 1)
-    assert (dl_total, dl_enabled) == (2, 1)
-
-
-async def test_dashboard_index_total(db: None) -> None:
-    site_id = await _add_site("s1")
-    async with session_scope() as session:
-        session.add(TorrentIndex(site_id=site_id, item_id="i1", name="t"))
-        await session.flush()
-
-    assert await dashboard_service.count_index_total() == 1
-
-
-async def test_dashboard_inflight_zero_without_downloaders(
-    db: None, factory: AdapterFactory
-) -> None:
-    assert await dashboard_service.count_inflight_torrents() == 0
 
 
 # ==================================================================== 索引

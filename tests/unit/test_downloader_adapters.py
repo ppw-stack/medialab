@@ -558,7 +558,7 @@ async def test_tr_list_torrents_does_not_fetch_files() -> None:
     """TR：``list_torrents`` **不得**拉 ``files`` / ``fileStats``。
 
     :class:`TorrentInfo` 没有这两个字段——拉了完全用不上，却让响应体
-    膨胀到 27 MB+（辅种站实测）。monitor / dashboard 走这条路径。
+    膨胀到 27 MB+（辅种站实测）。monitor 走这条路径。
     """
     from app.adapters.downloaders.transmission import TransmissionAdapter
 

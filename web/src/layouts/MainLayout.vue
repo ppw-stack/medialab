@@ -2,7 +2,6 @@
 import { ref, computed, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
-  DashboardOutlined,
   CloudServerOutlined,
   ApiOutlined,
   SettingOutlined,
@@ -56,7 +55,6 @@ const menuGroups = [
     title: '辅种',
     icon: SafetyOutlined,
     items: [
-      { key: '/', icon: DashboardOutlined, label: '总览', sub: '仪表盘概览', iconColor: 'red' },
       { key: '/sites', icon: CloudServerOutlined, label: '站点', sub: 'NexusPHP 适配', iconColor: 'violet' },
       { key: '/downloaders', icon: ApiOutlined, label: '下载器与任务', sub: '实例 / 实时任务', iconColor: 'green' },
       { key: '/torrent-index', icon: DatabaseOutlined, label: '拉取索引', sub: '免费种源', iconColor: 'amber' },
@@ -90,7 +88,7 @@ const activeMenu = computed(() => allItems.value.find((m) => m.key === route.pat
 
 /**
  * 当前路由所属的一级组 key（用于自动展开）。
- * '/' 属于辅种域（总览）。
+ * '/' 属于辅种域（重定向到 `/sites`）。
  */
 function groupOfPath(path: string): string {
   const group = menuGroups.find((g) => g.items.some((it) => it.key === path))
@@ -198,7 +196,7 @@ async function handleLogout() {
           <MenuOutlined />
         </a-button>
         <div class="header-title">
-          <span class="header-title__name">{{ activeMenu?.label ?? '总览' }}</span>
+          <span class="header-title__name">{{ activeMenu?.label ?? '站点' }}</span>
           <span class="header-title__sub">{{ activeMenu?.sub ?? '' }}</span>
         </div>
         <a-dropdown :trigger="['click']">
