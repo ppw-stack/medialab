@@ -190,6 +190,7 @@
 - **作业步骤带逐项明细**（2026-11-03 加入，`JobStep.items`）：
   - 步骤的 `detail` 是**聚合**描述（如「20 成功，0 失败」）——光看它**回答不了「是哪些出了问题」**。而作业执行时这些数据本来就在内存里（逐站结果、逐种推送结果…），只是没被带出来
   - `JobStep.items: list[JobStepItem] | None` = 逐项明细（`name` / `status` / `count` / `detail`）；`items_total` = 完整条数（`> len(items)` = 被截断，前端显示「显示 N / 共 M」）
+  - `JobStep.children: list[JobStep] | None` = **子步骤**（2026-11-21 加）：编排型作业（`cross_seed_maintenance`）把子作业自带的步骤挂上来——否则合并后页面上只看得到三个大段，看不到「写入快照 / 检测异常 / 自动暂停」。前端 `JobStepList` **总是展开** children（≤5 条，不撑面板），`items` 仍默认折叠。默认 None → 既有调用零改动；`asdict` 递归序列化，落库不用额外处理（`test_子步骤能落库` 固化）
   - **全部字段带默认值 → 向后兼容**：现有 60+ 处 `JobStep(...)` 调用零改动
   - **必须限流**：`build_items()` 上限 50 条/步（`monitor` 可能命中几百个种子），超限丢**最早**的（明细按执行顺序产生）
   - 前端**默认折叠**（点击「明细（N）」展开）——默认展开会把详情面板撑爆
@@ -305,7 +306,10 @@
   - **快照新鲜度守卫**（两道）：① `cross_seed_maintenance` 把 ① 巡查失败的 `downloader_id` 作为 `skip_downloader_ids` 传给 ②（① 失败时**不写**快照，"同轮顺序"≠"数据有效"）；② ② 自查 `scanned_at` 年龄，超过 `SNAPSHOT_MAX_AGE_HOURS`（6h = 2×作业周期）跳过并点名。`scanned_at` 解析不出时按**过期**处理（fail-safe）
   - **预演模式** `disk_rotation_dry_run`（运行参数，默认 0）：只算「会删哪几组、能释放多少」并写日志，不发删除指令。首次调阈值 / 改动作前先跑一轮
   - **`stats` 增加 `size_bytes`**（精确字节；`size_gb` 只有两位小数，删除预算按它算会累积舍入误差）。旧快照行没有该 key → 回退 `size_gb`（优雅降级，与 `added_at` 同款）
-  - ⚠️ **`disk_rotation.py` 旧注释声称"校验中（CHECKING）跳过"，实现里并没有**——快照 `stats` 不带 per-hash 状态，② 区分不出在途/校验中/已死副本。补这个要先把状态写进快照契约（`monitor.py:321` 的 CHECKING 保护只在免费种巡检那条链路上）
+  - **校验中 / 下载中的组整组跳过**（2026-11-21 第二段）：快照 `stats[].blocked_hashes` 记下组内 `CHECKING` / `DOWNLOADING` / `STALLED_DL` 的 hash（`_DELETE_BLOCKED_STATES`），② 见到非空就**整组本轮跳过**并计入 `blocked_groups`。理由与 monitor 的 CHECKING 保护同口径：校验期完成度判定不可靠，删数据还可能被下载器拒绝；下载中的删了等于丢半个任务
+    - **刻意不含 `SEEDING` / `UPLOADING`**：做种是辅种的正常稳态，算成"不可删"会让流转永远没有候选
+    - **不含 `PAUSED_*`**：已暂停的副本不参与传输，删它是安全的
+    - 全部候选都被冻结时，结果里的 `error` 写明「N 个候选组全部在校验/下载」，而不是含糊的「无候选」
   - 契约由 `tests/integration/test_disk_rotation.py`（整组删 / 释放上界 / 预演 / 快照过期 / 失败名单）+ `tests/unit/test_cross_seed_maintenance.py`（失败名单下传）固化
 - **辅种维护作业的合并边界**（2026-11-21 复核）：
   - **只有 ①② 之间有真实依赖**（② 的候选池只来自 ① 的快照），③ 孤儿扫描的输入是自己的（下载器 `files` + 挂载盘扫盘），与 ① 无关
