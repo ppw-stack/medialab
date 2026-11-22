@@ -20,12 +20,13 @@ from app.domain.aggregate_types import (
     STAGING_TERMINAL,
     is_valid_role,
 )
-from app.services.migration_pipeline import is_quota_error, landed_name_from_url
 from app.services.migration_pipeline import (
     GUANGYA_LANDED_NAME,
     SubmitGate,
     TargetIndex,
     TaskWatcher,
+    is_quota_error,
+    landed_name_from_url,
     norm_dir,
 )
 
