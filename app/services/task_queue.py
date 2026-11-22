@@ -176,23 +176,48 @@ class TaskQueueService:
         """把单个 pending 任务认领为 running（attempts + 1）。
 
         任务不存在或不在 pending 态（已被其他执行者认领）→ 返回 None。
+
+        **条件更新（2026-11-22 加固）**：用 ``UPDATE ... WHERE id=? AND
+        status='pending'`` + ``RETURNING`` 让**数据库**做判定，而不是
+        「先 get 读状态 → 在内存改 → flush」。后者是读-改-写：两个执行者
+        （push 的就地认领 / drain 的批量认领）若在同一瞬间读到 pending，
+        会**双双执行**同一条任务。条件更新下只有一个写入者能拿到行。
+
+        依赖 SQLite ≥ 3.35 的 ``RETURNING``（Debian bookworm 自带 3.40、
+        宿主 Homebrew 3.45 均满足）。
         """
-        row = await self._session.get(TaskQueue, task_id)
-        if row is None or row.status != TaskStatus.PENDING:
+        claimed = (
+            await self._session.execute(
+                update(TaskQueue)
+                .where(
+                    TaskQueue.id == task_id,
+                    TaskQueue.status == TaskStatus.PENDING,
+                )
+                .values(
+                    status=TaskStatus.RUNNING,
+                    attempts=TaskQueue.attempts + 1,
+                )
+                .returning(TaskQueue.id)
+            )
+        ).scalar_one_or_none()
+        if claimed is None:
             return None
-        row.status = TaskStatus.RUNNING
-        row.attempts += 1
-        await self._session.flush()
-        return row
+        # 重新读回（populate_existing：绕开本 session 可能缓存的旧状态）
+        return await self._session.get(TaskQueue, task_id, populate_existing=True)
 
     async def claim_due(self, now: str, *, limit: int = 50) -> list[TaskQueue]:
         """认领到期任务：pending 且 run_at <= now → running。
 
         run_at 是北京时区字符串（``yyyy-MM-dd HH:mm:ss``），字典序 == 时间序。
+
+        **与 :meth:`claim_one` 同一套条件更新**（2026-11-22 加固）：先只取
+        候选 id，再用 ``UPDATE ... WHERE id IN (...) AND status='pending'``
+        + ``RETURNING`` 认领——只有**真正被这次 UPDATE 改掉**的行才会被
+        返回。避免「先 select 再逐行改」时把别人刚认领的任务又跑一遍。
         """
-        rows = (
+        candidate_ids = (
             await self._session.execute(
-                select(TaskQueue)
+                select(TaskQueue.id)
                 .where(
                     TaskQueue.status == TaskStatus.PENDING,
                     TaskQueue.run_at <= now,
@@ -201,10 +226,35 @@ class TaskQueueService:
                 .limit(limit)
             )
         ).scalars().all()
-        for row in rows:
-            row.status = TaskStatus.RUNNING
-            row.attempts += 1
-        await self._session.flush()
+        if not candidate_ids:
+            return []
+        claimed_ids = (
+            await self._session.execute(
+                update(TaskQueue)
+                .where(
+                    TaskQueue.id.in_(candidate_ids),
+                    TaskQueue.status == TaskStatus.PENDING,
+                )
+                .values(
+                    status=TaskStatus.RUNNING,
+                    attempts=TaskQueue.attempts + 1,
+                )
+                .returning(TaskQueue.id)
+            )
+        ).scalars().all()
+        if not claimed_ids:
+            return []
+        rows = (
+            await self._session.execute(
+                select(TaskQueue)
+                .where(TaskQueue.id.in_(claimed_ids))
+                .order_by(TaskQueue.run_at)
+                # populate_existing：绕开本 session 可能缓存的旧状态——
+                # 否则 identity map 里若已有这些 id 的过期对象，返回的是
+                # status='pending'、attempts 未 +1 的陈旧实例（与 claim_one 同理）。
+                .execution_options(populate_existing=True)
+            )
+        ).scalars().all()
         return list(rows)
 
     async def mark_done(self, task_id: int) -> None:

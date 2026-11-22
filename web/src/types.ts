@@ -686,12 +686,50 @@ export interface SchedulerJob {
   title?: string
   /** 一句话说明（页面标题下方）——后端下发（`JobSpec.description`）。 */
   description?: string
+  /**
+   * 所属业务模块（`JOB_MODULES` 的键，如 `seed` / `media`）——后端下发。
+   *
+   * 「定时任务」页按它分组展示；空串 = 未归类（落进「其它」块）。
+   */
+  module?: string
+  /** 模块的页面展示名（如「辅种域」）——后端下发（键→中文名映射在后端）。 */
+  module_title?: string
+  /**
+   * 数据流上游作业名——后端下发。
+   *
+   * 含义：**上游本轮成功后**，若本作业距上次开始已满
+   * `min_trigger_interval_sec`，调度器立刻把它再跑一轮（不等自己的 cron）。
+   * `null` = 独立作业（只按 cron 触发）。前端据此画「上游 → 下游」链路。
+   *
+   * ⚠️ 这是**触发时机**，不是「数据正确性前提」：上游失败时本作业照旧
+   * 按自己的 cron 跑（优雅降级，不级联失败）。
+   */
+  depends_on?: string | null
+  /** 依赖触发的最小间隔（秒），0 = 上游每次成功都触发；后端下发。 */
+  min_trigger_interval_sec?: number
+}
+
+/** 一个业务模块及其作业数（`GET /scheduler` 的 `modules` 数组）。 */
+export interface SchedulerModule {
+  /** 模块 key（与 `SchedulerJob.module` 对应）。 */
+  key: string
+  /** 页面展示名（如「辅种域」）。 */
+  title: string
+  /** 该模块下的作业数。 */
+  job_count: number
 }
 
 /** 调度中心状态（`GET /scheduler`）。 */
 export interface SchedulerInfo {
   enabled: boolean
   jobs: SchedulerJob[]
+  /**
+   * 模块清单（顺序 = 注册顺序，即页面上的分组顺序）。
+   *
+   * 前端照它的顺序渲染分组——不自己排序（两处顺序约定必然会漂移）。
+   * 老后端无此字段时为 undefined，页面按作业首次出现顺序兜底。
+   */
+  modules?: SchedulerModule[]
   inflight: number
   accepting_new_work: boolean
 }

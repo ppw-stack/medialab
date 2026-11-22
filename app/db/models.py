@@ -70,6 +70,7 @@ __all__ = [
     "OrganizeHistory",
     "ProbeResult",
     "SchedulerJobSetting",
+    "SchedulerJobSettingBackup",
     "ScrapeAlias",
     "ScrapeCache",
     "SecondaryStaging",
@@ -343,6 +344,36 @@ class SchedulerJobSetting(Base):
     )
 
 
+class SchedulerJobSettingBackup(Base):
+    """调度作业配置的**删除快照**（不可逆迁移的恢复依据）。
+
+    启动期的作业合并 / 改名 / 孤儿清理会 ``DELETE``
+    :class:`SchedulerJobSetting` 的旧行——用户自定义的 cron 与启停状态
+    删掉就没了。本表在**同一个事务**里留下被删行的最后一份内容：
+
+    - 比启动日志可靠（日志会轮转、会随容器重建而丢）；
+    - 能用 SQL 直接还原（恢复步骤见 ``CHANGELOG.md`` 的「回滚 / 恢复」）。
+
+    快照写失败 → 整个事务回滚 → 旧行**不删**（下次启动重试），
+    不会出现「删了却没记录」。
+
+    每个作业名一行（PK）——同一作业被反复删除时覆盖上一份（保留最新）。
+    """
+
+    __tablename__ = "scheduler_job_settings_backup"
+
+    #: 作业名（PK），与 :class:`SchedulerJobSetting.job_name` 一致
+    job_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    #: 删除前的启停状态
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    #: 删除前的 cron（NULL = 用代码默认值）
+    cron: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: 删除原因（合并到新作业 / 清理已下线作业 / 迁移到新作业）
+    reason: Mapped[str] = mapped_column(String(64), default="")
+    #: 删除时刻（北京时间字符串）
+    deleted_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
+
+
 class CrossSeedSnapshot(Base):
     """辅种下载器扫描快照（定时抓取结果）。
 
@@ -485,7 +516,7 @@ class CrossSeedOrphan(Base):
 class SiteUserData(Base):
     """站点用户数据快照（FR-1.6 站点用户数据契约·精简版）。
 
-    ``refresh_user_data`` 作业每 30 分钟调一次各适配器的
+    站点页「全部测连」/ 单站测连时调一次各适配器的
     :meth:`SiteAdapter.get_user_snapshot`，把 3 业务字段
     upload / download / seeding_count upsert 到本表（``site_id`` UNIQUE）。
 

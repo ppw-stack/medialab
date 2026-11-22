@@ -41,6 +41,7 @@ async def test_create_all_builds_expected_tables(db: None) -> None:
         "app_env_settings",
         "job_runs",
         "scheduler_job_settings",
+        "scheduler_job_settings_backup",
         "site_user_data",
         "cross_seed_snapshot",
         "cross_seed_orphan",

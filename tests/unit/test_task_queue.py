@@ -145,6 +145,59 @@ async def test_claim_one_already_running_returns_none(db: None) -> None:
         assert await svc.claim_one(res.task_id) is None
 
 
+async def test_claim_one_is_conditional_update(db: None) -> None:
+    """认领必须是**条件更新**：另一个执行者先认领后，本次必须拿不到。
+
+    背景（2026-11-22 加固）：``claim_one`` 曾是「先 get 读状态 → 改 → flush」，
+    理论上两个执行者（push 就地认领 / drain 批量认领）读到同一 pending 会
+    双双执行。现在用 ``UPDATE ... WHERE status='pending'`` + RETURNING 让
+    数据库判定。这里用两个独立 session 模拟两个执行者。
+    """
+    async with session_scope() as s1:
+        res = await TaskQueueService(s1).enqueue(
+            TaskKind.ADD_TORRENT, {"i": 1}, idem_key="dup"
+        )
+        task_id = res.task_id
+
+    # 执行者 A：认领成功
+    async with session_scope() as s1:
+        a = await TaskQueueService(s1).claim_one(task_id)
+    assert a is not None and a.attempts == 1
+
+    # 执行者 B：另一个 session，必须拿不到（且 attempts 不再自增）
+    async with session_scope() as s2:
+        assert await TaskQueueService(s2).claim_one(task_id) is None
+    async with session_scope() as s3:
+        row = await s3.get(TaskQueue, task_id)
+        assert row is not None
+        assert row.status == TaskStatus.RUNNING
+        assert row.attempts == 1
+
+
+async def test_claim_due_returns_only_actually_claimed(db: None) -> None:
+    """``claim_due`` 只返回**本次 UPDATE 真正认领到**的行。
+
+    若先被别人认领（status 已是 running），本轮的候选 id 里带着它也不能
+    返回——否则 drain 会把 push 正在执行的任务再跑一遍。
+    """
+    past = format_bj(bj_now_dt() - timedelta(minutes=5))
+    async with session_scope() as s1:
+        svc = TaskQueueService(s1)
+        r1 = await svc.enqueue(TaskKind.ADD_TORRENT, {"i": 1}, idem_key="a", run_at=past)
+        r2 = await svc.enqueue(TaskKind.ADD_TORRENT, {"i": 2}, idem_key="b", run_at=past)
+        taken = r1.task_id
+
+    # 先由 push 的就地认领拿走一条
+    async with session_scope() as s2:
+        assert await TaskQueueService(s2).claim_one(taken) is not None
+
+    # drain 再来认领：只应拿到另一条
+    async with session_scope() as s3:
+        claimed = await TaskQueueService(s3).claim_due(bj_now())
+    ids = {t.id for t in claimed}
+    assert ids == {r2.task_id}, f"drain 认领到了别人正在跑的任务：{ids}"
+
+
 async def test_claim_due_only_claims_due_tasks(db: None) -> None:
     now = bj_now()
     past = format_bj(bj_now_dt() - timedelta(minutes=5))

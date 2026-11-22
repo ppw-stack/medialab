@@ -199,26 +199,43 @@ python -c "import secrets; print('WEB_TOKEN=' + secrets.token_urlsafe(32))"
 curl -H "Authorization: Bearer $WEB_TOKEN" http://localhost:8092/api/v1/scheduler
 ```
 
-## 6. 调度作业（7 个）
+## 6. 调度作业（9 个）
+
+**辅种域**
 
 | 作业 | 默认 cron | 说明 |
 |---|---|---|
-| `fetch_all_sites` | `*/10 * * * *` | 全站拉取 |
-| `push_free_torrents` | `*/30 * * * *` | 免费种推送（走 TaskQueue） |
-| `monitor_free_window` | `5,15,25,35,45,55 * * * *` | 免费窗口看护 |
-| `refresh_user_data` | `*/30 * * * *` | FR-1.6 用户数据刷新 |
+| `fetch_all_sites` | `*/10 * * * *` | 全站拉取 + 站点信息获取（用户数据/时魔，两段各自容错） |
+| `push_and_monitor_free` | `5,15,25,35,45,55 * * * *` | 免费种推送 + 窗口监测（10 分钟心跳；推送内部节流 ≥30 分钟） |
 | `drain_task_queue` | `*/5 * * * *` | 任务队列排空 |
-| `daily_checkin` | `37 8 * * *` | 站点每日签到（FR-3.6，仅 3 站） |
 | `cross_seed_maintenance` | `17 */3 * * *` | 辅种维护（巡查 → 落库快照 + 暂停异常 → 磁盘超阈删种子 → 孤儿扫描） |
 
-专属参数：
+**媒体库域**
 
-- `push_free_torrents`：`push_min_remaining_hours` / `push_max_per_run` / `push_download_interval_ms`
-- `monitor_free_window`：`monitor_pre_pause_minutes`
+| 作业 | 默认 cron | 说明 |
+|---|---|---|
+| `scrape_metadata` | `41 3 * * *` | 媒体刮削（补 NFO / 图片） |
+| `organize_files` | `23 * * * *` | 下载整理（源目录 → 媒体库） |
+| `aggregate_sync` | `29 * * * *` | 网盘聚合归拢 |
+| `cleanup_link_cache` | `47 3 * * *` | 清理过期直链缓存 |
+| `purge_dav_auth_cache` | `7 * * * *` | 淘汰 DAV 认证失败缓存 |
+
+> 2026-11-22 变更：`refresh_user_data` 独立作业**已移除**，其职责并入
+> `fetch_all_sites` 的第二段（与拉取共用 `*/10` 心跳）；`push_free_torrents`
+> + `monitor_free_window` **合并**为 `push_and_monitor_free`。
+> 「站点」页打开时仍会自动测连+刷新一次（5 分钟冷却），属即时补充。
+
+专属参数（按作业名归属，见 `app/services/runtime_params.py:ParamSpec.job`）：
+
+- `push_and_monitor_free`：`push_min_remaining_hours` / `push_max_per_run` /
+  `push_download_interval_ms`（推送侧）+ `monitor_pre_pause_minutes` /
+  `monitor_delete_expired`（监测侧）——两组合并到同一个「配置」弹框
+- `cross_seed_maintenance`：`disk_rotation_*` 四项
+- `aggregate_sync` / `scrape_metadata` / `organize_files` 各有专属参数
 
 ### 运行历史（2026-11-03 起）
 
-「设置 → 调度 → 历史」弹框里能看到：
+「系统 → 定时任务 → 历史」弹框里能看到：
 
 | 内容 | 来源 | 说明 |
 |---|---|---|
@@ -367,7 +384,9 @@ POST plugin_sign-in.php?cmd=signin {csrf}     → {"state":"success","signindays
 
 ### 7.2 时魔抓取（FR-1.6 增补，2026-10-22）
 
-`refresh_user_data` 作业现在抓 **时魔**（每小时获得的站点积分）。
+用户数据刷新（含 **时魔**＝每小时获得的站点积分）现在随 `fetch_all_sites`
+作业每 10 分钟跑一次（2026-11-22 前是独立的 `refresh_user_data` 周期作业）；
+「站点」页打开时的「全部测连」会额外即时刷新一次。
 数据在 NexusPHP 的 `/mybonus.php`——**该页 navbar 与 `/userdetails.php`
 同一套**（`stdhead()` 渲染），所以 4 业务字段 + 时魔**一页拿全**，
 每站仍是 1 次请求（navbar 解析不出 4 字段时才回退 `/userdetails.php`）。
@@ -458,8 +477,9 @@ hdwing.org 是 NexusPHP（Version 700efff）+ X2015 自定义主题，DOM 与标
 - `0`（默认）= 各站时魔进度升序（同进度退化为 `last_seen_at DESC`）
 - `1` = 整个档内随机打乱（含站点顺序）
 
-> ⚠️ 时魔数据来自 `refresh_user_data`（30 分钟一次），最多滞后 30 分钟。
-> 站点没有 `site_user_data` 行 → 落「无信号」档，行为与加此特性前一致。
+> ⚠️ 时魔数据随 `fetch_all_sites` 每 10 分钟刷新一次（2026-11-22 起并入拉取
+> 作业），最多滞后 10 分钟。站点没有 `site_user_data` 行 → 落「无信号」档，
+> 行为与加此特性前一致。
 
 fixture 由脚本抓取（裁剪 + 脱敏 + **裁剪后解析结果必须与整页一致**的自校验）：
 

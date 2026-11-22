@@ -124,7 +124,7 @@ def test_monitor_delete_expired_options() -> None:
 
 def test_specs_for_job_keeps_enum_options() -> None:
     """按作业取 spec 时，枚举信息不能丢（前端要靠它渲染 radio）。"""
-    for spec in specs_for_job("monitor_free_window"):
+    for spec in specs_for_job("push_and_monitor_free"):
         if spec.key == "monitor_delete_expired":
             assert spec.options is not None
             assert spec.note

@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import httpx
 import pytest
 import respx
-from app.adapters.sites.base import SiteFetchError, SitePermanentError, SiteProfile
+from app.adapters.sites.base import (
+    BreakerTripped,
+    SiteFetchError,
+    SitePermanentError,
+    SiteProfile,
+)
 from app.adapters.sites.generic import GenericAdapter
+from app.core.timeutils import parse_bj
 
 _LIST_HTML = """
 <table class="torrents">
@@ -40,6 +48,26 @@ _INDEX_HTML = """
 """
 
 
+def _promotion_fixture(name: str) -> str:
+    return (
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / name
+    ).read_text(encoding="utf-8")
+
+
+def _promotion_table(start: str, end: str) -> str:
+    return f"""
+<div class="noraml_box">
+<table class=normal_tab>
+<tr><td class=colhead>优惠类型</td><td class=colhead>开始时间</td>
+<td class=colhead>截止时间</td><td class=colhead>操作人</td></tr>
+<tr><td>Free</td><td>{start}</td><td>{end}</td><td>系统</td></tr>
+</table>
+</div>
+"""
+
+
 async def test_generic_search_uses_rule_pack() -> None:
     """通用适配器按规则包拼 URL 并解析列表。"""
     adapter = GenericAdapter(
@@ -59,6 +87,240 @@ async def test_generic_search_uses_rule_pack() -> None:
     assert item.item_id == "12345"
     assert item.download_factor == 0
     assert (item.free_payload or {}).get("free_classes") == ["free"]
+
+
+async def test_generic_hdwing_promotion_active(monkeypatch) -> None:
+    """HDWinG 当前生效的 Free 记录 → 返回带真实截止时间的 Promotion。"""
+    from app.adapters.sites import generic as generic_module
+
+    monkeypatch.setattr(
+        generic_module,
+        "bj_now_dt",
+        lambda: parse_bj("2026-11-22 15:30:00"),
+    )
+    adapter = GenericAdapter(
+        SiteProfile(name="HDWinG", domain="hdwing.org"),
+        cookies="uid=1",
+    )
+    assert adapter.supports_promotion_lookup is True
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://hdwing.org/promotion.php?id=841134").mock(
+            return_value=httpx.Response(
+                200,
+                text=_promotion_fixture("hdwing_promotion_active.html"),
+            )
+        )
+        promo = await adapter.get_promotion("841134")
+    await adapter.close()
+
+    assert promo is not None
+    assert promo.kind == "Free"
+    assert promo.start_at == "2026-11-22 13:19:38"
+    assert promo.end_at == "2026-11-23 15:04:44"
+
+
+async def test_generic_hdwing_promotion_mixed_picks_active(monkeypatch) -> None:
+    """同页有生效 + 已过期 Free 时，只取生效的那条（截止最晚）。"""
+    from app.adapters.sites import generic as generic_module
+
+    monkeypatch.setattr(
+        generic_module,
+        "bj_now_dt",
+        lambda: parse_bj("2026-11-22 15:30:00"),
+    )
+    adapter = GenericAdapter(
+        SiteProfile(name="HDWinG", domain="hdwing.org"),
+        cookies="uid=1",
+    )
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://hdwing.org/promotion.php?id=640343").mock(
+            return_value=httpx.Response(
+                200,
+                text=_promotion_fixture("hdwing_promotion_mixed.html"),
+            )
+        )
+        promo = await adapter.get_promotion("640343")
+    await adapter.close()
+
+    assert promo is not None
+    assert promo.start_at == "2026-11-07 11:50:30"
+    assert promo.end_at == "2026-12-07 11:50:30"
+
+
+async def test_generic_hdwing_promotion_expired_returns_none(monkeypatch) -> None:
+    """Free 记录已过期 / 只有 50% 记录 → 当前没有生效优惠。"""
+    from app.adapters.sites import generic as generic_module
+
+    monkeypatch.setattr(
+        generic_module,
+        "bj_now_dt",
+        lambda: parse_bj("2026-11-22 15:30:00"),
+    )
+    adapter = GenericAdapter(
+        SiteProfile(name="HDWinG", domain="hdwing.org"),
+        cookies="uid=1",
+    )
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://hdwing.org/promotion.php?id=838960").mock(
+            return_value=httpx.Response(
+                200,
+                text=_promotion_fixture("hdwing_promotion_expired.html"),
+            )
+        )
+        router.get("https://hdwing.org/promotion.php?id=841155").mock(
+            return_value=httpx.Response(
+                200,
+                text=_promotion_fixture("hdwing_promotion_no_free.html"),
+            )
+        )
+        expired = await adapter.get_promotion("838960")
+        no_free = await adapter.get_promotion("841155")
+    await adapter.close()
+
+    assert expired is None
+    assert no_free is None
+
+
+async def test_generic_hdwing_promotion_permanent(monkeypatch) -> None:
+    """截止时间为空 = 永久免费。"""
+    from app.adapters.sites import generic as generic_module
+
+    monkeypatch.setattr(
+        generic_module,
+        "bj_now_dt",
+        lambda: parse_bj("2026-11-22 15:30:00"),
+    )
+    adapter = GenericAdapter(
+        SiteProfile(name="HDWinG", domain="hdwing.org"),
+        cookies="uid=1",
+    )
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://hdwing.org/promotion.php?id=900001").mock(
+            return_value=httpx.Response(
+                200,
+                text=_promotion_table("2026-11-01 00:00:00", ""),
+            )
+        )
+        promo = await adapter.get_promotion("900001")
+    await adapter.close()
+
+    assert promo is not None
+    assert promo.end_at is None
+
+
+async def test_generic_hdwing_promotion_future_start_ignored(monkeypatch) -> None:
+    """开始时间在未来 → 当前尚未生效。"""
+    from app.adapters.sites import generic as generic_module
+
+    monkeypatch.setattr(
+        generic_module,
+        "bj_now_dt",
+        lambda: parse_bj("2026-11-22 15:30:00"),
+    )
+    adapter = GenericAdapter(
+        SiteProfile(name="HDWinG", domain="hdwing.org"),
+        cookies="uid=1",
+    )
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://hdwing.org/promotion.php?id=900002").mock(
+            return_value=httpx.Response(
+                200,
+                text=_promotion_table("2027-01-01 00:00:00", "2027-02-01 00:00:00"),
+            )
+        )
+        promo = await adapter.get_promotion("900002")
+    await adapter.close()
+
+    assert promo is None
+
+
+async def test_generic_hdwing_promotion_404_and_not_found_page() -> None:
+    """种子被删 / 不存在的 200 提示页都按「无优惠」处理，不算故障。"""
+    adapter = GenericAdapter(
+        SiteProfile(name="HDWinG", domain="hdwing.org"),
+        cookies="uid=1",
+    )
+    not_found_html = (
+        "<html><head><title>哎呀…您访问的页面不存在</title></head>"
+        "<body>您访问的页面不存在</body></html>"
+    )
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://hdwing.org/promotion.php?id=404404").mock(
+            return_value=httpx.Response(404, text="not found")
+        )
+        router.get("https://hdwing.org/promotion.php?id=1").mock(
+            return_value=httpx.Response(200, text=not_found_html)
+        )
+        deleted = await adapter.get_promotion("404404")
+        missing = await adapter.get_promotion("1")
+    await adapter.close()
+
+    assert deleted is None
+    assert missing is None
+
+
+async def test_generic_hdwing_promotion_login_page_is_permanent() -> None:
+    """优惠页返回登录页 → 凭据失效，抛永久错误而不是写「非免费」。"""
+    adapter = GenericAdapter(
+        SiteProfile(name="HDWinG", domain="hdwing.org"),
+        cookies="uid=1",
+    )
+    login_html = (
+        "<html><head><title>登录</title></head><body>"
+        '<form action="login.php"><input type="password" name="passwd">'
+        "</form></body></html>"
+    )
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://hdwing.org/promotion.php?id=841134").mock(
+            return_value=httpx.Response(200, text=login_html)
+        )
+        with pytest.raises(SitePermanentError):
+            await adapter.get_promotion("841134")
+    await adapter.close()
+
+
+async def test_generic_hdwing_promotion_429_trips_breaker() -> None:
+    """优惠页限流 → 熔断，交给 service 层写 breaker_until。"""
+    adapter = GenericAdapter(
+        SiteProfile(name="HDWinG", domain="hdwing.org"),
+        cookies="uid=1",
+    )
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://hdwing.org/promotion.php?id=841134").mock(
+            return_value=httpx.Response(429, text="too many requests")
+        )
+        with pytest.raises(BreakerTripped):
+            await adapter.get_promotion("841134")
+    await adapter.close()
+
+
+async def test_generic_hdwing_promotion_unexpected_page_raises() -> None:
+    """页面结构异常（无优惠表头）→ 抛错，不能当成「没有优惠」写库。"""
+    adapter = GenericAdapter(
+        SiteProfile(name="HDWinG", domain="hdwing.org"),
+        cookies="uid=1",
+    )
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://hdwing.org/promotion.php?id=841134").mock(
+            return_value=httpx.Response(
+                200,
+                text="<html><body>Cloudflare 挑战页</body></html>",
+            )
+        )
+        with pytest.raises(SiteFetchError):
+            await adapter.get_promotion("841134")
+    await adapter.close()
+
+
+async def test_generic_non_hdwing_has_no_promotion_lookup() -> None:
+    """普通 NexusPHP 站不走逐种优惠查询（列表已 SSR 优惠标记）。"""
+    adapter = GenericAdapter(
+        SiteProfile(name="自由农场", domain="pt.0ff.cc"),
+        cookies="uid=1",
+    )
+    assert adapter.supports_promotion_lookup is False
+    assert await adapter.get_promotion("12345") is None
+    await adapter.close()
 
 
 async def test_generic_check_reachability_detects_login() -> None:

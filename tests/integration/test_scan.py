@@ -645,7 +645,7 @@ class TestScanLockWindow:
     """扫描**不得**长时间持有 SQLite 写锁（2026-11-12 prod 事故回归）。
 
     事故机制：扫描的事务横跨「写 strm（CIFS）+ 等附件下载」→ 写锁被
-    持有几十秒 → ``drain_task_queue`` / ``push_free_torrents`` /
+    持有几十秒 → ``drain_task_queue`` / ``push_and_monitor_free`` /
     ``refresh_user_data`` 的写事务撞 ``database is locked``。
 
     这里用「第二个连接写库」复现同一机制：写 strm 慢（模拟 CIFS

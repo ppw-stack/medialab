@@ -18,6 +18,8 @@ import {
   MenuOutlined,
   FileImageOutlined,
   ClusterOutlined,
+  ControlOutlined,
+  DashboardOutlined,
 } from '@ant-design/icons-vue'
 import { useAuthStore } from '../stores/auth'
 import { useResponsive } from '../composables/useResponsive'
@@ -38,16 +40,21 @@ const { isMobile } = useResponsive()
 const drawerOpen = ref(false)
 
 /**
- * 侧边栏菜单（**两个业务域，两级菜单**）。
+ * 侧边栏菜单（**两个业务域 + 一个「系统」组，两级菜单**）。
  *
- * 一级 = 业务域（辅种 / 媒体库），可点击展开/收起；
+ * 一级 = 业务域（辅种 / 媒体库 / 系统），可点击展开/收起；
  * 二级 = 各域的叶子页面。
  *
  * 自动展开行为：当前路由所在的一级组始终展开，另一组可手动收起/展开。
  * 切换路由时强制展开目标组（避免点了二级菜单但一级是收起的）。
  *
- * 辅种域含「设置」（/settings，调度作业 + 环境变量两个 tab）；媒体库域
- * 的「签名密钥」用 /media-settings（避免与辅种域的 /settings 撞名）。
+ * 2026-11-22 拆出「系统」组：**定时任务**（`/scheduler`，按业务域分成
+ * 「辅种」「媒体库」两栏）与**设置**（`/settings`，环境变量配置）是两种
+ * 不同的事，此前挤在辅种域的「设置」页两个 tab 里——找调度得先进「设置」。
+ * 现在它们是平级菜单，且不再属于辅种域（调度管的是全应用的作业）。
+ *
+ * 媒体库域的「签名密钥」用 /media-settings（避免与 /settings 撞名，
+ * 且它是域内配置，不是部署级设置）。
  */
 const menuGroups = [
   {
@@ -59,7 +66,6 @@ const menuGroups = [
       { key: '/downloaders', icon: ApiOutlined, label: '下载器与任务', sub: '实例 / 实时任务', iconColor: 'green' },
       { key: '/torrent-index', icon: DatabaseOutlined, label: '拉取索引', sub: '免费种源', iconColor: 'amber' },
       { key: '/cross-seed', icon: SafetyOutlined, label: '辅种统计', sub: '按下载器分组展示', iconColor: 'gold' },
-      { key: '/settings', icon: SettingOutlined, label: '设置', sub: '调度作业 / 环境变量', iconColor: 'pink' },
     ],
   },
   {
@@ -76,6 +82,15 @@ const menuGroups = [
       { key: '/health', icon: HeartOutlined, label: '健康监控', sub: '断链检查', iconColor: 'red' },
       { key: '/dav-users', icon: CloudUploadOutlined, label: 'WebDAV', sub: '账号与审计', iconColor: 'cyan' },
       { key: '/media-settings', icon: SettingOutlined, label: '签名密钥', sub: '中转签名轮换', iconColor: 'pink' },
+    ],
+  },
+  {
+    key: 'system',
+    title: '系统',
+    icon: ControlOutlined,
+    items: [
+      { key: '/scheduler', icon: DashboardOutlined, label: '定时任务', sub: '辅种 / 媒体库 · 启停', iconColor: 'blue' },
+      { key: '/settings', icon: SettingOutlined, label: '设置', sub: '环境变量', iconColor: 'pink' },
     ],
   },
 ]
