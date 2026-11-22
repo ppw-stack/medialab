@@ -419,6 +419,16 @@ const jobs = ref<Record<number, AggregateSyncJob>>({});
 let jobTimer: number | undefined;
 
 /**
+ * 组件是否已卸载——**定时器链的确定性终点**。
+ *
+ * ⚠️ `jobTimer`（setInterval）在卸载时能直接 clear，但 `waitForJobEnd` 是
+ * 「await sleep → 发请求 → 再 await sleep」的**定时器链**：没有句柄可清，
+ * 卸载后仍会每 2 秒打一次 `/aggregate/sync-jobs/:id`，直到 job 结束
+ * （可能好几分钟）。故用本标志在每次 sleep 之后自查，提前收尾。
+ */
+let disposed = false;
+
+/**
  * 组件卸载时清掉轮询定时器。
  *
  * ⚠️ 定时器只在 job 结束或新 job 启动时清理——**离开页面时 job 往往还在跑**，
@@ -426,6 +436,7 @@ let jobTimer: number | undefined;
  * 并继续写 `jobs.value`（定时器泄漏 + 无意义请求）。
  */
 onUnmounted(() => {
+  disposed = true;
   if (jobTimer !== undefined) {
     window.clearInterval(jobTimer);
     jobTimer = undefined;
@@ -932,6 +943,8 @@ async function syncNow(groupId: number) {
     } else if (final?.state === 'cancelled') {
       message.warning('归拢已取消');
     }
+    // 已卸载：轮询被 `disposed` 打断（final 为 null），不再发多余的刷新请求
+    if (disposed) return;
     await loadAll();
   } catch (e) {
     message.error(errMsg(e, '归拢失败'));
@@ -940,10 +953,17 @@ async function syncNow(groupId: number) {
   }
 }
 
-/** 等一个 job 结束（2s 轮询），返回最终状态。 */
+/**
+ * 等一个 job 结束（2s 轮询），返回最终状态。
+ *
+ * ⚠️ 组件卸载时（`disposed`）**立即返回 null**：本循环靠 `await sleep` 串起
+ * 定时器链，没有可清理的句柄——不置标志的话，离开页面后仍会每 2 秒轮询到
+ * job 结束。返回 null 时调用方跳过结果提示（见 `syncNow`）。
+ */
 async function waitForJobEnd(jobId: string): Promise<AggregateSyncJob | null> {
   for (;;) {
     await new Promise((resolve) => setTimeout(resolve, 2000));
+    if (disposed) return null;
     const j = await api.get<AggregateSyncJob>(`/aggregate/sync-jobs/${jobId}`);
     if (j.state !== 'running') {
       jobs.value[j.group_id] = j;
