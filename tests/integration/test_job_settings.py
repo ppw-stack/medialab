@@ -33,7 +33,11 @@ from sqlalchemy import select
 
 
 def _boom_scope() -> Any:
-    """替身：打开 session 时直接炸（模拟 DB 不可用）。"""
+    """替身：打开 session 时直接炸（模拟 DB 不可用）。
+
+    Raises:
+        RuntimeError: 始终抛出，用于模拟数据库不可用。
+    """
     raise RuntimeError("炸了")
 
 

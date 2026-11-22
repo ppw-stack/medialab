@@ -221,15 +221,62 @@ running → 双方都执行同一 task。
 
 ## 7. 契约与兼容性
 
+### 7.1 数据流触发能力本身（纯新增）
+
 - **DB**：无迁移。`scheduler_job_settings.cron` 仍是「兜底 cron」；用户改过 push 的
   cron 时 **DB 覆盖优先**（现有逻辑不动），此时实际频率 = `max(cron 节奏, 上游触发门槛)`。
 - **API**：`GET /scheduler` 只**新增** `depends_on` 字段（向后兼容）。
 - **行为**：其他作业完全不受影响（没声明 `depends_on` 就不参与触发）。
 - **回滚**：删掉注册表里 `depends_on=` 一行 + 恢复 `DEFAULT_CRON` 即可，无残留状态。
-- **版本与弃用**：本次改动**没有**引入新的破坏性 API 语义；被移除的旧作业名
-  （`push_free_torrents` / `monitor_free_window` / `refresh_user_data`）自
-  **v2.1.0 起立即 404**、无兼容期，映射表与迁移步骤见
-  [`CHANGELOG.md`](../CHANGELOG.md) 的「Versioning & Deprecation」小节。
+
+> 上面这四条**只针对 `depends_on` 这套触发能力**。同一版本里还有一处
+> **破坏性变更**（三个旧作业键被移除）——见下一节，别被「无迁移 / 向后兼容」
+> 这句带偏。
+
+### 7.2 BREAKING CHANGE：三个旧作业键被移除（v2.1.0 起立即失效）
+
+| 旧作业键（已移除） | 新作业键 | 备注 |
+|---|---|---|
+| `refresh_user_data` | `fetch_all_sites` | 职责并入第二段「站点信息获取」 |
+| `push_free_torrents` | `push_and_monitor_free` | 与监测合并；启停取 AND |
+| `monitor_free_window` | `push_and_monitor_free` | 同上（两个旧名 → 一个新名） |
+
+**旧键的调用行为**（不是所有端点都返回 404，脚本要按端点区分）：
+
+| 端点 | 旧作业键的响应 |
+|---|---|
+| `POST /scheduler/{job}/toggle` | **404**，detail `作业不存在：{job}` |
+| `POST /scheduler/{job}/cron` | **404**，detail `作业不存在：{job}` |
+| `GET /scheduler/{job}/config` | **404**，detail `作业不存在：{job}` |
+| `POST /scheduler/{job}/run` | **HTTP 200** + `ok=false` + `error="unknown job: {job}"`（手动触发走 `run_now`，对未知作业名不抛 HTTP 异常——**脚本必须看 `ok` 字段**，只看状态码会把失败当成功） |
+
+`GET /scheduler` 的 `jobs[]` 里不再出现这三个名字（同时多了 `module` 等新字段，
+旧客户端忽略未知字段即可）。
+
+**受影响调用方**：任何按作业名调用 `/scheduler/{job}/…` 的脚本与外部工具；
+面板「定时任务」页（前端已在本 PR 内适配）。
+
+**`scheduler_job_settings` 里的旧行**：
+
+- `push_free_torrents` + `monitor_free_window` → 启动期合并成 `push_and_monitor_free`
+  一行（**启停取 AND**：任一边被用户停用过，新作业也停用；**cron 不搬** → 走
+  代码默认值）；
+- `refresh_user_data` → 作业已下线，旧行按「孤儿清理」删掉；
+- 迁移是**不可逆 DELETE**：删除前把旧行内容打进启动日志（`作业配置删除快照（…）`，
+  含 `job_name` / `enabled` / `cron`）——那是事后唯一的恢复依据。
+
+**迁移步骤**（外部脚本，升级镜像**前**改完）：
+
+1. 调 `push_free_torrents` / `monitor_free_window` 的地方改成
+   `push_and_monitor_free`（两者行为已合并：监测每轮都跑，推送由作业内部节流到
+   ≥30 分钟一次）；
+2. 调 `refresh_user_data` 的地方改成 `fetch_all_sites`（该作业现在多一段
+   「站点信息获取」，单轮耗时变长）；
+3. 手动触发按 `ok` 字段判成败（见上表）。
+
+**版本与弃用**：自 **v2.1.0** 起立即生效、**无兼容期**（面板自托管、前后端同版本
+发布）；完整映射表、受影响调用方与镜像 tag 见
+[`CHANGELOG.md`](../CHANGELOG.md) 的「Versioning & Deprecation」小节。
 
 ---
 

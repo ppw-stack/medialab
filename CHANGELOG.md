@@ -33,7 +33,8 @@
   `fetch_all_sites`**（见下一条 Changed）：
 
   `POST /scheduler/refresh_user_data/…` 调用方需改用 `fetch_all_sites`
-  （旧名 404）。作业数 10 → 9。
+  （`toggle` / `cron` / `config` 返 404；`run` 返 200 + `ok=false`——端点对照表
+  见下方「Versioning & Deprecation」）。作业数 10 → 9。
 
 ### Changed
 
@@ -79,8 +80,9 @@
     `min_trigger_interval_sec` 机制保留但当前无作业使用（`GET /scheduler` 仍下发，
     值为 `null` / `0`）。
   - **BREAKING（对调用 `POST /scheduler/{job}/...` 的脚本）**：`push_free_torrents`
-    / `monitor_free_window` 这两个 job 名不再存在，调用会 404；改用
-    `push_and_monitor_free`。`GET /scheduler` 的 `jobs[]` 里也不会再出现旧名。
+    / `monitor_free_window` 这两个 job 名不再存在——`toggle` / `cron` / `config`
+    **404**，`run` 返 **200 + `ok=false`**（脚本要按 `ok` 判成败，不能只看状态码）；
+    改用 `push_and_monitor_free`。`GET /scheduler` 的 `jobs[]` 里也不会再出现旧名。
 
     **回滚 / 恢复**（启动期迁移是**不可逆**的 `DELETE`）：
 
@@ -113,11 +115,10 @@
   （`module` / `module_title` / `modules[]` / `depends_on` /
   `min_trigger_interval_sec`），旧客户端忽略未知字段即可；破坏面**仅限**
   被移除的三个旧作业名（`refresh_user_data` / `push_free_torrents` /
-  `monitor_free_window`），且它们**响亮地 404**（脚本会立刻报错，不会像
+  `monitor_free_window`），且它们**响亮地失败**（脚本会立刻报错，不会像
   2.0.0 那次「502 → 202」那样**静默**把「已入队」当成失败）。
-- **弃用时间线**：旧作业名自 **v2.1.0 起立即不可调用**（`POST /scheduler/
-  {job}/…` 返回 404），**无兼容期**——面板自托管、前后端同版本发布，
-  面板前端已在本 PR 内适配；**外部脚本须在升级镜像前改完**。
+- **弃用时间线**：旧作业名自 **v2.1.0 起立即不可调用**，**无兼容期**——面板自托管、
+  前后端同版本发布，面板前端已在本 PR 内适配；**外部脚本须在升级镜像前改完**。
 
   | 旧作业名（已移除） | 新作业名 | 备注 |
   |---|---|---|
@@ -125,8 +126,22 @@
   | `push_free_torrents` | `push_and_monitor_free` | 与监测合并；启停取 AND |
   | `monitor_free_window` | `push_and_monitor_free` | 同上（两个旧名 → 一个新名） |
 
+- **旧作业名的端点行为**（**不是所有端点都返 404**，脚本要按端点区分）：
+
+  | 端点 | 旧作业名的响应 |
+  |---|---|
+  | `POST /scheduler/{job}/toggle` | **404**，detail `作业不存在：{job}` |
+  | `POST /scheduler/{job}/cron` | **404**，detail `作业不存在：{job}` |
+  | `GET /scheduler/{job}/config` | **404**，detail `作业不存在：{job}` |
+  | `POST /scheduler/{job}/run` | **200** + `ok=false` + `error="unknown job: {job}"`（手动触发走 `run_now`，对未知作业名不抛 HTTP 异常——**必须按 `ok` 判成败**） |
+
+- **`scheduler_job_settings` 的旧行**：启动期迁移把 `push_free_torrents` +
+  `monitor_free_window` 合并成 `push_and_monitor_free` 一行（**启停取 AND**、
+  **cron 不搬**）；`refresh_user_data` 的旧行按「孤儿清理」删除。迁移是**不可逆
+  DELETE**——删除前把旧行内容打进启动日志（`作业配置删除快照（…）`），恢复步骤
+  见上文「免费种推送与免费窗口监测合并为一个作业 → 回滚 / 恢复」。
 - **受影响调用方**：任何调用 `POST /scheduler/{job}/…`（手动触发 / 改 cron /
-  改启停 / 看历史）的脚本与外部工具；`GET /scheduler` 的消费方只会看到
+  改启停 / 看配置）的脚本与外部工具；`GET /scheduler` 的消费方只会看到
   `jobs[]` 少了三个名字、多了 `module` 等字段。
 - **镜像 tag**：git tag `v2.1.0` → 镜像 tag `2.1.0` / `2.1`（见 `DEPLOY.md`）。
 - **关联文档**：[`CHANGELOG.md`](CHANGELOG.md)（本页）；数据流方案与
