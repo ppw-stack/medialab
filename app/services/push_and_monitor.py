@@ -44,10 +44,10 @@
 from __future__ import annotations
 
 import time
-from dataclasses import asdict
 from typing import Any
 
 from app.core.logging import get_logger
+from app.services.job_compose import build_summary, run_stage, to_payload
 from app.services.scheduler import JobStep
 
 logger = get_logger(__name__)
@@ -85,7 +85,7 @@ async def run_push_and_monitor(factory: Any) -> dict[str, Any]:
     results: dict[str, Any] = {}
 
     # ① 免费窗口监测（安全动作：临期先暂停，不节流）
-    mon_result, mon_step = await _run_stage(
+    mon_result, mon_step = await run_stage(
         "免费窗口监测",
         lambda: _run_monitor(factory),
     )
@@ -93,7 +93,7 @@ async def run_push_and_monitor(factory: Any) -> dict[str, Any]:
     steps.append(mon_step)
 
     # ② 免费种推送（距上次真正推送 ≥ 门槛才跑）
-    push_result, push_step = await _run_stage(
+    push_result, push_step = await run_stage(
         "免费种推送",
         lambda: _run_push(factory),
     )
@@ -101,7 +101,7 @@ async def run_push_and_monitor(factory: Any) -> dict[str, Any]:
     steps.append(push_step)
 
     return {
-        "summary": _build_summary(results),
+        "summary": build_summary(results, ("monitor", "push")),
         "steps": steps,
         **results,
     }
@@ -115,7 +115,7 @@ async def _run_monitor(factory: Any) -> dict[str, Any]:
     from app.services.monitor import MonitorFreeWindowService
 
     result = await MonitorFreeWindowService(factory).run()
-    return _to_payload(result)
+    return to_payload(result)
 
 
 async def _run_push(factory: Any) -> dict[str, Any]:
@@ -144,7 +144,7 @@ async def _run_push(factory: Any) -> dict[str, Any]:
     from app.services.push_free import PushFreeService
 
     result = await PushFreeService(factory).run()
-    payload = _to_payload(result)
+    payload = to_payload(result)
 
     # 只有**真的尝试过**才记时间戳：空转轮次不算，避免把下一次推送推后 30 分钟
     selected = int(payload.get("selected") or 0)
@@ -152,78 +152,3 @@ async def _run_push(factory: Any) -> dict[str, Any]:
     if tried:
         _last_push_at = time.monotonic()
     return payload
-
-
-async def _run_stage(name: str, coro_factory: Any) -> tuple[dict[str, Any], JobStep]:
-    """跑一个子阶段，失败折叠成 ``fail`` 步骤（不影响另一段）。"""
-    try:
-        raw = await coro_factory()
-    except Exception as exc:
-        logger.exception("免费种作业子阶段失败：%s", name)
-        return {}, JobStep(name, "fail", None, f"{type(exc).__name__}: {exc}")
-
-    if not isinstance(raw, dict):
-        return {}, JobStep(name, "warn", None, str(raw)[:120])
-
-    detail = str(raw.get("summary") or "")
-    status = "ok"
-    if raw.get("errors") or raw.get("failed"):
-        status = "warn"
-    if raw.get("skipped_by_interval"):
-        # 节流跳过不是「失败」，但也不该显示成 ok（否则用户以为这轮推了）
-        status = "skip"
-
-    count = _extract_count(raw)
-    # 逐项明细**不在这里重抽**：两个子服务的 ``steps`` 里已经带着 items
-    # （逐站 / 逐种 / 逐 hash），挂成 children 后前端 `JobStepList` 会连
-    # items 一起渲染。重抽只会重复一遍，还容易把字段名搞错。
-    children = [s for s in (raw.get("steps") or []) if isinstance(s, JobStep)]
-    return raw, JobStep(
-        name,
-        status,
-        count,
-        detail or None,
-        children=children or None,
-    )
-
-
-def _to_payload(result: Any) -> dict[str, Any]:
-    """dataclass 结果 → dict，但**保留 ``steps`` 里的 JobStep 对象**。
-
-    为什么不能直接 ``asdict(result)``：``asdict`` 会递归把 JobStep 变成
-    普通 dict，后面 :func:`_run_stage` 就认不出子步骤了（``isinstance``
-    失败）→ 前端「步骤卡片」看不到子服务的逐站/逐种明细。
-
-    保留对象是安全的：最终的 ``_record_run`` 走 ``_jsonable``（递归
-    ``asdict``）再 ``json.dumps``，JobStep 会被正确序列化——与
-    ``cross_seed_maintenance`` 返回 ``steps=[JobStep(...)]`` 的做法一致。
-    """
-    payload = asdict(result)
-    steps = getattr(result, "steps", None)
-    if steps:
-        payload["steps"] = list(steps)
-    return payload
-
-
-def _extract_count(raw: dict[str, Any]) -> int | None:
-    """从子阶段返回里取一个「涉及数量」（推送=已推数 / 监测=命中数）。"""
-    for key in ("pushed", "matched", "pre_paused"):
-        value = raw.get(key)
-        if isinstance(value, int):
-            return value
-    return None
-
-
-def _build_summary(results: dict[str, Any]) -> str:
-    """合成一句人话摘要（两段各自的 summary 拼接，**去重**）。
-
-    去重不是洁癖：两段共用同一个前置条件（例如都没配默认下载器）时会返回
-    **完全相同**的 summary，拼起来就是「未配置默认下载器；未配置默认下载器」
-    —— 用户看不出这是两段的结论，只觉得是 bug。
-    """
-    parts: list[str] = []
-    for key in ("monitor", "push"):
-        text = str(results.get(key, {}).get("summary") or "")
-        if text and text not in parts:
-            parts.append(text)
-    return "；".join(parts) if parts else "无动作"

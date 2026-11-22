@@ -205,7 +205,7 @@ curl -H "Authorization: Bearer $WEB_TOKEN" http://localhost:8092/api/v1/schedule
 
 | 作业 | 默认 cron | 说明 |
 |---|---|---|
-| `fetch_all_sites` | `*/10 * * * *` | 全站拉取 |
+| `fetch_all_sites` | `*/10 * * * *` | 全站拉取 + 站点信息获取（用户数据/时魔，两段各自容错） |
 | `push_and_monitor_free` | `5,15,25,35,45,55 * * * *` | 免费种推送 + 窗口监测（10 分钟心跳；推送内部节流 ≥30 分钟） |
 | `drain_task_queue` | `*/5 * * * *` | 任务队列排空 |
 | `cross_seed_maintenance` | `17 */3 * * *` | 辅种维护（巡查 → 落库快照 + 暂停异常 → 磁盘超阈删种子 → 孤儿扫描） |
@@ -220,9 +220,10 @@ curl -H "Authorization: Bearer $WEB_TOKEN" http://localhost:8092/api/v1/schedule
 | `cleanup_link_cache` | `47 3 * * *` | 清理过期直链缓存 |
 | `purge_dav_auth_cache` | `7 * * * *` | 淘汰 DAV 认证失败缓存 |
 
-> 2026-11-22 变更：`refresh_user_data` 周期作业**已移除**（用户数据改在
-> 「站点」页打开时刷新）；`push_free_torrents` + `monitor_free_window`
-> **合并**为 `push_and_monitor_free`。
+> 2026-11-22 变更：`refresh_user_data` 独立作业**已移除**，其职责并入
+> `fetch_all_sites` 的第二段（与拉取共用 `*/10` 心跳）；`push_free_torrents`
+> + `monitor_free_window` **合并**为 `push_and_monitor_free`。
+> 「站点」页打开时仍会自动测连+刷新一次（5 分钟冷却），属即时补充。
 
 专属参数（按作业名归属，见 `app/services/runtime_params.py:ParamSpec.job`）：
 
@@ -383,8 +384,9 @@ POST plugin_sign-in.php?cmd=signin {csrf}     → {"state":"success","signindays
 
 ### 7.2 时魔抓取（FR-1.6 增补，2026-10-22）
 
-用户数据刷新（含 **时魔**＝每小时获得的站点积分）由「站点」页打开时的
-「全部测连」触发（2026-11-22 前是 `refresh_user_data` 周期作业）。
+用户数据刷新（含 **时魔**＝每小时获得的站点积分）现在随 `fetch_all_sites`
+作业每 10 分钟跑一次（2026-11-22 前是独立的 `refresh_user_data` 周期作业）；
+「站点」页打开时的「全部测连」会额外即时刷新一次。
 数据在 NexusPHP 的 `/mybonus.php`——**该页 navbar 与 `/userdetails.php`
 同一套**（`stdhead()` 渲染），所以 4 业务字段 + 时魔**一页拿全**，
 每站仍是 1 次请求（navbar 解析不出 4 字段时才回退 `/userdetails.php`）。
@@ -475,9 +477,9 @@ hdwing.org 是 NexusPHP（Version 700efff）+ X2015 自定义主题，DOM 与标
 - `0`（默认）= 各站时魔进度升序（同进度退化为 `last_seen_at DESC`）
 - `1` = 整个档内随机打乱（含站点顺序）
 
-> ⚠️ 时魔数据来自「站点」页打开时的刷新（2026-11-22 移除周期作业），
-> 面板长期不打开时最多滞后到「上次打开站点页」。档位只影响先推哪站。
-> 站点没有 `site_user_data` 行 → 落「无信号」档，行为与加此特性前一致。
+> ⚠️ 时魔数据随 `fetch_all_sites` 每 10 分钟刷新一次（2026-11-22 起并入拉取
+> 作业），最多滞后 10 分钟。站点没有 `site_user_data` 行 → 落「无信号」档，
+> 行为与加此特性前一致。
 
 fixture 由脚本抓取（裁剪 + 脱敏 + **裁剪后解析结果必须与整页一致**的自校验）：
 

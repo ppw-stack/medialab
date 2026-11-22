@@ -191,9 +191,10 @@ class JobMeta:
 JOB_META: tuple[JobMeta, ...] = (
     JobMeta(
         name="fetch_all_sites",
-        title="站点拉取",
+        title="站点拉取与信息",
         description=(
-            "遍历所有启用站点拉取种子列表（API/HTML），写入 torrent_index 表"
+            "遍历所有启用站点拉取种子列表（写入 torrent_index）"
+            "＋ 同步刷新各站用户数据（上传/下载/做种/时魔 → site_user_data）"
         ),
         make_func=lambda f: _job_fn(lambda: _run_fetch_all_sites(f)),
         module="seed",
@@ -353,7 +354,9 @@ def preflight_job_imports() -> None:
 
     for mod in (
         "app.services.runtime_params",  # _current_pre_pause_minutes
-        "app.services.jobs",            # _run_fetch_all_sites
+        "app.services.jobs",            # _run_fetch_all_sites（拉取阶段）
+        "app.services.user_data",       # _run_fetch_all_sites（信息获取阶段）
+        "app.services.job_compose",     # _run_fetch_all_sites / push_and_monitor
         "app.services.push_and_monitor",  # _run_push_and_monitor（合并作业）
         "app.services.push_free",       # 合并作业内部调 PushFreeService
         "app.services.monitor",         # 合并作业内部调 MonitorFreeWindowService
@@ -371,10 +374,49 @@ def preflight_job_imports() -> None:
 
 # ============================================================ 作业入口
 async def _run_fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
-    """执行站点拉取。"""
-    from app.services.jobs import fetch_all_sites
+    """站点拉取 + 站点信息获取（2026-11-22 合并为一个作业）。
 
-    return await fetch_all_sites(factory)
+    两段都遍历同一批**启用站点**，所以合并后共用一条 cron 心跳
+    （``*/10``），不再单独为「用户数据」开一个作业：
+
+    1. **站点拉取** → 种子列表写 ``torrent_index``（推送的数据源）
+    2. **站点信息获取** → 上传/下载/做种/时魔写 ``site_user_data``
+       （推送选种排序的输入）
+
+    顺序：先拉取（推送依赖它），再取信息——两段互不依赖，顺序只是为了
+    让「拉取失败」更容易在日志里对齐。
+
+    两段**各自容错**（:func:`app.services.job_compose.run_stage`）：
+    一段抛错不影响另一段，失败进 ``steps``。返回的顶层字段保持与合并前
+    一致（``total_written`` / ``scanned_sites`` 等），额外的用户数据结果
+    放在 ``user_data`` 键里——旧调用方不受影响。
+    """
+    from app.services.job_compose import build_summary, run_stage
+    from app.services.jobs import fetch_all_sites
+    from app.services.user_data import refresh_all_sites
+
+    fetch_result, fetch_step = await run_stage(
+        "站点拉取",
+        lambda: fetch_all_sites(factory),
+    )
+    user_result, user_step = await run_stage(
+        "站点信息获取",
+        lambda: refresh_all_sites(factory),
+    )
+
+    merged = dict(fetch_result)
+    merged.update(
+        {
+            "summary": build_summary(
+                {"fetch": fetch_result, "user_data": user_result},
+                ("fetch", "user_data"),
+            ),
+            # 两段各自带逐站明细 → 挂成两步的 children（前端可展开）
+            "steps": [fetch_step, user_step],
+            "user_data": user_result,
+        }
+    )
+    return merged
 
 
 async def _run_push_and_monitor(factory: AdapterFactory) -> dict[str, object]:
