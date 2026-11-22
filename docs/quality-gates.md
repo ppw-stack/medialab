@@ -228,6 +228,12 @@ Dockerfile 的 `npm ci` 加 `HUSKY=0`——构建上下文里没有 `.git`，装
 没有意义。（不加也不会失败，husky 找不到 `.git` 时返回提示并以 0 退出，
 但输出是噪音。）
 
+`.dockerignore` 排除了 `**/tests`，Docker 上下文里**没有** `web/tests`。所以
+`npm run build` 只构建 **app / node** 两个工程——若把测试工程也纳入（原来的
+`vue-tsc -b` 全量构建会读根 tsconfig 的 `tsconfig.test.json` 引用），会因
+「测试工程没有输入」报 **TS18003** 把镜像构建打挂（v3.0.0 发布时踩过）。
+测试代码的类型检查在 CI 里由 `npm run type-check` 单独覆盖，不会被漏掉。
+
 ---
 
 ## 7. 命令
@@ -236,7 +242,8 @@ Dockerfile 的 `npm ci` 加 `HUSKY=0`——构建上下文里没有 `.git`，装
 cd web
 
 npm run dev            # 本地开发
-npm run build          # vue-tsc -b && vite build
+npm run build          # vue-tsc -b tsconfig.app.json tsconfig.node.json && vite build
+                       # （生产构建不含测试工程；测试类型由 npm run type-check 覆盖）
 npm run lint           # eslint . --max-warnings 0
 npm run lint:fix       # eslint . --fix
 npm run format         # prettier --write .
@@ -256,7 +263,9 @@ node scripts/check-css-classes.mjs      # template 用到的 class 有样式定�
 
 `.github/workflows/ci.yml` 的 `frontend` job，6 步全绿才允许合并：
 
-1. `npm run build`（vue-tsc 类型检查 + 构建）
+1. `npm run type-check`（`vue-tsc -b`，含测试工程）+ `npm run build`
+   （`vue-tsc -b tsconfig.app.json tsconfig.node.json && vite build`——
+   生产构建**不依赖测试源码**，见 §6.1 的 Docker 构建上下文说明）
 2. `node scripts/check-types-placement.mjs`
 3. `node scripts/check-css-classes.mjs`
 4. `npm run lint`
