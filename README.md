@@ -28,8 +28,8 @@
 
 ```
 播放器 ──GET /302/<id>/<sig>──▶ 你的服务器（几 KB）
-       ◀──302 Location: cdn.115.com/...──┘
-       ──GET cdn.115.com/...──▶ 网盘 CDN   ← GB 级流量在此，完全不经服务器
+       ◀──302 Location: <光鸭 CDN 直链>──┘
+       ──GET <光鸭 CDN 直链>──▶ 网盘 CDN   ← GB 级流量在此，完全不经服务器
 ```
 
 ## 现状
@@ -40,13 +40,13 @@
 |---|---|---|
 | P0 | 骨架：配置 / DB 迁移 / 驱动接口 / fake driver / 契约测试 | ✅ |
 | P1 | 中转：HMAC 签名 + L1/L2 本地直链缓存 + 单飞 + `/302` | ✅ |
-| P2 | 115 驱动：扫码登录 + cookie 加密 + 列目录 + 换直链 | ✅ **已实测** |
+| P2 | ~~115 驱动~~（2026-11-22 移除，只保留光鸭盘） | ❌ 已移除 |
 | P2b | 光鸭盘驱动：扫码 / 短信登录 + Token 自动刷新 + 列目录 + 换直链 | ✅ **已实测** |
 | P3 | 生成：扫描 + STRM 写出 + 幂等 + 孤儿清理 + **附件同步** | ✅ **已实测** |
 | P4 | Web 应用：5 个模块 | ✅ |
 | P5 | 监控：健康检查 + 批量重签/重建 + 密钥轮换 | ✅ |
 | P6 | Docker 部署：多阶段构建 + compose 测试环境 | ✅ |
-| P7 | 迁移：115 → 光鸭盘（流式边扫边迁 + 幂等预检 + 失败即跳过） | ✅ **已实测** |
+| P7 | 迁移：光鸭 → 光鸭盘（流式边扫边迁 + 幂等预检 + 失败即跳过） | ✅ **已实测** |
 | P8 | WebDAV：wsgidav 协议层 + 多用户 + 限流 + 审计 | ✅ **已实测** |
 | P9 | 数据同步：监听本地目录 → 网盘（幂等比对「同名+同大小」/ 覆盖进回收站 / 可选删本地，**空目录一并删**）。**支持哪些网盘按驱动声明**（`UploadDriver` 协议 + `UPLOADABLE_DRIVER_TYPES`），当前已实测：光鸭盘 | ✅ **已实测** |
 
@@ -105,7 +105,7 @@ curl -H "Authorization: Bearer <WEB_TOKEN>" http://localhost:8092/metrics | head
 
 ```bash
 # 安装依赖（Python 3.12，由 uv 管理）
-uv sync --extra dev --extra p115 --extra guangya
+uv sync --extra dev --extra guangya
 
 # 静态检查
 uv run ruff check app/ tests/

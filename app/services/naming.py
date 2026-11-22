@@ -85,7 +85,7 @@ def classify_by_ext(
 
     图片 / 数据 / 未知**分开计数**——便于排查「为什么这个文件没生成」。
 
-    **隐藏备份文件一律算 unknown**：115 客户端会在目录里留
+    **隐藏备份文件一律算 unknown**：网盘客户端会在目录里留
     ``.mp-backup-xxxx**..mp4`` 这类自动备份（实测 16 个 / 28 GB），
     它们后缀确实是 ``.mp4``，若按后缀分类会被当成正片生成 strm。
     """
@@ -104,7 +104,7 @@ def classify_by_ext(
     return "unknown"
 
 
-#: 隐藏备份文件的名字特征（115 客户端的自动备份残留）
+#: 隐藏备份文件的名字特征（网盘客户端的自动备份残留）
 HIDDEN_BACKUP_PATTERNS = (".mp-backup",)
 
 
@@ -128,7 +128,7 @@ def sanitize(name: str) -> str:
     - 去掉结尾的点与空格（Windows 不允许）
     - 避开 Windows 保留名（``CON`` / ``PRN`` …）
 
-    源文件名理论上不含这些（115 的文件名是合法文件名），但写盘前仍要过一遍
+    源文件名理论上不含这些（网盘的文件名是合法文件名），但写盘前仍要过一遍
     ——把「不可能」当假设，比出事后排查便宜。
     """
     cleaned = _UNSAFE_CHARS.sub("", name).strip()

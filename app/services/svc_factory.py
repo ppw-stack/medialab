@@ -25,7 +25,16 @@ def init_services(settings: AppSettings | None = None) -> None:
     resolved = settings or get_settings()
     _link_cache = LinkCache(resolved)
     _redirect_service = RedirectService(resolved, _link_cache)
-    logger.info("服务初始化完成 ua_policy=%s", resolved.ua_policy)
+    logger.info(
+        "服务初始化完成：%s",
+        "link_cache+redirect",
+        extra={
+            "op": "svc_init",
+            "components": ["link_cache", "redirect"],
+            "link_cache_l1_size": resolved.link_cache_l1_size,
+            "link_cache_ttl_margin_sec": resolved.link_cache_ttl_margin_sec,
+        },
+    )
 
 
 def get_link_cache() -> LinkCache:

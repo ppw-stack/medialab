@@ -1,11 +1,11 @@
-"""迁移路由：115 → 光鸭 的一次性同步。
+"""迁移路由：光鸭 → 光鸭 的一次性同步。
 
 只有「手动触发」——不做定时调度（以后要加，只需存下入参 + 到点调
 :func:`app.services.migration_jobs.start_migration_job`）。
 
 目录浏览走两个端点：
 
-- ``/sources``  —— 115 目录树，按 **cid** 逐层（路径改名会失效，cid 不会）
+- ``/sources``  —— 源目录树，按 **fileId** 逐层（路径改名会失效，id 不会）
 - ``/targets``  —— 光鸭目录树，按 **fileId** 逐层
 
 **路由层只做参数校验与响应组装**——DB 与适配层的访问全在
@@ -53,7 +53,7 @@ class MigrationRunIn(BaseModel):
     # 注：**没有并发参数**——迁移恒串行（2026-11-15 决策）。
     # 旧客户端若仍传 ``concurrency``，``extra="forbid"`` 会**显式拒绝**（422）
     # ——而不是静默忽略（静默忽略会让调用方以为并发生效了）。
-    #: 两次提交给光鸭之间的最小间隔（秒）——错开提交，避开 115 下载频控
+    #: 两次提交给光鸭之间的最小间隔（秒）——错开提交，避开落盘名撞车
     submit_interval_sec: float = Field(default=60.0, ge=0.0, le=600.0)
     #: 排除原盘（iso / m2ts / BDMV / CERTIFICATE）
     exclude_disc: bool = True
@@ -66,7 +66,7 @@ class MigrationRunIn(BaseModel):
 
 @router.get("/sources")
 async def browse_sources(driver_id: int, parent_id: str = "") -> dict[str, Any]:
-    """列出 115 目录下的子目录（按 cid 逐层浏览）。"""
+    """列出源目录下的子目录（按 fileId 逐层浏览）。"""
     try:
         dirs = await browse_source_dirs(driver_id, parent_id)
     except MigrationBrowseError as exc:

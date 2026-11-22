@@ -23,10 +23,6 @@ from app.domain.driver_types import (
 
 
 class TestRootDirId:
-    def test_p115_root_is_zero(self) -> None:
-        """115 的账号根 cid 是数字 ``0``。"""
-        assert root_dir_id("p115") == "0"
-
     def test_guangya_root_is_empty_string(self) -> None:
         """光鸭的账号根 fileId 就是空串（``list_dir_by_cid("")`` 列的就是根）。"""
         assert root_dir_id("guangya") == ""
@@ -42,11 +38,8 @@ class TestRootDirId:
 
 
 class TestMediaCidLabel:
-    def test_p115_calls_it_cid(self) -> None:
-        assert media_cid_label("p115") == "115 媒体库 cid"
-
     def test_guangya_calls_it_file_id(self) -> None:
-        """光鸭叫 fileId——文案写死「115 媒体库 cid」会让用户以为存错了。"""
+        """光鸭叫 fileId——文案写死别的名字会让用户以为存错了。"""
         assert media_cid_label("guangya") == "光鸭媒体库 fileId"
 
     def test_unknown_type_falls_back_to_generic(self) -> None:
@@ -60,8 +53,7 @@ class TestMediaCidLabel:
 
 
 class TestProbeable:
-    def test_p115_and_guangya(self) -> None:
-        assert is_probeable("p115")
+    def test_guangya(self) -> None:
         assert is_probeable("guangya")
 
     def test_unknown(self) -> None:

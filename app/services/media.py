@@ -10,7 +10,7 @@
 
 **幂等是硬要求**：重复扫描不能重复写文件，也不能让媒体服务器反复重扫库。
 
-**用 cid 不用路径**：115 的目录 id 在改名后不变，路径会失效。
+**用目录 id 不用路径**：网盘的目录 id 在改名后不变，路径会失效。
 """
 
 from __future__ import annotations
@@ -314,7 +314,7 @@ def target_relative_dir(driver: Driver, cloud_file: CloudFile) -> Path:
     **优先用驱动给的 ``relative_dir``**（相对媒体库根的目录）——
     光鸭没有「路径 ↔ id」反查接口，拿不到根路径字符串，只能靠这个。
 
-    没有 ``relative_dir`` 时（115）回退到「从绝对路径里剥掉
+    没有 ``relative_dir`` 时回退到「从绝对路径里剥掉
     ``media_path``」：``/影视/电影/阿凡达 (2009)/阿凡达.mkv`` →
     ``电影/阿凡达 (2009)``。
     """
@@ -563,7 +563,7 @@ async def _drop_loser_entry(
 def _build_driver(driver: Driver) -> Any:
     """按存储源构造驱动实例。"""
     try:
-        return build_driver(driver.type, driver.credential, driver.device_type)
+        return build_driver(driver.type, driver.credential)
     except DriverError as exc:
         raise MediaServiceError(
             f"驱动不可用：{exc}", status_code=503, kind="config"

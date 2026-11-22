@@ -21,7 +21,6 @@ async def _seed_media(db, driver_id: int = 1, remote_id: str = "pc_abc") -> Medi
             type="fake",
             name="测试源",
             credential=None,
-            device_type=None,
             enabled=True,
             created_at=int(time.time()),
             updated_at=int(time.time()),

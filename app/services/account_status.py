@@ -5,13 +5,13 @@
 1. **凭据还有效吗** —— ``login_status()``
 2. **账号是谁 / 容量多少** —— ``user_space_info()``
 3. **能不能真的换到直链** —— ``download_url()``（这一步最关键：前两步通过
-   但换直链被 115 的账号安全验证挡住，是常见情况）
+   但换直链被网盘的账号安全验证挡住，是常见情况）
 
 「测连」要区分**三种结果**，不能笼统报「失败」：
 
 - ``ok`` —— 全部正常
 - ``needs_verify`` —— 登录态正常，但换直链被账号安全验证挡住
-  （115 ``code 911``，需在手机 APP 里验证；**重新扫码无效**）
+  （需在手机 APP 里验证；**重新扫码无效**）
 - ``error`` —— 其它问题（凭据失效 / 限流 / 网络）
 """
 
@@ -65,7 +65,7 @@ async def probe_account(driver: Any) -> AccountStatus:
     3. ``get_direct_link()`` —— 能否真正换到直链
 
     Args:
-        driver: 驱动实例（115 驱动）。
+        driver: 驱动实例。
 
     Returns:
         账号状态。
@@ -121,9 +121,8 @@ async def probe_account(driver: Any) -> AccountStatus:
         if kind == "auth_verify":
             status = STATUS_NEEDS_VERIFY
             message = (
-                "登录态正常，但换直链被 115 账号安全验证挡住："
-                "请用手机 115 APP 进入「文件」目录完成验证（大约每天一次）。"
-                "重新扫码登录无效。"
+                f"登录态正常，但换直链被{label}账号安全验证挡住："
+                "请用手机 APP 完成验证（大约每天一次）。重新扫码登录无效。"
             )
         elif kind == "auth":
             status = STATUS_ERROR
@@ -148,14 +147,8 @@ async def probe_account(driver: Any) -> AccountStatus:
 
 
 def _driver_label(driver: Any) -> str:
-    """驱动的显示名（错误文案用）。
-
-    不同驱动的凭据失效提示不一样——写死「115」会让光鸭的用户看到
-    「115 凭据已失效」这种莫名其妙的提示。
-    """
+    """驱动的显示名（错误文案用）。"""
     name = getattr(driver, "name", "")
-    if name == "p115":
-        return "115 "
     if name == "guangya":
         return "光鸭盘 "
     return ""
@@ -167,9 +160,8 @@ async def _pick_any_file(driver: Any) -> str | None:
     遍历根目录取第一个文件；根目录全是目录时再往下一层。
     返回 None 表示网盘里确实没有文件。
 
-    **按驱动分派**：115 的 ``list_dir(path)`` 吃路径；光鸭的接口**只接受
-    fileId**，得用 ``list_dir_by_cid("")`` 列根目录，再用自己的 fileId
-    下钻。
+    光鸭接口**只接受 fileId**，得用 ``list_dir_by_cid("")`` 列根目录，
+    再用自己的 fileId 下钻。
     """
     lister = getattr(driver, "list_dir_by_cid", None)
     if lister is None:
@@ -178,7 +170,7 @@ async def _pick_any_file(driver: Any) -> str | None:
 
 
 async def _pick_any_file_by_path(driver: Any) -> str | None:
-    """按路径找文件（115）。"""
+    """按路径找文件（驱动只实现 ``list_dir`` 时的兜底）。"""
     try:
         entries = await driver.list_dir("/")
     except Exception:
@@ -254,9 +246,8 @@ def _probe_user_agent(driver: Any) -> str:
 async def _fetch_space_info(driver: Any) -> dict[str, Any]:
     """取账号 id 与容量。
 
-    **优先用驱动自己提供的能力**：不同网盘的容量接口完全不同
-    （115 是 ``user_space_info()``，光鸭是 ``user_info()``）。驱动实现了
-    ``get_space_info()`` 就用它，否则回退到 115 的实现。
+    驱动实现了 ``get_space_info()`` 就用它（光鸭的容量接口是
+    ``user_info()``）；没有该能力时只返回空信息。
     """
     getter = getattr(driver, "get_space_info", None)
     if getter is not None:
@@ -267,42 +258,4 @@ async def _fetch_space_info(driver: Any) -> dict[str, Any]:
         if isinstance(result, dict):
             return result
 
-    return await _fetch_space_info_115(driver)
-
-
-async def _fetch_space_info_115(driver: Any) -> dict[str, Any]:
-    """取账号 id 与容量（115 专用）。
-
-    用 ``user_space_info()``——返回 ``all_total`` / ``all_use`` /
-    ``all_remain``，每项含 ``size``（字节）与 ``size_format``（可读）。
-    """
-    client = driver._client
-
-    # 账号 id：client.user_id
-    account_id = ""
-    try:
-        account_id = str(getattr(client, "user_id", "") or "")
-    except Exception:
-        account_id = ""
-
-    from app.core.rate_limit import rate_limiter
-
-    await rate_limiter.acquire("p115")
-
-    result = await client.user_space_info(async_=True)
-    data = result.get("data") if isinstance(result, dict) else None
-    if not isinstance(data, dict):
-        return {"account_id": account_id}
-
-    def _size(key: str) -> int:
-        value = data.get(key)
-        if isinstance(value, dict):
-            return int(value.get("size") or 0)
-        return 0
-
-    return {
-        "account_id": account_id,
-        "total_bytes": _size("all_total"),
-        "used_bytes": _size("all_use"),
-        "remain_bytes": _size("all_remain"),
-    }
+    return {}

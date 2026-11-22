@@ -1,7 +1,7 @@
 """上传器工厂（按驱动类型分派）。
 
 **为什么需要它**：「数据同步」功能要支持多个网盘，但各网盘的**上传流程**
-差异极大（光鸭走 token → OSS 分片 → 轮询；115 走秒传 + 分片 + 续传）。
+差异极大（光鸭走 token → OSS 分片 → 轮询）。
 业务代码不该知道这些差异——它只认
 :class:`app.adapters.drivers.upload_base.UploadDriver` 协议。
 
@@ -64,7 +64,6 @@ async def build_upload_clients(
 async def _build_guangya_clients(
     *,
     credential: str | None,
-    device_type: str | None = None,
     on_token_refresh: Any = None,
 ) -> tuple[Any, UploadDriver]:
     """构造光鸭驱动 + 上传器。
@@ -75,8 +74,6 @@ async def _build_guangya_clients(
     from app.adapters.drivers.guangya import build_guangya_driver
     from app.adapters.drivers.guangya_upload import build_guangya_uploader
 
-    driver = build_guangya_driver(
-        credential, device_type, on_token_refresh=on_token_refresh
-    )
+    driver = build_guangya_driver(credential, on_token_refresh=on_token_refresh)
     uploader = build_guangya_uploader(driver.client, driver)
     return driver, uploader

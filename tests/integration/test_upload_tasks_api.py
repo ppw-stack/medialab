@@ -71,7 +71,6 @@ async def _add_driver(db_session, **kwargs) -> int:
         "type": "guangya",
         "name": "光鸭盘",
         "credential": None,
-        "device_type": None,
         "enabled": True,
         "created_at": int(time.time()),
         "updated_at": int(time.time()),
@@ -185,8 +184,8 @@ class TestAuth:
 
 class TestWhitelist:
     async def test_目标存储源不支持上传(self, client, db_session, tmp_path) -> None:
-        """目标存储源不支持上传（如 115）→ 400。"""
-        driver_id = await _add_driver(db_session, type="p115")
+        """目标存储源不支持上传 → 400。"""
+        driver_id = await _add_driver(db_session, type="fake")
         resp = await client.post(
             "/api/upload-tasks",
             json={

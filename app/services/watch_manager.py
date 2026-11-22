@@ -755,20 +755,14 @@ async def _build_clients(driver_id: int) -> tuple[Any, Any]:
         if row is None:
             raise DriverError(f"存储源不存在：{driver_id}", kind="not_found")
         credential = row.credential
-        device_type = row.device_type
         driver_type = row.type
 
-    async def _on_refresh(cred: Any) -> None:
-        # Token 刷新后写回 DB（光鸭的 token 只有 1~2 小时有效）。
-        from app.services.migration import persist_guangya_credential
-
-        await persist_guangya_credential(driver_id, cred)
+    from app.services.driver_service import guangya_refresh_callback
 
     return await build_upload_clients(
         driver_type,
         credential=credential,
-        device_type=device_type,
-        on_token_refresh=_on_refresh,
+        on_token_refresh=guangya_refresh_callback(driver_id),
     )
 
 

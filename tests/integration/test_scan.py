@@ -28,7 +28,6 @@ async def driver_row(db_session) -> Driver:
         type="fake",
         name="测试源",
         credential=None,
-        device_type=None,
         enabled=True,
         media_cid=FAKE_CID,
         media_path="/影视",

@@ -148,11 +148,9 @@ async def test_second_master_in_group_is_rejected(
     assert "主数据源" in str(exc.value)
 
 
-async def test_p115_driver_cannot_join_aggregate(db, group_id: int) -> None:
+async def test_non_guangya_driver_cannot_join_aggregate(db, group_id: int) -> None:
     """当前只支持光鸭参与聚合（跨网盘类型要另建通道）。"""
-    row = await driver_service.add_driver(
-        driver_type="p115", name="115", device_type="web"
-    )
+    row = await driver_service.add_driver(driver_type="fake", name="非光鸭")
     with pytest.raises(ServiceError) as exc:
         await aggregate_groups.assign_driver_role(
             row.id, group_id=group_id, role="master"

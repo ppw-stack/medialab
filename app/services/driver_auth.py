@@ -10,10 +10,8 @@
 路由层只拿到 dataclass（:class:`QRStartResult` / :class:`QRStatusResult`
 / :class:`SmsSendResult` / :class:`SmsVerifyResult`）。
 
-**按存储源类型分派**：
-
-- **115** —— p115client 的扫码（绑设备类型）
-- **光鸭** —— Device Code（``account.guangyapan.com``）或短信验证码
+**唯一的存储源类型是光鸭盘**：Device Code 扫码
+（``account.guangyapan.com``）或短信验证码。其它类型一律 400。
 """
 
 from __future__ import annotations
@@ -21,10 +19,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from app.adapters.drivers import guangya_auth, guangya_credential, p115_qr
+from app.adapters.drivers import guangya_auth, guangya_credential
 from app.adapters.drivers.credential_crypto import CredentialCryptoError
 from app.core.logging import get_logger
-from app.domain.device_types import DEFAULT_DEVICE_TYPE
 from app.services.driver_service import (
     get_driver,
     store_credential,
@@ -88,17 +85,25 @@ class SmsVerifyResult:
 # ================================================================ 内部辅助
 
 
-async def _driver_type_and_credential(driver_id: int) -> tuple[str, str | None, str | None]:
-    """取存储源的类型 / 凭据 / 设备类型。
-
-    Raises:
-        DriverServiceError: 存储源不存在（404）。
-    """
+async def _driver_type(driver_id: int) -> str:
+    """取存储源类型（存储源不存在时抛 ``DriverServiceError`` 404）。"""
     from app.db.session import session_scope
 
     async with session_scope() as db:
         row = await get_driver(db, driver_id)
-        return row.type, row.credential, row.device_type
+        return row.type
+
+
+async def _require_guangya(driver_id: int) -> None:
+    """登录只支持光鸭盘（其它类型一律 400，不是上游故障）。
+
+    Raises:
+        DriverAuthError: 存储源类型不是 ``guangya``（``status_code=400``、
+            ``kind="invalid"``）。存储源不存在时由 :func:`_driver_type`
+            转发的 ``DriverServiceError``（404）先冒泡，路由层统一映射。
+    """
+    if await _driver_type(driver_id) != "guangya":
+        raise DriverAuthError("该存储源不支持登录", status_code=400, kind="invalid")
 
 
 # ================================================================ 扫码登录
@@ -107,7 +112,6 @@ async def _driver_type_and_credential(driver_id: int) -> tuple[str, str | None, 
 async def start_qr(driver_id: int, *, client_mode: bool = False) -> QRStartResult:
     """启动扫码登录。
 
-    **按存储源类型分派**：115 走 p115client 的扫码（绑设备类型），
     光鸭走 Device Code（``account.guangyapan.com``）。
 
     Args:
@@ -116,34 +120,15 @@ async def start_qr(driver_id: int, *, client_mode: bool = False) -> QRStartResul
             且 scope 带 ``offline``（有 ``refresh_token`` 可自续期）。
             ``False`` = 原来的 Web 身份登录。
     """
-    driver_type, _, device_type = await _driver_type_and_credential(driver_id)
-
-    if driver_type == "guangya":
-        try:
-            gyp_result = await guangya_auth.start_qr_session(
-                client_mode=client_mode
-            )
-        except guangya_auth.GuangyaAuthError as exc:
-            raise DriverAuthError(str(exc), status_code=502) from exc
-        except Exception as exc:
-            raise DriverAuthError(f"启动扫码失败：{exc}", status_code=502) from exc
-        return QRStartResult(
-            session_id=gyp_result.session_id, qr_image_b64=gyp_result.qr_image_b64
-        )
-
-    if driver_type != "p115":
-        raise DriverAuthError("该存储源不支持扫码登录", status_code=400, kind="invalid")
-
-    resolved_device = device_type or DEFAULT_DEVICE_TYPE
+    await _require_guangya(driver_id)
     try:
-        result = await p115_qr.start_qr_session(resolved_device)
-    except p115_qr.QRCapabilityError as exc:
-        # 设备类型不支持扫码——明确告知（400 而非 502：不是上游故障）
-        raise DriverAuthError(str(exc), status_code=400, kind="invalid") from exc
+        gyp_result = await guangya_auth.start_qr_session(client_mode=client_mode)
+    except guangya_auth.GuangyaAuthError as exc:
+        raise DriverAuthError(str(exc), status_code=502) from exc
     except Exception as exc:
         raise DriverAuthError(f"启动扫码失败：{exc}", status_code=502) from exc
     return QRStartResult(
-        session_id=result.session_id, qr_image_b64=result.qr_image_b64
+        session_id=gyp_result.session_id, qr_image_b64=gyp_result.qr_image_b64
     )
 
 
@@ -152,41 +137,22 @@ async def qr_status(driver_id: int, session_id: str) -> QRStatusResult:
 
     ``confirmed`` 时**自动落盘凭据**（加密存储）。
     """
-    from app.db.session import session_scope
+    await _require_guangya(driver_id)
 
-    driver_type, _, _ = await _driver_type_and_credential(driver_id)
-
-    if driver_type == "guangya":
-        gyp_status = await guangya_auth.get_qr_status(session_id)
-        if gyp_status is None:
-            raise DriverAuthError("扫码会话不存在或已过期", status_code=404, kind="not_found")
-        confirmed = gyp_status.kind == "confirmed"
-        if confirmed and gyp_status.credential:
-            await _store_guangya_credential(
-                driver_id,
-                gyp_status.credential,
-                client_mode=gyp_status.client_mode,
-            )
-        return QRStatusResult(
-            kind=gyp_status.kind,
-            error_kind=gyp_status.error_kind or "",
-            error_msg=gyp_status.error_msg or "",
-            confirmed=confirmed,
-        )
-
-    p115_status = await p115_qr.get_qr_status(session_id)
-    if p115_status is None:
+    gyp_status = await guangya_auth.get_qr_status(session_id)
+    if gyp_status is None:
         raise DriverAuthError("扫码会话不存在或已过期", status_code=404, kind="not_found")
-
-    confirmed = p115_status.kind == "confirmed"
-    if confirmed and p115_status.cookie_str:
-        async with session_scope() as db:
-            await store_credential(db, driver_id, p115_status.cookie_str)
-
+    confirmed = gyp_status.kind == "confirmed"
+    if confirmed and gyp_status.credential:
+        await _store_guangya_credential(
+            driver_id,
+            gyp_status.credential,
+            client_mode=gyp_status.client_mode,
+        )
     return QRStatusResult(
-        kind=p115_status.kind,
-        error_kind=p115_status.error_kind or "",
-        error_msg=p115_status.error_msg or "",
+        kind=gyp_status.kind,
+        error_kind=gyp_status.error_kind or "",
+        error_msg=gyp_status.error_msg or "",
         confirmed=confirmed,
     )
 
@@ -268,9 +234,7 @@ async def send_sms_code(driver_id: int, phone: str) -> SmsSendResult:
 
     短信**立即发出**，返回后续步骤要用的 ``captcha_token``。
     """
-    driver_type, _, _ = await _driver_type_and_credential(driver_id)
-    if driver_type != "guangya":
-        raise DriverAuthError("该存储源不支持短信登录", status_code=400, kind="invalid")
+    await _require_guangya(driver_id)
 
     try:
         result = await guangya_auth.send_sms_code(phone)
@@ -292,9 +256,7 @@ async def verify_sms_code(
     校验失败返回 ``ok=False``（**不抛异常**）——验证码输错是**用户可
     重试**的正常情况，不是服务端故障；用异常表达会让前端误判成故障。
     """
-    driver_type, _, _ = await _driver_type_and_credential(driver_id)
-    if driver_type != "guangya":
-        raise DriverAuthError("该存储源不支持短信登录", status_code=400, kind="invalid")
+    await _require_guangya(driver_id)
 
     try:
         cred = await guangya_auth.verify_sms_code(phone, code, captcha_token)

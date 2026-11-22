@@ -257,7 +257,7 @@ def fake_drivers(monkeypatch: pytest.MonkeyPatch):
     master = _FakeMaster()
     source = _FakeSource()
 
-    def _build(driver_type, credential=None, device_type=None, **kwargs):
+    def _build(driver_type, credential=None, **kwargs):
         if credential == "master":
             return master
         return source

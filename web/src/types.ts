@@ -833,18 +833,17 @@ export interface Driver {
   id: number
   type: string
   name: string
-  device_type: string | null
   enabled: boolean
   /** 凭据掩码（不回传明文） */
   credential_masked: string
 
   // -- 媒体库配置 --
-  /** 115 媒体库 cid（字符串） */
+  /** 媒体库目录 id（光鸭是 fileId，字符串） */
   media_cid: string | null
   /** 媒体库路径（只读展示） */
   media_path: string | null
   /**
-   * 媒体库目录 id 的**展示名**（115 叫 cid、光鸭叫 fileId）。
+   * 媒体库目录 id 的**展示名**（光鸭叫 fileId）。
    * 后端按驱动类型给出——前端不写 `if type === "guangya"`。
    */
   media_cid_label: string
@@ -993,32 +992,21 @@ export interface DriverConnStatus {
   checked_at: string | null
 }
 
-/** 115 设备类型（后端是单一真源，前端不手写）。 */
-export interface DeviceType {
-  value: string
-  label: string
-  /** 能否用于扫码登录（实测：18 个里只有 10 个能取到二维码） */
-  qr_capable: boolean
-  note: string
-}
-
 export interface DriverInput {
   type: string
   name: string
-  device_type?: string | null
 }
 
 /** 修改存储源（只传要改的字段）。 */
 export interface DriverUpdate {
   name?: string | null
-  device_type?: string | null
 }
 
 /** 媒体库配置（每个存储源一套）。 */
 export interface DriverConfig {
-  /** 115 媒体库 cid（字符串） */
+  /** 媒体库目录 id（光鸭是 fileId，字符串） */
   media_cid: string
-  /** 媒体库路径（只读展示，后端按 cid 自动解析） */
+  /** 媒体库路径（只读展示；光鸭无反查接口，恒为空） */
   media_path: string
   /** 本地媒体库目录 */
   output_dir: string
@@ -1056,44 +1044,6 @@ export interface ScanStats {
   errors: string[]
   /** 去重明细（点名两个源文件 + 谁胜出）——去重不是错误，单独一条通道 */
   dedup_details?: string[]
-}
-
-/** 增量同步任务（115 生活事件流）。 */
-export interface IncrementalJob {
-  id: string
-  driver_id: number
-  driver_name: string
-  /** running / success / failed / cancelled */
-  state: string
-  started_at: number
-  finished_at: number | null
-  elapsed_sec: number
-  current_path: string
-  logs: string[]
-  error: string | null
-  /** 拉到的原始事件数 */
-  events_fetched: number
-  /** 落在媒体库内的事件数 */
-  events_in_scope: number
-  created: number
-  updated: number
-  unchanged: number
-  deleted: number
-  attachment_synced: number
-  attachment_unchanged: number
-  attachment_failed: number
-  /** 路径冲突（疑似目录改名）——已跳过 */
-  conflicts: number
-  /** 同名不同扩展名的去重数（保留大的，小的不落库） */
-  deduped: number
-  /** 去重明细（点名两个源文件 + 谁胜出）——去重不是错误，单独一条通道 */
-  dedup_details?: string[]
-  skipped_unknown: number
-  skipped_deleted: number
-  failed: number
-  cursor_old: number
-  cursor_new: number
-  total: number
 }
 
 /** 扫描任务（后台任务 + 轮询进度）。 */
@@ -1280,7 +1230,7 @@ export interface DriverStatus {
   /**
    * 状态：
    * - `ok` —— 一切正常
-   * - `needs_verify` —— 登录态正常，但换直链被 115 账号安全验证挡住
+   * - `needs_verify` —— 登录态正常，但换直链被网盘账号安全验证挡住
    * - `no_credential` —— 尚未扫码登录
    * - `error` —— 其它问题
    */
@@ -1397,9 +1347,9 @@ export interface ReadyResponse {
   cache: CacheStats | null
 }
 
-// ---- 迁移（115 → 光鸭盘） ----
+// ---- 迁移（光鸭 → 光鸭盘） ----
 
-/** 目录浏览项（115 用 cid，光鸭用 fileId）。 */
+/** 目录浏览项（光鸭用 fileId）。 */
 export interface DirEntry {
   id: string
   name: string

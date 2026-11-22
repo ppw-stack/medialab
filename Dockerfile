@@ -35,14 +35,13 @@ RUN pip install --no-cache-dir uv==${UV_VERSION}
 WORKDIR /build
 
 # 依赖先行（最大化层缓存命中）
-# --extra p115：115 驱动依赖（p115client / qrcode 等）。
-# --extra guangya：光鸭盘驱动依赖（guangyaclient）。
-# **两个都必须装**——否则镜像里没有对应驱动，扫码登录用不了。
+# --extra guangya：光鸭盘驱动依赖（guangyaclient / qrcode）。
+# **必须装**——否则镜像里没有驱动，扫码登录用不了。
 # uv.lock 必须存在（不加 glob）：缺 lock 时 --frozen 会显式失败，而不是
 # 静默重新解析依赖，导致本地构建与 CI 用的版本不一致。
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --extra p115 --extra guangya --no-install-project --no-editable
+    uv sync --frozen --no-dev --extra guangya --no-install-project --no-editable
 
 # 拷贝 README + app，build（hatchling 需要 readme）
 COPY README.md ./
@@ -50,9 +49,8 @@ COPY app ./app
 # --reinstall：强制重装 app，绕开 uv 缓存的旧 wheel
 # （uv sync 只哈希 pyproject.toml/uv.lock，不感知 app/ 源码变化）
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --extra p115 --extra guangya --no-editable --reinstall \
+    uv sync --frozen --no-dev --extra guangya --no-editable --reinstall \
     && /opt/venv/bin/python -c "import app, app.main; print('import ok:', app.__version__)" \
-    && /opt/venv/bin/python -c "from p115client import P115Client, tool; print('p115client ok')" \
     && /opt/venv/bin/python -c "from guangyaclient import GuangyaClient; print('guangyaclient ok')" \
     && uv pip install --no-cache --python /opt/venv/bin/python py-spy==0.4.3 \
     && /opt/venv/bin/py-spy --version
@@ -61,7 +59,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM ${PY_IMAGE} AS runtime
 
 # tini：PID 1 与信号处理（优雅停机）
-# curl：docker-compose 的 healthcheck 用；ca-certificates：HTTPS 访问 115 / PT 站
+# curl：docker-compose 的 healthcheck 用；ca-certificates：HTTPS 访问网盘 / PT 站
 RUN apt-get update && \
     apt-get install -y --no-install-recommends tini curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*

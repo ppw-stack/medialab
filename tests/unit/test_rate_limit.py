@@ -1,10 +1,10 @@
 """请求限速器的契约测试。
 
-115 对高频请求会限流（``405 Method Not Allowed``）。递归扫描一棵大树
+网盘对高频请求会限流。递归扫描一棵大树
 要发几百个请求，不限速必然被打。
 
-**按驱动分桶**是后加的：不同网盘的限频不同（115 = 1 次/秒，
-光鸭 = 5 次/秒），用同一个间隔会浪费配额也会拖慢 115。
+**按驱动分桶**：不同网盘 / 不同接口的限频不同（光鸭列目录 5 次/秒、
+换直链 2 次/秒），用同一个间隔会浪费配额也会打出软限频。
 """
 
 from __future__ import annotations
@@ -66,9 +66,9 @@ class TestRateLimiter:
 
 class TestProviderBuckets:
     async def test_providers_are_independent(self) -> None:
-        """不同 provider 互不干扰——光鸭的桶不受付 115 的影响。"""
+        """不同 provider 互不干扰——各自的桶相互独立。"""
         limiter = RateLimiter(default_interval=1.0)
-        await limiter.acquire("p115")
+        await limiter.acquire("other")
         # 光鸭的首次请求应当立即返回（自己的桶还没发过请求）
         t0 = time.monotonic()
         await limiter.acquire("guangya")
@@ -77,9 +77,9 @@ class TestProviderBuckets:
     async def test_same_provider_shares_bucket(self) -> None:
         """同一 provider 的多次请求共享一个桶。"""
         limiter = RateLimiter(default_interval=0.5)
-        await limiter.acquire("p115")
+        await limiter.acquire("other")
         t0 = time.monotonic()
-        await limiter.acquire("p115")
+        await limiter.acquire("other")
         assert time.monotonic() - t0 >= 0.45
 
     async def test_set_interval_for_one_provider_only(self) -> None:
@@ -87,13 +87,13 @@ class TestProviderBuckets:
         limiter = RateLimiter(default_interval=1.0)
         limiter.set_interval(0.0, "guangya")
         assert limiter.get_interval("guangya") == 0.0
-        assert limiter.get_interval("p115") == 1.0
+        assert limiter.get_interval("other") == 1.0
 
     async def test_set_interval_without_provider_updates_default(self) -> None:
         """不带 provider 的设置只改**默认值**。"""
         limiter = RateLimiter(default_interval=1.0)
         limiter.set_interval(0.0)
-        assert limiter.get_interval("p115") == 0.0
+        assert limiter.get_interval("other") == 0.0
         assert limiter.get_interval("guangya") == 0.0
         assert limiter.default_interval == 0.0
 
@@ -103,4 +103,4 @@ class TestProviderBuckets:
         limiter.set_interval(0.2, "guangya")
         limiter.set_interval(5.0)  # 改默认值
         assert limiter.get_interval("guangya") == 0.2
-        assert limiter.get_interval("p115") == 5.0
+        assert limiter.get_interval("other") == 5.0

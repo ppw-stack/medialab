@@ -136,30 +136,18 @@ class AppSettings(BaseSettings):
     link_cache_default_ttl_sec: int = Field(default=600, ge=1)
     #: 直链缓存 L2 过期清理间隔（秒）；0 = 禁用
     link_cache_cleanup_interval_sec: int = Field(default=600, ge=0)
-    #: UA 策略：无 UA 客户端（Infuse 等）的兜底方式
+    #: 无 UA 客户端（Infuse 等）的兜底 UA。
     #:
-    #: - ``strict``          严格按 UA 分桶，UA 不符则上游 403
-    #: - ``fallback_default`` 无 UA 时用 :attr:`default_user_agent` 换直链
-    #: - ``relaxed``         尽量取 ``f=0``（不绑定 UA）的直链
-    ua_policy: Literal["strict", "fallback_default", "relaxed"] = "fallback_default"
-    #: UA 策略为 ``fallback_default`` 时，用于无 UA 客户端的兜底 UA。
-    #: 换直链与访问直链用同一个 UA 才有效（``f=1`` 的语义）。
+    #: 换直链用哪个 UA，缓存就按哪个 UA 分桶——同一播放器复用同一份直链。
     default_user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     )
 
     # -- 请求限速（媒体库域）--
-    #: 115 请求的最小间隔（秒）。0 = 不限速。
-    #:
-    #: 115 对高频请求会限流（表现为 ``405 Method Not Allowed``）。递归扫描
-    #: 一棵大树要发几百个请求，不限速必然被打。默认 1.0 秒。
-    rate_limit_interval_sec: float = Field(default=1.0, ge=0.0)
-
     #: 光鸭盘的最小间隔（秒）。0 = 不限速。
     #:
-    #: 光鸭官方限频是 5 次/秒（列目录）/ 2 次/秒（换直链），比 115 宽松，
-    #: 故单列一个值。默认 0.2 秒。
+    #: 光鸭官方限频是 5 次/秒（列目录）/ 2 次/秒（换直链）→ 默认 0.2 秒。
     guangya_rate_limit_interval_sec: float = Field(default=0.2, ge=0.0)
 
     #: 光鸭**换直链**的最小间隔（秒）。0 = 不限速。

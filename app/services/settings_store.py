@@ -44,8 +44,3 @@ async def delete_value(db: AsyncSession, key: str) -> None:
     ).scalar_one_or_none()
     if row is not None:
         await db.delete(row)
-
-
-def cursor_key(driver_id: int) -> str:
-    """增量游标的键名。"""
-    return f"p115_event_cursor:{driver_id}"

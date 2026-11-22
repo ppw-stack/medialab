@@ -31,7 +31,7 @@ __all__ = [
 
 #: 默认视频后缀——扫描依据（**生成 .strm**）。
 #:
-#: 含 ``iso``：115 的原盘 iso 走直链 + 内挂播放（实测可用）。
+#: 含 ``iso``：原盘 iso 可走直链 + 内挂播放（实测可用）。
 DEFAULT_VIDEO_EXTS = "mkv,mp4,avi,mov,wmv,flv,m4v,ts,m2ts,rmvb,rm,webm,iso"
 
 #: 默认媒体图片后缀——海报 / 剧照等（**附件同步**：下载到本地，

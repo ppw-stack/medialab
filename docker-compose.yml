@@ -33,7 +33,7 @@ services:
       # -- 媒体库域 --
       # 中转 URL 的签名密钥（必填）
       SIGNING_SECRET: ${SIGNING_SECRET}
-      # 115 / 光鸭凭据加密密钥（必填，扫码登录时用）
+      # 光鸭凭据加密密钥（必填，扫码登录时用）
       CREDENTIAL_ENCRYPTION_SECRET: ${CREDENTIAL_ENCRYPTION_SECRET}
       # 写进 STRM 的对外地址——**必须是播放器能访问到的地址**
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}

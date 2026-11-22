@@ -3,7 +3,7 @@
     <PageHeader
       eyebrow="媒体库 · MEDIA"
       title="存储源"
-      sub="网盘账号（115 / 光鸭盘）——凭据、容量与直链能力"
+      sub="光鸭盘账号——凭据、容量与直链能力"
       compact
     >
       <template #actions>
@@ -29,8 +29,7 @@
             <div class="name-cell">
               <a-badge :status="statusBadge(record.id)" />
               <span>{{ record.name }}</span>
-              <a-tag v-if="record.type === 'p115'" color="blue">115</a-tag>
-              <a-tag v-else-if="record.type === 'guangya'" color="cyan">光鸭盘</a-tag>
+              <a-tag v-if="record.type === 'guangya'" color="cyan">光鸭盘</a-tag>
               <a-tooltip
                 v-if="record.role === 'master'"
                 title="聚合组的主数据源：内容以它为准（媒体库扫描 / STRM / 播放都只认它）"
@@ -86,16 +85,6 @@
             <span class="mono truncate">{{ record.output_dir || "—" }}</span>
           </template>
 
-          <template v-else-if="column.key === 'device_type'">
-            <span class="mono">{{ record.device_type ?? "—" }}</span>
-            <a-tooltip
-              v-if="record.device_type && !isQrCapable(record.device_type)"
-              title="该设备类型不支持扫码登录，请编辑后改选"
-            >
-              <a-tag color="orange" style="margin-left: 6px">不可扫码</a-tag>
-            </a-tooltip>
-          </template>
-
           <template v-else-if="column.key === 'status'">
             <a-tag :color="statusColor(record.id)">{{ statusLabel(record.id) }}</a-tag>
           </template>
@@ -141,18 +130,6 @@
               >
                 {{ isScanning(record.id) ? "扫描中" : "扫描" }}
               </a-button>
-              <a-tooltip
-                v-if="record.type === 'p115'"
-                title="增量同步：只处理上次之后的变化，不遍历目录树"
-              >
-                <a-button
-                  size="small"
-                  :loading="incrementalId === record.id"
-                  @click="onIncremental(record)"
-                >
-                  增量
-                </a-button>
-              </a-tooltip>
               <a-popconfirm
                 title="删除存储源？关联的媒体条目也会一并删除。"
                 ok-text="删除"
@@ -178,26 +155,10 @@
     >
       <a-form layout="vertical">
         <a-form-item label="名称">
-          <a-input v-model:value="form.name" placeholder="我的 115" />
+          <a-input v-model:value="form.name" placeholder="我的光鸭盘" />
         </a-form-item>
         <a-form-item label="类型">
-          <a-select v-model:value="form.type">
-            <a-select-option value="p115">115 网盘</a-select-option>
-            <a-select-option value="guangya">光鸭盘</a-select-option>
-          </a-select>
-        </a-form-item>
-        <a-form-item v-if="form.type === 'p115'" label="设备类型">
-          <a-select v-model:value="form.device_type" :loading="deviceTypesLoading">
-            <a-select-option
-              v-for="d in deviceTypes"
-              :key="d.value"
-              :value="d.value"
-              :disabled="!d.qr_capable"
-            >
-              {{ d.label }}
-              <span v-if="!d.qr_capable" class="muted">（不支持扫码）</span>
-            </a-select-option>
-          </a-select>
+          <a-input value="光鸭盘" disabled />
         </a-form-item>
       </a-form>
     </a-modal>
@@ -331,81 +292,6 @@
       </template>
     </a-drawer>
 
-    <!-- 增量同步进度 -->
-    <a-modal
-      v-model:open="incrementalOpen"
-      title="增量同步"
-      :footer="null"
-      :width="720"
-      :mask-closable="false"
-      @cancel="closeIncremental"
-    >
-      <template v-if="incrementalJob">
-        <a-descriptions :column="2" size="small" bordered>
-          <a-descriptions-item label="存储源">
-            {{ incrementalJob.driver_name }}
-          </a-descriptions-item>
-          <a-descriptions-item label="状态">
-            <a-tag :color="scanStateColor(incrementalJob.state)">
-              {{ scanStateLabel(incrementalJob.state) }}
-            </a-tag>
-          </a-descriptions-item>
-          <a-descriptions-item label="事件" :span="2">
-            <span class="mono">
-              拉到 {{ incrementalJob.events_fetched }} 条，媒体库内
-              {{ incrementalJob.events_in_scope }} 条
-            </span>
-          </a-descriptions-item>
-          <a-descriptions-item label="STRM" :span="2">
-            <span class="mono">
-              新增 {{ incrementalJob.created }} / 更新 {{ incrementalJob.updated }} /
-              未变 {{ incrementalJob.unchanged }} / 删除 {{ incrementalJob.deleted }}
-            </span>
-          </a-descriptions-item>
-          <a-descriptions-item label="附件" :span="2">
-            <span class="mono">
-              新增 {{ incrementalJob.attachment_synced }} / 未变
-              {{ incrementalJob.attachment_unchanged }} / 失败
-              {{ incrementalJob.attachment_failed }}
-            </span>
-          </a-descriptions-item>
-          <a-descriptions-item label="游标" :span="2">
-            <span class="mono">
-              {{ incrementalJob.cursor_old }} → {{ incrementalJob.cursor_new }}
-            </span>
-          </a-descriptions-item>
-          <a-descriptions-item v-if="incrementalJob.conflicts" label="冲突" :span="2">
-            <span class="mono">
-              {{ incrementalJob.conflicts }} 处路径冲突（疑似目录改名）——建议跑一次全量
-            </span>
-          </a-descriptions-item>
-          <a-descriptions-item label="正在处理" :span="2">
-            <span class="mono path-line" :title="incrementalJob.current_path">
-              {{ incrementalJob.current_path || "—" }}
-            </span>
-          </a-descriptions-item>
-        </a-descriptions>
-
-        <a-alert
-          v-if="incrementalJob.state === 'failed'"
-          type="error"
-          :message="incrementalJob.error || '增量同步失败'"
-          show-icon
-          style="margin-top: 12px"
-        />
-
-        <div class="scan-log">
-          <div
-            v-for="(line, i) in incrementalJob.logs"
-            :key="i"
-            class="log-line mono"
-          >
-            {{ line }}
-          </div>
-        </div>
-      </template>
-    </a-modal>
-
     <!-- 扫描进度 -->
     <a-modal
       v-model:open="scanOpen"
@@ -522,9 +408,7 @@
     >
       <template v-if="loginDriver">
         <p class="hint">
-          存储源「{{ loginDriver.name }}」（{{
-            loginDriver.type === "guangya" ? "光鸭盘" : "115"
-          }}）尚未登录。
+          存储源「{{ loginDriver.name }}」（光鸭盘）尚未登录。
         </p>
         <div v-if="loginDriver.type === 'guangya'" class="identity-pick">
           <p class="hint" style="margin: 0 0 6px">扫码身份</p>
@@ -620,9 +504,7 @@
     <!-- 扫码登录 -->
     <a-modal
       v-model:open="qrOpen"
-      :title="`${qrDriverType === 'guangya' ? '光鸭盘' : '115'} 扫码登录${
-        qrMode === 'client' ? '（客户端身份）' : ''
-      }`"
+      :title="`光鸭盘 扫码登录${qrMode === 'client' ? '（客户端身份）' : ''}`"
       :footer="null"
       :width="360"
     >
@@ -660,57 +542,19 @@
         style="margin-top: 12px"
       />
       <p v-else class="hint">
-        用 {{ qrDriverType === "guangya" ? "光鸭云盘" : "115" }} APP 扫描二维码。{{
+        用光鸭云盘 APP 扫描二维码。{{
           qrKind === "scanned" ? "已扫描，等待确认…" : ""
         }}
       </p>
       <template #footer>
         <a-space>
-          <a-button
-            v-if="qrDriverType === 'p115' && !qrRefreshCapable"
-            size="small"
-            @click="openEditDeviceType"
-          >
-            修改设备类型
-          </a-button>
-          <a-button size="small" :disabled="!qrRefreshCapable" @click="refreshQr">
+          <a-button size="small" @click="refreshQr">
             重新获取二维码
           </a-button>
         </a-space>
       </template>
     </a-modal>
 
-    <!-- 编辑设备类型 -->
-    <a-modal
-      v-model:open="editOpen"
-      title="编辑存储源"
-      :confirm-loading="saving"
-      ok-text="保存"
-      cancel-text="取消"
-      @ok="onEdit"
-    >
-      <a-form layout="vertical">
-        <a-form-item label="名称">
-          <a-input
-            :value="editForm.name ?? ''"
-            @update:value="(v: string) => (editForm.name = v)"
-          />
-        </a-form-item>
-        <a-form-item label="设备类型">
-          <a-select v-model:value="editForm.device_type" :loading="deviceTypesLoading">
-            <a-select-option
-              v-for="d in deviceTypes"
-              :key="d.value"
-              :value="d.value"
-              :disabled="!d.qr_capable"
-            >
-              {{ d.label }}
-              <span v-if="!d.qr_capable" class="muted">（不支持扫码）</span>
-            </a-select-option>
-          </a-select>
-        </a-form-item>
-      </a-form>
-    </a-modal>
   </div>
 </template>
 
@@ -719,14 +563,11 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue"
 import { message } from "ant-design-vue"
 import { ApiError, errMsg, mediaApi as api } from "../../api"
 import type {
-  DeviceType,
   DirEntry,
   Driver,
   DriverConfig,
   DriverInput,
   DriverStatus,
-  DriverUpdate,
-  IncrementalJob,
   QrStartResult,
   QrStatusKind,
   QrStatusResult,
@@ -743,12 +584,8 @@ const drivers = ref<Driver[]>([])
 const loading = ref(false)
 const saving = ref(false)
 
-/** 设备类型清单（**从后端取**——后端是单一真源，前端不手写）。 */
-const deviceTypes = ref<DeviceType[]>([])
-const deviceTypesLoading = ref(false)
-
 const createOpen = ref(false)
-const form = ref<DriverInput>({ type: "p115", name: "", device_type: "115android" })
+const form = ref<DriverInput>({ type: "guangya", name: "" })
 
 /** 媒体库配置抽屉 */
 const configOpen = ref(false)
@@ -765,28 +602,12 @@ const configForm = ref<DriverConfig>({
   auto_prune: false,
 })
 
-/** 编辑存储源（名称 / 设备类型） */
-const editOpen = ref(false)
-const editId = ref<number | null>(null)
-const editForm = ref<DriverUpdate>({ name: "", device_type: null })
-
 const qrOpen = ref(false)
 const qrDriverId = ref<number | null>(null)
-const qrDriverType = ref("p115")
+const qrDriverType = ref("guangya")
 /** 本次扫码身份：web = Web 身份；client = 客户端身份（aud = 客户端 clientId） */
 const qrMode = ref<"web" | "client">("web")
 
-/**
- * 当前扫码对象是否支持二维码。
- *
- * **不能看 `configDriver`**——登录流程里配置抽屉没打开，它是 null；
- * 且光鸭 `device_type` 恒为空，用 `isQrCapable(null)` 会把按钮禁掉。
- */
-const qrRefreshCapable = computed(() => {
-  const d = drivers.value.find((x) => x.id === qrDriverId.value)
-  if (!d) return false
-  return d.type === "guangya" ? true : isQrCapable(d.device_type)
-})
 const qrSessionId = ref("")
 const qrImage = ref("")
 const qrKind = ref<QrStatusKind>("waiting")
@@ -953,24 +774,7 @@ function usedPercent(id: number): number {
   return Math.round((s.used_bytes / s.total_bytes) * 100)
 }
 
-function isQrCapable(value: string | null | undefined): boolean {
-  if (!value) return false
-  const found = deviceTypes.value.find((d) => d.value === value)
-  return found ? found.qr_capable : true
-}
-
 // -- 加载 --
-
-async function loadDeviceTypes(): Promise<void> {
-  deviceTypesLoading.value = true
-  try {
-    deviceTypes.value = await api.get<DeviceType[]>("/drivers/device-types")
-  } catch (e) {
-    message.error(errMsg(e, "加载设备类型失败"))
-  } finally {
-    deviceTypesLoading.value = false
-  }
-}
 
 async function load(): Promise<void> {
   loading.value = true
@@ -1018,7 +822,6 @@ async function load(): Promise<void> {
 }
 
 onMounted(() => {
-  void loadDeviceTypes()
   void load()
   // 页面刷新后**找回正在跑的后台任务**——否则关掉页面就看不到进度了，
   // 而后台任务其实还在跑。
@@ -1048,7 +851,7 @@ function isScanning(driverId: number): boolean {
 // -- 新增 --
 
 function openCreate(): void {
-  form.value = { type: "p115", name: "", device_type: "115android" }
+  form.value = { type: "guangya", name: "" }
   createOpen.value = true
 }
 
@@ -1085,8 +888,8 @@ const DEFAULT_DATA_EXTS = ["nfo", "ass", "ssa", "srt"]
 /**
  * 网盘目录浏览的**面包屑栈**（栈底 = 账号根目录）。
  *
- * 栈底的 id 是**空串**——后端按驱动类型把空串解析成真正的根（光鸭是空串，
- * 115 是 ``0``），前端不必知道这个差异。
+ * 栈底的 id 是**空串**——后端按驱动类型把空串解析成真正的根
+ * （光鸭的根 fileId 就是空串），前端不必知道这个差异。
  */
 const mediaStack = ref<DirEntry[]>([{ id: "", name: "网盘根目录" }])
 const mediaDirs = ref<DirEntry[]>([])
@@ -1303,70 +1106,6 @@ function closeScan(): void {
   scanOpen.value = false
 }
 
-// -- 增量同步 --
-
-/** 增量同步进度弹窗 */
-const incrementalOpen = ref(false)
-const incrementalJob = ref<IncrementalJob | null>(null)
-const incrementalId = ref<number | null>(null)
-let incrementalTimer: number | undefined
-
-async function onIncremental(driver: Driver): Promise<void> {
-  incrementalId.value = driver.id
-  try {
-    const res = await api.post<{ job_id: string }>(
-      `/drivers/${driver.id}/incremental`,
-    )
-    incrementalOpen.value = true
-    incrementalJob.value = null
-    startIncrementalPolling(res.job_id)
-  } catch (e) {
-    if (e instanceof ApiError && e.status === 409) {
-      message.info("该存储源已有增量任务在跑")
-    } else {
-      message.error(errMsg(e, "启动增量同步失败"))
-    }
-  } finally {
-    incrementalId.value = null
-  }
-}
-
-function startIncrementalPolling(jobId: string): void {
-  stopIncrementalPolling()
-  const tick = async (): Promise<void> => {
-    try {
-      const job = await api.get<IncrementalJob>(`/incremental-jobs/${jobId}`)
-      incrementalJob.value = job
-      if (job.state !== "running") {
-        stopIncrementalPolling()
-        await load()
-        if (job.state === "success") {
-          message.success(
-            `增量完成：新增 ${job.created} / 更新 ${job.updated} / 删除 ${job.deleted}`,
-          )
-        }
-      }
-    } catch (e) {
-      stopIncrementalPolling()
-      message.error(errMsg(e, "查询增量进度失败"))
-    }
-  }
-  void tick()
-  incrementalTimer = window.setInterval(tick, 1500)
-}
-
-function stopIncrementalPolling(): void {
-  if (incrementalTimer !== undefined) {
-    window.clearInterval(incrementalTimer)
-    incrementalTimer = undefined
-  }
-}
-
-function closeIncremental(): void {
-  stopIncrementalPolling()
-  incrementalOpen.value = false
-}
-
 function scanStateLabel(state: string): string {
   switch (state) {
     case "running":
@@ -1433,33 +1172,6 @@ async function probeAll(): Promise<void> {
   }
 }
 
-// -- 编辑 --
-
-function openEdit(device: Driver): void {
-  editId.value = device.id
-  editForm.value = { name: device.name, device_type: device.device_type }
-  editOpen.value = true
-}
-
-function openEditDeviceType(): void {
-  if (configDriver.value) openEdit(configDriver.value)
-}
-
-async function onEdit(): Promise<void> {
-  if (editId.value === null) return
-  saving.value = true
-  try {
-    await api.patch<Driver>(`/drivers/${editId.value}`, editForm.value)
-    message.success("已保存")
-    editOpen.value = false
-    await load()
-  } catch (e) {
-    message.error(errMsg(e, "保存失败"))
-  } finally {
-    saving.value = false
-  }
-}
-
 // -- 删除 --
 
 async function onDelete(id: number): Promise<void> {
@@ -1482,7 +1194,7 @@ function onLogin(driver: Driver): void {
   loginOpen.value = true
 }
 
-/** 用扫码方式登录（身份取当前单选值；115 恒为 Web，忽略该值）。 */
+/** 用扫码方式登录（身份取当前单选值）。 */
 function onLoginByQr(): void {
   const driver = loginDriver.value
   if (!driver) return
