@@ -1,6 +1,16 @@
 """站点用户数据刷新服务（FR-1.6 站点用户数据契约·精简版）。
 
-``refresh_user_data`` 周期性作业（``*/30 * * * *``）：
+**触发方式（2026-11-22 起）**：**按需**——面板「站点」页打开时自动跑一次
+「全部测连」（可达且已登录的站各刷一次），或用户在单站上点「测连」时顺手刷。
+原先的 `refresh_user_data` 周期作业（30 分钟一次）**已移除**：数据只在
+「有人看」时才刷新，避免无人值守时对一个纯展示数据源做无谓的站点请求。
+
+**代价（必须知道）**：面板关着时 ``site_user_data`` 会变旧——
+``push_and_monitor_free`` 选种排序用的时魔档位读的就是这张表，故它最多
+滞后「上次打开站点页」到现在。档位只影响「先推哪站」，不影响推不推。
+
+流程：
+
 
 1. 读取所有 ``Site.enabled = 1`` 的站点
 2. 按站拿到对应 :class:`SiteAdapter` 实例
@@ -210,7 +220,7 @@ async def refresh_all_sites(factory: AdapterFactory) -> dict[str, object]:
                 )
 
     logger.info(
-        "refresh_user_data 完成：ok=%d failed=%d skipped=%d total=%d",
+        "站点用户数据刷新完成：ok=%d failed=%d skipped=%d total=%d",
         ok, failed, skipped, total,
     )
     items, items_total = build_items(site_items)

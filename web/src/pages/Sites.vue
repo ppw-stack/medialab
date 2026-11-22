@@ -72,7 +72,13 @@ async function loadSites() {
   } catch { /* ignore */ }
 }
 
-onMounted(load)
+onMounted(() => {
+  void load()
+  // 打开页面就做一次全局测连（顺带刷新可达站点的用户数据）。
+  // 这是 `refresh_user_data` 周期作业（已于 2026-11-22 移除）的替代：
+  // 用户数据只在「有人看」时刷新，不做无人值守的周期请求。
+  void onTestAll({ auto: true })
+})
 
 function onCreate() {
   editing.value = null
@@ -179,8 +185,26 @@ function testStatus(reachable: boolean, loggedIn: boolean): string {
   return loggedIn ? 'ok' : 'warn'
 }
 
-async function onTestAll() {
+/**
+ * 自动测连的冷却时间（毫秒）。
+ *
+ * 「打开页面自动测一次」按字面是每次进入都跑，但站点对短时间重复请求敏感
+ * （后端 `_TEST_ALL_CONCURRENCY` 也是为此压到 3），来回切页面会打出成倍
+ * 请求。故自动模式 5 分钟内只跑一次；**手动按钮不受限制**（用户显式点了
+ * 就是要测）。
+ */
+const AUTO_TEST_COOLDOWN_MS = 5 * 60_000
+const AUTO_TEST_KEY = 'sites:auto-test-at'
+
+async function onTestAll(opts: { auto?: boolean } = {}) {
   if (testingAll.value) return
+  const auto = !!opts.auto
+  if (auto) {
+    const last = Number(sessionStorage.getItem(AUTO_TEST_KEY) || 0)
+    if (Date.now() - last < AUTO_TEST_COOLDOWN_MS) return
+  }
+  // 先落时间戳：并发/快速重入时后到的那个直接跳过（避免双发）
+  if (auto) sessionStorage.setItem(AUTO_TEST_KEY, String(Date.now()))
   testingAll.value = true
   // 清旧结果（让圆点在测连过程中复位）
   testResults.value = {}
@@ -217,7 +241,8 @@ async function onTestAll() {
       if (unauthorized > 0) parts.push(`未登录 ${unauthorized}（凭据可能已失效）`)
       if (passing.length) parts.push(`用户数据 ${refreshed} 成功${refreshFailed ? ` / ${refreshFailed} 失败` : ''}`)
       message.warning(parts.join('，'))
-    } else {
+    } else if (!auto) {
+      // 自动模式**静默成功**：每次打开页面弹一条「全部正常」是噪音
       message.success(
         `共 ${total} 站全部可达且已登录` +
         (passing.length ? `，用户数据已刷新 ${refreshed} 站` : '')
@@ -304,7 +329,7 @@ const columns = [
     >
       <template #actions>
         <a-space>
-          <a-button :loading="testingAll" @click="onTestAll">全部测连</a-button>
+          <a-button :loading="testingAll" @click="onTestAll()">全部测连</a-button>
           <a-button type="primary" @click="onCreate">新增站点</a-button>
         </a-space>
       </template>

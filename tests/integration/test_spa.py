@@ -1,6 +1,7 @@
 """SPA 静态资源托管的契约测试。
 
-深链接（``/library``、``/settings``）在浏览器刷新时是**服务端路径**。
+深链接（``/library``、``/scheduler``、``/settings``）在浏览器刷新时是
+**服务端路径**。
 若不回退到 index.html，用户一刷新就 404 白屏。
 
 这条契约原先由浏览器自动化测试暴露，去掉自动化测试后用单元测试固化。
@@ -46,7 +47,7 @@ class TestSpaFallback:
 
     async def test_deep_link_falls_back_to_index(self, spa_client):
         """深链接返回 index.html（**不是** 404）——刷新不白屏。"""
-        for path in ("/library", "/settings", "/health", "/drivers/1"):
+        for path in ("/library", "/scheduler", "/settings", "/health", "/drivers/1"):
             resp = await spa_client.get(path)
             assert resp.status_code == 200, f"{path} 返回 {resp.status_code}"
             assert "strmmanger" in resp.text

@@ -8,7 +8,7 @@
 把该作业期间的 Python 日志收集成**结构化**条目，随作业结果一起落库。
 
 **并发隔离**（关键）：多个作业可能并发跑（如 ``fetch_all_sites``
-与 ``push_free_torrents`` 同时触发），日志必须**各归各的**。
+与 ``push_and_monitor_free`` 同时触发），日志必须**各归各的**。
 做法是 :class:`contextvars.ContextVar` 记录「当前采集器」——
 ``emit`` 只接受**自己**发来的记录，别的作业的日志直接忽略。
 

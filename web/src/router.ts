@@ -4,15 +4,22 @@ import { useAuthStore } from './stores/auth'
 /**
  * 路由表。
  *
- * **两个业务域的页面在同一�� SPA 里**：
+ * **两个业务域 + 一个「系统」**：
  *
- * - 辅种域 —— `/sites` `/downloaders` `/torrent-index`
- *   `/cross-seed` `/settings`（`/` 重定向到 `/sites`）
- * - 媒体库域 —— `/drivers` `/library` `/migrations` `/uploads` `/health`
- *   `/dav-users` `/media-settings`
+ * - 辅种域 —— `/sites` `/downloaders` `/torrent-index` `/cross-seed`
+ *   （`/` 重定向到 `/sites`）
+ * - 媒体库域 —— `/drivers` `/aggregate` `/library` `/migrations` `/scrape`
+ *   `/uploads` `/health` `/dav-users` `/media-settings`
+ * - 系统 —— `/scheduler`（定时任务）/ `/settings`（设置）
  *
- * ⚠️ **`/settings` 归辅种域**（调度作业 + 环境变量两个 tab，功能多、
- * 改动频繁）；媒体库域的「签名密钥」页用 **`/media-settings`**。
+ * ⚠️ **`/scheduler` 与 `/settings` 是平级两个菜单**（2026-11-22 拆分）：
+ * 此前「调度作业」与「环境变量」是 `/settings` 页里的两个 tab，
+ * 找调度得先进「设置」——与它作为日常高频页面的地位不符。现拆开：
+ * 定时任务按业务域分「辅种」「媒体库」两栏，设置只留部署级
+ * 环境变量配置。
+ *
+ * ⚠️ **媒体库域的「签名密钥」页用 `/media-settings`**，不要并进
+ * `/settings`——它是域内配置，不是部署级设置。
  *
  * ⚠️ **面板的 WebDAV 账号页用 `/dav-users`，不能用 `/dav`**——
  * 后端把 `/dav` 挂给了 WebDAV **服务端**（`dav_mount_path`，且必须在
@@ -37,6 +44,10 @@ const routes: RouteRecordRaw[] = [
       { path: 'downloaders', name: 'downloaders', component: () => import('./pages/Downloaders.vue') },
       { path: 'torrent-index', name: 'torrent-index', component: () => import('./pages/TorrentIndex.vue') },
       { path: 'cross-seed', name: 'cross-seed', component: () => import('./pages/CrossSeed.vue') },
+
+      // -- 系统 --
+      // 定时任务（辅种 / 媒体库两栏）与设置（环境变量）是**平级两个菜单**
+      { path: 'scheduler', name: 'scheduler', component: () => import('./pages/Scheduler.vue') },
       { path: 'settings', name: 'settings', component: () => import('./pages/Settings.vue') },
 
       // -- 媒体库域 --

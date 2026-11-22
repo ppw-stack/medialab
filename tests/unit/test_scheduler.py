@@ -130,6 +130,165 @@ def test_overrides_apply_both_enabled_and_cron(center: SchedulerCenter) -> None:
     assert job["cron"] == "15,45 * * * *"
 
 
+# ------------------------------------------------------- 数据流触发（depends_on）
+
+class _DownstreamRecorder:
+    """记录下游作业被触发了几次（用于断言门槛 / 重入）。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self) -> dict[str, object]:
+        self.calls += 1
+        return {"ok": 1}
+
+
+async def _drain_pending_tasks() -> None:
+    """把 ``_trigger_downstream`` 里 create_task 出来的执行体跑完。"""
+    for _ in range(3):
+        pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        if not pending:
+            return
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
+def _upstream_downstream(
+    center: SchedulerCenter,
+    downstream: _DownstreamRecorder,
+    *,
+    interval: int = 0,
+) -> None:
+    center.register(JobSpec(name="up", func=_ok_job, cron="*/10 * * * *"))
+    center.register(
+        JobSpec(
+            name="down",
+            func=downstream,
+            cron="0 */2 * * *",
+            depends_on="up",
+            min_trigger_interval_sec=interval,
+        )
+    )
+    center.validate_graph()
+
+
+async def test_upstream_success_triggers_downstream(
+    center: SchedulerCenter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """上游成功 → 下游被立刻拉起，且两条运行的 ``trigger`` 可区分。
+
+    ``job_runs.trigger`` 是前端唯一的来源线索：``cron`` = 自己到点，
+    ``upstream`` = 被上游喂过来的。混成一个值就回答不了「这次是谁叫的」。
+    """
+    rec = _DownstreamRecorder()
+    _upstream_downstream(center, rec)
+
+    recorded: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        scheduler,
+        "_record_run",
+        lambda **kw: recorded.append((kw["job_name"], kw["trigger"])),
+    )
+
+    await center._execute(center._specs["up"], trigger="cron")
+    await _drain_pending_tasks()
+
+    assert rec.calls == 1
+    assert ("up", "cron") in recorded
+    assert ("down", "upstream") in recorded
+    # 作业结束后必须从 _running 摘掉，否则下一轮会被当成「正在运行」
+    assert center._running == set()
+
+
+async def test_manual_run_also_feeds_downstream(center: SchedulerCenter) -> None:
+    """手动「立即执行」上游成功 → 同样触发下游。
+
+    面板最常用的调试路径就是「手动跑拉取，然后看推送」，若只有 cron 触发
+    才喂下游，手动跑就看不到链路效果（2026-11-22 真机验证时踩到）。
+    """
+    rec = _DownstreamRecorder()
+    _upstream_downstream(center, rec)
+
+    await center.run_now("up")
+    await _drain_pending_tasks()
+    assert rec.calls == 1
+
+
+async def test_upstream_failure_does_not_trigger(center: SchedulerCenter) -> None:
+    """上游失败**不触发**下游——一次站点 502 不该级联成整条链的红。"""
+    rec = _DownstreamRecorder()
+    center.register(JobSpec(name="up", func=_fail_job, cron="*/10 * * * *"))
+    center.register(
+        JobSpec(name="down", func=rec, cron="0 */2 * * *", depends_on="up")
+    )
+    center.validate_graph()
+
+    await center._execute(center._specs["up"], trigger="cron")
+    await _drain_pending_tasks()
+    assert rec.calls == 0
+
+
+async def test_min_interval_gates_upstream_trigger(center: SchedulerCenter) -> None:
+    """门槛内重复的上游成功不触发（= 推送不会变密）。"""
+    rec = _DownstreamRecorder()
+    _upstream_downstream(center, rec, interval=3600)
+
+    await center._execute(center._specs["up"], trigger="cron")
+    await _drain_pending_tasks()
+    assert rec.calls == 1
+
+    # 再成功一次：距上次开始远小于 3600s → 跳过
+    await center._execute(center._specs["up"], trigger="cron")
+    await _drain_pending_tasks()
+    assert rec.calls == 1
+
+
+async def test_disabled_downstream_not_triggered(center: SchedulerCenter) -> None:
+    rec = _DownstreamRecorder()
+    _upstream_downstream(center, rec)
+    center._specs["down"].enabled = False
+
+    await center._execute(center._specs["up"], trigger="cron")
+    await _drain_pending_tasks()
+    assert rec.calls == 0
+
+
+def test_validate_graph_rejects_unknown_upstream(center: SchedulerCenter) -> None:
+    center.register(
+        JobSpec(name="down", func=_ok_job, cron="*/5 * * * *", depends_on="nope")
+    )
+    with pytest.raises(ValueError, match="未注册"):
+        center.validate_graph()
+
+
+def test_validate_graph_rejects_cycle(center: SchedulerCenter) -> None:
+    center.register(
+        JobSpec(name="a", func=_ok_job, cron="*/5 * * * *", depends_on="b")
+    )
+    center.register(
+        JobSpec(name="b", func=_ok_job, cron="*/5 * * * *", depends_on="a")
+    )
+    with pytest.raises(ValueError, match="成环"):
+        center.validate_graph()
+
+
+def test_list_jobs_exposes_dependency_fields(center: SchedulerCenter) -> None:
+    """前端画链路要知道「谁依赖谁」+「门槛多久」——都随 jobs 下发。"""
+    center.register(JobSpec(name="up", func=_ok_job, cron="*/10 * * * *"))
+    center.register(
+        JobSpec(
+            name="down",
+            func=_ok_job,
+            cron="0 */2 * * *",
+            depends_on="up",
+            min_trigger_interval_sec=1800,
+        )
+    )
+    jobs = {j["name"]: j for j in center.list_jobs()}
+    assert jobs["up"]["depends_on"] is None
+    assert jobs["down"]["depends_on"] == "up"
+    assert jobs["down"]["min_trigger_interval_sec"] == 1800
+
+
 def test_default_cron_covers_all_registered_jobs() -> None:
     """代码里的默认 cron 常量必须覆盖每个已注册作业。
 
@@ -139,9 +298,7 @@ def test_default_cron_covers_all_registered_jobs() -> None:
 
     assert set(DEFAULT_CRON) == {
         "fetch_all_sites",
-        "push_free_torrents",
-        "monitor_free_window",
-        "refresh_user_data",
+        "push_and_monitor_free",
         "drain_task_queue",
         "cross_seed_maintenance",
         "scrape_metadata",
@@ -153,13 +310,17 @@ def test_default_cron_covers_all_registered_jobs() -> None:
 
 
 def test_job_meta_covers_all_jobs() -> None:
-    """每个作业都要有中文名 + 描述（前端直接展示，不硬编码映射表）。
+    """每个作业都要有中文名 + 描述 + 所属业务模块。
 
     漏了 title/description → 调度页显示原始 job 名（如 ``scan_orphans``）
     和 "—" 描述。这正是本条契约要防的回归：以前前端硬编码一份
     job → 中文名的映射表，每加一个作业就要手改前端，漏一处就露馅。
+
+    漏了 module → 作业落进「其它」块，「定时任务」页按业务域分组的意义
+    就丢了（两个业务域的作业重新混排）。
     """
     from app.services.job_registry import DEFAULT_CRON, JOB_META
+    from app.services.scheduler import JOB_MODULES
 
     meta_names = {m.name for m in JOB_META}
     assert meta_names == set(DEFAULT_CRON), "JOB_META 与 DEFAULT_CRON 必须一致"
@@ -167,6 +328,12 @@ def test_job_meta_covers_all_jobs() -> None:
     for meta in JOB_META:
         assert meta.title.strip(), f"{meta.name} 缺中文名"
         assert meta.description.strip(), f"{meta.name} 缺描述"
+        assert meta.module in JOB_MODULES, (
+            f"{meta.name} 的 module {meta.module!r} 未在 JOB_MODULES 登记"
+        )
+
+    # 两个业务域都得有作业——否则「分开展示」在页面上看不出效果
+    assert {m.module for m in JOB_META} == {"seed", "media"}
 
 
 def test_list_jobs_includes_title_and_description() -> None:
@@ -197,6 +364,40 @@ def test_list_jobs_includes_title_and_description() -> None:
 
     # register_jobs 走真实路径也要带上（防止只测构造不测注册）
     assert callable(register_jobs)
+
+
+def test_list_jobs_grouped_by_module(center: SchedulerCenter) -> None:
+    """``GET /scheduler`` 要为每个作业下发模块，且 ``list_modules`` 自洽。
+
+    「不同模块的定时任务分开展示」的数据前提：作业自己带 module，
+    模块的顺序与中文名由后端给（前端不自己排——两处顺序约定必然漂移）。
+    """
+    center.register(
+        JobSpec(name="a1", func=_ok_job, cron="*/5 * * * *", module="seed")
+    )
+    center.register(
+        JobSpec(name="b1", func=_ok_job, cron="*/5 * * * *", module="media")
+    )
+    center.register(
+        JobSpec(name="a2", func=_ok_job, cron="*/5 * * * *", module="seed")
+    )
+    # 未声明模块 → 落「其它」，但仍要能展示（不崩、不丢作业）
+    center.register(JobSpec(name="c1", func=_ok_job, cron="*/5 * * * *"))
+
+    jobs = center.list_jobs()
+    by_name = {j["name"]: j for j in jobs}
+    assert by_name["a1"]["module"] == "seed"
+    assert by_name["a1"]["module_title"] == "辅种"
+    assert by_name["b1"]["module"] == "media"
+    assert by_name["b1"]["module_title"] == "媒体库"
+    assert by_name["c1"]["module"] == ""
+    assert by_name["c1"]["module_title"]  # 回退名非空
+
+    modules = center.list_modules()
+    # 顺序 = 首次出现顺序（注册顺序），前端照抄即可
+    assert [m["key"] for m in modules] == ["seed", "media", ""]
+    assert [m["job_count"] for m in modules] == [2, 1, 1]
+    assert modules[0]["title"] == "辅种"
 
 
 def test_default_cron_values_are_valid() -> None:
@@ -412,7 +613,7 @@ def test_preflight_job_imports_loads_all_lazy_modules() -> None:
         "app.services.jobs",
         "app.services.push_free",
         "app.services.monitor",
-        "app.services.user_data",
+        "app.services.push_and_monitor",
         "app.services.task_drain",
         "app.services.cross_seed_maintenance",
     ):

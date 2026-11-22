@@ -706,7 +706,7 @@ async def self_test_site(site_id: int) -> SiteSelfTestResult:
 #: 全部测连的并发上限。
 #:
 #: 站点测连是 GET 首页（轻量），但站点对短时间多次请求敏感（频控 / 封禁），
-#: 故仍限并发——与 ``refresh_user_data`` 的上限 5 同量级，取 3 保守。
+#: 故仍限并发——与用户数据刷新的上限 5 同量级，取 3 保守。
 _TEST_ALL_CONCURRENCY = 3
 
 

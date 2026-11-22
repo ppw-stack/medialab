@@ -58,7 +58,7 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         default=6,
         min=0,
         max=72,
-        job="push_free_torrents",
+        job="push_and_monitor_free",
     ),
     ParamSpec(
         key="push_max_per_run",
@@ -66,7 +66,7 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         default=20,
         min=1,
         max=200,
-        job="push_free_torrents",
+        job="push_and_monitor_free",
     ),
     ParamSpec(
         key="monitor_pre_pause_minutes",
@@ -74,7 +74,7 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         default=10,
         min=1,
         max=120,
-        job="monitor_free_window",
+        job="push_and_monitor_free",
     ),
     ParamSpec(
         key="monitor_delete_expired",
@@ -82,7 +82,7 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         default=0,
         min=0,
         max=1,
-        job="monitor_free_window",
+        job="push_and_monitor_free",
         options=((0, "仅暂停"), (1, "删除任务+删数据")),
         note="选择删除会连带删掉磁盘数据（不可恢复）",
     ),
@@ -92,7 +92,7 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         default=2000,
         min=0,
         max=30000,
-        job="push_free_torrents",
+        job="push_and_monitor_free",
     ),
     ParamSpec(
         key="aggregate_max_submissions",
@@ -188,7 +188,7 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         default=0,
         min=0,
         max=1,
-        job="organize_torrents",
+        job="organize_files",
         options=((0, "关闭"), (1, "开启")),
         note=(
             "还需在「整理与刮削」配置里填本地媒体库目录与下载器清单；"
@@ -201,7 +201,7 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         default=0,
         min=0,
         max=1,
-        job="organize_torrents",
+        job="organize_files",
         options=((0, "复制（源文件保留）"), (1, "移动（删源文件）")),
         note=(
             "移动会删掉下载器目录里的源文件——做种中的任务会变成 missingFiles；"
@@ -214,7 +214,7 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         default=0,
         min=0,
         max=1,
-        job="organize_torrents",
+        job="organize_files",
         options=((0, "记冲突失败"), (1, "自动序号消歧")),
         note=(
             "同一目录出现同名但大小不同的文件（如导演剪辑版）时："

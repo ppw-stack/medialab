@@ -18,16 +18,24 @@ UI 里的修改会"复活"。
 - **DB 写失败不回滚内存**：配置已在调度中心生效，回滚需要反向操作
   APScheduler 的 job 槽，实现复杂且可能失败。改为让 API 层返 500，
   用户能立刻知道"生效了但没存住"。
+- **删除旧行前先留快照**：作业合并 / 改名 / 孤儿清理会 ``DELETE`` 旧行
+  （不可逆）。删除前把旧行内容写进 ``scheduler_job_settings_backup``
+  （**与 DELETE 同一事务**）并打一条启动日志——见 :func:`_snapshot_settings`。
+  恢复步骤见 ``CHANGELOG.md`` 的「回滚 / 恢复」。
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
-from app.db.models import SchedulerJobSetting
+from app.core.timeutils import bj_now
+from app.db.models import SchedulerJobSetting, SchedulerJobSettingBackup
 from app.db.session import session_scope
+from app.services import startup_status
 
 logger = get_logger(__name__)
 
@@ -36,6 +44,7 @@ __all__ = [
     "load_crons",
     "load_enabled_states",
     "load_job_settings",
+    "merge_job_settings",
     "migrate_renamed_job",
     "prune_orphaned_settings",
     "save_cron",
@@ -136,7 +145,138 @@ async def save_cron(job_name: str, cron: str) -> None:
             row.cron = cron
 
 
-async def prune_orphaned_settings(known_jobs: set[str]) -> int:
+async def _snapshot_settings(
+    session: AsyncSession,
+    rows: Sequence[SchedulerJobSetting],
+    reason: str,
+) -> None:
+    """删除前把旧行内容**留快照**（不可逆迁移的恢复依据）。
+
+    三条删除路径（合并 / 孤儿清理 / 改名迁移）都走这里——**每条路径都先
+    留快照**，不留快照就不删。
+
+    快照落在两处：
+
+    1. **快照表**（``scheduler_job_settings_backup``）——与 ``DELETE`` 在
+       **同一个事务**里：要么都成、要么都回滚 → 不会出现「删了却没记录」。
+       比日志可靠（日志会轮转、会随容器重建而丢），且能用 SQL 还原。
+    2. **启动日志**——人读的线索（``作业配置删除快照（…）``）。
+
+    快照写失败 → 事务回滚 → 旧行**不删**（本次迁移放弃，下次启动重试），
+    失败会登记到 ``startup_status``（由调用方处理）。
+
+    恢复步骤见 ``CHANGELOG.md`` 的「回滚 / 恢复」小节。
+
+    :raises Exception: 快照写入（``session.get`` / ``session.add``）或其它
+        session 操作失败时向上抛——**绝不静默吞掉**；调用方据此回滚事务
+        （旧行因此不删）并登记 ``startup_status`` 降级。
+    """
+    for row in rows:
+        backup = await session.get(SchedulerJobSettingBackup, row.job_name)
+        if backup is None:
+            session.add(
+                SchedulerJobSettingBackup(
+                    job_name=row.job_name,
+                    enabled=bool(row.enabled),
+                    cron=row.cron,
+                    reason=reason,
+                )
+            )
+        else:
+            backup.enabled = bool(row.enabled)
+            backup.cron = row.cron
+            backup.reason = reason
+            backup.deleted_at = bj_now()
+        logger.info(
+            "作业配置删除快照（%s）：job_name=%s enabled=%s cron=%r",
+            reason,
+            row.job_name,
+            bool(row.enabled),
+            row.cron,
+        )
+
+
+async def merge_job_settings(
+    old_names: list[str],
+    new_name: str,
+    known_jobs: set[str],
+) -> bool:
+    """把**多个**旧作业的启停状态合并到新作业（作业合并时用）。
+
+    例：``push_free_torrents`` + ``monitor_free_window`` → ``push_and_monitor_free``
+    （2026-11-22 合并）。
+
+    与 :func:`migrate_renamed_job` 的差别只有两点：
+
+    1. 旧名是**一组**；
+    2. 启停取 **AND**（任一旧作业被用户停用过 → 新作业也停用）。
+
+    **为什么是 AND 而不是 OR**：合并后的作业同时承担两边的动作，任一边
+    被停用都说明用户不想要那半边行为——而合并作业没有「只停半边」的开关。
+    取 AND = 「只有两边都开着才自动开」，宁可少跑一轮让用户显式打开，
+    也不要在用户不知情时恢复他关掉的行为（推送会占带宽/额度，监测会暂停
+    种子，两边都不该被静默复活）。
+
+    **不搬 cron**：合并后频率语义变了（原来是两条不同节奏的 cron），
+    沿用任何一条都是错的——用代码里的新默认值（10 分钟心跳 + 内部节流）。
+
+    目标行已存在 → **不覆盖**（用户可能已经在新作业上改过）。
+
+    Returns:
+        是否发生了迁移（有旧行被消费）。
+    """
+    from sqlalchemy import delete
+
+    try:
+        async with session_scope() as session:
+            rows = (
+                await session.execute(
+                    select(SchedulerJobSetting).where(
+                        SchedulerJobSetting.job_name.in_(old_names)
+                    )
+                )
+            ).scalars().all()
+            if not rows:
+                return False
+            if new_name not in known_jobs:
+                # 新作业还没注册 → 不动（等它真被注册时再说）
+                return False
+
+            enabled = all(bool(r.enabled) for r in rows)
+            target = await session.get(SchedulerJobSetting, new_name)
+            if target is None:
+                session.add(
+                    SchedulerJobSetting(
+                        job_name=new_name,
+                        enabled=enabled,
+                        cron=None,
+                    )
+                )
+            # 删除前先留快照（不可逆 → 事后能回答「删了什么」）；快照与
+            # DELETE 同一事务 → 写不进去就整体回滚，旧行不删
+            await _snapshot_settings(session, rows, "合并到新作业")
+            await session.execute(
+                delete(SchedulerJobSetting).where(
+                    SchedulerJobSetting.job_name.in_(old_names)
+                )
+            )
+            logger.info(
+                "作业配置已合并：%s → %s（enabled=%s，cron 用新默认值）",
+                " + ".join(sorted(old_names)),
+                new_name,
+                enabled,
+            )
+            return True
+    except Exception as exc:
+        logger.warning("合并作业配置失败（可忽略）：%s", exc)
+        # 启动降级必须登记（AGENTS.md）：/readyz 的 degradations 要能看见
+        startup_status.record("job_settings_merge", exc)
+        return False
+
+
+async def prune_orphaned_settings(
+    known_jobs: set[str], *, keep: set[str] | None = None
+) -> int:
     """删掉**已下线作业**的残留行，返回删除条数。
 
     **为什么需要**：作业合并/下线后，DB 里旧作业名的行会变成孤儿——
@@ -144,7 +284,15 @@ async def prune_orphaned_settings(known_jobs: set[str]) -> int:
     ``job_name`` 主键。用户手动改过的启停状态也会跟着丢（新作业用
     默认值），所以**要迁移而不是直接删**——见 :func:`migrate_renamed_job`。
 
-    删除失败只记日志——启动期不该因清理失败而中断。
+    **``keep`` 里的作业名不删**：用于「迁移尚未完成」的场景。合并旧作业
+    配置失败时，旧行必须留着给下次启动重试——删掉等于把用户的启停状态
+    永久丢了（新作业会按默认 ``enabled=True`` 复活）。
+
+    删除前会把旧行内容**留快照**（快照表 + 日志，见
+    :func:`_snapshot_settings`）——三条删除路径都先留快照，不留就不删。
+
+    删除失败只记日志——启动期不该因清理失败而中断（但会登记到
+    ``startup_status``，让 ``/readyz`` 看得见）。
     """
     from sqlalchemy import delete
 
@@ -153,18 +301,32 @@ async def prune_orphaned_settings(known_jobs: set[str]) -> int:
             rows = (
                 await session.execute(select(SchedulerJobSetting))
             ).scalars().all()
-            orphans = [r.job_name for r in rows if r.job_name not in known_jobs]
+            protected = keep or set()
+            orphans = [
+                r
+                for r in rows
+                if r.job_name not in known_jobs and r.job_name not in protected
+            ]
             if not orphans:
                 return 0
+            # 删除前先留快照（不可逆 → 事后能回答「删了什么」）；快照与
+            # DELETE 同一事务 → 写不进去就整体回滚，旧行不删
+            await _snapshot_settings(session, orphans, "清理已下线作业")
             await session.execute(
                 delete(SchedulerJobSetting).where(
-                    SchedulerJobSetting.job_name.in_(orphans)
+                    SchedulerJobSetting.job_name.in_(
+                        [r.job_name for r in orphans]
+                    )
                 )
             )
-            logger.info("清理已下线作业的调度配置：%s", "、".join(orphans))
+            logger.info(
+                "清理已下线作业的调度配置：%s",
+                "、".join(sorted(r.job_name for r in orphans)),
+            )
             return len(orphans)
     except Exception as exc:
         logger.warning("清理已下线作业的调度配置失败（可忽略）：%s", exc)
+        startup_status.record("job_settings_prune", exc)
         return 0
 
 
@@ -205,6 +367,9 @@ async def migrate_renamed_job(
                         cron=None,
                     )
                     session.add(new_row)
+                # 删除前先留快照（不可逆 → 事后能回答「删了什么」）；快照与
+                # DELETE 同一事务 → 写不进去就整体回滚，旧行不删
+                await _snapshot_settings(session, [old_row], "迁移到新作业")
                 await session.execute(
                     delete(SchedulerJobSetting).where(
                         SchedulerJobSetting.job_name == old_name
@@ -221,4 +386,5 @@ async def migrate_renamed_job(
             return False
     except Exception as exc:
         logger.warning("迁移作业配置失败（可忽略）：%s", exc)
+        startup_status.record("job_settings_migrate", exc)
         return False

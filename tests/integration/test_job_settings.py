@@ -14,18 +14,35 @@
 
 from __future__ import annotations
 
-from app.db.models import AppRuntimeParam, SchedulerJobSetting
+from typing import Any
+
+import pytest
+from app.db.models import (
+    AppRuntimeParam,
+    SchedulerJobSetting,
+    SchedulerJobSettingBackup,
+)
 from app.db.session import session_scope
 from app.services.job_settings import (
     load_crons,
     load_enabled_states,
     load_job_settings,
+    merge_job_settings,
     migrate_renamed_job,
     prune_orphaned_settings,
     save_cron,
     save_enabled_state,
 )
 from sqlalchemy import select
+
+
+def _boom_scope() -> Any:
+    """替身：打开 session 时直接炸（模拟 DB 不可用）。
+
+    Raises:
+        RuntimeError: 始终抛出，用于模拟数据库不可用。
+    """
+    raise RuntimeError("炸了")
 
 
 async def _rows() -> list[SchedulerJobSetting]:
@@ -37,6 +54,18 @@ async def _rows() -> list[SchedulerJobSetting]:
                 )
             ).scalars()
         )
+
+
+async def _backups() -> dict[str, SchedulerJobSettingBackup]:
+    async with session_scope() as session:
+        rows = (
+            await session.execute(
+                select(SchedulerJobSettingBackup).order_by(
+                    SchedulerJobSettingBackup.job_name
+                )
+            )
+        ).scalars().all()
+        return {r.job_name: r for r in rows}
 
 
 # ------------------------------------------------------------------ 落库
@@ -226,6 +255,53 @@ async def test_migrate_renamed_job_noop_when_source_missing(db: None) -> None:
 # ------------------------------------------------------------------ 孤儿清理
 
 
+# ------------------------------------------------------------------ 作业合并
+
+
+async def test_merge_job_settings_ands_enabled_states(db: None) -> None:
+    """两个旧作业合成一个：启停取 **AND**，cron 用新默认值。
+
+    2026-11-22 合并 `push_free_torrents` + `monitor_free_window`。任一边被
+    用户停用过 → 新作业也停用（合并作业没有「只停半边」的开关，宁可不跑
+    也不要静默复活用户关掉的行为）。
+    """
+    async with session_scope() as session:
+        session.add(
+            SchedulerJobSetting(
+                job_name="push_free_torrents", enabled=True, cron="0 */2 * * *"
+            )
+        )
+        session.add(
+            SchedulerJobSetting(
+                job_name="monitor_free_window",
+                enabled=False,
+                cron="5,15,25,35,45,55 * * * *",
+            )
+        )
+        await session.commit()
+
+    merged = await merge_job_settings(
+        ["push_free_torrents", "monitor_free_window"],
+        "push_and_monitor_free",
+        {"push_and_monitor_free"},
+    )
+    assert merged is True
+
+    rows = {r.job_name: r for r in await _rows()}
+    assert set(rows) == {"push_and_monitor_free"}
+    assert rows["push_and_monitor_free"].enabled is False
+    # cron 不搬（旧的节奏对新作业是错的）→ 留空 = 用代码默认值
+    assert rows["push_and_monitor_free"].cron is None
+
+
+async def test_merge_job_settings_noop_without_old_rows(db: None) -> None:
+    """旧行不存在（全新部署）→ 什么都没发生，也不凭空建行。"""
+    assert await merge_job_settings(
+        ["push_free_torrents"], "push_and_monitor_free", {"push_and_monitor_free"}
+    ) is False
+    assert await _rows() == []
+
+
 async def test_prune_orphaned_settings_removes_unknown_jobs(db: None) -> None:
     """已下线作业的残留行被清掉（读出来没人用）。"""
     async with session_scope() as session:
@@ -250,3 +326,186 @@ async def test_prune_orphaned_settings_keeps_known_jobs(db: None) -> None:
     removed = await prune_orphaned_settings({"daily_checkin"})
     assert removed == 0
     assert {r.job_name for r in await _rows()} == {"daily_checkin"}
+
+
+async def test_prune_orphaned_settings_keeps_protected_jobs(db: None) -> None:
+    """``keep`` 里的作业名**不删**——迁移没成功时旧行要留着等下次重试。
+
+    删掉等于把用户的启停状态永久丢了（新作业会按默认 enabled=True 复活）。
+    """
+    async with session_scope() as session:
+        session.add(
+            SchedulerJobSetting(
+                job_name="push_free_torrents", enabled=False, cron="0 */2 * * *"
+            )
+        )
+        session.add(SchedulerJobSetting(job_name="scan_orphans", enabled=True))
+        await session.commit()
+
+    removed = await prune_orphaned_settings(
+        set(), keep={"push_free_torrents"}
+    )
+
+    assert removed == 1, "只有未被保护的孤儿行被删"
+    rows = {r.job_name for r in await _rows()}
+    assert rows == {"push_free_torrents"}
+
+
+async def test_merge_failure_is_registered_as_startup_degradation(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """合并失败是**启动降级** → 必须登记到 ``startup_status``（/readyz 看得见）。"""
+    from app.services import job_settings as js
+    from app.services import startup_status
+
+    startup_status.reset()
+    monkeypatch.setattr(
+        js,
+        "session_scope",
+        _boom_scope,
+    )
+
+    try:
+        merged = await merge_job_settings(
+            ["push_free_torrents"],
+            "push_and_monitor_free",
+            {"push_and_monitor_free"},
+        )
+
+        assert merged is False
+        degradations = startup_status.snapshot()
+        assert "job_settings_merge" in degradations
+        assert "炸了" in degradations["job_settings_merge"]["reason"]
+    finally:
+        # 台账是进程级状态，别漏给别的用例（/readyz 的用例断言无降级）
+        startup_status.reset()
+
+
+# ------------------------------------------------------------------ 删除快照
+#
+# 启动期的作业合并 / 改名 / 孤儿清理都是**不可逆 DELETE**——用户改过的
+# cron 与启停状态删掉就没了。故删除前必须留快照，且快照要**持久化**
+# （日志会轮转，不能当唯一依据），并与 DELETE 在**同一个事务**里
+# （写不进去就整体回滚 → 旧行不删 → 不会出现「删了却没记录」）。
+
+
+async def test_merge_writes_persistent_snapshot(db: None) -> None:
+    """合并删除旧行前 → 快照表留下旧行的 ``enabled`` / ``cron``。"""
+    async with session_scope() as session:
+        session.add(
+            SchedulerJobSetting(
+                job_name="push_free_torrents", enabled=False, cron="0 */2 * * *"
+            )
+        )
+        session.add(
+            SchedulerJobSetting(
+                job_name="monitor_free_window", enabled=True, cron="5,15 * * * *"
+            )
+        )
+        await session.commit()
+
+    await merge_job_settings(
+        ["push_free_torrents", "monitor_free_window"],
+        "push_and_monitor_free",
+        {"push_and_monitor_free"},
+    )
+
+    backups = await _backups()
+    assert set(backups) == {"push_free_torrents", "monitor_free_window"}
+    assert backups["push_free_torrents"].enabled is False
+    assert backups["push_free_torrents"].cron == "0 */2 * * *"
+    assert backups["monitor_free_window"].enabled is True
+    assert backups["monitor_free_window"].cron == "5,15 * * * *"
+    assert backups["push_free_torrents"].reason == "合并到新作业"
+
+
+async def test_prune_writes_persistent_snapshot(db: None) -> None:
+    """孤儿清理删除旧行前 → 同样留快照（这条路径与合并路径各自独立）。"""
+    async with session_scope() as session:
+        session.add(
+            SchedulerJobSetting(
+                job_name="refresh_user_data", enabled=False, cron="*/30 * * * *"
+            )
+        )
+        await session.commit()
+
+    removed = await prune_orphaned_settings({"daily_checkin"})
+    assert removed == 1
+
+    backups = await _backups()
+    assert "refresh_user_data" in backups
+    assert backups["refresh_user_data"].enabled is False
+    assert backups["refresh_user_data"].cron == "*/30 * * * *"
+    assert backups["refresh_user_data"].reason == "清理已下线作业"
+
+
+async def test_migrate_writes_persistent_snapshot(db: None) -> None:
+    """改名迁移删除旧行前 → 也留快照。"""
+    async with session_scope() as session:
+        session.add(
+            SchedulerJobSetting(
+                job_name="scan_cross_seed", enabled=False, cron="5,35 * * * *"
+            )
+        )
+        await session.commit()
+
+    await migrate_renamed_job(
+        "scan_cross_seed", "cross_seed_maintenance", {"cross_seed_maintenance"}
+    )
+
+    backups = await _backups()
+    assert "scan_cross_seed" in backups
+    assert backups["scan_cross_seed"].enabled is False
+    assert backups["scan_cross_seed"].cron == "5,35 * * * *"
+    assert backups["scan_cross_seed"].reason == "迁移到新作业"
+
+
+async def test_snapshot_failure_keeps_old_rows(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """快照写不进去 → **旧行不删**（事务回滚），且登记为启动降级。
+
+    反例：删了却没留快照 → 用户改过的 cron / 启停状态永久丢失，且无从恢复。
+    """
+    from app.services import job_settings as js
+    from app.services import startup_status
+
+    startup_status.reset()
+
+    async def _boom_snapshot(*_args: object, **_kwargs: object) -> None:
+        """模拟快照写失败，验证调用方回滚而非吞异常。
+
+        :raises RuntimeError: 总是抛出。
+        """
+        raise RuntimeError("快照写不进去")
+
+    monkeypatch.setattr(js, "_snapshot_settings", _boom_snapshot)
+
+    async with session_scope() as session:
+        session.add(
+            SchedulerJobSetting(
+                job_name="push_free_torrents", enabled=False, cron="0 */2 * * *"
+            )
+        )
+        await session.commit()
+
+    try:
+        merged = await merge_job_settings(
+            ["push_free_torrents"],
+            "push_and_monitor_free",
+            {"push_and_monitor_free"},
+        )
+
+        assert merged is False
+        # 旧行还在（没删）→ 下次启动可重试
+        rows = {r.job_name: r for r in await _rows()}
+        assert "push_free_torrents" in rows
+        assert rows["push_free_torrents"].enabled is False
+        # 新行也没建（同一事务 → 一起回滚）
+        assert "push_and_monitor_free" not in rows
+        # 降级登记 → /readyz 的 degradations 看得见
+        degradations = startup_status.snapshot()
+        assert "job_settings_merge" in degradations
+        assert "快照写不进去" in degradations["job_settings_merge"]["reason"]
+    finally:
+        startup_status.reset()
