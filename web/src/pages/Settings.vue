@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { useAuthStore } from '../stores/auth'
-import EnvTab from './settings/EnvTab.vue'
-import PageHeader from '../components/PageHeader.vue'
+import { useAuthStore } from '../stores/auth';
+import EnvTab from './settings/EnvTab.vue';
+import PageHeader from '../components/PageHeader.vue';
 
 /**
  * 设置页（原「调度作业 / 环境变量」两个 tab 中的**设置**这一半）。
@@ -15,16 +15,12 @@ import PageHeader from '../components/PageHeader.vue'
  * 环境变量配置仍留在本页（它是部署级设置，不是作业级配置）。
  * 媒体库域的「签名密钥」是域内配置，仍在 `/media-settings`。
  */
-const auth = useAuthStore()
+const auth = useAuthStore();
 </script>
 
 <template>
   <div>
-    <PageHeader
-      eyebrow="系统 · SETTINGS"
-      title="设置"
-      sub="环境变量配置（重启后保持）"
-    >
+    <PageHeader eyebrow="系统 · SETTINGS" title="设置" sub="环境变量配置（重启后保持）">
       <template #sub>
         当前会话 · <span class="mono">{{ auth.username }}</span>
       </template>

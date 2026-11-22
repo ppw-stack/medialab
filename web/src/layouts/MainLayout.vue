@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
+import { ref, computed, watch } from 'vue';
+import { useRouter, useRoute } from 'vue-router';
 import {
   CloudServerOutlined,
   ApiOutlined,
@@ -20,16 +20,16 @@ import {
   ClusterOutlined,
   ControlOutlined,
   DashboardOutlined,
-} from '@ant-design/icons-vue'
-import { useAuthStore } from '../stores/auth'
-import { useResponsive } from '../composables/useResponsive'
+} from '@ant-design/icons-vue';
+import { useAuthStore } from '../stores/auth';
+import { useResponsive } from '../composables/useResponsive';
 
-const router = useRouter()
-const route = useRoute()
-const auth = useAuthStore()
-const collapsed = ref(false)
+const router = useRouter();
+const route = useRoute();
+const auth = useAuthStore();
+const collapsed = ref(false);
 
-const { isMobile } = useResponsive()
+const { isMobile } = useResponsive();
 
 /**
  * 侧栏在手机上的展开态（抽屉）。
@@ -37,7 +37,7 @@ const { isMobile } = useResponsive()
  * 桌面端侧栏常驻；手机端改成**覆盖式抽屉**（`collapsedWidth: 0`），
  * 否则 280px 的侧栏会把内容区挤到只剩 95px（375px 视口实测）。
  */
-const drawerOpen = ref(false)
+const drawerOpen = ref(false);
 
 /**
  * 侧边栏菜单（**两个业务域 + 一个「系统」组，两级菜单**）。
@@ -62,10 +62,34 @@ const menuGroups = [
     title: '辅种',
     icon: SafetyOutlined,
     items: [
-      { key: '/sites', icon: CloudServerOutlined, label: '站点', sub: 'NexusPHP 适配', iconColor: 'violet' },
-      { key: '/downloaders', icon: ApiOutlined, label: '下载器与任务', sub: '实例 / 实时任务', iconColor: 'green' },
-      { key: '/torrent-index', icon: DatabaseOutlined, label: '拉取索引', sub: '免费种源', iconColor: 'amber' },
-      { key: '/cross-seed', icon: SafetyOutlined, label: '辅种统计', sub: '按下载器分组展示', iconColor: 'gold' },
+      {
+        key: '/sites',
+        icon: CloudServerOutlined,
+        label: '站点',
+        sub: 'NexusPHP 适配',
+        iconColor: 'violet',
+      },
+      {
+        key: '/downloaders',
+        icon: ApiOutlined,
+        label: '下载器与任务',
+        sub: '实例 / 实时任务',
+        iconColor: 'green',
+      },
+      {
+        key: '/torrent-index',
+        icon: DatabaseOutlined,
+        label: '拉取索引',
+        sub: '免费种源',
+        iconColor: 'amber',
+      },
+      {
+        key: '/cross-seed',
+        icon: SafetyOutlined,
+        label: '辅种统计',
+        sub: '按下载器分组展示',
+        iconColor: 'gold',
+      },
     ],
   },
   {
@@ -73,15 +97,63 @@ const menuGroups = [
     title: '媒体库',
     icon: DatabaseFilled,
     items: [
-      { key: '/drivers', icon: DatabaseFilled, label: '存储源', sub: '网盘账号', iconColor: 'violet' },
-      { key: '/aggregate', icon: ClusterOutlined, label: '网盘聚合', sub: '主盘 + 副盘缓冲', iconColor: 'gold' },
-      { key: '/library', icon: FolderOpenOutlined, label: '媒体库', sub: 'STRM 条目', iconColor: 'blue' },
-      { key: '/migrations', icon: SwapOutlined, label: '迁移', sub: '光鸭 → 光鸭', iconColor: 'amber' },
-      { key: '/scrape', icon: FileImageOutlined, label: '整理与刮削', sub: '下载 → 媒体库 → NFO', iconColor: 'purple' },
-      { key: '/uploads', icon: UploadOutlined, label: '数据同步', sub: '本地 → 网盘', iconColor: 'green' },
+      {
+        key: '/drivers',
+        icon: DatabaseFilled,
+        label: '存储源',
+        sub: '网盘账号',
+        iconColor: 'violet',
+      },
+      {
+        key: '/aggregate',
+        icon: ClusterOutlined,
+        label: '网盘聚合',
+        sub: '主盘 + 副盘缓冲',
+        iconColor: 'gold',
+      },
+      {
+        key: '/library',
+        icon: FolderOpenOutlined,
+        label: '媒体库',
+        sub: 'STRM 条目',
+        iconColor: 'blue',
+      },
+      {
+        key: '/migrations',
+        icon: SwapOutlined,
+        label: '迁移',
+        sub: '光鸭 → 光鸭',
+        iconColor: 'amber',
+      },
+      {
+        key: '/scrape',
+        icon: FileImageOutlined,
+        label: '整理与刮削',
+        sub: '下载 → 媒体库 → NFO',
+        iconColor: 'purple',
+      },
+      {
+        key: '/uploads',
+        icon: UploadOutlined,
+        label: '数据同步',
+        sub: '本地 → 网盘',
+        iconColor: 'green',
+      },
       { key: '/health', icon: HeartOutlined, label: '健康监控', sub: '断链检查', iconColor: 'red' },
-      { key: '/dav-users', icon: CloudUploadOutlined, label: 'WebDAV', sub: '账号与审计', iconColor: 'cyan' },
-      { key: '/media-settings', icon: SettingOutlined, label: '签名密钥', sub: '中转签名轮换', iconColor: 'pink' },
+      {
+        key: '/dav-users',
+        icon: CloudUploadOutlined,
+        label: 'WebDAV',
+        sub: '账号与审计',
+        iconColor: 'cyan',
+      },
+      {
+        key: '/media-settings',
+        icon: SettingOutlined,
+        label: '签名密钥',
+        sub: '中转签名轮换',
+        iconColor: 'pink',
+      },
     ],
   },
   {
@@ -89,29 +161,41 @@ const menuGroups = [
     title: '系统',
     icon: ControlOutlined,
     items: [
-      { key: '/scheduler', icon: DashboardOutlined, label: '定时任务', sub: '辅种 / 媒体库 · 启停', iconColor: 'blue' },
-      { key: '/settings', icon: SettingOutlined, label: '设置', sub: '环境变量', iconColor: 'pink' },
+      {
+        key: '/scheduler',
+        icon: DashboardOutlined,
+        label: '定时任务',
+        sub: '辅种 / 媒体库 · 启停',
+        iconColor: 'blue',
+      },
+      {
+        key: '/settings',
+        icon: SettingOutlined,
+        label: '设置',
+        sub: '环境变量',
+        iconColor: 'pink',
+      },
     ],
   },
-]
+];
 
 /** 全部菜单项（用于「当前页」标题查找）。 */
-const allItems = computed(() => menuGroups.flatMap((g) => g.items))
+const allItems = computed(() => menuGroups.flatMap((g) => g.items));
 
-const selectedKeys = computed(() => [route.path])
-const activeMenu = computed(() => allItems.value.find((m) => m.key === route.path))
+const selectedKeys = computed(() => [route.path]);
+const activeMenu = computed(() => allItems.value.find((m) => m.key === route.path));
 
 /**
  * 当前路由所属的一级组 key（用于自动展开）。
  * '/' 属于辅种域（重定向到 `/sites`）。
  */
 function groupOfPath(path: string): string {
-  const group = menuGroups.find((g) => g.items.some((it) => it.key === path))
-  return group?.key ?? 'seed'
+  const group = menuGroups.find((g) => g.items.some((it) => it.key === path));
+  return group?.key ?? 'seed';
 }
 
 /** 展开的一级组 key 列表。初始展开当前路由所在组。 */
-const openKeys = ref<string[]>([groupOfPath(route.path)])
+const openKeys = ref<string[]>([groupOfPath(route.path)]);
 
 /**
  * 路由变化时自动展开目标组。
@@ -123,24 +207,23 @@ const openKeys = ref<string[]>([groupOfPath(route.path)])
 watch(
   () => route.path,
   (path) => {
-    const target = groupOfPath(path)
+    const target = groupOfPath(path);
     if (!openKeys.value.includes(target)) {
-      openKeys.value = [...openKeys.value, target]
+      openKeys.value = [...openKeys.value, target];
     }
   },
-)
+);
 
 function onMenuClick({ key }: { key: string }) {
-  router.push(key)
+  router.push(key);
   // 手机端点了菜单就收起抽屉（否则新页面被遮罩挡住）
-  drawerOpen.value = false
+  drawerOpen.value = false;
 }
 
 async function handleLogout() {
-  await auth.logout()
-  router.push('/login')
+  await auth.logout();
+  router.push('/login');
 }
-
 </script>
 
 <template>
@@ -176,10 +259,7 @@ async function handleLogout() {
         :selected-keys="selectedKeys"
         @click="onMenuClick"
       >
-        <a-sub-menu
-          v-for="group in menuGroups"
-          :key="group.key"
-        >
+        <a-sub-menu v-for="group in menuGroups" :key="group.key">
           <template #title>
             <span class="menu-icon menu-icon--group">
               <component :is="group.icon" />

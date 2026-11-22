@@ -1,17 +1,11 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
-import { api, errMsg } from '../api'
-import type {
-  JobRunItem,
-  JobRunPage,
-  RunResult,
-  SchedulerInfo,
-  SchedulerJob,
-} from '../types'
-import { message } from 'ant-design-vue'
-import SchedulerConfigModal from '../components/SchedulerConfigModal.vue'
-import SchedulerHistoryModal from '../components/SchedulerHistoryModal.vue'
-import PageHeader from '../components/PageHeader.vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import { api, errMsg } from '../api';
+import type { JobRunItem, JobRunPage, RunResult, SchedulerInfo, SchedulerJob } from '../types';
+import { message } from 'ant-design-vue';
+import SchedulerConfigModal from '../components/SchedulerConfigModal.vue';
+import SchedulerHistoryModal from '../components/SchedulerHistoryModal.vue';
+import PageHeader from '../components/PageHeader.vue';
 
 /**
  * 定时任务页（原「设置 → 调度作业」tab，2026-11-22 拆成独立菜单）。
@@ -24,16 +18,16 @@ import PageHeader from '../components/PageHeader.vue'
  * job → 域的映射，也不自己排域的顺序（两处顺序约定必然漂移）。
  */
 
-const data = ref<SchedulerInfo | null>(null)
-const runningJob = ref<string | null>(null)
+const data = ref<SchedulerInfo | null>(null);
+const runningJob = ref<string | null>(null);
 
-const runsByJob = ref<Record<string, JobRunItem[]>>({})
+const runsByJob = ref<Record<string, JobRunItem[]>>({});
 
 // 配置 / 历史 modal 状态
-const configOpen = ref(false)
-const configJobName = ref('')
-const historyOpen = ref(false)
-const historyJobName = ref('')
+const configOpen = ref(false);
+const configJobName = ref('');
+const historyOpen = ref(false);
+const historyJobName = ref('');
 
 /**
  * 作业的中文名 + 描述**由后端下发**（`JobSpec.title` / `description`）。
@@ -42,21 +36,21 @@ const historyJobName = ref('')
  * 在调度页显示原始 job 名（如 "scan_orphans"）和 "—" 描述。
  */
 function jobTitle(job: { title?: string; name: string }): string {
-  return job.title || job.name
+  return job.title || job.name;
 }
 
 function jobDesc(job: { description?: string }): string {
-  return job.description || '—'
+  return job.description || '—';
 }
 
 /** 按 job 名取中文名（弹框标题用）——从后端下发的作业列表里查。 */
 function jobTitleByName(name: string): string {
-  return data.value?.jobs.find(j => j.name === name)?.title || name
+  return data.value?.jobs.find((j) => j.name === name)?.title || name;
 }
 
 /** 某个模块下的作业（保持后端下发顺序）。 */
 function jobsOf(moduleKey: string): SchedulerJob[] {
-  return (data.value?.jobs ?? []).filter((j) => (j.module ?? '') === moduleKey)
+  return (data.value?.jobs ?? []).filter((j) => (j.module ?? '') === moduleKey);
 }
 
 /**
@@ -64,27 +58,27 @@ function jobsOf(moduleKey: string): SchedulerJob[] {
  * 老后端（无该字段）时按作业首次出现顺序兜底，页面不至于空白。
  */
 const moduleGroups = computed(() => {
-  const jobs = data.value?.jobs ?? []
-  const declared = data.value?.modules
+  const jobs = data.value?.jobs ?? [];
+  const declared = data.value?.modules;
   if (declared?.length) {
     return declared.map((m) => ({
       key: m.key,
       title: m.title,
       jobs: jobsOf(m.key),
-    }))
+    }));
   }
-  const seen: { key: string; title: string; jobs: SchedulerJob[] }[] = []
+  const seen: { key: string; title: string; jobs: SchedulerJob[] }[] = [];
   for (const j of jobs) {
-    const key = j.module ?? ''
-    let group = seen.find((g) => g.key === key)
+    const key = j.module ?? '';
+    let group = seen.find((g) => g.key === key);
     if (!group) {
-      group = { key, title: j.module_title || '其它', jobs: [] }
-      seen.push(group)
+      group = { key, title: j.module_title || '其它', jobs: [] };
+      seen.push(group);
     }
-    group.jobs.push(j)
+    group.jobs.push(j);
   }
-  return seen
-})
+  return seen;
+});
 
 /**
  * 当前 tab（域的 key）。
@@ -92,14 +86,14 @@ const moduleGroups = computed(() => {
  * 默认选第一个域（后端下发顺序 = 注册顺序，辅种域在前）；data 到达后
  * 若还没选过就落到第一个，避免首屏是空 tab。
  */
-const activeModule = ref('')
+const activeModule = ref('');
 
 watch(moduleGroups, (groups) => {
-  if (!groups.length) return
+  if (!groups.length) return;
   if (!groups.some((g) => g.key === activeModule.value)) {
-    activeModule.value = groups[0].key
+    activeModule.value = groups[0].key;
   }
-})
+});
 
 /**
  * 数据流链路：把「有依赖关系」的作业排到前面（上游 → 下游），其余按
@@ -109,69 +103,69 @@ watch(moduleGroups, (groups) => {
  * 深度小的先排（上游在前），同一深度保持后端顺序（`sort` 稳定）。
  */
 function orderedJobs(jobs: SchedulerJob[]): SchedulerJob[] {
-  const byName = new Map(jobs.map((j) => [j.name, j]))
-  const linked = (j: SchedulerJob) => !!j.depends_on && byName.has(j.depends_on)
+  const byName = new Map(jobs.map((j) => [j.name, j]));
+  const linked = (j: SchedulerJob) => !!j.depends_on && byName.has(j.depends_on);
   const depth = (job: SchedulerJob): number => {
-    let d = 0
-    let cur: SchedulerJob | undefined = job
-    const seen = new Set<string>()
+    let d = 0;
+    let cur: SchedulerJob | undefined = job;
+    const seen = new Set<string>();
     while (cur?.depends_on && !seen.has(cur.name)) {
-      seen.add(cur.name)
-      d += 1
-      cur = byName.get(cur.depends_on)
+      seen.add(cur.name);
+      d += 1;
+      cur = byName.get(cur.depends_on);
     }
-    return d
-  }
+    return d;
+  };
   // 链的成员 = 有依赖的节点 **加上它们的所有上游祖先**
   // （只取 depends_on 非空的那个会把「站点拉取」漏到独立节点里去，
   //   结果下游排在它的上游前面——2026-11-22 真机截图发现的）
-  const inChain = new Set<string>()
+  const inChain = new Set<string>();
   for (const j of jobs.filter(linked)) {
-    let cur: SchedulerJob | undefined = j
-    const seen = new Set<string>()
+    let cur: SchedulerJob | undefined = j;
+    const seen = new Set<string>();
     // 一路走到链首：**链首自己通常没有 depends_on**，所以「有 depends_on 才
     // 收集」会把上游漏掉（曾导致下游排在它的上游前面）
     while (cur && !seen.has(cur.name)) {
-      seen.add(cur.name)
-      inChain.add(cur.name)
-      cur = cur.depends_on ? byName.get(cur.depends_on) : undefined
+      seen.add(cur.name);
+      inChain.add(cur.name);
+      cur = cur.depends_on ? byName.get(cur.depends_on) : undefined;
     }
   }
-  const chain = jobs.filter((j) => inChain.has(j.name))
-  const rest = jobs.filter((j) => !inChain.has(j.name))
-  chain.sort((a, b) => depth(a) - depth(b))
-  return [...chain, ...rest]
+  const chain = jobs.filter((j) => inChain.has(j.name));
+  const rest = jobs.filter((j) => !inChain.has(j.name));
+  chain.sort((a, b) => depth(a) - depth(b));
+  return [...chain, ...rest];
 }
 
 /** 每个 tab 的展示顺序（后端顺序 + 依赖优先）。 */
 const orderedByModule = computed<Record<string, SchedulerJob[]>>(() => {
-  const out: Record<string, SchedulerJob[]> = {}
+  const out: Record<string, SchedulerJob[]> = {};
   for (const g of moduleGroups.value) {
-    out[g.key] = orderedJobs(g.jobs)
+    out[g.key] = orderedJobs(g.jobs);
   }
-  return out
-})
+  return out;
+});
 
 /** 该 tab 是否有数据流链路（决定要不要显示「独立节奏」分隔）。 */
 function hasChain(moduleKey: string): boolean {
-  return (orderedByModule.value[moduleKey] ?? []).some((j) => j.depends_on)
+  return (orderedByModule.value[moduleKey] ?? []).some((j) => j.depends_on);
 }
 
 /** 是不是「链路结束了、开始独立节点」的那一项（用于插分隔标题）。 */
 function isFirstIndependent(moduleKey: string, index: number): boolean {
-  const list = orderedByModule.value[moduleKey] ?? []
-  if (!hasChain(moduleKey)) return false
+  const list = orderedByModule.value[moduleKey] ?? [];
+  if (!hasChain(moduleKey)) return false;
   // 链的成员一定带 depends_on（链首是别人的上游、自己也有上游或有人依赖它），
   // 故「当前项无 depends_on 且上一项在链内」= 链刚结束
-  const hasDep = (i: number) => !!list[i]?.depends_on
-  return index > 0 && !hasDep(index) && hasDep(index - 1)
+  const hasDep = (i: number) => !!list[i]?.depends_on;
+  return index > 0 && !hasDep(index) && hasDep(index - 1);
 }
 
 /** 门槛秒数 → 人话（1800 → 「30 分钟」）。 */
 function minutesLabel(sec: number | undefined): string {
-  if (!sec) return '每次上游成功都触发'
-  if (sec % 60 === 0) return `${sec / 60} 分钟`
-  return `${Math.round(sec / 60)} 分钟`
+  if (!sec) return '每次上游成功都触发';
+  if (sec % 60 === 0) return `${sec / 60} 分钟`;
+  return `${Math.round(sec / 60)} 分钟`;
 }
 
 /** 当前 tab 的统计（启用 / 运行中）——一眼看出这个域在不在干活。 */
@@ -179,7 +173,7 @@ function groupStats(jobs: SchedulerJob[]): { enabled: number; running: number } 
   return {
     enabled: jobs.filter((j) => j.enabled).length,
     running: jobs.filter((j) => j.running).length,
-  }
+  };
 }
 
 async function loadRuns() {
@@ -187,94 +181,98 @@ async function loadRuns() {
     // 取 200 条（后端上限）：作业节奏从 5 分钟到 3 小时不等，50 条只
     // 覆盖 ~2 小时，会让 3 小时间隔的辅种维护经常「最近运行」空白
     // （2026-11-04 用户反馈）。200 条 ≈ 7 小时，覆盖最长间隔。
-    const page = await api.get<JobRunPage>('/scheduler/runs?limit=200')
-    const grouped: Record<string, JobRunItem[]> = {}
+    const page = await api.get<JobRunPage>('/scheduler/runs?limit=200');
+    const grouped: Record<string, JobRunItem[]> = {};
     for (const r of page.items) {
-      (grouped[r.job_name] ??= []).push(r)
+      (grouped[r.job_name] ??= []).push(r);
     }
-    runsByJob.value = grouped
-  } catch { /* ignore */ }
+    runsByJob.value = grouped;
+  } catch {
+    /* ignore */
+  }
 }
 
 async function load() {
   try {
-    data.value = await api.get<SchedulerInfo>('/scheduler')
-  } catch { /* ignore */ }
+    data.value = await api.get<SchedulerInfo>('/scheduler');
+  } catch {
+    /* ignore */
+  }
 }
 
 onMounted(() => {
-  load()
-  loadRuns()
+  load();
+  loadRuns();
   const timer = setInterval(() => {
-    load()
-    loadRuns()
-  }, 5000)
-  onUnmounted(() => clearInterval(timer))
-})
+    load();
+    loadRuns();
+  }, 5000);
+  onUnmounted(() => clearInterval(timer));
+});
 
 async function toggle(name: string, enabled: boolean) {
   try {
-    await api.post(`/scheduler/${name}/toggle?enabled=${enabled}`)
-    message.success(`${name} → ${enabled ? '启用' : '暂停'}`)
-    load()
+    await api.post(`/scheduler/${name}/toggle?enabled=${enabled}`);
+    message.success(`${name} → ${enabled ? '启用' : '暂停'}`);
+    load();
   } catch (e) {
     // 失败时重新拉取状态——否则开关停在用户点击后的乐观状态，
     // 与后端实际状态不一致。
-    message.error('切换失败：' + errMsg(e))
-    load()
+    message.error('切换失败：' + errMsg(e));
+    load();
   }
 }
 
 async function runNow(name: string) {
-  runningJob.value = name
-  const hide = message.loading(`正在执行 ${name}...`, 0)
+  runningJob.value = name;
+  const hide = message.loading(`正在执行 ${name}...`, 0);
   try {
-    const r = await api.post<RunResult>(`/scheduler/${name}/run`)
-    const summary = formatResult(r)
+    const r = await api.post<RunResult>(`/scheduler/${name}/run`);
+    const summary = formatResult(r);
     if (r.ok) {
-      message.success(`${name} 完成：${summary}（${r.duration_ms} ms）`)
+      message.success(`${name} 完成：${summary}（${r.duration_ms} ms）`);
     } else {
-      message.error(`${name} 失败：${summary || r.error || '未知错误'}`)
+      message.error(`${name} 失败：${summary || r.error || '未知错误'}`);
     }
   } catch (e) {
-    message.error('触发失败：' + errMsg(e))
+    message.error('触发失败：' + errMsg(e));
   } finally {
-    hide()
-    runningJob.value = null
-    load()
-    loadRuns()
+    hide();
+    runningJob.value = null;
+    load();
+    loadRuns();
   }
 }
 
 /** 结果摘要优先用后端给的 summary（后端是人话来源，前端不硬编码字段名）。 */
 function formatResult(r: RunResult): string {
-  const v = r.result
-  if (!v || typeof v !== 'object') return ''
-  const summary = v.summary
-  if (typeof summary === 'string' && summary) return summary
+  const v = r.result;
+  if (!v || typeof v !== 'object') return '';
+  const summary = v.summary;
+  if (typeof summary === 'string' && summary) return summary;
   // 兜底：老数据（无 summary）时拍平其余字段
   return Object.entries(v)
     .filter(([k]) => k !== 'steps' && k !== 'summary')
     .map(([key, val]) => `${key}: ${typeof val === 'object' ? JSON.stringify(val) : String(val)}`)
-    .join('，')
+    .join('，');
 }
 
 function openConfig(name: string) {
-  configJobName.value = name
-  configOpen.value = true
+  configJobName.value = name;
+  configOpen.value = true;
 }
 
 function openHistory(name: string) {
-  historyJobName.value = name
-  historyOpen.value = true
+  historyJobName.value = name;
+  historyOpen.value = true;
 }
 
 function formatRunTime(s: string): string {
-  return s.length >= 16 ? s.substring(11, 16) : s
+  return s.length >= 16 ? s.substring(11, 16) : s;
 }
 
 function formatRunFull(s: string): string {
-  return s
+  return s;
 }
 </script>
 
@@ -297,12 +295,11 @@ function formatRunFull(s: string): string {
           <div>
             <span class="label-caps">调度器状态</span>
             <div class="scheduler-head__state">
-              <span
-                class="live-dot"
-                :class="{ 'live-dot--idle': !data.accepting_new_work }"
-              />
+              <span class="live-dot" :class="{ 'live-dot--idle': !data.accepting_new_work }" />
               <span class="mono">{{ data.accepting_new_work ? 'WORKING' : 'STOPPED' }}</span>
-              <span class="dim mono" style="margin-left: var(--sp-2)">inflight {{ data.inflight }}</span>
+              <span class="dim mono" style="margin-left: var(--sp-2)"
+                >inflight {{ data.inflight }}</span
+              >
               <span class="dim mono" style="margin-left: var(--sp-2)">
                 {{ moduleGroups.length }} 个业务域 · {{ data.jobs.length }} 个作业
               </span>
@@ -316,16 +313,15 @@ function formatRunFull(s: string): string {
           来自后端（`modules`），前端不自己排。
         -->
         <a-tabs v-model:active-key="activeModule">
-          <a-tab-pane
-            v-for="group in moduleGroups"
-            :key="group.key"
-          >
+          <a-tab-pane v-for="group in moduleGroups" :key="group.key">
             <template #tab>
               <span class="domain-tab">
                 <span class="domain-tab__name">{{ group.title }}</span>
                 <span class="domain-tab__meta mono">
                   {{ group.jobs.length }}
-                  <template v-if="groupStats(group.jobs).running"> · 运行中 {{ groupStats(group.jobs).running }}</template>
+                  <template v-if="groupStats(group.jobs).running">
+                    · 运行中 {{ groupStats(group.jobs).running }}</template
+                  >
                 </span>
               </span>
             </template>
@@ -335,7 +331,10 @@ function formatRunFull(s: string): string {
               <span class="module-head__meta mono dim">
                 {{ group.jobs.length }} 个作业 · 启用 {{ groupStats(group.jobs).enabled }}
                 <template v-if="groupStats(group.jobs).running">
-                  · <span class="module-head__running">运行中 {{ groupStats(group.jobs).running }}</span>
+                  ·
+                  <span class="module-head__running"
+                    >运行中 {{ groupStats(group.jobs).running }}</span
+                  >
                 </template>
               </span>
             </div>
@@ -366,10 +365,7 @@ function formatRunFull(s: string): string {
                 </div>
                 <div class="job-item__main">
                   <div class="job-item__title-row">
-                    <span
-                      class="live-dot"
-                      :class="{ 'live-dot--idle': !job.running }"
-                    />
+                    <span class="live-dot" :class="{ 'live-dot--idle': !job.running }" />
                     <span class="job-item__name">{{ jobTitle(job) }}</span>
                     <span class="job-item__id mono">{{ job.name }}</span>
                   </div>
@@ -380,10 +376,7 @@ function formatRunFull(s: string): string {
                   </div>
                 </div>
                 <div class="job-item__actions">
-                  <a-switch
-                    :checked="job.enabled"
-                    @change="(e: boolean) => toggle(job.name, e)"
-                  />
+                  <a-switch :checked="job.enabled" @change="(e: boolean) => toggle(job.name, e)" />
                   <a-button
                     size="small"
                     type="default"
@@ -393,18 +386,10 @@ function formatRunFull(s: string): string {
                   >
                     立即执行 →
                   </a-button>
-                  <a-button
-                    size="small"
-                    type="default"
-                    @click="openConfig(job.name)"
-                  >
+                  <a-button size="small" type="default" @click="openConfig(job.name)">
                     配置
                   </a-button>
-                  <a-button
-                    size="small"
-                    type="default"
-                    @click="openHistory(job.name)"
-                  >
+                  <a-button size="small" type="default" @click="openHistory(job.name)">
                     历史
                   </a-button>
                 </div>
@@ -447,7 +432,12 @@ function formatRunFull(s: string): string {
           v-model:open="configOpen"
           :job-name="configJobName"
           :job-label="jobTitleByName(configJobName)"
-          @saved="() => { load(); loadRuns() }"
+          @saved="
+            () => {
+              load();
+              loadRuns();
+            }
+          "
         />
         <SchedulerHistoryModal
           v-model:open="historyOpen"

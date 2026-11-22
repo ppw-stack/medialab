@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import zhCN from 'ant-design-vue/es/locale/zh_CN'
+import zhCN from 'ant-design-vue/es/locale/zh_CN';
 
 const theme = {
   token: {
@@ -18,7 +18,7 @@ const theme = {
     fontFamily:
       '"Inter", "PingFang SC", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif',
   },
-}
+};
 </script>
 
 <template>

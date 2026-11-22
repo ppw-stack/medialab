@@ -17,55 +17,55 @@
  * `minWidth` → 默认 120px 兜底。宁可多给一点（多出来的空白在滚动条
  * 右侧），也不要少给（少给会被压缩，文字截断）。
  */
-import { computed, useSlots } from 'vue'
+import { computed, useSlots } from 'vue';
 
 const props = withDefaults(
   defineProps<{
-    columns: readonly any[]
+    columns: readonly any[];
     /** 列宽总和的**下限**——列少 / 列窄时保证一个合理的最小滚动宽度。 */
-    minScrollX?: number
+    minScrollX?: number;
     /**
      * 表格布局。默认 `fixed`（列宽严格生效）。
      *
      * `auto` 时列宽只是「建议值」，浏览器按内容重新分配——设了宽度也
      * 白设（表现为「列宽忽宽忽窄」「文字莫名换行」）。
      */
-    tableLayout?: 'fixed' | 'auto'
+    tableLayout?: 'fixed' | 'auto';
   }>(),
   { minScrollX: 0, tableLayout: 'fixed' },
-)
+);
 
-const slots = useSlots()
+const slots = useSlots();
 
 /** 单列占位宽——没给 width 也没给 minWidth 的列。 */
-const DEFAULT_COL_WIDTH = 120
+const DEFAULT_COL_WIDTH = 120;
 
 /** 列宽总和。 */
 const totalWidth = computed(() => {
-  let sum = 0
+  let sum = 0;
   for (const col of props.columns) {
     // 列组（children）按其子列累加
     if (Array.isArray((col as any).children)) {
       for (const child of (col as any).children) {
-        sum += columnWidth(child)
+        sum += columnWidth(child);
       }
-      continue
+      continue;
     }
-    sum += columnWidth(col)
+    sum += columnWidth(col);
   }
-  return sum
-})
+  return sum;
+});
 
 function columnWidth(col: any): number {
-  const w = col?.width
-  if (typeof w === 'number' && w > 0) return w
+  const w = col?.width;
+  if (typeof w === 'number' && w > 0) return w;
   if (typeof w === 'string') {
-    const n = parseFloat(w)
-    if (Number.isFinite(n) && n > 0) return n
+    const n = parseFloat(w);
+    if (Number.isFinite(n) && n > 0) return n;
   }
-  const mw = col?.minWidth
-  if (typeof mw === 'number' && mw > 0) return mw
-  return DEFAULT_COL_WIDTH
+  const mw = col?.minWidth;
+  if (typeof mw === 'number' && mw > 0) return mw;
+  return DEFAULT_COL_WIDTH;
 }
 
 /**
@@ -82,16 +82,11 @@ function columnWidth(col: any): number {
  */
 const scrollX = computed(() => ({
   x: Math.max(totalWidth.value, props.minScrollX),
-}))
+}));
 </script>
 
 <template>
-  <a-table
-    :columns="columns"
-    :scroll="{ x: scrollX }"
-    :table-layout="tableLayout"
-    v-bind="$attrs"
-  >
+  <a-table :columns="columns" :scroll="{ x: scrollX }" :table-layout="tableLayout" v-bind="$attrs">
     <!--
       透传所有具名插槽（bodyCell / expandedRowRender / title 等）。
 

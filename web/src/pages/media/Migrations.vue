@@ -23,8 +23,9 @@
 
       <a-alert type="warning" show-icon :closable="false" class="tip">
         <template #message>
-          <b>云添加额度有限</b>（每天每账号，失败也扣）。
-          云下载按 URL 末段落名（<span class="mono">download</span>），落盘后会自动<b>改名回原名</b>；
+          <b>云添加额度有限</b>（每天每账号，失败也扣）。 云下载按 URL 末段落名（<span class="mono"
+            >download</span
+          >），落盘后会自动<b>改名回原名</b>；
           <b>恒串行</b>提交（同目录并发会撞名）。撞到额度上限会<b>暂停</b>作业，次日重跑即可续传。
         </template>
       </a-alert>
@@ -94,7 +95,12 @@
 
       <a-form layout="inline" :model="form">
         <a-form-item label="最小体积 (GB)">
-          <a-input-number v-model:value="form.minSizeGb" :min="0" :step="0.5" style="width: 100px" />
+          <a-input-number
+            v-model:value="form.minSizeGb"
+            :min="0"
+            :step="0.5"
+            style="width: 100px"
+          />
         </a-form-item>
         <a-form-item label="最大体积 (GB)">
           <a-input-number v-model:value="form.maxSizeGb" :min="0" :step="1" style="width: 100px" />
@@ -123,11 +129,7 @@
         <a-form-item label="搬完清理源">
           <a-switch v-model:checked="form.deleteSource" />
           <span class="hint">
-            {{
-              true
-                ? "只删已校验成功的；进回收站可恢复"
-                : "仅光鸭源支持"
-            }}
+            {{ true ? '只删已校验成功的；进回收站可恢复' : '仅光鸭源支持' }}
           </span>
         </a-form-item>
         <a-form-item>
@@ -157,7 +159,7 @@
       </template>
 
       <div class="mono truncate current block-truncate" :title="job.current_path">
-        {{ job.current_path || "（等待第一个文件）" }}
+        {{ job.current_path || '（等待第一个文件）' }}
       </div>
 
       <a-descriptions :column="4" size="small" bordered class="stats">
@@ -223,9 +225,7 @@
           :pagination="false"
         >
           <template #bodyCell="{ column, record }">
-            <template v-if="column.key === 'size'">
-              {{ record.size_gb }} GB
-            </template>
+            <template v-if="column.key === 'size'"> {{ record.size_gb }} GB </template>
           </template>
         </DataTable>
       </template>
@@ -261,27 +261,27 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue"
-import { message } from "ant-design-vue"
-import DirBrowser from "../../components/DirBrowser.vue"
-import PageHeader from "../../components/PageHeader.vue"
-import { errMsg, mediaApi as api } from "../../api"
-import type { DirEntry, Driver, MigrationJob, MigrationRunInput } from "../../types"
-import { formatBytes } from "../../utils/format"
-import DataTable from '../../components/DataTable.vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
+import { message } from 'ant-design-vue';
+import DirBrowser from '../../components/DirBrowser.vue';
+import PageHeader from '../../components/PageHeader.vue';
+import { errMsg, mediaApi as api } from '../../api';
+import type { DirEntry, Driver, MigrationJob, MigrationRunInput } from '../../types';
+import { formatBytes } from '../../utils/format';
+import DataTable from '../../components/DataTable.vue';
 
-const drivers = ref<Driver[]>([])
-const sourceDriverId = ref<number | undefined>(undefined)
-const targetDriverId = ref<number | undefined>(undefined)
+const drivers = ref<Driver[]>([]);
+const sourceDriverId = ref<number | undefined>(undefined);
+const targetDriverId = ref<number | undefined>(undefined);
 
-const sourceStack = ref<DirEntry[]>([])
-const targetStack = ref<DirEntry[]>([])
-const sourceDirs = ref<DirEntry[]>([])
-const targetDirs = ref<DirEntry[]>([])
-const loadingSource = ref(false)
-const loadingTarget = ref(false)
-const sourceError = ref("")
-const targetError = ref("")
+const sourceStack = ref<DirEntry[]>([]);
+const targetStack = ref<DirEntry[]>([]);
+const sourceDirs = ref<DirEntry[]>([]);
+const targetDirs = ref<DirEntry[]>([]);
+const loadingSource = ref(false);
+const loadingTarget = ref(false);
+const sourceError = ref('');
+const targetError = ref('');
 
 const form = reactive({
   minSizeGb: 0,
@@ -289,63 +289,59 @@ const form = reactive({
   submitIntervalSec: 60,
   excludeDisc: true,
   deleteSource: false,
-})
+});
 
-const job = ref<MigrationJob | null>(null)
-const starting = ref(false)
-const cancelling = ref(false)
-const logBox = ref<HTMLElement | null>(null)
+const job = ref<MigrationJob | null>(null);
+const starting = ref(false);
+const cancelling = ref(false);
+const logBox = ref<HTMLElement | null>(null);
 
-let timer: number | undefined
+let timer: number | undefined;
 
 const failedColumns = [
-  { title: "文件", dataIndex: "name", key: "name", ellipsis: true },
-  { title: "大小", key: "size", width: 100 },
-  { title: "原因", dataIndex: "reason", key: "reason", ellipsis: true },
-]
+  { title: '文件', dataIndex: 'name', key: 'name', ellipsis: true },
+  { title: '大小', key: 'size', width: 100 },
+  { title: '原因', dataIndex: 'reason', key: 'reason', ellipsis: true },
+];
 
 const conflictColumns = [
-  { title: "文件", dataIndex: "name", key: "name", ellipsis: true },
-  { title: "源", key: "local", width: 110 },
-  { title: "光鸭", key: "remote", width: 110 },
-]
+  { title: '文件', dataIndex: 'name', key: 'name', ellipsis: true },
+  { title: '源', key: 'local', width: 110 },
+  { title: '光鸭', key: 'remote', width: 110 },
+];
 
 /** 源只能是光鸭账号（光鸭 → 光鸭）。 */
 const sourceDriverOptions = computed(() =>
-  drivers.value
-    .filter((d) => d.type === "guangya")
-    .map((d) => ({ value: d.id, label: d.name })),
-)
+  drivers.value.filter((d) => d.type === 'guangya').map((d) => ({ value: d.id, label: d.name })),
+);
 
 /** 目标只能是光鸭盘。 */
 const targetDriverOptions = computed(() =>
-  drivers.value
-    .filter((d) => d.type === "guangya")
-    .map((d) => ({ value: d.id, label: d.name })),
-)
+  drivers.value.filter((d) => d.type === 'guangya').map((d) => ({ value: d.id, label: d.name })),
+);
 
 const sourceDriver = computed(
   () => drivers.value.find((d) => d.id === sourceDriverId.value) ?? null,
-)
+);
 const targetDriver = computed(
   () => drivers.value.find((d) => d.id === targetDriverId.value) ?? null,
-)
+);
 
-const currentSource = computed(() => sourceStack.value[sourceStack.value.length - 1])
-const currentTarget = computed(() => targetStack.value[targetStack.value.length - 1])
+const currentSource = computed(() => sourceStack.value[sourceStack.value.length - 1]);
+const currentTarget = computed(() => targetStack.value[targetStack.value.length - 1]);
 
-const sourceBrowserTitle = "① 光鸭源目录"
+const sourceBrowserTitle = '① 光鸭源目录';
 
 /** 在途任务（提交顺序） */
 const inFlightList = computed(() => {
-  const items = job.value?.in_flight_items ?? {}
+  const items = job.value?.in_flight_items ?? {};
   return Object.entries(items).map(([id, v]) => ({
     id,
     path: v.path,
     name: v.name,
     size: v.size,
-  }))
-})
+  }));
+});
 
 const canRun = computed(
   () =>
@@ -354,205 +350,201 @@ const canRun = computed(
     sourceDriverId.value !== targetDriverId.value &&
     !!currentSource.value &&
     currentTarget.value !== undefined &&
-    job.value?.state !== "running",
-)
+    job.value?.state !== 'running',
+);
 
 onMounted(async () => {
   try {
-    drivers.value = await api.get<Driver[]>("/drivers")
+    drivers.value = await api.get<Driver[]>('/drivers');
   } catch (e) {
-    message.error(errMsg(e, "加载存储源失败"))
-    return
+    message.error(errMsg(e, '加载存储源失败'));
+    return;
   }
 
-  const firstGuangya = drivers.value.find((d) => d.type === "guangya")
-  sourceDriverId.value = firstGuangya?.id
-  targetDriverId.value = firstGuangya?.id
+  const firstGuangya = drivers.value.find((d) => d.type === 'guangya');
+  sourceDriverId.value = firstGuangya?.id;
+  targetDriverId.value = firstGuangya?.id;
 
-  await resetSourceStack()
+  await resetSourceStack();
   if (sourceDriver.value) {
-    await loadSource()
+    await loadSource();
   }
   if (targetDriver.value) {
-    targetStack.value = [{ id: "", name: "光鸭根目录" }]
-    await loadTarget()
+    targetStack.value = [{ id: '', name: '光鸭根目录' }];
+    await loadTarget();
   }
 
   // 找回最近一次任务（刷新页面后还能看到进度）
   try {
-    const jobs = await api.get<MigrationJob[]>("/migrations/jobs")
+    const jobs = await api.get<MigrationJob[]>('/migrations/jobs');
     if (jobs.length) {
-      job.value = jobs[0] as MigrationJob
-      if (job.value.state === "running") startPolling()
+      job.value = jobs[0] as MigrationJob;
+      if (job.value.state === 'running') startPolling();
     }
   } catch {
     // 没有任务不算错
   }
-})
+});
 
 /** 源目录栈复位——光鸭账号根 fileId 是空串，目录由用户逐层选。 */
 async function resetSourceStack(): Promise<void> {
-  const driver = sourceDriver.value
+  const driver = sourceDriver.value;
   if (!driver) {
-    sourceStack.value = []
-    return
+    sourceStack.value = [];
+    return;
   }
-  sourceStack.value = [{ id: "", name: "光鸭根目录" }]
+  sourceStack.value = [{ id: '', name: '光鸭根目录' }];
 }
 
 /** 换源存储源——目录栈复位并重新加载。 */
 async function onSourceDriverChange(): Promise<void> {
-  await resetSourceStack()
-  await loadSource()
+  await resetSourceStack();
+  await loadSource();
 }
 
 /** 换目标存储源——目标目录栈复位并重新加载。 */
 async function onTargetDriverChange(): Promise<void> {
-  targetStack.value = [{ id: "", name: "光鸭根目录" }]
-  await loadTarget()
+  targetStack.value = [{ id: '', name: '光鸭根目录' }];
+  await loadTarget();
 }
 
-onUnmounted(stopPolling)
+onUnmounted(stopPolling);
 
 watch(
   () => job.value?.logs.length,
   async () => {
-    await nextTick()
-    if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight
+    await nextTick();
+    if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight;
   },
-)
+);
 
 // -- 目录浏览 --
 
 async function loadSource(): Promise<void> {
-  if (!sourceDriver.value || !currentSource.value) return
-  loadingSource.value = true
-  sourceError.value = ""
+  if (!sourceDriver.value || !currentSource.value) return;
+  loadingSource.value = true;
+  sourceError.value = '';
   try {
     const res = await api.get<{ dirs: DirEntry[] }>(
       `/migrations/sources?driver_id=${sourceDriver.value.id}&parent_id=${encodeURIComponent(currentSource.value.id)}`,
-    )
-    sourceDirs.value = res.dirs
+    );
+    sourceDirs.value = res.dirs;
   } catch (e) {
-    sourceError.value = errMsg(e, "读取源目录失败")
-    sourceDirs.value = []
+    sourceError.value = errMsg(e, '读取源目录失败');
+    sourceDirs.value = [];
   } finally {
-    loadingSource.value = false
+    loadingSource.value = false;
   }
 }
 
 async function loadTarget(): Promise<void> {
-  if (!targetDriver.value || !currentTarget.value) return
-  loadingTarget.value = true
-  targetError.value = ""
+  if (!targetDriver.value || !currentTarget.value) return;
+  loadingTarget.value = true;
+  targetError.value = '';
   try {
     const res = await api.get<{ dirs: DirEntry[] }>(
       `/migrations/targets?driver_id=${targetDriver.value.id}&parent_id=${encodeURIComponent(currentTarget.value.id)}`,
-    )
-    targetDirs.value = res.dirs
+    );
+    targetDirs.value = res.dirs;
   } catch (e) {
-    targetError.value = errMsg(e, "读取光鸭目录失败")
-    targetDirs.value = []
+    targetError.value = errMsg(e, '读取光鸭目录失败');
+    targetDirs.value = [];
   } finally {
-    loadingTarget.value = false
+    loadingTarget.value = false;
   }
 }
 
 function openSource(dir: DirEntry): void {
-  sourceStack.value = [...sourceStack.value, dir]
-  void loadSource()
+  sourceStack.value = [...sourceStack.value, dir];
+  void loadSource();
 }
 
 function goSource(index: number): void {
-  sourceStack.value = sourceStack.value.slice(0, index + 1)
-  void loadSource()
+  sourceStack.value = sourceStack.value.slice(0, index + 1);
+  void loadSource();
 }
 
 function openTarget(dir: DirEntry): void {
-  targetStack.value = [...targetStack.value, dir]
-  void loadTarget()
+  targetStack.value = [...targetStack.value, dir];
+  void loadTarget();
 }
 
 function goTarget(index: number): void {
-  targetStack.value = targetStack.value.slice(0, index + 1)
-  void loadTarget()
+  targetStack.value = targetStack.value.slice(0, index + 1);
+  void loadTarget();
 }
 
 // -- 迁移 --
 
 async function start(): Promise<void> {
   if (!sourceDriver.value || !targetDriver.value || !currentSource.value || !currentTarget.value) {
-    return
+    return;
   }
-  starting.value = true
+  starting.value = true;
   try {
     const payload: MigrationRunInput = {
       source_driver_id: sourceDriver.value.id,
       source_cid: currentSource.value.id,
-      source_path: sourceStack.value.map((c) => c.name).join("/"),
+      source_path: sourceStack.value.map((c) => c.name).join('/'),
       target_driver_id: targetDriver.value.id,
       target_file_id: currentTarget.value.id,
-      target_path: targetStack.value.map((c) => c.name).join("/"),
+      target_path: targetStack.value.map((c) => c.name).join('/'),
       min_size_mb: Math.round((form.minSizeGb || 0) * 1024),
       max_size_mb: Math.round((form.maxSizeGb || 0) * 1024),
       submit_interval_sec: form.submitIntervalSec,
       exclude_disc: form.excludeDisc,
       delete_source: form.deleteSource,
-    }
-    const res = await api.post<{ job_id: string }>("/migrations/run", payload)
-    job.value = await api.get<MigrationJob>(`/migrations/jobs/${res.job_id}`)
-    startPolling()
+    };
+    const res = await api.post<{ job_id: string }>('/migrations/run', payload);
+    job.value = await api.get<MigrationJob>(`/migrations/jobs/${res.job_id}`);
+    startPolling();
   } catch (e) {
-    message.error(errMsg(e, "启动迁移失败"))
+    message.error(errMsg(e, '启动迁移失败'));
   } finally {
-    starting.value = false
+    starting.value = false;
   }
 }
 
 async function cancel(): Promise<void> {
-  if (!job.value) return
-  cancelling.value = true
+  if (!job.value) return;
+  cancelling.value = true;
   try {
-    await api.post(`/migrations/jobs/${job.value.id}/cancel`)
-    message.info("已请求取消（已提交的离线任务留在光鸭继续跑）")
+    await api.post(`/migrations/jobs/${job.value.id}/cancel`);
+    message.info('已请求取消（已提交的离线任务留在光鸭继续跑）');
   } catch (e) {
-    message.error(errMsg(e, "取消失败"))
+    message.error(errMsg(e, '取消失败'));
   } finally {
-    cancelling.value = false
+    cancelling.value = false;
   }
 }
 
 function startPolling(): void {
-  stopPolling()
-  timer = window.setInterval(() => void tick(), 2000)
+  stopPolling();
+  timer = window.setInterval(() => void tick(), 2000);
 }
 
 function stopPolling(): void {
   if (timer !== undefined) {
-    window.clearInterval(timer)
-    timer = undefined
+    window.clearInterval(timer);
+    timer = undefined;
   }
 }
 
 async function tick(): Promise<void> {
-  if (!job.value) return
+  if (!job.value) return;
   try {
-    job.value = await api.get<MigrationJob>(`/migrations/jobs/${job.value.id}`)
-    if (job.value.state !== "running") {
-      stopPolling()
-      if (job.value.state === "success") {
-        message.success(
-          `迁移结束：成功 ${job.value.success} 个，失败 ${job.value.failed} 个`,
-        )
-      } else if (job.value.state === "paused") {
-        message.warning(
-          `迁移已暂停（云添加额度耗尽）：${job.value.error ?? ""}——次日重跑即可续传`,
-        )
+    job.value = await api.get<MigrationJob>(`/migrations/jobs/${job.value.id}`);
+    if (job.value.state !== 'running') {
+      stopPolling();
+      if (job.value.state === 'success') {
+        message.success(`迁移结束：成功 ${job.value.success} 个，失败 ${job.value.failed} 个`);
+      } else if (job.value.state === 'paused') {
+        message.warning(`迁移已暂停（云添加额度耗尽）：${job.value.error ?? ''}——次日重跑即可续传`);
       }
     }
   } catch (e) {
-    message.error(errMsg(e, "查询迁移进度失败"))
-    stopPolling()
+    message.error(errMsg(e, '查询迁移进度失败'));
+    stopPolling();
   }
 }
 
@@ -560,45 +552,45 @@ async function tick(): Promise<void> {
 
 function stateLabel(state: string): string {
   switch (state) {
-    case "running":
-      return "进行中"
-    case "success":
-      return "已完成"
-    case "failed":
-      return "失败"
-    case "cancelled":
-      return "已取消"
-    case "paused":
-      return "已暂停（额度耗尽）"
+    case 'running':
+      return '进行中';
+    case 'success':
+      return '已完成';
+    case 'failed':
+      return '失败';
+    case 'cancelled':
+      return '已取消';
+    case 'paused':
+      return '已暂停（额度耗尽）';
     default:
-      return state
+      return state;
   }
 }
 
 function stateColor(state: string): string {
   switch (state) {
-    case "running":
-      return "processing"
-    case "success":
-      return "success"
-    case "failed":
-      return "error"
-    case "paused":
-      return "warning"
+    case 'running':
+      return 'processing';
+    case 'success':
+      return 'success';
+    case 'failed':
+      return 'error';
+    case 'paused':
+      return 'warning';
     default:
-      return "default"
+      return 'default';
   }
 }
 
 /** 拆出日志行首的时间戳（``[00:41:37]``），没有就返回空串。 */
 function logTime(line: string): string {
-  const m = line.match(/^\[(\d{2}:\d{2}:\d{2})\]\s*/)
-  return m ? m[1] : ""
+  const m = line.match(/^\[(\d{2}:\d{2}:\d{2})\]\s*/);
+  return m ? m[1] : '';
 }
 
 /** 去掉时间戳后的正文。 */
 function logText(line: string): string {
-  return line.replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, "")
+  return line.replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, '');
 }
 </script>
 
@@ -698,7 +690,7 @@ function logText(line: string): string {
 .log-time {
   flex: none;
   color: #aaa;
-  font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  font-family: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }

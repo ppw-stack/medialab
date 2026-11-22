@@ -18,31 +18,31 @@
  * 用法：node web/scripts/check-css-classes.mjs
  */
 
-import { readFileSync, readdirSync, statSync } from 'node:fs'
-import { dirname, join, relative } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { dirname, join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
-const SRC = join(ROOT, 'src')
-const GLOBAL_CSS = join(SRC, 'styles', 'global.css')
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const SRC = join(ROOT, 'src');
+const GLOBAL_CSS = join(SRC, 'styles', 'global.css');
 
 /** 递归列出 src 下的 .vue 文件 */
 function collectVue(dir) {
-  const out = []
+  const out = [];
   for (const entry of readdirSync(dir)) {
-    const path = join(dir, entry)
+    const path = join(dir, entry);
     if (statSync(path).isDirectory()) {
-      out.push(...collectVue(path))
+      out.push(...collectVue(path));
     } else if (path.endsWith('.vue')) {
-      out.push(path)
+      out.push(path);
     }
   }
-  return out
+  return out;
 }
 
 /** 取出 <style> 块的内容 */
 function styleBlocks(src) {
-  return [...src.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)].map((m) => m[1]).join('\n')
+  return [...src.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)].map((m) => m[1]).join('\n');
 }
 
 /**
@@ -52,25 +52,23 @@ function styleBlocks(src) {
  * 字符串），必须先剥掉，否则会误报。
  */
 function templateOf(src) {
-  return src
-    .replace(/<script[\s\S]*?<\/script>/g, '')
-    .replace(/<style[\s\S]*?<\/style>/g, '')
+  return src.replace(/<script[\s\S]*?<\/script>/g, '').replace(/<style[\s\S]*?<\/style>/g, '');
 }
 
 /** 抽出一个 CSS 文件里定义的所有 class 名 */
 function definedClasses(css) {
   // 只取「选择器位置」的 .name —— 排除小数（.5）、属性值里的内容
-  const out = new Set()
+  const out = new Set();
   // 匹配选择器部分：{} 之前
   for (const m of css.matchAll(/([^{}]+)\{/g)) {
-    const selector = m[1]
+    const selector = m[1];
     // 去掉注释
-    const clean = selector.replace(/\/\*[\s\S]*?\*\//g, '')
+    const clean = selector.replace(/\/\*[\s\S]*?\*\//g, '');
     for (const c of clean.matchAll(/\.(-?[_a-zA-Z][\w-]*)/g)) {
-      out.add(c[1])
+      out.add(c[1]);
     }
   }
-  return out
+  return out;
 }
 
 /**
@@ -99,7 +97,7 @@ const EXEMPTIONS = {
     // （.mono 字体由 global.css 提供），不需要独立规则。
     'run-chip__time': 'BEM 子元素，字体由 global.css 的 .mono 提供',
   },
-}
+};
 
 /**
  * 抽出一个 template 里用到的 class 名。
@@ -115,16 +113,16 @@ const EXEMPTIONS = {
  *   - 引号内不是纯标识符的片段（表达式、函数调用）
  */
 function usedClasses(tpl) {
-  const out = new Set()
+  const out = new Set();
 
   // ① 静态 class="..."
   //
   // 前面不能是 `:` —— 否则 `:class="..."` 的尾部会被误当成静态 class。
   for (const m of tpl.matchAll(/(?<![:\w-])class="([^"]*)"/g)) {
     // 去掉插值
-    const raw = m[1].replace(/\{\{[^}]*\}\}/g, ' ')
+    const raw = m[1].replace(/\{\{[^}]*\}\}/g, ' ');
     for (const c of raw.split(/\s+/)) {
-      if (c) out.add(c)
+      if (c) out.add(c);
     }
   }
 
@@ -135,54 +133,54 @@ function usedClasses(tpl) {
   // 不能简单地「取所有引号里的标识符」——`:class="freeEndChip(a, b).cls"`
   // 里的函数参数 `'free_end_at'` 会被误当成 class 名。
   // 判据：引号前必须是 `{` 或 `,`（后跟空白），即**键值对的值位置**。
-  const kvLiteral = /[{,]\s*['"]([A-Za-z_][\w-]*)['"]\s*:/g
+  const kvLiteral = /[{,]\s*['"]([A-Za-z_][\w-]*)['"]\s*:/g;
   for (const m of tpl.matchAll(/\s:class=(?:"([^"]*)"|'([^']*)')/g)) {
-    const expr = m[1] ?? m[2] ?? ''
+    const expr = m[1] ?? m[2] ?? '';
     for (const s of expr.matchAll(kvLiteral)) {
-      out.add(s[1])
+      out.add(s[1]);
     }
   }
 
-  return out
+  return out;
 }
 
 /** 该 class 是否是 :deep() 穿透选择器的目标（不算缺失） */
 function isDeepTarget(tpl, name) {
-  return new RegExp(`:deep\\([^)]*\\.${name}\\b`).test(tpl)
+  return new RegExp(`:deep\\([^)]*\\.${name}\\b`).test(tpl);
 }
 
-const globalClasses = definedClasses(readFileSync(GLOBAL_CSS, 'utf-8'))
+const globalClasses = definedClasses(readFileSync(GLOBAL_CSS, 'utf-8'));
 
-const failures = []
+const failures = [];
 
 for (const abs of collectVue(SRC)) {
-  const rel = relative(SRC, abs)
-  const src = readFileSync(abs, 'utf-8')
-  const tpl = templateOf(src)
-  const local = definedClasses(styleBlocks(src))
-  const exempt = EXEMPTIONS[rel] ?? {}
+  const rel = relative(SRC, abs);
+  const src = readFileSync(abs, 'utf-8');
+  const tpl = templateOf(src);
+  const local = definedClasses(styleBlocks(src));
+  const exempt = EXEMPTIONS[rel] ?? {};
 
-  const missing = []
+  const missing = [];
   for (const name of usedClasses(tpl)) {
-    if (local.has(name) || globalClasses.has(name)) continue
-    if (isDeepTarget(tpl, name)) continue
-    if (name in exempt) continue
-    missing.push(name)
+    if (local.has(name) || globalClasses.has(name)) continue;
+    if (isDeepTarget(tpl, name)) continue;
+    if (name in exempt) continue;
+    missing.push(name);
   }
 
   if (missing.length) {
-    failures.push({ rel, missing: missing.sort() })
+    failures.push({ rel, missing: missing.sort() });
   }
 }
 
 if (failures.length) {
-  console.error('CSS class 定义检查失败（template 用了但没有样式定义）：')
+  console.error('CSS class 定义检查失败（template 用了但没有样式定义）：');
   for (const f of failures) {
-    console.error(`  - src/${f.rel}: ${f.missing.join(', ')}`)
+    console.error(`  - src/${f.rel}: ${f.missing.join(', ')}`);
   }
-  console.error('')
-  console.error('修法：在该文件的 <style> 里补上定义，或把它提到 styles/global.css。')
-  process.exit(1)
+  console.error('');
+  console.error('修法：在该文件的 <style> 里补上定义，或把它提到 styles/global.css。');
+  process.exit(1);
 }
 
-console.log('CSS class 定义检查通过')
+console.log('CSS class 定义检查通过');

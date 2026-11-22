@@ -1,50 +1,50 @@
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue'
-import { api, errMsg } from '../api'
-import { message } from 'ant-design-vue'
-import HistoryStats from './HistoryStats.vue'
-import JobStepList from './JobStepList.vue'
-import JobLogViewer from './JobLogViewer.vue'
-import type { JobRunItem as RunItem, JobStep, JobLogEntry } from '../types'
-import DataTable from './DataTable.vue'
+import { ref, watch, computed } from 'vue';
+import { api, errMsg } from '../api';
+import { message } from 'ant-design-vue';
+import HistoryStats from './HistoryStats.vue';
+import JobStepList from './JobStepList.vue';
+import JobLogViewer from './JobLogViewer.vue';
+import type { JobRunItem as RunItem, JobStep, JobLogEntry } from '../types';
+import DataTable from './DataTable.vue';
 
 const props = defineProps<{
-  open: boolean
-  jobName: string
-  jobLabel: string
-}>()
+  open: boolean;
+  jobName: string;
+  jobLabel: string;
+}>();
 
 const emit = defineEmits<{
-  (e: 'update:open', v: boolean): void
-}>()
+  (e: 'update:open', v: boolean): void;
+}>();
 
-const runs = ref<RunItem[]>([])
-const loading = ref(false)
-const selectedRun = ref<RunItem | null>(null)
+const runs = ref<RunItem[]>([]);
+const loading = ref(false);
+const selectedRun = ref<RunItem | null>(null);
 /** 详情加载中（点行时按需拉完整数据） */
-const detailLoading = ref(false)
+const detailLoading = ref(false);
 
 watch(
   () => props.open,
   async (o) => {
     if (o) {
-      selectedRun.value = null
-      await load()
+      selectedRun.value = null;
+      await load();
     }
-  }
-)
+  },
+);
 
 async function load() {
-  loading.value = true
+  loading.value = true;
   try {
     const r = await api.get<{ items: RunItem[] }>(
-      `/scheduler/runs?job_name=${props.jobName}&limit=100`
-    )
-    runs.value = r.items
+      `/scheduler/runs?job_name=${props.jobName}&limit=100`,
+    );
+    runs.value = r.items;
   } catch (e) {
-    message.error('加载历史失败：' + errMsg(e))
+    message.error('加载历史失败：' + errMsg(e));
   } finally {
-    loading.value = false
+    loading.value = false;
   }
 }
 
@@ -55,91 +55,86 @@ async function load() {
  * 100 条就是 MB 级），故选中行时才去详情端点取全量。
  */
 async function loadDetail(id: number): Promise<void> {
-  detailLoading.value = true
+  detailLoading.value = true;
   try {
-    const r = await api.get<RunItem>(`/scheduler/runs/${id}`)
+    const r = await api.get<RunItem>(`/scheduler/runs/${id}`);
     // 用详情替换列表里的精简条目（保持 selectedRun 指向同一条）
-    selectedRun.value = r
+    selectedRun.value = r;
   } catch (e) {
-    message.error('加载详情失败：' + errMsg(e))
+    message.error('加载详情失败：' + errMsg(e));
   } finally {
-    detailLoading.value = false
+    detailLoading.value = false;
   }
 }
 
 // ---------------------------------------------------------- 步骤提取
-function pickSummary(
-  rawSummary: unknown,
-  latestSteps: JobStep[],
-  latest: RunItem | null,
-): string {
+function pickSummary(rawSummary: unknown, latestSteps: JobStep[], latest: RunItem | null): string {
   // 优先后端 summary；兜底取最后一步 detail；再兜底 error / '—'
-  if (typeof rawSummary === 'string' && rawSummary) return rawSummary
+  if (typeof rawSummary === 'string' && rawSummary) return rawSummary;
   if (latestSteps.length) {
-    const last = latestSteps[latestSteps.length - 1]
+    const last = latestSteps[latestSteps.length - 1];
     // detail 可能是 null / 非字符串（后端 steps 来自 JSON）——
     // 只有字符串才能直接返回，否则回退到 name
-    const detail = typeof last.detail === 'string' ? last.detail : ''
-    return detail || last.name
+    const detail = typeof last.detail === 'string' ? last.detail : '';
+    return detail || last.name;
   }
-  if (latest?.error) return '失败'
-  return '—'
+  if (latest?.error) return '失败';
+  return '—';
 }
 
 function getSteps(r: RunItem | null): JobStep[] {
-  if (!r?.result) return []
-  const steps = (r.result as Record<string, unknown>).steps
-  if (!Array.isArray(steps)) return []
+  if (!r?.result) return [];
+  const steps = (r.result as Record<string, unknown>).steps;
+  if (!Array.isArray(steps)) return [];
   return steps.filter(
-    (s): s is JobStep =>
-      !!s && typeof s === 'object' && typeof (s as JobStep).name === 'string'
-  )
+    (s): s is JobStep => !!s && typeof s === 'object' && typeof (s as JobStep).name === 'string',
+  );
 }
 
 /** 执行日志（详情端点才有；列表端点被剥离）。 */
 function getLogs(r: RunItem | null): JobLogEntry[] {
-  if (!r?.result) return []
-  const logs = (r.result as Record<string, unknown>).logs
-  if (!Array.isArray(logs)) return []
+  if (!r?.result) return [];
+  const logs = (r.result as Record<string, unknown>).logs;
+  if (!Array.isArray(logs)) return [];
   return logs.filter(
     (l): l is JobLogEntry =>
-      !!l && typeof l === 'object' && typeof (l as JobLogEntry).message === 'string'
-  )
+      !!l && typeof l === 'object' && typeof (l as JobLogEntry).message === 'string',
+  );
 }
 
 function formatResult(r: unknown): string {
-  if (!r || typeof r !== 'object') return ''
-  const obj = r as Record<string, unknown>
-  const out: string[] = []
+  if (!r || typeof r !== 'object') return '';
+  const obj = r as Record<string, unknown>;
+  const out: string[] = [];
   // 人话摘要优先（后端是人话来源）
-  const summary = obj.summary
+  const summary = obj.summary;
   if (typeof summary === 'string' && summary) {
-    out.push(`摘要: ${summary}`)
+    out.push(`摘要: ${summary}`);
   }
   for (const [k, v] of Object.entries(obj)) {
-    if (k === 'steps' || k === 'summary' || k === 'logs') continue
-    out.push(`${k}: ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`)
+    if (k === 'steps' || k === 'summary' || k === 'logs') continue;
+    out.push(`${k}: ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`);
   }
-  return out.join('\n')
+  return out.join('\n');
 }
 
 // ---------------------------------------------------------- 顶部统计
 const stats = computed(() => {
-  const list = runs.value
-  if (!list.length) return null
-  const okCount = list.filter((r) => r.ok).length
+  const list = runs.value;
+  if (!list.length) return null;
+  const okCount = list.filter((r) => r.ok).length;
   const durations = list
     .map((r) => r.duration_ms)
-    .filter((d): d is number => typeof d === 'number')
+    .filter((d): d is number => typeof d === 'number');
   const avgMs = durations.length
     ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length)
-    : 0
-  const maxMs = durations.length ? Math.max(...durations) : 0
+    : 0;
+  const maxMs = durations.length ? Math.max(...durations) : 0;
   // 最近一次的结果摘要：优先后端 summary，兜底取最后一步 detail
-  const latest = list[0]
-  const latestSteps = getSteps(latest)
-  const rawSummary = latest?.result?.summary
-  const summary = pickSummary(rawSummary, latestSteps, latest)
+  const latest = list[0];
+  const latestSteps = getSteps(latest);
+  const rawSummary = latest?.result?.summary;
+  const summary = pickSummary(rawSummary, latestSteps, latest);
   return {
     total: list.length,
     okCount,
@@ -147,15 +142,15 @@ const stats = computed(() => {
     avgMs,
     maxMs,
     summary,
-  }
-})
+  };
+});
 
 /** 耗时格式化（毫秒 → 人类可读）。与 HistoryStats 同一口径。 */
 function formatDuration(ms: number | null): string {
-  if (ms == null) return '—'
-  if (ms < 1000) return `${ms}ms`
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
-  return `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`
+  if (ms == null) return '—';
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`;
 }
 
 /**
@@ -165,7 +160,7 @@ function formatDuration(ms: number | null): string {
  * 弹框变高）。完整值放进 tooltip。
  */
 function shortTime(s: string): string {
-  return s.length >= 19 ? s.substring(5, 19) : s
+  return s.length >= 19 ? s.substring(5, 19) : s;
 }
 
 /**
@@ -190,16 +185,16 @@ const columns = [
   { title: '状态', dataIndex: 'ok', key: 'ok', width: 60 },
   { title: '步骤', key: 'steps', width: 70 },
   { title: '错误', dataIndex: 'error', key: 'error', width: 60, ellipsis: true },
-]
+];
 
 /** Antd Table custom-row: 给 <tr> 绑 click 事件（比 @rowClick 可靠）。 */
 function customRow(record: RunItem) {
   return {
     onClick: () => {
-      selectedRun.value = record
-      void loadDetail(record.id)
+      selectedRun.value = record;
+      void loadDetail(record.id);
     },
-  }
+  };
 }
 </script>
 
@@ -237,7 +232,7 @@ function customRow(record: RunItem) {
           size="small"
           :loading="loading"
           :pagination="{ pageSize: 8, showSizeChanger: false }"
-          :row-class-name="(r: RunItem) => selectedRun?.id === r.id ? 'row-selected' : ''"
+          :row-class-name="(r: RunItem) => (selectedRun?.id === r.id ? 'row-selected' : '')"
           :custom-row="customRow"
         >
           <template #bodyCell="{ column, record }">
@@ -255,11 +250,7 @@ function customRow(record: RunItem) {
               </a-tag>
             </template>
             <template v-else-if="column.key === 'steps'">
-              <JobStepList
-                v-if="getSteps(record).length"
-                :steps="getSteps(record)"
-                compact
-              />
+              <JobStepList v-if="getSteps(record).length" :steps="getSteps(record)" compact />
               <span v-else class="dim">—</span>
             </template>
             <template v-else-if="column.key === 'error'">
@@ -323,9 +314,15 @@ function customRow(record: RunItem) {
 </template>
 
 <style scoped>
-.dim { color: var(--text-tertiary); }
-.mono { font-family: var(--font-mono, monospace); }
-.nowrap { white-space: nowrap; }
+.dim {
+  color: var(--text-tertiary);
+}
+.mono {
+  font-family: var(--font-mono, monospace);
+}
+.nowrap {
+  white-space: nowrap;
+}
 
 .history-toolbar {
   display: flex;

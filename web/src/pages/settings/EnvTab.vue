@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
-import { api, errMsg } from '../../api'
-import type { EnvSettingsView } from '../../types'
-import { message } from 'ant-design-vue'
+import { ref, onMounted, computed } from 'vue';
+import { api, errMsg } from '../../api';
+import type { EnvSettingsView } from '../../types';
+import { message } from 'ant-design-vue';
 
 /**
  * 环境变量配置（「设置」页的主体内容）。
@@ -16,72 +16,72 @@ import { message } from 'ant-design-vue'
  * 字段少（目前仅 cross_seed_scan_dirs 一项）+ 改后立即生效，弹框徒增
  * 一次点击。若未来字段增多（>5）可考虑改成弹框。
  */
-const data = ref<EnvSettingsView | null>(null)
-const loading = ref(false)
-const saving = ref(false)
+const data = ref<EnvSettingsView | null>(null);
+const loading = ref(false);
+const saving = ref(false);
 
 /** 草稿值（key → 用户编辑中的字符串）。 */
-const draft = ref<Record<string, string>>({})
+const draft = ref<Record<string, string>>({});
 
-const items = computed(() => data.value?.items ?? [])
+const items = computed(() => data.value?.items ?? []);
 
 function isDirty(): boolean {
-  if (!data.value) return false
-  return items.value.some((it) => draft.value[it.key] !== it.value)
+  if (!data.value) return false;
+  return items.value.some((it) => draft.value[it.key] !== it.value);
 }
 
 async function load() {
-  loading.value = true
+  loading.value = true;
   try {
-    const r = await api.get<EnvSettingsView>('/env-settings')
-    data.value = r
+    const r = await api.get<EnvSettingsView>('/env-settings');
+    data.value = r;
     // 草稿初始化为当前值
-    const next: Record<string, string> = {}
+    const next: Record<string, string> = {};
     for (const it of r.items) {
-      next[it.key] = it.value
+      next[it.key] = it.value;
     }
-    draft.value = next
+    draft.value = next;
   } catch (e) {
-    message.error('加载配置失败：' + errMsg(e))
+    message.error('加载配置失败：' + errMsg(e));
   } finally {
-    loading.value = false
+    loading.value = false;
   }
 }
 
 async function onSave() {
-  if (!data.value) return
+  if (!data.value) return;
   // 只传有改动的字段（partial update）
-  const updates: Record<string, string> = {}
+  const updates: Record<string, string> = {};
   for (const it of items.value) {
-    const v = draft.value[it.key]
+    const v = draft.value[it.key];
     if (v !== undefined && v !== it.value) {
-      updates[it.key] = v
+      updates[it.key] = v;
     }
   }
   if (Object.keys(updates).length === 0) {
-    return
+    return;
   }
-  saving.value = true
+  saving.value = true;
   try {
-    const r = await api.put<EnvSettingsView>('/env-settings', updates)
-    data.value = r
+    const r = await api.put<EnvSettingsView>('/env-settings', updates);
+    data.value = r;
     // 同步草稿（保存成功后端返回最新值）
-    const next: Record<string, string> = {}
+    const next: Record<string, string> = {};
     for (const it of r.items) {
-      next[it.key] = it.value
+      next[it.key] = it.value;
     }
-    draft.value = next
-    message.success('环境变量配置已保存（重启后保持）')
+    draft.value = next;
+    message.success('环境变量配置已保存（重启后保持）');
   } catch (e) {
-    message.error('保存失败：' + errMsg(e))
+    message.error('保存失败：' + errMsg(e));
   } finally {
-    saving.value = false
+    saving.value = false;
   }
 }
 
 onMounted(() => {
-  load()
-})
+  load();
+});
 </script>
 
 <template>
@@ -93,15 +93,10 @@ onMounted(() => {
       <section v-if="items.length" class="env-section">
         <div class="env-section__hint">
           <span class="env-section__hint-icon">ⓘ</span>
-          改动会立即生效并写入数据库——重启容器后保持不变。
-          多个目录用逗号分隔。
+          改动会立即生效并写入数据库——重启容器后保持不变。 多个目录用逗号分隔。
         </div>
 
-        <div
-          v-for="it in items"
-          :key="it.key"
-          class="env-row"
-        >
+        <div v-for="it in items" :key="it.key" class="env-row">
           <label class="env-label">{{ it.label }}</label>
           <div class="env-field">
             <a-textarea
@@ -122,12 +117,7 @@ onMounted(() => {
 
         <div class="env-actions">
           <a-button :disabled="saving" @click="load">取消</a-button>
-          <a-button
-            type="primary"
-            :loading="saving"
-            :disabled="!isDirty()"
-            @click="onSave"
-          >
+          <a-button type="primary" :loading="saving" :disabled="!isDirty()" @click="onSave">
             保存
           </a-button>
         </div>

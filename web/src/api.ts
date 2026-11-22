@@ -11,10 +11,10 @@
  */
 
 /** 辅种域的 API 前缀。 */
-const BASE = "/api/v1";
+const BASE = '/api/v1';
 
 /** 媒体库域的 API 前缀。 */
-const BASE_MEDIA = "/api";
+const BASE_MEDIA = '/api';
 
 export class ApiError extends Error {
   status: number;
@@ -34,12 +34,12 @@ export class ApiError extends Error {
  * 3. 带 `message` 字符串字段的普通对象（fetch 拒绝值常见形态）→ 该字段
  * 4. 否则 → fallback
  */
-export function errMsg(e: unknown, fallback = "未知错误"): string {
+export function errMsg(e: unknown, fallback = '未知错误'): string {
   if (e instanceof Error) return e.message || fallback;
-  if (typeof e === "string") return e || fallback;
-  if (e && typeof e === "object" && "message" in e) {
+  if (typeof e === 'string') return e || fallback;
+  if (e && typeof e === 'object' && 'message' in e) {
     const m = (e as { message: unknown }).message;
-    if (typeof m === "string" && m) return m;
+    if (typeof m === 'string' && m) return m;
   }
   return fallback;
 }
@@ -58,7 +58,7 @@ async function request<T = unknown>(
   const resp = await fetch(`${base}${path}`, {
     ...opts,
     headers: {
-      "Content-Type": "application/json",
+      'Content-Type': 'application/json',
       ...opts.headers,
     },
   });
@@ -67,16 +67,16 @@ async function request<T = unknown>(
     // 会话失效：清登录态并回登录页。不整页 reload（保留 SPA 路由栈，
     // 避免丢失滚动状态）；动态 import 避免与 router/pages 形成静态循环依赖。
     const [{ useAuthStore }, { default: router }] = await Promise.all([
-      import("./stores/auth"),
-      import("./router"),
+      import('./stores/auth'),
+      import('./router'),
     ]);
     const auth = useAuthStore();
     auth.authenticated = false;
     auth.username = null;
-    if (router.currentRoute.value.path !== "/login") {
-      await router.push("/login");
+    if (router.currentRoute.value.path !== '/login') {
+      await router.push('/login');
     }
-    throw new ApiError(401, "未登录");
+    throw new ApiError(401, '未登录');
   }
 
   if (!resp.ok) {
@@ -93,18 +93,12 @@ async function request<T = unknown>(
 }
 
 /** 辅种域的请求（`/api/v1/*`）。 */
-export function apiFetch<T = unknown>(
-  path: string,
-  opts: RequestInit = {},
-): Promise<T> {
+export function apiFetch<T = unknown>(path: string, opts: RequestInit = {}): Promise<T> {
   return request<T>(BASE, path, opts);
 }
 
 /** 媒体库域的请求（`/api/*`）。 */
-export function mediaFetch<T = unknown>(
-  path: string,
-  opts: RequestInit = {},
-): Promise<T> {
+export function mediaFetch<T = unknown>(path: string, opts: RequestInit = {}): Promise<T> {
   return request<T>(BASE_MEDIA, path, opts);
 }
 
@@ -121,12 +115,12 @@ export const api = {
   get: <T = unknown>(path: string) => apiFetch<T>(path),
   post: <T = unknown>(path: string, body?: unknown) =>
     apiFetch<T>(path, {
-      method: "POST",
+      method: 'POST',
       body: body ? JSON.stringify(body) : undefined,
     }),
   put: <T = unknown>(path: string, body?: unknown) =>
     apiFetch<T>(path, {
-      method: "PUT",
+      method: 'PUT',
       body: body ? JSON.stringify(body) : undefined,
     }),
 };
@@ -141,18 +135,18 @@ export const mediaApi = {
   get: <T = unknown>(path: string) => mediaFetch<T>(path),
   post: <T = unknown>(path: string, body?: unknown) =>
     mediaFetch<T>(path, {
-      method: "POST",
+      method: 'POST',
       body: body ? JSON.stringify(body) : undefined,
     }),
   put: <T = unknown>(path: string, body?: unknown) =>
     mediaFetch<T>(path, {
-      method: "PUT",
+      method: 'PUT',
       body: body ? JSON.stringify(body) : undefined,
     }),
   patch: <T = unknown>(path: string, body?: unknown) =>
     mediaFetch<T>(path, {
-      method: "PATCH",
+      method: 'PATCH',
       body: body ? JSON.stringify(body) : undefined,
     }),
-  del: <T = unknown>(path: string) => mediaFetch<T>(path, { method: "DELETE" }),
+  del: <T = unknown>(path: string) => mediaFetch<T>(path, { method: 'DELETE' }),
 };

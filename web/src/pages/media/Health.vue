@@ -18,11 +18,7 @@
             :type="report.healthy ? 'success' : 'warning'"
             show-icon
             :message="
-              report.configuration_error
-                ? '配置不完整'
-                : report.healthy
-                  ? '媒体库健康'
-                  : '发现问题'
+              report.configuration_error ? '配置不完整' : report.healthy ? '媒体库健康' : '发现问题'
             "
             :description="
               report.configuration_error
@@ -84,7 +80,9 @@
             </a-collapse-panel>
           </a-collapse>
 
-          <p class="muted" style="margin-top: 16px">检查时间：{{ formatTime(report.checked_at) }}</p>
+          <p class="muted" style="margin-top: 16px">
+            检查时间：{{ formatTime(report.checked_at) }}
+          </p>
         </template>
         <a-empty v-else description="尚未检查" />
       </a-spin>
@@ -93,31 +91,31 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from "vue"
-import { message } from "ant-design-vue"
-import { errMsg, mediaApi as api } from "../../api"
-import type { HealthReport } from "../../types"
-import PageHeader from "../../components/PageHeader.vue"
+import { onMounted, ref } from 'vue';
+import { message } from 'ant-design-vue';
+import { errMsg, mediaApi as api } from '../../api';
+import type { HealthReport } from '../../types';
+import PageHeader from '../../components/PageHeader.vue';
 
-const report = ref<HealthReport | null>(null)
-const loading = ref(false)
+const report = ref<HealthReport | null>(null);
+const loading = ref(false);
 
-onMounted(check)
+onMounted(check);
 
 async function check(): Promise<void> {
-  loading.value = true
+  loading.value = true;
   try {
-    report.value = await api.get<HealthReport>("/health/library")
+    report.value = await api.get<HealthReport>('/health/library');
   } catch (e) {
-    message.error(errMsg(e, "检查失败"))
+    message.error(errMsg(e, '检查失败'));
   } finally {
-    loading.value = false
+    loading.value = false;
   }
 }
 
 function formatTime(ts: number): string {
-  if (!ts) return "—"
-  return new Date(ts * 1000).toLocaleString("zh-CN")
+  if (!ts) return '—';
+  return new Date(ts * 1000).toLocaleString('zh-CN');
 }
 </script>
 <style scoped>

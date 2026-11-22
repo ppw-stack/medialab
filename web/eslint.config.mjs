@@ -26,13 +26,7 @@ export default withVueTs(
   },
 
   {
-    ignores: [
-      'node_modules/**',
-      'dist/**',
-      'coverage/**',
-      'auto-imports.d.ts',
-      'components.d.ts',
-    ],
+    ignores: ['node_modules/**', 'dist/**', 'coverage/**', 'auto-imports.d.ts', 'components.d.ts'],
   },
 
   js.configs.recommended,

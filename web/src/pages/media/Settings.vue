@@ -37,12 +37,7 @@
         </a-popconfirm>
       </a-space>
 
-      <a-alert
-        v-if="rotatedSecret"
-        type="success"
-        show-icon
-        style="margin-top: 12px"
-      >
+      <a-alert v-if="rotatedSecret" type="success" show-icon style="margin-top: 12px">
         <template #message>新密钥（只显示这一次，请立刻保存）</template>
         <template #description>
           <div class="mono secret">{{ rotatedSecret }}</div>
@@ -78,39 +73,41 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from "vue"
-import { message } from "ant-design-vue"
-import { api, errMsg } from "../../api"
-import PageHeader from "../../components/PageHeader.vue"
+import { ref } from 'vue';
+import { message } from 'ant-design-vue';
+import { api, errMsg } from '../../api';
+import PageHeader from '../../components/PageHeader.vue';
 
-const newSecret = ref("")
-const rotatedSecret = ref("")
-const rotating = ref(false)
+const newSecret = ref('');
+const rotatedSecret = ref('');
+const rotating = ref(false);
 
 async function onRotate(): Promise<void> {
-  rotating.value = true
-  rotatedSecret.value = ""
+  rotating.value = true;
+  rotatedSecret.value = '';
   try {
-    const res = await api.post<{ resigned: number; rewritten: number; failed: number; new_secret: string }>(
-      "/media/rotate-secret",
-      newSecret.value ? { new_secret: newSecret.value } : {},
-    )
-    rotatedSecret.value = res.new_secret
-    newSecret.value = ""
-    message.success(`已重签 ${res.resigned} 条，重写 ${res.rewritten} 个文件`)
+    const res = await api.post<{
+      resigned: number;
+      rewritten: number;
+      failed: number;
+      new_secret: string;
+    }>('/media/rotate-secret', newSecret.value ? { new_secret: newSecret.value } : {});
+    rotatedSecret.value = res.new_secret;
+    newSecret.value = '';
+    message.success(`已重签 ${res.resigned} 条，重写 ${res.rewritten} 个文件`);
   } catch (e) {
-    message.error(errMsg(e, "轮换失败"))
+    message.error(errMsg(e, '轮换失败'));
   } finally {
-    rotating.value = false
+    rotating.value = false;
   }
 }
 
 async function copySecret(): Promise<void> {
   try {
-    await navigator.clipboard.writeText(rotatedSecret.value)
-    message.success("已复制")
+    await navigator.clipboard.writeText(rotatedSecret.value);
+    message.success('已复制');
   } catch {
-    message.error("复制失败")
+    message.error('复制失败');
   }
 }
 </script>

@@ -10,14 +10,14 @@
  * 必须能看到「写入快照 / 检测异常 / 自动暂停」这些真实环节。子步骤最多
  * 5 条，展开不会撑爆面板。
  */
-import { ref, watch } from 'vue'
-import type { JobStep } from '../types'
+import { ref, watch } from 'vue';
+import type { JobStep } from '../types';
 
 const props = defineProps<{
-  steps: JobStep[]
+  steps: JobStep[];
   /** compact = 只显示小圆点（列表内预览） */
-  compact?: boolean
-}>()
+  compact?: boolean;
+}>();
 
 /**
  * 哪些步骤的明细处于展开态。
@@ -25,53 +25,57 @@ const props = defineProps<{
  * 用 `Set` 存步骤索引而不是组件级布尔——多个步骤各自独立展开，
  * 且步骤名可能重复（不同作业的同名步骤），索引更安全。
  */
-const expanded = ref<Set<number>>(new Set())
+const expanded = ref<Set<number>>(new Set());
 
 /** 步骤内容变化时收起全部（换了运行记录，旧展开态无意义）。 */
 watch(
   () => props.steps,
   () => {
-    expanded.value = new Set()
-  }
-)
+    expanded.value = new Set();
+  },
+);
 
 function isExpanded(idx: number): boolean {
-  return expanded.value.has(idx)
+  return expanded.value.has(idx);
 }
 
 function toggle(idx: number): void {
-  const next = new Set(expanded.value)
+  const next = new Set(expanded.value);
   if (next.has(idx)) {
-    next.delete(idx)
+    next.delete(idx);
   } else {
-    next.add(idx)
+    next.add(idx);
   }
-  expanded.value = next
+  expanded.value = next;
 }
 
 function statusIcon(s: string): string {
   switch (s) {
-    case 'ok': return '✓'
-    case 'warn': return '⚠'
-    case 'fail': return '✕'
-    default: return '○'
+    case 'ok':
+      return '✓';
+    case 'warn':
+      return '⚠';
+    case 'fail':
+      return '✕';
+    default:
+      return '○';
   }
 }
 
 function stepClass(s: string): string {
-  return `step--${s}`
+  return `step--${s}`;
 }
 
 /** 明细条数（截断时取完整条数）。 */
 function itemCount(step: JobStep): number {
-  return step.items_total ?? step.items?.length ?? 0
+  return step.items_total ?? step.items?.length ?? 0;
 }
 
 /** 是否被截断（显示条数 < 完整条数）。 */
 function truncated(step: JobStep): boolean {
-  const total = step.items_total ?? 0
-  const shown = step.items?.length ?? 0
-  return total > shown
+  const total = step.items_total ?? 0;
+  const shown = step.items?.length ?? 0;
+  return total > shown;
 }
 </script>
 
@@ -89,12 +93,7 @@ function truncated(step: JobStep): boolean {
 
   <!-- 完整模式：步骤卡片 -->
   <div v-else class="steps-list">
-    <div
-      v-for="(s, i) in steps"
-      :key="i"
-      class="step-card"
-      :class="stepClass(s.status)"
-    >
+    <div v-for="(s, i) in steps" :key="i" class="step-card" :class="stepClass(s.status)">
       <span class="step-icon">{{ statusIcon(s.status) }}</span>
       <span class="step-name">{{ s.name }}</span>
       <span v-if="s.count != null" class="step-count mono">{{ s.count }}</span>
@@ -110,12 +109,7 @@ function truncated(step: JobStep): boolean {
 
       <!-- 子步骤（编排型作业）：总是展开，视觉上缩进一级 -->
       <div v-if="s.children && s.children.length" class="step-children">
-        <div
-          v-for="(c, k) in s.children"
-          :key="k"
-          class="step-child"
-          :class="stepClass(c.status)"
-        >
+        <div v-for="(c, k) in s.children" :key="k" class="step-child" :class="stepClass(c.status)">
           <span class="step-child__icon">{{ statusIcon(c.status) }}</span>
           <span class="step-child__name">{{ c.name }}</span>
           <span v-if="c.count != null" class="step-child__count mono">{{ c.count }}</span>
@@ -154,7 +148,9 @@ function truncated(step: JobStep): boolean {
 </template>
 
 <style scoped>
-.mono { font-family: var(--font-mono, monospace); }
+.mono {
+  font-family: var(--font-mono, monospace);
+}
 
 /* 步骤卡片 */
 .steps-list {
@@ -174,10 +170,19 @@ function truncated(step: JobStep): boolean {
   background: var(--bg-surface);
   font-size: var(--text-xs);
 }
-.step--ok { border-left-color: var(--success-text, #52c41a); }
-.step--warn { border-left-color: var(--warning-text, #d97706); }
-.step--skip { border-left-color: var(--text-tertiary); opacity: 0.7; }
-.step--fail { border-left-color: var(--error-text, #f5222d); }
+.step--ok {
+  border-left-color: var(--success-text, #52c41a);
+}
+.step--warn {
+  border-left-color: var(--warning-text, #d97706);
+}
+.step--skip {
+  border-left-color: var(--text-tertiary);
+  opacity: 0.7;
+}
+.step--fail {
+  border-left-color: var(--error-text, #f5222d);
+}
 
 .step-icon {
   font-weight: 700;
@@ -185,10 +190,18 @@ function truncated(step: JobStep): boolean {
   flex: 0 0 14px;
   text-align: center;
 }
-.step--ok .step-icon { color: var(--success-text, #52c41a); }
-.step--warn .step-icon { color: var(--warning-text, #d97706); }
-.step--skip .step-icon { color: var(--text-tertiary); }
-.step--fail .step-icon { color: var(--error-text, #f5222d); }
+.step--ok .step-icon {
+  color: var(--success-text, #52c41a);
+}
+.step--warn .step-icon {
+  color: var(--warning-text, #d97706);
+}
+.step--skip .step-icon {
+  color: var(--text-tertiary);
+}
+.step--fail .step-icon {
+  color: var(--error-text, #f5222d);
+}
 
 .step-name {
   font-weight: 500;
@@ -237,10 +250,18 @@ function truncated(step: JobStep): boolean {
   flex: 0 0 12px;
   text-align: center;
 }
-.step-child--ok .step-child__icon { color: var(--success-text, #52c41a); }
-.step-child--warn .step-child__icon { color: var(--warning-text, #d97706); }
-.step-child--skip .step-child__icon { color: var(--text-tertiary); }
-.step-child--fail .step-child__icon { color: var(--error-text, #f5222d); }
+.step-child--ok .step-child__icon {
+  color: var(--success-text, #52c41a);
+}
+.step-child--warn .step-child__icon {
+  color: var(--warning-text, #d97706);
+}
+.step-child--skip .step-child__icon {
+  color: var(--text-tertiary);
+}
+.step-child--fail .step-child__icon {
+  color: var(--error-text, #f5222d);
+}
 .step-child__name {
   color: var(--text-secondary);
   flex: 0 0 auto;
@@ -305,10 +326,18 @@ function truncated(step: JobStep): boolean {
   flex: 0 0 12px;
   text-align: center;
 }
-.step-item--ok .step-item__icon { color: var(--success-text, #52c41a); }
-.step-item--warn .step-item__icon { color: var(--warning-text, #d97706); }
-.step-item--skip .step-item__icon { color: var(--text-tertiary); }
-.step-item--fail .step-item__icon { color: var(--error-text, #f5222d); }
+.step-item--ok .step-item__icon {
+  color: var(--success-text, #52c41a);
+}
+.step-item--warn .step-item__icon {
+  color: var(--warning-text, #d97706);
+}
+.step-item--skip .step-item__icon {
+  color: var(--text-tertiary);
+}
+.step-item--fail .step-item__icon {
+  color: var(--error-text, #f5222d);
+}
 
 .step-item__name {
   color: var(--text-primary);
@@ -337,8 +366,16 @@ function truncated(step: JobStep): boolean {
   display: inline-block;
   background: var(--text-tertiary);
 }
-.step-dot.step--ok { background: var(--success-text, #52c41a); }
-.step-dot.step--warn { background: var(--warning-text, #d97706); }
-.step-dot.step--skip { background: var(--border-hairline); }
-.step-dot.step--fail { background: var(--error-text, #f5222d); }
+.step-dot.step--ok {
+  background: var(--success-text, #52c41a);
+}
+.step-dot.step--warn {
+  background: var(--warning-text, #d97706);
+}
+.step-dot.step--skip {
+  background: var(--border-hairline);
+}
+.step-dot.step--fail {
+  background: var(--error-text, #f5222d);
+}
 </style>
