@@ -133,7 +133,7 @@ ssh <别名> "cd /mnt/user/appdata/medialab/app && TAG=1.0.2 docker compose -f d
 ```
 
 > **CI 是有依赖链的**（2026-10-23 改）：`push`（PR 合并 / tag push）→ `ci`
-> （ruff/mypy/pytest/vue-tsc/oxlint 闸门）→ **全绿才** `docker-image`（构建推送）。
+> （ruff/mypy/pytest/vue-tsc/ESLint/Prettier 闸门）→ **全绿才** `docker-image`（构建推送）。
 > 闸门红 → **不产出镜像**，第 2 步拉到的还是旧镜像（不会拉到半成品）。
 > 所以第 2 步前先确认 `docker-image` workflow 是 success。
 > ⚠️ **日常合并到 main 不出镜像**——CI 绿只会干净跳过 docker-image；

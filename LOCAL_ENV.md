@@ -603,7 +603,7 @@ ssh <别名> "cd /mnt/user/appdata/medialab/app && TAG=latest docker compose -f 
 两个 workflow，**有依赖关系**（2026-10-23 改）：
 
 ```
-push main ──→ ci（ruff+mypy+pytest / vue-tsc+oxlint）──全绿──→ docker-image（构建+推送）
+push main ──→ ci（ruff+mypy+pytest / vue-tsc+ESLint+Prettier）──全绿──→ docker-image（构建+推送）
                   ↓ 红                                              ↑
               不构建不推送                                     产出 latest/main/sha-*
 ```
@@ -611,7 +611,7 @@ push main ──→ ci（ruff+mypy+pytest / vue-tsc+oxlint）──全绿──�
 `.github/workflows/ci.yml`（闸门）
 
 - 触发：`push` 到 `main` 或 `v*` tag；`pull_request` 也触发
-- 闸门：backend（ruff + mypy + pytest）+ frontend（vue-tsc + types-placement + oxlint）
+- 闸门：backend（ruff + mypy + pytest）+ frontend（vue-tsc + types-placement + ESLint + Prettier）
 - 不保留 Playwright e2e（依赖真实下载器与站点，已整体移除）
 - 不上传 coverage artifact（无 codecov 等消费者，纯堆积）
 

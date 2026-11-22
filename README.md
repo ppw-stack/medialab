@@ -149,7 +149,7 @@ tests/
 | job | 检查 |
 |---|---|
 | backend | `ruff` + `mypy` + `pytest` |
-| frontend | `vue-tsc` + `oxlint` |
+| frontend | `vue-tsc` + `ESLint` + `Prettier` |
 
 **全绿才允许合并。** 前端不保留 e2e 测试（原 Playwright e2e 依赖真实下载器与站点，无法在 CI 运行，已移除）。
 

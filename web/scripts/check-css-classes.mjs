@@ -6,7 +6,7 @@
  * 没搬 `<style scoped>`**——原文件里的 `.filter-row` / `.progress-cell` 等
  * 6 个 class 定义就此丢失。页面上表现为：筛选栏控件挤成一团、进度条与
  * 百分比上下堆叠。**没有任何闸门能发现这件事**——vue-tsc 不管 CSS，
- * oxlint 也不管 CSS。
+ * ESLint 也不管 CSS。
  *
  * 约定：template 里用到的 class，必须在
  *   ① 本文件的 `<style>` 里，或
