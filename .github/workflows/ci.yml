@@ -7,7 +7,9 @@ name: ci
 #
 # 闸门内容（AGENTS.md「静态检查不通过禁止合并」的落地）：
 #   backend : ruff + mypy + pytest
-#   frontend: vue-tsc（类型）+ oxlint（lint）
+#   frontend: vue-tsc（类型）+ ESLint（lint）+ Prettier（格式）
+#
+# 前端工程规范见 docs/quality-gates.md。
 #
 # 不含 e2e：项目不保留 Playwright e2e（原 e2e 连真实下载器与站点，
 # CI 上跑不了，已整体移除）。
@@ -72,7 +74,7 @@ jobs:
         run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=66
 
   frontend:
-    name: frontend (vue-tsc + oxlint)
+    name: frontend (vue-tsc + ESLint + Prettier)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -87,8 +89,9 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - name: Install dependencies
+        # HUSKY=0：CI 不需要装 git hook（装了也没用，CI 不提交代码）
         working-directory: web
-        run: npm ci
+        run: HUSKY=0 npm ci
 
       - name: Type check + build
         # npm run build = `vue-tsc -b && vite build`——类型检查与构建一次覆盖，
@@ -104,14 +107,21 @@ jobs:
 
       - name: CSS class check
         # template 里用到的 class 必须有样式定义（本文件 <style> 或 global.css）。
-        # 防的是「合并页面时丢了 <style scoped>」——vue-tsc / oxlint 都不管 CSS，
+        # 防的是「合并页面时丢了 <style scoped>」——vue-tsc / ESLint 都不管 CSS，
         # 丢了不会有任何报错，页面样式却已经坏了。独立 node 脚本，不依赖浏览器 / 容器。
         working-directory: web
         run: node scripts/check-css-classes.mjs
 
       - name: Lint
+        # ESLint 10（flat config）+ strictTypeChecked / stylisticTypeChecked。
+        # --max-warnings 0：警告也不允许过（见 docs/quality-gates.md 的门禁标准）。
         working-directory: web
-        run: npx oxlint .
+        run: npm run lint
+
+      - name: Format check
+        # Prettier 格式统一——lint 不管格式，格式由 Prettier 单独把关。
+        working-directory: web
+        run: npm run format:check
 
   compose:
     name: compose (配置语法)
