@@ -265,3 +265,36 @@ def test_sanitize_loaded_warns_on_illegal_value(
         _sanitize_loaded(spec, 5, "DB")
     assert any("monitor_delete_expired" in r.message for r in caplog.records)
     assert any("回退" in r.message for r in caplog.records)
+
+
+# --------------------------------------------------------------------------
+# 参数归属的一致性（2026-11-22 加：整理作业的参数曾全部挂在不存在的
+# ``organize_torrents`` 下 → 作业配置弹框空着，用户无法开启整理）
+# --------------------------------------------------------------------------
+
+
+def test_spec_job_names_exist_in_registry() -> None:
+    """每个参数的 ``job`` 必须指向**已注册**的作业。
+
+    归属名写错不会报错：``specs_for_job(job_name)`` 只是按字符串过滤，
+    查不到就返回空元组——配置弹框静默空白，作业参数永远停在默认值。
+    故把「归属名 ⊆ 作业名」写成测试。
+    """
+    from app.services.job_registry import JOB_META
+    from app.services.runtime_params import PARAM_SPECS
+
+    job_names = {meta.name for meta in JOB_META}
+    unknown = sorted(
+        {spec.job for spec in PARAM_SPECS if spec.job and spec.job not in job_names}
+    )
+    assert not unknown, (
+        f"这些参数挂在未注册的作业名下：{unknown}（可用作业：{sorted(job_names)}）"
+    )
+
+
+def test_organize_job_exposes_its_params() -> None:
+    """整理作业必须拿得到自己的三个参数（否则面板上无法启用 / 调整）。"""
+    from app.services.runtime_params import specs_for_job
+
+    keys = {spec.key for spec in specs_for_job("organize_files")}
+    assert keys == {"organize_enabled", "organize_action", "organize_conflict_policy"}
