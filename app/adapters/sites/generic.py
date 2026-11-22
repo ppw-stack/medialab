@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any
@@ -24,6 +25,7 @@ from parsel import Selector
 from app.adapters.sites.base import (
     BreakerTripped,
     FeedItem,
+    Promotion,
     SiteAdapter,
     SiteFetchError,
     SiteHealth,
@@ -41,7 +43,7 @@ from app.adapters.sites.indexer.rules import SiteRules, load_site_rules
 from app.adapters.sites.user_data import SiteUserSnapshot
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.core.timeutils import format_bj
+from app.core.timeutils import bj_now_dt, format_bj, parse_bj
 
 logger = get_logger(__name__)
 
@@ -50,6 +52,9 @@ _DEFAULT_DETAIL_PATH = "details.php?id={item_id}"
 
 #: 列表页/详情页的促销 class（用于把倍率翻译成现有的免费窗口输入）
 _PROMO_CLASS_BY_FACTOR = {0: "free", 0.5: "halfdown", 0.3: "thirtypercent"}
+
+#: 优惠标记是 AJAX 占位符、只能逐种子查 ``promotion.php`` 的规则解析器。
+_PROMOTION_LOOKUP_PARSERS = frozenset({"HDWing"})
 
 #: 合法 .torrent 的首字节（bencode 顶层必须是 dict）。
 _TORRENT_MAGIC = b"d"
@@ -154,6 +159,9 @@ class GenericAdapter(SiteAdapter):
         self._user_agent = get_runtime_setting("USER_AGENT")
         self._rule = resolve_rule(profile.domain)
         self._base_url_value = str((self._rule or {}).get("domain") or profile.domain).rstrip("/")
+        self.supports_promotion_lookup = (
+            str((self._rule or {}).get("parser") or "") in _PROMOTION_LOOKUP_PARSERS
+        )
         self._client = httpx.AsyncClient(
             headers={"User-Agent": self._user_agent},
             cookies=_cookie_dict(cookies),
@@ -422,6 +430,61 @@ class GenericAdapter(SiteAdapter):
             raw_html=html,
         )
 
+    # ------------------------------------------------------------------ 5b. 优惠
+    async def get_promotion(self, item_id: str) -> Promotion | None:
+        """查单个种子的优惠历史，返回**当前生效**的 Free 优惠。
+
+        HDWinG 的列表页优惠标记是空占位符，真实数据由页面 JS 调
+        ``ajax_promotion.php`` 填充；该接口被 Cloudflare Turnstile 闸保护，
+        未过闸时对**任意 id**（含已过期 / 不存在的）都返回兜底的
+        ``pro_free``，不可信。服务端渲染的 ``promotion.php?id={tid}`` 是
+        权威源（优惠类型 / 开始时间 / 截止时间 / 操作人）。
+
+        返回 ``None`` = 该种子当前没有生效的优惠（不是免费种；不是查失败）。
+        404 / 「页面不存在」= 种子被删或 id 不存在 → 也返回 ``None``。
+        403/429 → :class:`BreakerTripped`；其它失败 → :class:`SiteFetchError`。
+        """
+        if not self.supports_promotion_lookup:
+            return None
+        item_id = str(item_id or "").strip()
+        if not item_id:
+            return None
+        url = urljoin(
+            f"{self._base_url_value}/",
+            f"promotion.php?id={quote(item_id)}",
+        )
+        try:
+            resp = await self._client.get(url, timeout=self._timeout)
+        except httpx.HTTPError as exc:
+            raise SiteFetchError(
+                f"{self.profile.name} 优惠历史拉取失败 id={item_id}: {exc}"
+            ) from exc
+        if resp.status_code in (403, 429):
+            raise BreakerTripped(
+                f"{self.profile.name} 优惠历史返回 {resp.status_code}，需熔断"
+            )
+        if resp.status_code == 404:
+            return None
+        if resp.status_code >= 400:
+            raise SiteFetchError(
+                f"{self.profile.name} 优惠历史返回 HTTP {resp.status_code} id={item_id}"
+            )
+        if _looks_like_login_response(resp):
+            raise SitePermanentError(
+                f"{self.profile.name} 优惠历史返回登录页（cookie 可能已失效）"
+                f" id={item_id}"
+            )
+        html = resp.text
+        if "页面不存在" in html:
+            return None
+        rows, header_seen = _parse_promotion_rows(html)
+        if not header_seen:
+            raise SiteFetchError(
+                f"{self.profile.name} 优惠历史页结构异常（缺少优惠表头）"
+                f" id={item_id}"
+            )
+        return _current_promotion(rows, bj_now_dt())
+
     # ------------------------------------------------------------------ 6. 字幕
     async def search_subtitles(
         self,
@@ -579,6 +642,93 @@ def _to_subtitle_item(row: dict[str, Any]) -> SubtitleItem:
         torrent_id=str(row["torrent_id"]) if row.get("torrent_id") else None,
         subtitle_id=str(row["subtitle_id"]) if row.get("subtitle_id") else None,
         file_name=str(row["file_name"]) if row.get("file_name") else None,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _PromotionRow:
+    """``promotion.php`` 表格中的一行 Free 记录（含过期删除线标记）。"""
+
+    start_at: str | None
+    end_at: str | None
+    expired: bool
+
+
+def _cell_text(cell: Selector) -> str:
+    """表格单元格文本（折叠空白）。"""
+    return re.sub(r"\s+", " ", "".join(cell.css("::text").getall())).strip()
+
+
+def _parse_promotion_rows(html: str) -> tuple[list[_PromotionRow], bool]:
+    """解析 ``promotion.php`` 优惠历史表。
+
+    Returns: ``(Free 行列表, 是否看到优惠表头)``。表头是「页面结构正常」
+    的判据：缺少表头时不能把页面当成「没有优惠」——可能是登录页 / CF
+    挑战 / 站点改版，调用方应抛错而不是写入错误判定。
+
+    过期行在站点页面里带 ``style='text-decoration: line-through;'``；
+    同时保留时间字段，最终由 :func:`_current_promotion` 按「开始时间 <= 现在
+    <= 截止时间」再次校验（截止为空 = 永久）。
+    """
+    doc = Selector(text=html)
+    rows: list[_PromotionRow] = []
+    header_seen = False
+    for tr in doc.css("tr"):
+        cells = [_cell_text(cell) for cell in tr.xpath("./td|./th")]
+        if not cells:
+            continue
+        if (
+            "优惠类型" in cells
+            and "开始时间" in cells
+            and "截止时间" in cells
+        ):
+            header_seen = True
+            continue
+        if len(cells) < 3 or cells[0].strip().lower() != "free":
+            continue
+        start_raw = cells[1].strip()
+        end_raw = cells[2].strip()
+        rows.append(
+            _PromotionRow(
+                start_at=parse_abs_datetime(start_raw),
+                end_at=parse_abs_datetime(end_raw) if end_raw else None,
+                expired="line-through" in (tr.attrib.get("style") or "").lower(),
+            )
+        )
+    return (rows, header_seen)
+
+
+def _current_promotion(
+    rows: list[_PromotionRow],
+    now: datetime,
+) -> Promotion | None:
+    """从 Free 行里挑出**当前生效**的那条。
+
+    判定：未被删除线标记、开始时间 <= 现在、截止时间为空或 > 现在。
+    多条同时生效时取**截止最晚**的一条（永久优先）。
+    """
+    active: list[Promotion] = []
+    for row in rows:
+        if row.expired:
+            continue
+        start = parse_bj(row.start_at)
+        if start is None or start > now:
+            continue
+        end = parse_bj(row.end_at)
+        if end is not None and end <= now:
+            continue
+        active.append(
+            Promotion(kind="Free", start_at=row.start_at, end_at=row.end_at)
+        )
+    if not active:
+        return None
+    return max(
+        active,
+        key=lambda promo: (
+            promo.end_at is None,
+            promo.end_at or "",
+            promo.start_at or "",
+        ),
     )
 
 

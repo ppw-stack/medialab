@@ -17,14 +17,19 @@ from datetime import timedelta
 
 import pytest
 from app.adapters.sites.base import (
+    BreakerTripped,
     FeedItem,
+    Promotion,
     SiteAdapter,
+    SiteFetchError,
     SiteHealth,
     SiteProfile,
 )
 from app.core.timeutils import bj_now, bj_now_dt, format_bj, parse_bj
 from app.db.models import Site, TorrentIndex
 from app.db.session import session_scope
+from app.domain.enums import FreeType
+from app.services import jobs as jobs_module
 from app.services.factory import AdapterFactory
 from app.services.jobs import fetch_all_sites
 from sqlalchemy import func, select, update
@@ -49,6 +54,9 @@ class _FakeAdapter(SiteAdapter):
         *,
         mode: str = "ok",
         fail_times: int = 0,
+        promotions: dict[str, Promotion | None] | None = None,
+        promo_breaker: bool = False,
+        promo_fail_items: set[str] | None = None,
         **_: object,
     ) -> None:
         super().__init__(profile)
@@ -56,6 +64,11 @@ class _FakeAdapter(SiteAdapter):
         #: 前 N 次调用抛异常（模拟瞬态故障），之后恢复正常
         self.fail_times = fail_times
         self.calls = 0
+        self.promotions = promotions or {}
+        self.promo_breaker = promo_breaker
+        self.promo_fail_items = promo_fail_items or set()
+        self.promotion_calls: list[str] = []
+        self.supports_promotion_lookup = promotions is not None or promo_breaker
 
     async def check_reachability(self) -> SiteHealth:
         return SiteHealth(reachable=True, logged_in=True)
@@ -92,6 +105,15 @@ class _FakeAdapter(SiteAdapter):
             return []
         if page_number > 1:
             return []
+        if self.mode == "plain":
+            return [
+                FeedItem(
+                    title=f"torrent-{self.profile.name}-{i}",
+                    item_id=f"{i}",
+                    size=1024 * (i + 1),
+                )
+                for i in range(3)
+            ]
         return [
             FeedItem(
                 title=f"torrent-{self.profile.name}-{i}",
@@ -118,6 +140,14 @@ class _FakeAdapter(SiteAdapter):
         from app.adapters.sites.base import TorrentDetail
 
         return TorrentDetail(item_id=item_id)
+
+    async def get_promotion(self, item_id: str) -> Promotion | None:
+        self.promotion_calls.append(item_id)
+        if self.promo_breaker:
+            raise BreakerTripped("优惠历史返回 429，需熔断")
+        if item_id in self.promo_fail_items:
+            raise SiteFetchError("优惠历史临时失败")
+        return self.promotions.get(item_id)
 
 
 @pytest.fixture
@@ -564,6 +594,179 @@ async def test_fetch_upsert_after_site_deleted_is_skipped_not_crashed(
             )
         ).scalar_one()
         assert orphan == 0
+
+
+# ------------------------------------------------- 优惠查询（HDWinG 免费判定）
+
+def _factory_with_adapter(adapter: _FakeAdapter) -> AdapterFactory:
+    factory = AdapterFactory()
+
+    def _site(row: Site, *, cookies: str | None = None) -> _FakeAdapter:
+        return adapter
+
+    factory.site = _site  # type: ignore[method-assign]
+    return factory
+
+
+async def test_promotion_lookup_incremental_and_ttl(db: None) -> None:
+    """优惠判定按「新增 / 到期 / TTL」增量复查，不每轮全量重查。"""
+    await _add_sites("hdwing")
+    async with session_scope() as session:
+        site_id = (
+            await session.execute(select(Site.id).where(Site.name == "hdwing"))
+        ).scalar_one()
+
+    now = bj_now_dt()
+    future = format_bj(now + timedelta(hours=2))
+    adapter = _FakeAdapter(
+        SiteProfile(name="hdwing", domain="hdwing.test"),
+        mode="plain",
+        promotions={
+            "0": Promotion("Free", "2020-01-01 00:00:00", future),
+            "1": None,
+            "2": Promotion("Free", "2020-01-01 00:00:00", None),
+        },
+    )
+    factory = _factory_with_adapter(adapter)
+
+    result = await fetch_all_sites(factory)
+    assert result["total_written"] == 3
+    assert set(adapter.promotion_calls) == {"0", "1", "2"}
+
+    async with session_scope() as session:
+        rows = (
+            await session.execute(
+                select(TorrentIndex).where(TorrentIndex.site_id == site_id)
+            )
+        ).scalars().all()
+        by_id = {row.item_id: row for row in rows}
+        assert by_id["0"].free_type == FreeType.TIMED
+        assert by_id["0"].free_end_at == future
+        assert by_id["1"].free_type == FreeType.UNKNOWN
+        assert by_id["1"].free_payload.get("free_classes") == []
+        assert by_id["1"].free_payload.get("promotion_checked_at")
+        assert by_id["2"].free_type == FreeType.PERMANENT
+
+    # 立即再跑一轮：生效中的 TIMED、永久免费、刚标记的非免费都不该重查
+    adapter.promotion_calls.clear()
+    await fetch_all_sites(factory)
+    assert adapter.promotion_calls == []
+
+    # 把非免费标记做旧、把 TIMED 窗口改成已过期 → 只复查这两条
+    async with session_scope() as session:
+        rows = (
+            await session.execute(
+                select(TorrentIndex).where(TorrentIndex.site_id == site_id)
+            )
+        ).scalars().all()
+        by_id = {row.item_id: row for row in rows}
+        payload = dict(by_id["1"].free_payload)
+        payload["promotion_checked_at"] = format_bj(
+            bj_now_dt() - timedelta(hours=2)
+        )
+        by_id["1"].free_payload = payload
+        by_id["0"].free_end_at = format_bj(bj_now_dt() - timedelta(minutes=1))
+
+    adapter.promotions["0"] = None
+    adapter.promotion_calls.clear()
+    await fetch_all_sites(factory)
+    assert set(adapter.promotion_calls) == {"0", "1"}
+
+    async with session_scope() as session:
+        rows = (
+            await session.execute(
+                select(TorrentIndex).where(TorrentIndex.site_id == site_id)
+            )
+        ).scalars().all()
+        by_id = {row.item_id: row for row in rows}
+        assert by_id["0"].free_type == FreeType.UNKNOWN
+        assert by_id["0"].free_payload.get("free_classes") == []
+        assert by_id["1"].free_type == FreeType.UNKNOWN
+        assert by_id["2"].free_type == FreeType.PERMANENT
+
+
+async def test_promotion_lookup_respects_round_cap(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """单轮上限：超出的条目本轮先不查，下轮自然续查。"""
+    await _add_sites("hdwing")
+    monkeypatch.setattr(jobs_module, "_PROMO_LOOKUP_MAX", 2)
+    adapter = _FakeAdapter(
+        SiteProfile(name="hdwing", domain="hdwing.test"),
+        mode="plain",
+        promotions={"0": None, "1": None, "2": None},
+    )
+    factory = _factory_with_adapter(adapter)
+
+    await fetch_all_sites(factory)
+    assert set(adapter.promotion_calls) == {"0", "1"}
+
+    adapter.promotion_calls.clear()
+    await fetch_all_sites(factory)
+    assert set(adapter.promotion_calls) == {"2"}
+
+    adapter.promotion_calls.clear()
+    await fetch_all_sites(factory)
+    assert adapter.promotion_calls == []
+
+
+async def test_promotion_lookup_failure_is_retried_next_round(db: None) -> None:
+    """单条查询失败**不写非免费标记**，下轮继续重试。"""
+    await _add_sites("hdwing")
+    async with session_scope() as session:
+        site_id = (
+            await session.execute(select(Site.id).where(Site.name == "hdwing"))
+        ).scalar_one()
+    adapter = _FakeAdapter(
+        SiteProfile(name="hdwing", domain="hdwing.test"),
+        mode="plain",
+        promotions={"0": None, "1": None, "2": None},
+        promo_fail_items={"0"},
+    )
+    factory = _factory_with_adapter(adapter)
+
+    await fetch_all_sites(factory)
+    async with session_scope() as session:
+        rows = (
+            await session.execute(
+                select(TorrentIndex).where(TorrentIndex.site_id == site_id)
+            )
+        ).scalars().all()
+        by_id = {row.item_id: row for row in rows}
+        assert by_id["0"].free_payload == {}
+        assert by_id["1"].free_payload.get("promotion_checked_at")
+
+    adapter.promotion_calls.clear()
+    await fetch_all_sites(factory)
+    assert set(adapter.promotion_calls) == {"0"}
+
+
+async def test_promotion_lookup_breaker_opens_site_breaker(db: None) -> None:
+    """优惠查询触发 429 → 同样写站点熔断，下一轮整站跳过。"""
+    await _add_sites("hdwing")
+    adapter = _FakeAdapter(
+        SiteProfile(name="hdwing", domain="hdwing.test"),
+        mode="plain",
+        promotions={"0": None, "1": None, "2": None},
+        promo_breaker=True,
+    )
+    factory = _factory_with_adapter(adapter)
+
+    result = await fetch_all_sites(factory)
+    assert result["skipped_breaker"] == 1
+    assert result["failed_sites"] == 0
+    assert adapter.promotion_calls
+
+    async with session_scope() as session:
+        row = (
+            await session.execute(select(Site).where(Site.name == "hdwing"))
+        ).scalar_one()
+        assert row.breaker_until is not None
+        assert row.breaker_until > bj_now()
+
+    adapter.promotion_calls.clear()
+    await fetch_all_sites(factory)
+    assert adapter.promotion_calls == []
 
 
 

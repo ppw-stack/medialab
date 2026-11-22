@@ -83,6 +83,18 @@ class SiteProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class Promotion:
+    """单个种子**当前生效**的优惠（服务端渲染的优惠历史）。
+
+    :attr:`end_at` 为 ``None`` = **永久优惠**（站点没给截止时间）。
+    """
+
+    kind: str
+    start_at: str | None
+    end_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class SubtitleItem:
     """站点字幕搜索结果（``search_subtitles`` 返回值）。
 
@@ -185,6 +197,14 @@ class SiteAdapter(ABC):
     adapter_type: str = "generic"
     #: HTTP 客户端由子类 __init__ 按站点 headers/cookies 创建
     _client: httpx.AsyncClient
+    #: 适配器是否支持「按种子查优惠详情」（``promotion.php`` 类接口）。
+    #:
+    #: 默认 False——多数 NexusPHP 站把 ``pro_*`` 优惠标记**直接 SSR 在列表
+    #: HTML 里**，adapter 解析列表时就拿到了。少数站（hdwing）优惠标记是
+    #: AJAX 占位符，只能逐种子查服务端渲染的优惠历史表；这类站置 True，
+    #: service 层据此做**增量**免费判定（只复查新增 / 已过期的条目）。
+    supports_promotion_lookup: bool = False
+
     def __init__(
         self,
         profile: SiteProfile,
@@ -255,6 +275,14 @@ class SiteAdapter(ABC):
     @abstractmethod
     async def get_torrent_detail(self, item_id: str) -> TorrentDetail:
         """5. 种子详情查询。返回统一结构（含 download_url / free_payload / raw_html）。"""
+
+    async def get_promotion(self, item_id: str) -> Promotion | None:
+        """6b. 按种子查**当前生效**的优惠（可选能力，默认不支持）。
+
+        返回 ``None`` = 该种子当前**没有生效的优惠**（不是免费种；
+        不是「查失败」——失败必须抛 :class:`SiteFetchError`）。
+        """
+        raise NotImplementedError
 
     async def search_subtitles(
         self,
