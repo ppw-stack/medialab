@@ -1146,7 +1146,7 @@ cd web && npm run lint                           # ESLint（--max-warnings 0）
 cd web && npm run format:check                   # Prettier 格式检查
 cd web && npm run type-check                     # vue-tsc 类型检查
 cd web && npm test                               # 前端单元测试（node:test，零新增依赖，需 Node ≥ 22.18）
-cd web && npm run build                          # vue-tsc -b && vite build
+cd web && npm run build                          # 生产构建（app+node，不含测试工程）
 cd web && node scripts/check-types-placement.mjs # 类型放置约束
 cd web && node scripts/check-css-classes.mjs      # CSS class 定义检查
 ```

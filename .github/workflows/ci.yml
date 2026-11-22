@@ -94,10 +94,16 @@ jobs:
         run: HUSKY=0 npm ci
 
       - name: Type check + build
-        # npm run build = `vue-tsc -b && vite build`——类型检查与构建一次覆盖，
-        # 不需要再单独跑 vue-tsc（重复且慢）。
+        # 类型检查分两段，**不要合并成只跑 build**：
+        # · `npm run type-check` = `vue-tsc -b`（根 tsconfig 引用 app / node /
+        #   **test** 三个工程）——测试代码也要过严格模式；
+        # · `npm run build` = `vue-tsc -b tsconfig.app.json tsconfig.node.json
+        #   && vite build`——**只构建生产工程，不含测试工程**。
+        #   原因：Docker 构建上下文按 `.dockerignore` 排除 `**/tests`，
+        #   生产构建不能依赖测试源码（v3.0.0 曾因 TS18003
+        #   「No inputs were found in /build/tsconfig.test.json」镜像构建失败）。
         working-directory: web
-        run: npm run build
+        run: npm run type-check && npm run build
 
       - name: Type placement check
         # API 契约类型必须集中在 web/src/types.ts（Phase 4）。
