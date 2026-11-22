@@ -315,7 +315,7 @@ function formatRunFull(s: string): string {
           作业里找目标，堆一页又会拉成 2-3 屏长列表。域的顺序与中文名都
           来自后端（`modules`），前端不自己排。
         -->
-        <a-tabs v-model:active-key="activeModule" class="domain-tabs">
+        <a-tabs v-model:active-key="activeModule">
           <a-tab-pane
             v-for="group in moduleGroups"
             :key="group.key"
