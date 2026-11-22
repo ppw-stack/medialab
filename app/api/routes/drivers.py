@@ -316,8 +316,9 @@ async def update_config_route(driver_id: int, payload: DriverConfigIn) -> Driver
 async def browse_driver_dirs_route(driver_id: int, parent_id: str = "") -> dict[str, object]:
     """列出存储源某个目录下的**子目录**（媒体库配置页选目录用）。
 
-    ``parent_id`` **留空 = 账号根目录**（按驱动类型解析：光鸭的根是空串、
-    光鸭的根是空串）——浏览起点只能是根，此时 ``media_cid`` 还没配。
+    ``parent_id`` **留空 = 账号根目录**（光鸭的根 ``fileId`` 就是空串，
+    由 service 层按驱动类型解析）——浏览起点只能是根，此时 ``media_cid``
+    还没配。
 
     返回 ``{"driver_id", "parent_id", "dirs": [{"id", "name"}]}``，形状与
     ``GET /api/upload-tasks/targets`` 一致（前端同一个 ``DirBrowser`` 组件

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 from typing import Any
 
@@ -69,12 +70,32 @@ def build_driver(
     factory, decoder = entry
     plain = decoder(credential)
     if on_token_refresh is not None:
-        try:
+        # 用**签名判断**而不是 try/except TypeError：构造函数内部抛出的
+        # TypeError（参数拼错、类型不对）会被 except 吞掉，然后静默退化成
+        # 不带回调的重建——真实缺陷被掩盖，且驱动被初始化两次
+        # （2026-11-22 评审指出）。
+        if _accepts_token_refresh(factory):
             return factory(plain, on_token_refresh=on_token_refresh)
-        except TypeError:
-            # 驱动不接受该回调——退回普通构造
-            pass
+        logger.debug(
+            "驱动 %s 不接受 on_token_refresh，按普通构造（刷新后的 token 不会写回 DB）",
+            driver_type,
+        )
     return factory(plain)
+
+
+def _accepts_token_refresh(factory: DriverFactory) -> bool:
+    """构造函数是否接受 ``on_token_refresh`` 关键字参数。
+
+    取不到签名（C 扩展 / ``functools.partial`` 等）时按**接受**处理——
+    让驱动自己决定，而不是静默丢掉回调（丢回调会让 Token 刷新后不写回）。
+    """
+    try:
+        params = inspect.signature(factory).parameters
+    except (TypeError, ValueError):  # pragma: no cover - 无法取签名的构造器
+        return True
+    return "on_token_refresh" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
 
 
 def registered_types() -> list[str]:

@@ -95,7 +95,13 @@ async def _driver_type(driver_id: int) -> str:
 
 
 async def _require_guangya(driver_id: int) -> None:
-    """登录只支持光鸭盘；其它类型 400（不是上游故障）。"""
+    """登录只支持光鸭盘（其它类型一律 400，不是上游故障）。
+
+    Raises:
+        DriverAuthError: 存储源类型不是 ``guangya``（``status_code=400``、
+            ``kind="invalid"``）。存储源不存在时由 :func:`_driver_type`
+            转发的 ``DriverServiceError``（404）先冒泡，路由层统一映射。
+    """
     if await _driver_type(driver_id) != "guangya":
         raise DriverAuthError("该存储源不支持登录", status_code=400, kind="invalid")
 

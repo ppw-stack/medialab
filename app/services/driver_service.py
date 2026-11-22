@@ -749,9 +749,9 @@ async def browse_driver_dirs(driver_id: int, parent_id: str = "") -> list[tuple[
 
     Args:
         driver_id: 存储源 id。
-        parent_id: 父目录 id；**留空 = 账号根目录**（按驱动类型解析，
-            见 :data:`app.domain.driver_types.ROOT_DIR_IDS`）。浏览起点
-            只能是根——此时 ``media_cid`` 还没配，没有更深的入口。
+        parent_id: 父目录 id；**留空 = 账号根目录**（光鸭的根 ``fileId``
+            就是空串，见 :data:`app.domain.driver_types.ROOT_DIR_IDS`）。
+            浏览起点只能是根——此时 ``media_cid`` 还没配，没有更深的入口。
 
     Returns:
         ``[(remote_id, name), ...]``——只含目录（文件不进目录浏览器）。
