@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+# 只检查本次 Git 暂存文件；检查失败则禁止提交。
+#
+# ⚠️ Git hook 的 cwd 是**仓库根**（不是 web/），且 husky 的 PATH 注入
+#    只认仓库根的 node_modules/.bin —— 所以必须先 cd 进 web/。
+cd web && npx lint-staged
