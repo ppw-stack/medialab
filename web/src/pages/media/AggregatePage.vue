@@ -27,8 +27,9 @@
         且<b>失败也扣</b>。额度耗尽时任务转「暂停」，<b>不硬撞不重试</b>，
         次日额度窗口打开时自动续传。
         <br />
-        迁移与归拢都<b>串行</b>提交（不支持并发）——并发会让云下载落盘名撞车
-        （<span class="mono">download(1)</span>），且更快撞上额度墙。
+        迁移与归拢都<b>串行</b>提交（不支持并发）——并发会让云下载落盘名撞车 （<span class="mono"
+          >download(1)</span
+        >），且更快撞上额度墙。
       </template>
     </a-alert>
 
@@ -38,7 +39,7 @@
         <a-space>
           <span>{{ group.name }}</span>
           <a-tag :color="group.enabled ? 'green' : 'default'">
-            {{ group.enabled ? "启用" : "停用" }}
+            {{ group.enabled ? '启用' : '停用' }}
           </a-tag>
         </a-space>
       </template>
@@ -123,14 +124,12 @@
           <div v-if="driversOf(group).length === 0" class="muted">尚未指派存储源</div>
           <div v-for="d in driversOf(group)" :key="d.id" class="member">
             <a-tag :color="d.role === 'master' ? 'blue' : 'orange'">
-              {{ d.role === "master" ? "主" : "副" }}
+              {{ d.role === 'master' ? '主' : '副' }}
             </a-tag>
             <span class="member-name">{{ d.name }}</span>
             <a-button size="small" danger @click="detach(d)">移出</a-button>
           </div>
-          <a-button size="small" class="mt-sm" @click="openAssign(group)">
-            指派存储源
-          </a-button>
+          <a-button size="small" class="mt-sm" @click="openAssign(group)"> 指派存储源 </a-button>
         </a-col>
 
         <a-col :span="14">
@@ -146,7 +145,7 @@
             <div class="mapping-row">
               <span class="mapping-label">归拢目标</span>
               <span class="mapping-value">
-                {{ mappingOf(group.id)?.target_dir_path || "（未配置）" }}
+                {{ mappingOf(group.id)?.target_dir_path || '（未配置）' }}
                 <span v-if="mappingOf(group.id)?.target_dir_id" class="muted mono">
                   （id: {{ mappingOf(group.id)?.target_dir_id }}）
                 </span>
@@ -156,7 +155,7 @@
             <div v-for="d in secondariesOf(group)" :key="d.id" class="mapping-row">
               <span class="mapping-label">{{ d.name }}</span>
               <span class="mapping-value">
-                {{ rootPathOf(group.id, d.id) || "（未配置缓冲根）" }}
+                {{ rootPathOf(group.id, d.id) || '（未配置缓冲根）' }}
               </span>
             </div>
           </div>
@@ -170,7 +169,7 @@
               {{ pendingCount(group) }} 个 / {{ formatBytes(pendingBytes(group)) }}
             </a-descriptions-item>
             <a-descriptions-item label="失败 / 暂停">
-              {{ countOf(group, "failed") }} / {{ countOf(group, "paused") }} 个 ·
+              {{ countOf(group, 'failed') }} / {{ countOf(group, 'paused') }} 个 ·
               {{ formatBytes(failedPausedBytes(group)) }}
             </a-descriptions-item>
           </a-descriptions>
@@ -286,7 +285,7 @@
         @go="goTargetDir"
       />
       <div class="muted hint">
-        已选：{{ mappingTarget?.path || "（未选）" }}
+        已选：{{ mappingTarget?.path || '（未选）' }}
         <span v-if="mappingTarget" class="mono">（id: {{ mappingTarget.id }}）</span>
       </div>
 
@@ -296,15 +295,13 @@
           :title="`${d.name} 缓冲根`"
           :stack="rootStack(d.id).stack"
           :dirs="rootStack(d.id).dirs"
-          :loading="loadingRoot[d.id]"
+          :loading="loadingRoot[d.id] ?? false"
           @open="(e: DirEntry) => openRootDir(d.id, e)"
           @go="(i: number) => goRootDir(d.id, i)"
         />
         <div class="muted hint">
-          已选：{{ rootPicked[d.id]?.path || "（未选）" }}
-          <span v-if="rootPicked[d.id]" class="mono">
-            （id: {{ rootPicked[d.id]?.id }}）
-          </span>
+          已选：{{ rootPicked[d.id]?.path || '（未选）' }}
+          <span v-if="rootPicked[d.id]" class="mono"> （id: {{ rootPicked[d.id]?.id }}） </span>
         </div>
       </template>
     </a-modal>
@@ -342,12 +339,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue"
-import { message } from "ant-design-vue"
-import DataTable from "../../components/DataTable.vue"
-import DirBrowser from "../../components/DirBrowser.vue"
-import PageHeader from "../../components/PageHeader.vue"
-import { errMsg, mediaApi as api } from "../../api"
+import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { message } from 'ant-design-vue';
+import DataTable from '../../components/DataTable.vue';
+import DirBrowser from '../../components/DirBrowser.vue';
+import PageHeader from '../../components/PageHeader.vue';
+import { errMsg, mediaApi as api } from '../../api';
 import type {
   AggregateGroup,
   AggregateGroupMapping,
@@ -356,123 +353,148 @@ import type {
   DirEntry,
   Driver,
   StagingRow,
-} from "../../types"
-import { formatBytes } from "../../utils/format"
+} from '../../types';
+import { formatBytes } from '../../utils/format';
 
-const groups = ref<AggregateGroup[]>([])
-const stats = ref<AggregateGroupStats[]>([])
-const drivers = ref<Driver[]>([])
-const staging = ref<StagingRow[]>([])
+const groups = ref<AggregateGroup[]>([]);
+const stats = ref<AggregateGroupStats[]>([]);
+const drivers = ref<Driver[]>([]);
+const staging = ref<StagingRow[]>([]);
 /** 服务端常量（单一真源）：光鸭云添加每日额度 */
-const dailyQuota = ref(3)
+const dailyQuota = ref(3);
 
 /** 各组的目录映射（group_id → mapping） */
-const mappings = ref<Record<number, AggregateGroupMapping>>({})
-const mappingOpen = ref(false)
-const mappingGroup = ref<AggregateGroup | null>(null)
+const mappings = ref<Record<number, AggregateGroupMapping>>({});
+const mappingOpen = ref(false);
+const mappingGroup = ref<AggregateGroup | null>(null);
 /** 主盘目标目录的浏览状态 */
-const targetStack = ref<DirEntry[]>([])
-const targetDirs = ref<DirEntry[]>([])
-const loadingTarget = ref(false)
-const mappingTarget = ref<{ id: string; path: string } | null>(null)
+const targetStack = ref<DirEntry[]>([]);
+const targetDirs = ref<DirEntry[]>([]);
+const loadingTarget = ref(false);
+const mappingTarget = ref<{ id: string; path: string } | null>(null);
 /** 各副盘缓冲根的浏览状态（driver_id → {stack, dirs}） */
-const rootStackState = ref<Record<number, { stack: DirEntry[]; dirs: DirEntry[] }>>({})
-const loadingRoot = ref<Record<number, boolean>>({})
-const rootPicked = ref<Record<number, { id: string; path: string } | undefined>>({})
+const rootStackState = ref<Record<number, { stack: DirEntry[]; dirs: DirEntry[] }>>({});
+const loadingRoot = ref<Record<number, boolean>>({});
+const rootPicked = ref<Record<number, { id: string; path: string } | undefined>>({});
 
-const loading = ref(false)
-const saving = ref(false)
-const busyGroupId = ref<number | null>(null)
-const syncingGroupId = ref<number | null>(null)
+const loading = ref(false);
+const saving = ref(false);
+const busyGroupId = ref<number | null>(null);
+const syncingGroupId = ref<number | null>(null);
 
-const createOpen = ref(false)
-const groupName = ref("")
-const assignOpen = ref(false)
-const assignGroupId = ref<number | null>(null)
-const assignDriverId = ref<number | undefined>(undefined)
-const assignRole = ref<string>("secondary")
+const createOpen = ref(false);
+const groupName = ref('');
+const assignOpen = ref(false);
+const assignGroupId = ref<number | null>(null);
+const assignDriverId = ref<number | undefined>(undefined);
+const assignRole = ref<string>('secondary');
 
 const stagingColumns = [
-  { title: "文件", dataIndex: "file_name", key: "name", ellipsis: true },
-  { title: "大小", key: "size", width: 110 },
-  { title: "状态", key: "state", width: 100 },
-  { title: "操作", key: "action", width: 150 },
-]
+  { title: '文件', dataIndex: 'file_name', key: 'name', ellipsis: true },
+  { title: '大小', key: 'size', width: 110 },
+  { title: '状态', key: 'state', width: 100 },
+  { title: '操作', key: 'action', width: 150 },
+];
 
 /** 组内存储源（主盘在前）。 */
 function driversOf(group: AggregateGroup): Driver[] {
-  const members = drivers.value.filter((d) => d.aggregate_group_id === group.id)
+  const members = drivers.value.filter((d) => d.aggregate_group_id === group.id);
   return members.sort((a, b) => {
-    if (a.role === b.role) return a.id - b.id
-    return a.role === "master" ? -1 : 1
-  })
+    if (a.role === b.role) return a.id - b.id;
+    return a.role === 'master' ? -1 : 1;
+  });
 }
 
 /** 可指派的存储源（未入组的优先，已入组的也能换组）。 */
-const candidates = computed(() => drivers.value.filter((d) => d.type === "guangya"))
+const candidates = computed(() => drivers.value.filter((d) => d.type === 'guangya'));
 
 /** 某组的目录映射 */
 function mappingOf(groupId: number): AggregateGroupMapping | undefined {
-  return mappings.value[groupId]
+  return mappings.value[groupId];
 }
 
 // ---- 归拢进度（手动 job 实时展示）----
 /** 各组进行中 / 最近一次的归拢 job（group_id → job） */
-const jobs = ref<Record<number, AggregateSyncJob>>({})
-let jobTimer: number | undefined
+const jobs = ref<Record<number, AggregateSyncJob>>({});
+let jobTimer: number | undefined;
+
+/**
+ * 组件是否已卸载——**定时器链的确定性终点**。
+ *
+ * ⚠️ `jobTimer`（setInterval）在卸载时能直接 clear，但 `waitForJobEnd` 是
+ * 「await sleep → 发请求 → 再 await sleep」的**定时器链**：没有句柄可清，
+ * 卸载后仍会每 2 秒打一次 `/aggregate/sync-jobs/:id`，直到 job 结束
+ * （可能好几分钟）。故用本标志在每次 sleep 之后自查，提前收尾。
+ */
+let disposed = false;
+
+/**
+ * 组件卸载时清掉轮询定时器。
+ *
+ * ⚠️ 定时器只在 job 结束或新 job 启动时清理——**离开页面时 job 往往还在跑**，
+ * 不在这里兜底的话，卸载后仍每 2 秒打一次 `/aggregate/sync-jobs/:id`，
+ * 并继续写 `jobs.value`（定时器泄漏 + 无意义请求）。
+ */
+onUnmounted(() => {
+  disposed = true;
+  if (jobTimer !== undefined) {
+    window.clearInterval(jobTimer);
+    jobTimer = undefined;
+  }
+});
 
 /** 某组的归拢 job（没有则 undefined）。 */
 function jobOf(groupId: number): AggregateSyncJob | undefined {
-  return jobs.value[groupId]
+  return jobs.value[groupId];
 }
 
 function jobStateLabel(state: string): string {
   switch (state) {
-    case "running":
-      return "进行中"
-    case "success":
-      return "已完成"
-    case "failed":
-      return "失败"
-    case "cancelled":
-      return "已取消"
+    case 'running':
+      return '进行中';
+    case 'success':
+      return '已完成';
+    case 'failed':
+      return '失败';
+    case 'cancelled':
+      return '已取消';
     default:
-      return state
+      return state;
   }
 }
 
 function jobStateColor(state: string): string {
   switch (state) {
-    case "running":
-      return "processing"
-    case "success":
-      return "green"
-    case "failed":
-      return "red"
-    case "cancelled":
-      return "default"
+    case 'running':
+      return 'processing';
+    case 'success':
+      return 'green';
+    case 'failed':
+      return 'red';
+    case 'cancelled':
+      return 'default';
     default:
-      return "default"
+      return 'default';
   }
 }
 
 /** 轮询一个 job 到结束（2s 间隔；结束保留卡片）。 */
 function watchJob(job: AggregateSyncJob, groupId: number) {
-  jobs.value[groupId] = job
-  if (jobTimer !== undefined) window.clearInterval(jobTimer)
+  jobs.value[groupId] = job;
+  if (jobTimer !== undefined) window.clearInterval(jobTimer);
   jobTimer = window.setInterval(async () => {
     try {
-      const j = await api.get<AggregateSyncJob>(`/aggregate/sync-jobs/${job.id}`)
-      jobs.value[groupId] = j
-      if (j.state !== "running") {
-        window.clearInterval(jobTimer)
-        jobTimer = undefined
-        await loadAll()
+      const j = await api.get<AggregateSyncJob>(`/aggregate/sync-jobs/${job.id}`);
+      jobs.value[groupId] = j;
+      if (j.state !== 'running') {
+        window.clearInterval(jobTimer);
+        jobTimer = undefined;
+        await loadAll();
       }
     } catch {
       // 轮询失败下轮再试
     }
-  }, 2000)
+  }, 2000);
 }
 
 /** 页面加载时恢复「正在跑」的 job（容器重启后 job 表清空 → 恢复不了就没了）。 */
@@ -480,12 +502,12 @@ async function resumeRunningJobs(gs: AggregateGroup[]) {
   for (const g of gs) {
     try {
       const list = await api.get<AggregateSyncJob[]>(
-        `/aggregate/sync-jobs?group_id=${g.id}`,
-      )
-      const running = list.find((j) => j.state === "running")
+        `/aggregate/sync-jobs?group_id=${String(g.id)}`,
+      );
+      const running = list.find((j) => j.state === 'running');
       if (running) {
-        jobs.value[g.id] = running
-        watchJob(running, g.id)
+        jobs.value[g.id] = running;
+        watchJob(running, g.id);
       }
     } catch {
       // 忽略（没有 job 或服务异常）
@@ -500,273 +522,263 @@ async function resumeRunningJobs(gs: AggregateGroup[]) {
  * 直接当禁用条件用 → 按钮**永远点不动**（配置齐全时文案也是非空的）。
  */
 function enqueueDisabled(group: AggregateGroup): boolean {
-  const m = mappingOf(group.id)
-  if (!m?.target_dir_id) return true
-  return !secondariesOf(group).some((d) =>
-    (m?.roots ?? []).some((r) => r.driver_id === d.id),
-  )
+  const m = mappingOf(group.id);
+  if (!m?.target_dir_id) return true;
+  return !secondariesOf(group).some((d) => m.roots.some((r) => r.driver_id === d.id));
 }
 
 /** 「登记在途」的 tooltip（缺配置时点名缺什么，否则说功能）。 */
 function enqueueTip(group: AggregateGroup): string {
-  const m = mappingOf(group.id)
-  if (!m?.target_dir_id) return "缺少归拢目标目录——请先「配置」目录映射"
-  if (!secondariesOf(group).some((d) => (m?.roots ?? []).some((r) => r.driver_id === d.id))) {
-    return "副盘都没配缓冲根目录——请先「配置」目录映射"
+  const m = mappingOf(group.id);
+  if (!m?.target_dir_id) return '缺少归拢目标目录——请先「配置」目录映射';
+  if (!secondariesOf(group).some((d) => m.roots.some((r) => r.driver_id === d.id))) {
+    return '副盘都没配缓冲根目录——请先「配置」目录映射';
   }
-  return "扫描副盘缓冲目录，把里面的文件登记成在途任务（幂等）"
+  return '扫描副盘缓冲目录，把里面的文件登记成在途任务（幂等）';
 }
 
 /** 「立即归拢」是否不可用（缺归拢目标目录时）。 */
 function syncDisabled(group: AggregateGroup): boolean {
-  return !mappingOf(group.id)?.target_dir_id
+  return !mappingOf(group.id)?.target_dir_id;
 }
 
 /** 「立即归拢」的 tooltip。 */
 function syncTip(group: AggregateGroup): string {
-  if (syncDisabled(group)) return "缺少归拢目标目录——请先「配置」目录映射"
-  return "全量归拢：含失败任务重试，一直搬到台账清空（只有云添加额度墙会停）"
+  if (syncDisabled(group)) return '缺少归拢目标目录——请先「配置」目录映射';
+  return '全量归拢：含失败任务重试，一直搬到台账清空（只有云添加额度墙会停）';
 }
 
 /** 组内的副数据源 */
 function secondariesOf(group: AggregateGroup | null): Driver[] {
-  if (!group) return []
-  return drivers.value.filter(
-    (d) => d.aggregate_group_id === group.id && d.role === "secondary",
-  )
+  if (!group) return [];
+  return drivers.value.filter((d) => d.aggregate_group_id === group.id && d.role === 'secondary');
 }
 
 /** 某副盘的缓冲根路径 */
 function rootPathOf(groupId: number, driverId: number): string {
-  const root = mappings.value[groupId]?.roots.find(
-    (r) => r.driver_id === driverId,
-  )
-  if (!root) return ""
-  return root.root_path || `id: ${root.root_id}`
+  const root = mappings.value[groupId]?.roots.find((r) => r.driver_id === driverId);
+  if (!root) return '';
+  return (root.root_path ?? '') || `id: ${root.root_id}`;
 }
 
 /** 某副盘的浏览状态（不存在则给空壳） */
 function rootStack(driverId: number): { stack: DirEntry[]; dirs: DirEntry[] } {
-  return rootStackState.value[driverId] ?? { stack: [], dirs: [] }
+  return rootStackState.value[driverId] ?? { stack: [], dirs: [] };
 }
 
 function statsOf(groupId: number): AggregateGroupStats | undefined {
-  return stats.value.find((s) => s.group_id === groupId)
+  return stats.value.find((s) => s.group_id === groupId);
 }
 
 function masterName(group: AggregateGroup): string {
-  const master = driversOf(group).find((d) => d.role === "master")
-  return master?.name ?? "未设置"
+  const master = driversOf(group).find((d) => d.role === 'master');
+  return master?.name ?? '未设置';
 }
 
 function countOf(group: AggregateGroup, state: string): number {
-  return statsOf(group.id)?.counts?.[state] ?? 0
+  return statsOf(group.id)?.counts[state] ?? 0;
 }
 
 function pendingCount(group: AggregateGroup): number {
-  const counts = statsOf(group.id)?.counts ?? {}
+  const counts = statsOf(group.id)?.counts ?? {};
   return (
-    (counts["pending"] ?? 0) +
-    (counts["syncing"] ?? 0) +
-    (counts["paused"] ?? 0) +
-    (counts["verified"] ?? 0) +
+    (counts.pending ?? 0) +
+    (counts.syncing ?? 0) +
+    (counts.paused ?? 0) +
+    (counts.verified ?? 0) +
     // failed 与后端 pending_bytes **同口径**（非终态都算「未消化」）——
     // 曾漏算 failed：字节含 failed、个数不含，页面读起来像
     // 「142G 只登记 1 个文件」（2026-11-18 修正）
-    (counts["failed"] ?? 0)
-  )
+    (counts.failed ?? 0)
+  );
 }
 
 /** 失败 + 暂停行的字节数（失败栏与行数并排展示，口径不再错位）。 */
 function failedPausedBytes(group: AggregateGroup): number {
-  const bytes = statsOf(group.id)?.bytes_by_state ?? {}
-  return (bytes["failed"] ?? 0) + (bytes["paused"] ?? 0)
+  const bytes = statsOf(group.id)?.bytes_by_state ?? {};
+  return (bytes.failed ?? 0) + (bytes.paused ?? 0);
 }
 
 function pendingBytes(group: AggregateGroup): number {
-  return statsOf(group.id)?.pending_bytes ?? 0
+  return statsOf(group.id)?.pending_bytes ?? 0;
 }
 
 function stateLabel(state: string): string {
   switch (state) {
-    case "pending":
-      return "待归拢"
-    case "syncing":
-      return "归拢中"
-    case "verified":
-      return "待清理"
-    case "done":
-      return "已完成"
-    case "failed":
-      return "失败"
-    case "paused":
-      return "已暂停"
+    case 'pending':
+      return '待归拢';
+    case 'syncing':
+      return '归拢中';
+    case 'verified':
+      return '待清理';
+    case 'done':
+      return '已完成';
+    case 'failed':
+      return '失败';
+    case 'paused':
+      return '已暂停';
     default:
-      return state
+      return state;
   }
 }
 
 function stateColor(state: string): string {
   switch (state) {
-    case "pending":
-      return "blue"
-    case "syncing":
-      return "processing"
-    case "verified":
-      return "cyan"
-    case "done":
-      return "green"
-    case "failed":
-      return "red"
-    case "paused":
-      return "orange"
+    case 'pending':
+      return 'blue';
+    case 'syncing':
+      return 'processing';
+    case 'verified':
+      return 'cyan';
+    case 'done':
+      return 'green';
+    case 'failed':
+      return 'red';
+    case 'paused':
+      return 'orange';
     default:
-      return "default"
+      return 'default';
   }
 }
 
 async function loadAll() {
-  loading.value = true
+  loading.value = true;
   try {
     // 核心数据一起拉；limits 是辅助展示，**单独拉、失败降级**——
     // 别让一个常量接口失败把整页拖垮。
     const [g, s, d, st] = await Promise.all([
-      api.get<AggregateGroup[]>("/aggregate/groups"),
-      api.get<AggregateGroupStats[]>("/aggregate/stats"),
-      api.get<Driver[]>("/drivers"),
-      api.get<StagingRow[]>("/aggregate/staging"),
-    ])
-    groups.value = g
-    stats.value = s
-    drivers.value = d
-    staging.value = st
-    await loadMappings(g)
+      api.get<AggregateGroup[]>('/aggregate/groups'),
+      api.get<AggregateGroupStats[]>('/aggregate/stats'),
+      api.get<Driver[]>('/drivers'),
+      api.get<StagingRow[]>('/aggregate/staging'),
+    ]);
+    groups.value = g;
+    stats.value = s;
+    drivers.value = d;
+    staging.value = st;
+    await loadMappings(g);
     try {
-      const lim = await api.get<{ daily_cloud_add_quota: number }>(
-        "/aggregate/limits",
-      )
-      dailyQuota.value = lim.daily_cloud_add_quota
+      const lim = await api.get<{ daily_cloud_add_quota: number }>('/aggregate/limits');
+      dailyQuota.value = lim.daily_cloud_add_quota;
     } catch {
       // 降级：保持默认值 3（文案仍正确，只是数字可能过时）
     }
   } catch (e) {
-    message.error(errMsg(e, "加载聚合数据失败"))
+    message.error(errMsg(e, '加载聚合数据失败'));
   } finally {
-    loading.value = false
+    loading.value = false;
   }
 }
 
 /** 拉取各组的目录映射（并行，失败不影响其它数据）。 */
 async function loadMappings(gs: AggregateGroup[]) {
-  const map: Record<number, AggregateGroupMapping> = {}
+  const map: Record<number, AggregateGroupMapping> = {};
   await Promise.all(
     gs.map(async (g) => {
       try {
         map[g.id] = await api.get<AggregateGroupMapping>(
-          `/aggregate/groups/${g.id}/mapping`,
-        )
+          `/aggregate/groups/${String(g.id)}/mapping`,
+        );
       } catch {
         // 拉不到就当没配（面板显示「未配置」）
       }
     }),
-  )
-  mappings.value = map
+  );
+  mappings.value = map;
 }
 
 /** 打开「目录映射」弹框（主盘目标 + 各副盘缓冲根）。 */
 function openMapping(group: AggregateGroup) {
-  mappingGroup.value = group
-  const m = mappings.value[group.id]
+  mappingGroup.value = group;
+  const m = mappings.value[group.id];
   mappingTarget.value = m?.target_dir_id
-    ? { id: m.target_dir_id, path: m.target_dir_path || "" }
-    : null
-  targetStack.value = [{ id: "", name: "网盘根目录" }]
-  targetDirs.value = []
-  rootStackState.value = {}
-  rootPicked.value = {}
+    ? { id: m.target_dir_id, path: m.target_dir_path ?? '' }
+    : null;
+  targetStack.value = [{ id: '', name: '网盘根目录' }];
+  targetDirs.value = [];
+  rootStackState.value = {};
+  rootPicked.value = {};
   for (const d of secondariesOf(group)) {
-    const root = m?.roots.find((r) => r.driver_id === d.id)
-    rootStackState.value[d.id] = { stack: [{ id: "", name: "网盘根目录" }], dirs: [] }
-    rootPicked.value[d.id] = root
-      ? { id: root.root_id, path: root.root_path || "" }
-      : undefined
+    const root = m?.roots.find((r) => r.driver_id === d.id);
+    rootStackState.value[d.id] = { stack: [{ id: '', name: '网盘根目录' }], dirs: [] };
+    rootPicked.value[d.id] = root ? { id: root.root_id, path: root.root_path ?? '' } : undefined;
   }
-  mappingOpen.value = true
-  void loadTargetDirs("")
-  for (const d of secondariesOf(group)) void loadRootDirs(d.id, "")
+  mappingOpen.value = true;
+  void loadTargetDirs('');
+  for (const d of secondariesOf(group)) void loadRootDirs(d.id, '');
 }
 
 /** 载入主盘某目录下的子目录。 */
 async function loadTargetDirs(parentId: string) {
-  const master = masterDriverOf(mappingGroup.value)
-  if (!master) return
-  loadingTarget.value = true
+  const master = masterDriverOf(mappingGroup.value);
+  if (!master) return;
+  loadingTarget.value = true;
   try {
     const resp = await api.get<{ dirs: DirEntry[] }>(
-      `/drivers/${master.id}/browse-dirs?parent_id=${encodeURIComponent(parentId)}`,
-    )
-    targetDirs.value = resp.dirs ?? []
+      `/drivers/${String(master.id)}/browse-dirs?parent_id=${encodeURIComponent(parentId)}`,
+    );
+    targetDirs.value = resp.dirs;
   } catch (e) {
-    message.error(errMsg(e, "加载主盘目录失败"))
+    message.error(errMsg(e, '加载主盘目录失败'));
   } finally {
-    loadingTarget.value = false
+    loadingTarget.value = false;
   }
 }
 
 function openTargetDir(entry: DirEntry) {
-  targetStack.value = [...targetStack.value, entry]
-  mappingTarget.value = { id: entry.id, path: dirPathOf(targetStack.value) }
-  void loadTargetDirs(entry.id)
+  targetStack.value = [...targetStack.value, entry];
+  mappingTarget.value = { id: entry.id, path: dirPathOf(targetStack.value) };
+  void loadTargetDirs(entry.id);
 }
 
 function goTargetDir(index: number) {
-  targetStack.value = targetStack.value.slice(0, index + 1)
-  const picked = targetStack.value[index]
-  if (!picked) return
-  mappingTarget.value = { id: picked.id, path: dirPathOf(targetStack.value) }
-  void loadTargetDirs(picked.id)
+  targetStack.value = targetStack.value.slice(0, index + 1);
+  const picked = targetStack.value[index];
+  if (!picked) return;
+  mappingTarget.value = { id: picked.id, path: dirPathOf(targetStack.value) };
+  void loadTargetDirs(picked.id);
 }
 
 /** 载入某副盘某目录下的子目录。 */
 async function loadRootDirs(driverId: number, parentId: string) {
-  loadingRoot.value[driverId] = true
+  loadingRoot.value[driverId] = true;
   try {
     const resp = await api.get<{ dirs: DirEntry[] }>(
-      `/drivers/${driverId}/browse-dirs?parent_id=${encodeURIComponent(parentId)}`,
-    )
+      `/drivers/${String(driverId)}/browse-dirs?parent_id=${encodeURIComponent(parentId)}`,
+    );
     const st = rootStackState.value[driverId] ?? {
-      stack: [{ id: "", name: "网盘根目录" }],
+      stack: [{ id: '', name: '网盘根目录' }],
       dirs: [],
-    }
-    st.dirs = resp.dirs ?? []
-    rootStackState.value[driverId] = st
+    };
+    st.dirs = resp.dirs;
+    rootStackState.value[driverId] = st;
   } catch (e) {
-    message.error(errMsg(e, "加载副盘目录失败"))
+    message.error(errMsg(e, '加载副盘目录失败'));
   } finally {
-    loadingRoot.value[driverId] = false
+    loadingRoot.value[driverId] = false;
   }
 }
 
 function openRootDir(driverId: number, entry: DirEntry) {
   const st = rootStackState.value[driverId] ?? {
-    stack: [{ id: "", name: "网盘根目录" }],
+    stack: [{ id: '', name: '网盘根目录' }],
     dirs: [],
-  }
-  st.stack = [...st.stack, entry]
-  rootStackState.value[driverId] = st
-  rootPicked.value[driverId] = { id: entry.id, path: dirPathOf(st.stack) }
-  void loadRootDirs(driverId, entry.id)
+  };
+  st.stack = [...st.stack, entry];
+  rootStackState.value[driverId] = st;
+  rootPicked.value[driverId] = { id: entry.id, path: dirPathOf(st.stack) };
+  void loadRootDirs(driverId, entry.id);
 }
 
 function goRootDir(driverId: number, index: number) {
-  const st = rootStackState.value[driverId]
-  if (!st) return
-  st.stack = st.stack.slice(0, index + 1)
-  rootStackState.value[driverId] = st
-  const picked = st.stack[index]
-  if (!picked) return
-  rootPicked.value[driverId] = { id: picked.id, path: dirPathOf(st.stack) }
-  void loadRootDirs(driverId, picked.id)
+  const st = rootStackState.value[driverId];
+  if (!st) return;
+  st.stack = st.stack.slice(0, index + 1);
+  rootStackState.value[driverId] = st;
+  const picked = st.stack[index];
+  if (!picked) return;
+  rootPicked.value[driverId] = { id: picked.id, path: dirPathOf(st.stack) };
+  void loadRootDirs(driverId, picked.id);
 }
 
 /** 面包屑 → 路径字符串（根为空）。 */
@@ -775,137 +787,133 @@ function dirPathOf(stack: DirEntry[]): string {
     .slice(1)
     .map((s) => s.name)
     .filter(Boolean)
-    .join("/")
+    .join('/');
 }
 
 /** 组内的主数据源。 */
 function masterDriverOf(group: AggregateGroup | null): Driver | undefined {
-  if (!group) return undefined
-  return drivers.value.find(
-    (d) => d.aggregate_group_id === group.id && d.role === "master",
-  )
+  if (!group) return undefined;
+  return drivers.value.find((d) => d.aggregate_group_id === group.id && d.role === 'master');
 }
 
 /** 保存整组映射（一次提交）。 */
 async function saveMapping() {
-  const group = mappingGroup.value
-  if (!group) return
-  saving.value = true
+  const group = mappingGroup.value;
+  if (!group) return;
+  saving.value = true;
   try {
     const roots = secondariesOf(group)
       .map((d) => {
-        const picked = rootPicked.value[d.id]
-        if (!picked) return null
-        return { driver_id: d.id, root_id: picked.id, root_path: picked.path }
+        const picked = rootPicked.value[d.id];
+        if (!picked) return null;
+        return { driver_id: d.id, root_id: picked.id, root_path: picked.path };
       })
-      .filter((r): r is { driver_id: number; root_id: string; root_path: string } =>
-        r !== null,
-      )
-    await api.put(`/aggregate/groups/${group.id}/mapping`, {
+      .filter((r): r is { driver_id: number; root_id: string; root_path: string } => r !== null);
+    await api.put(`/aggregate/groups/${String(group.id)}/mapping`, {
       target_dir_id: mappingTarget.value?.id ?? null,
       target_dir_path: mappingTarget.value?.path ?? null,
       roots,
-    })
-    mappingOpen.value = false
-    message.success("目录映射已保存")
-    await loadAll()
+    });
+    mappingOpen.value = false;
+    message.success('目录映射已保存');
+    await loadAll();
   } catch (e) {
-    message.error(errMsg(e, "保存目录映射失败"))
+    message.error(errMsg(e, '保存目录映射失败'));
   } finally {
-    saving.value = false
+    saving.value = false;
   }
 }
 
 function openCreateGroup() {
-  groupName.value = ""
-  createOpen.value = true
+  groupName.value = '';
+  createOpen.value = true;
 }
 
 async function createGroup() {
-  saving.value = true
+  saving.value = true;
   try {
-    await api.post("/aggregate/groups", { name: groupName.value })
-    createOpen.value = false
-    message.success("已创建聚合组")
-    await loadAll()
+    await api.post('/aggregate/groups', { name: groupName.value });
+    createOpen.value = false;
+    message.success('已创建聚合组');
+    await loadAll();
   } catch (e) {
-    message.error(errMsg(e, "创建聚合组失败"))
+    message.error(errMsg(e, '创建聚合组失败'));
   } finally {
-    saving.value = false
+    saving.value = false;
   }
 }
 
 async function toggleGroup(group: AggregateGroup, enabled: boolean) {
   try {
-    await api.patch(`/aggregate/groups/${group.id}`, { enabled })
-    await loadAll()
+    await api.patch(`/aggregate/groups/${String(group.id)}`, { enabled });
+    await loadAll();
   } catch (e) {
-    message.error(errMsg(e, "修改聚合组失败"))
+    message.error(errMsg(e, '修改聚合组失败'));
   }
 }
 
 async function removeGroup(group: AggregateGroup) {
   try {
-    await api.del(`/aggregate/groups/${group.id}`)
-    message.success("已解散聚合组")
-    await loadAll()
+    await api.del(`/aggregate/groups/${String(group.id)}`);
+    message.success('已解散聚合组');
+    await loadAll();
   } catch (e) {
-    message.error(errMsg(e, "解散聚合组失败"))
+    message.error(errMsg(e, '解散聚合组失败'));
   }
 }
 
 function openAssign(group: AggregateGroup) {
-  assignGroupId.value = group.id
-  assignDriverId.value = undefined
-  assignRole.value = "secondary"
-  assignOpen.value = true
+  assignGroupId.value = group.id;
+  assignDriverId.value = undefined;
+  assignRole.value = 'secondary';
+  assignOpen.value = true;
 }
 
 async function assign() {
   if (!assignDriverId.value || !assignGroupId.value) {
-    message.warning("请选择存储源")
-    return
+    message.warning('请选择存储源');
+    return;
   }
-  saving.value = true
+  saving.value = true;
   try {
-    await api.put(`/aggregate/drivers/${assignDriverId.value}/role`, {
+    await api.put(`/aggregate/drivers/${String(assignDriverId.value)}/role`, {
       group_id: assignGroupId.value,
       role: assignRole.value,
-    })
-    assignOpen.value = false
-    message.success("已指派")
-    await loadAll()
+    });
+    assignOpen.value = false;
+    message.success('已指派');
+    await loadAll();
   } catch (e) {
-    message.error(errMsg(e, "指派失败"))
+    message.error(errMsg(e, '指派失败'));
   } finally {
-    saving.value = false
+    saving.value = false;
   }
 }
 
 async function detach(driver: Driver) {
   try {
-    await api.del(`/aggregate/drivers/${driver.id}/role`)
-    message.success("已移出聚合组")
-    await loadAll()
+    await api.del(`/aggregate/drivers/${String(driver.id)}/role`);
+    message.success('已移出聚合组');
+    await loadAll();
   } catch (e) {
-    message.error(errMsg(e, "移出失败"))
+    message.error(errMsg(e, '移出失败'));
   }
 }
 
 async function enqueue(groupId: number) {
-  busyGroupId.value = groupId
+  busyGroupId.value = groupId;
   try {
     const result = await api.post<{ scanned: number; added: number; skipped: number }>(
-      `/aggregate/groups/${groupId}/enqueue`,
-    )
+      `/aggregate/groups/${String(groupId)}/enqueue`,
+    );
     message.success(
-      `扫描 ${result.scanned} 个文件，新登记 ${result.added} 个，已存在 ${result.skipped} 个`,
-    )
-    await loadAll()
+      `扫描 ${String(result.scanned)} 个文件，新登记 ${String(result.added)} 个，已存在 ${String(result.skipped)} 个`,
+    );
+    await loadAll();
   } catch (e) {
-    message.error(errMsg(e, "登记在途任务失败"))
+    message.error(errMsg(e, '登记在途任务失败'));
   } finally {
-    busyGroupId.value = null
+    busyGroupId.value = null;
   }
 }
 
@@ -916,79 +924,86 @@ async function enqueue(groupId: number) {
  * （与「存储源扫描」同款处理）。
  */
 async function syncNow(groupId: number) {
-  syncingGroupId.value = groupId
+  syncingGroupId.value = groupId;
   try {
     const ref = await api.post<{ job_id: string; state: string }>(
-      `/aggregate/groups/${groupId}/sync`,
-    )
-    const job = await api.get<AggregateSyncJob>(
-      `/aggregate/sync-jobs/${ref.job_id}`,
-    )
+      `/aggregate/groups/${String(groupId)}/sync`,
+    );
+    const job = await api.get<AggregateSyncJob>(`/aggregate/sync-jobs/${ref.job_id}`);
     // 进度卡实时展示（2s 轮询），结束后 loadAll 刷新水位
-    watchJob(job, groupId)
-    syncingGroupId.value = null
-    const final = await waitForJobEnd(job.id)
-    if (final?.state === "success") {
+    watchJob(job, groupId);
+    syncingGroupId.value = null;
+    const final = await waitForJobEnd(job.id);
+    if (final?.state === 'success') {
       message.success(
-        `归拢完成：成功 ${final.synced} / 清理 ${final.cleaned} / 暂停 ${final.paused} / 失败 ${final.failed} / 跳过 ${final.skipped}`,
-      )
-    } else if (final?.state === "failed") {
-      message.error(errMsg(final.error || "归拢失败", "归拢失败"))
-    } else if (final?.state === "cancelled") {
-      message.warning("归拢已取消")
+        `归拢完成：成功 ${String(final.synced)} / 清理 ${String(final.cleaned)} / 暂停 ${String(final.paused)} / 失败 ${String(final.failed)} / 跳过 ${String(final.skipped)}`,
+      );
+    } else if (final?.state === 'failed') {
+      message.error(errMsg(final.error ?? '归拢失败', '归拢失败'));
+    } else if (final?.state === 'cancelled') {
+      message.warning('归拢已取消');
     }
-    await loadAll()
+    // 已卸载：轮询被 `disposed` 打断（final 为 null），不再发多余的刷新请求
+    if (disposed) return;
+    await loadAll();
   } catch (e) {
-    message.error(errMsg(e, "归拢失败"))
+    message.error(errMsg(e, '归拢失败'));
   } finally {
-    syncingGroupId.value = null
+    syncingGroupId.value = null;
   }
 }
 
-/** 等一个 job 结束（2s 轮询），返回最终状态。 */
+/**
+ * 等一个 job 结束（2s 轮询），返回最终状态。
+ *
+ * ⚠️ 组件卸载时（`disposed`）**立即返回 null**：本循环靠 `await sleep` 串起
+ * 定时器链，没有可清理的句柄——不置标志的话，离开页面后仍会每 2 秒轮询到
+ * job 结束。返回 null 时调用方跳过结果提示（见 `syncNow`）。
+ */
 async function waitForJobEnd(jobId: string): Promise<AggregateSyncJob | null> {
   for (;;) {
-    await new Promise((r) => setTimeout(r, 2000))
-    const j = await api.get<AggregateSyncJob>(`/aggregate/sync-jobs/${jobId}`)
-    if (j.state !== "running") {
-      jobs.value[j.group_id] = j
-      return j
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    if (disposed) return null;
+    const j = await api.get<AggregateSyncJob>(`/aggregate/sync-jobs/${jobId}`);
+    if (j.state !== 'running') {
+      jobs.value[j.group_id] = j;
+      return j;
     }
   }
 }
 
 async function cancelJob(jobId: string) {
   try {
-    await api.post(`/aggregate/sync-jobs/${jobId}/cancel`)
-    message.success("已取消")
+    await api.post(`/aggregate/sync-jobs/${jobId}/cancel`);
+    message.success('已取消');
   } catch (e) {
-    message.error(errMsg(e, "取消失败"))
+    message.error(errMsg(e, '取消失败'));
   }
 }
 
 async function retry(id: number) {
   try {
-    await api.post(`/aggregate/staging/${id}/retry`)
-    message.success("已重置为待归拢")
-    await loadAll()
+    await api.post(`/aggregate/staging/${String(id)}/retry`);
+    message.success('已重置为待归拢');
+    await loadAll();
   } catch (e) {
-    message.error(errMsg(e, "重试失败"))
+    message.error(errMsg(e, '重试失败'));
   }
 }
 
 async function removeStaging(id: number) {
   try {
-    await api.del(`/aggregate/staging/${id}`)
-    await loadAll()
+    await api.del(`/aggregate/staging/${String(id)}`);
+    await loadAll();
   } catch (e) {
-    message.error(errMsg(e, "删除失败"))
+    message.error(errMsg(e, '删除失败'));
   }
 }
 
 onMounted(async () => {
-  await loadAll()
-  await resumeRunningJobs(groups.value)
-})
+  await loadAll();
+  await resumeRunningJobs(groups.value);
+});
 </script>
 
 <style scoped>

@@ -14,9 +14,15 @@
     "noEmit": true,
 
     /* Linting */
+    /* 与 tsconfig.app.json 同款严格模式——vite.config.ts 也得守规矩 */
+    "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "allowUnreachableCode": false
   },
   "include": ["vite.config.ts"]
 }

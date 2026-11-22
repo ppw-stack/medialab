@@ -1,58 +1,64 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
-import { api, errMsg } from '../api'
-import type { JobConfig } from '../types'
-import { message } from 'ant-design-vue'
-import CronBuilder from './CronBuilder.vue'
+import { ref, watch } from 'vue';
+import { api, errMsg } from '../api';
+import type { JobConfig } from '../types';
+import { message } from 'ant-design-vue';
+import CronBuilder from './CronBuilder.vue';
 
 const props = defineProps<{
-  open: boolean
-  jobName: string
-  jobLabel: string
-}>()
+  open: boolean;
+  jobName: string;
+  jobLabel: string;
+}>();
 
 const emit = defineEmits<{
-  (e: 'update:open', v: boolean): void
-  (e: 'saved'): void
-}>()
+  (e: 'update:open', v: boolean): void;
+  (e: 'saved'): void;
+}>();
 
-const config = ref<JobConfig | null>(null)
-const loading = ref(false)
-const saving = ref(false)
-const cronDraft = ref('')
-const paramDraft = ref<Record<string, number>>({})
+const config = ref<JobConfig | null>(null);
+const loading = ref(false);
+const saving = ref(false);
+const cronDraft = ref('');
+/**
+ * 参数草稿。
+ *
+ * ⚠️ 值类型**含 null / undefined**——a-input-number 被用户清空时
+ * v-model 写入的就是 null（见 mergeParams 的注释）。类型如实反映这点，
+ * mergeParams 才能把「空」与「没填」区分开。
+ */
+const paramDraft = ref<Record<string, number | null | undefined>>({});
 
 watch(
   () => props.open,
   async (o) => {
     if (o) {
-      await load()
+      await load();
     }
-  }
-)
+  },
+);
 
 async function load() {
-  loading.value = true
+  loading.value = true;
   try {
-    const r = await api.get<JobConfig>(`/scheduler/${props.jobName}/config`)
-    config.value = r
-    cronDraft.value = r.cron
-    paramDraft.value = { ...r.params }
+    const r = await api.get<JobConfig>(`/scheduler/${props.jobName}/config`);
+    config.value = r;
+    cronDraft.value = r.cron;
+    paramDraft.value = { ...r.params };
   } catch (e) {
-    message.error('加载配置失败：' + errMsg(e))
+    message.error('加载配置失败：' + errMsg(e));
   } finally {
-    loading.value = false
+    loading.value = false;
   }
 }
 
 function isDirty(): boolean {
-  if (!config.value) return false
-  if (cronDraft.value.trim() !== config.value.cron) return true
+  const cfg = config.value;
+  if (!cfg) return false;
+  if (cronDraft.value.trim() !== cfg.cron) return true;
   // 与 onSave 的判定逻辑一致：基于 fullParams 合并后比较，
   // 避免 paramDraft 缺 key 时漏判（后端 params 比 specs 少 key 的情况）
-  return Object.entries(mergeParams()).some(
-    ([k, v]) => config.value!.params[k] !== v,
-  )
+  return Object.entries(mergeParams()).some(([k, v]) => cfg.params[k] !== v);
 }
 
 /**
@@ -66,47 +72,46 @@ function isDirty(): boolean {
  * 故 null 一律按"不修改"处理（沿用后端当前值）。
  */
 function mergeParams(): Record<string, number> {
-  if (!config.value) return {}
-  const merged: Record<string, number> = { ...config.value.params }
+  if (!config.value) return {};
+  const merged: Record<string, number> = { ...config.value.params };
   for (const [k, v] of Object.entries(paramDraft.value)) {
-    if (v === null || v === undefined) continue
-    merged[k] = v
+    if (v === null || v === undefined) continue;
+    merged[k] = v;
   }
-  return merged
+  return merged;
 }
 
 async function onSave() {
-  if (!config.value) return
-  const cronNew = cronDraft.value.trim()
+  if (!config.value) return;
+  const cronNew = cronDraft.value.trim();
   if (!cronNew) {
-    message.warning('cron 不能为空')
-    return
+    message.warning('cron 不能为空');
+    return;
   }
-  saving.value = true
+  saving.value = true;
   try {
     if (cronNew !== config.value.cron) {
-      await api.post(`/scheduler/${props.jobName}/cron`, { cron: cronNew })
+      await api.post(`/scheduler/${props.jobName}/cron`, { cron: cronNew });
     }
     // 只传本任务专属的 param 全量 (覆盖该任务的 param 子集)
-    const fullParams = mergeParams()
-    const dirty = Object.entries(fullParams).some(
-      ([k, v]) => config.value!.params[k] !== v
-    )
+    const fullParams = mergeParams();
+    const cfg = config.value;
+    const dirty = Object.entries(fullParams).some(([k, v]) => cfg.params[k] !== v);
     if (dirty) {
-      await api.put('/scheduler/runtime-params', fullParams)
+      await api.put('/scheduler/runtime-params', fullParams);
     }
-    message.success(`${props.jobLabel} 配置已保存`)
-    emit('saved')
-    emit('update:open', false)
+    message.success(`${props.jobLabel} 配置已保存`);
+    emit('saved');
+    emit('update:open', false);
   } catch (e) {
-    message.error('保存失败：' + errMsg(e))
+    message.error('保存失败：' + errMsg(e));
   } finally {
-    saving.value = false
+    saving.value = false;
   }
 }
 
 function onCancel() {
-  emit('update:open', false)
+  emit('update:open', false);
 }
 </script>
 
@@ -137,11 +142,7 @@ function onCancel() {
       <!-- 作业运行参数 (按 spec 渲染) -->
       <section v-if="config.specs.length" class="config-section">
         <div class="config-section__title">作业运行参数</div>
-        <div
-          v-for="spec in config.specs"
-          :key="spec.key"
-          class="config-row"
-        >
+        <div v-for="spec in config.specs" :key="spec.key" class="config-row">
           <label class="config-label">{{ spec.label }}</label>
           <!-- 枚举参数：单选按钮组（每个选项有名字，一眼可见） -->
           <a-radio-group
@@ -150,11 +151,7 @@ function onCancel() {
             size="small"
             class="config-enum"
           >
-            <a-radio-button
-              v-for="[val, text] in spec.options"
-              :key="val"
-              :value="val"
-            >
+            <a-radio-button v-for="[val, text] in spec.options" :key="val" :value="val">
               {{ text }}
             </a-radio-button>
           </a-radio-group>
@@ -187,12 +184,7 @@ function onCancel() {
       <!-- 操作 -->
       <div class="config-actions">
         <a-button :disabled="saving" @click="onCancel">取消</a-button>
-        <a-button
-          type="primary"
-          :loading="saving"
-          :disabled="!isDirty()"
-          @click="onSave"
-        >
+        <a-button type="primary" :loading="saving" :disabled="!isDirty()" @click="onSave">
           保存
         </a-button>
       </div>
@@ -205,8 +197,12 @@ function onCancel() {
   padding: var(--sp-4) 0;
   text-align: center;
 }
-.dim { color: var(--text-tertiary); }
-.mono { font-family: var(--font-mono, monospace); }
+.dim {
+  color: var(--text-tertiary);
+}
+.mono {
+  font-family: var(--font-mono, monospace);
+}
 
 .config-section {
   margin-bottom: var(--sp-4);

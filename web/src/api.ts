@@ -11,15 +11,19 @@
  */
 
 /** 辅种域的 API 前缀。 */
-const BASE = "/api/v1";
+const BASE = '/api/v1';
 
 /** 媒体库域的 API 前缀。 */
-const BASE_MEDIA = "/api";
+const BASE_MEDIA = '/api';
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
-    super(message);
+  /**
+   * @param options 透传给 `Error` 的选项——`cause` 用于挂底层失败原因
+   *   （如响应体不是 JSON 时的解析异常），**不静默吞掉**。
+   */
+  constructor(status: number, message: string, options?: ErrorOptions) {
+    super(message, options);
     this.status = status;
   }
 }
@@ -34,12 +38,12 @@ export class ApiError extends Error {
  * 3. 带 `message` 字符串字段的普通对象（fetch 拒绝值常见形态）→ 该字段
  * 4. 否则 → fallback
  */
-export function errMsg(e: unknown, fallback = "未知错误"): string {
+export function errMsg(e: unknown, fallback = '未知错误'): string {
   if (e instanceof Error) return e.message || fallback;
-  if (typeof e === "string") return e || fallback;
-  if (e && typeof e === "object" && "message" in e) {
-    const m = (e as { message: unknown }).message;
-    if (typeof m === "string" && m) return m;
+  if (typeof e === 'string') return e || fallback;
+  if (e && typeof e === 'object' && 'message' in e) {
+    const m = e.message;
+    if (typeof m === 'string' && m) return m;
   }
   return fallback;
 }
@@ -55,37 +59,43 @@ async function request<T = unknown>(
   path: string,
   opts: RequestInit = {},
 ): Promise<T> {
-  const resp = await fetch(`${base}${path}`, {
-    ...opts,
-    headers: {
-      "Content-Type": "application/json",
-      ...opts.headers,
-    },
-  });
+  // ⚠️ 不能把 opts.headers 直接展开——HeadersInit 可能是数组或 Headers
+  // 实例（展开后属性全丢）。用 Headers 归一：调用方显式给了
+  // Content-Type 就用它，否则默认 JSON。
+  const headers = new Headers(opts.headers);
+  if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+  const resp = await fetch(`${base}${path}`, { ...opts, headers });
 
   if (resp.status === 401) {
     // 会话失效：清登录态并回登录页。不整页 reload（保留 SPA 路由栈，
     // 避免丢失滚动状态）；动态 import 避免与 router/pages 形成静态循环依赖。
     const [{ useAuthStore }, { default: router }] = await Promise.all([
-      import("./stores/auth"),
-      import("./router"),
+      import('./stores/auth'),
+      import('./router'),
     ]);
     const auth = useAuthStore();
     auth.authenticated = false;
     auth.username = null;
-    if (router.currentRoute.value.path !== "/login") {
-      await router.push("/login");
+    if (router.currentRoute.value.path !== '/login') {
+      await router.push('/login');
     }
-    throw new ApiError(401, "未登录");
+    throw new ApiError(401, '未登录');
   }
 
   if (!resp.ok) {
-    let detail = `HTTP ${resp.status}`;
+    let detail = `HTTP ${String(resp.status)}`;
+    let cause: unknown;
     try {
-      const data = await resp.json();
-      detail = data.detail || detail;
-    } catch {}
-    throw new ApiError(resp.status, detail);
+      const data = (await resp.json()) as { detail?: string };
+      // 空串也退回 HTTP 状态文案（后端不会返回空 detail，这里只是保险）
+      detail = (data.detail ?? '') || detail;
+    } catch (err) {
+      // 响应体不是 JSON（网关错误页等）——保留 HTTP 状态文案，
+      // 并把解析失败作为 `cause` 挂到 ApiError 上：**不静默吞掉**，
+      // 否则「detail 为何退回状态文案」完全不可观测。
+      cause = err;
+    }
+    throw new ApiError(resp.status, detail, { cause });
   }
 
   if (resp.status === 204) return undefined as T;
@@ -93,19 +103,25 @@ async function request<T = unknown>(
 }
 
 /** 辅种域的请求（`/api/v1/*`）。 */
-export function apiFetch<T = unknown>(
-  path: string,
-  opts: RequestInit = {},
-): Promise<T> {
+export function apiFetch<T = unknown>(path: string, opts: RequestInit = {}): Promise<T> {
   return request<T>(BASE, path, opts);
 }
 
 /** 媒体库域的请求（`/api/*`）。 */
-export function mediaFetch<T = unknown>(
-  path: string,
-  opts: RequestInit = {},
-): Promise<T> {
+export function mediaFetch<T = unknown>(path: string, opts: RequestInit = {}): Promise<T> {
   return request<T>(BASE_MEDIA, path, opts);
+}
+
+/**
+ * 组装带请求体的 RequestInit。
+ *
+ * ⚠️ **不能写成 `body: body ? JSON.stringify(body) : undefined`**：
+ * ① `exactOptionalPropertyTypes` 下可选属性不能显式赋 `undefined`
+ *    （`RequestInit.body?: string | null`）——必须让整个 `body` 键**缺席**；
+ * ② 真值判断会把 `0` / `false` / `''` 这类**合法请求体**吞成 undefined。
+ */
+function withBody(method: string, body?: unknown): RequestInit {
+  return body === undefined ? { method } : { method, body: JSON.stringify(body) };
 }
 
 /**
@@ -119,16 +135,8 @@ export function mediaFetch<T = unknown>(
  */
 export const api = {
   get: <T = unknown>(path: string) => apiFetch<T>(path),
-  post: <T = unknown>(path: string, body?: unknown) =>
-    apiFetch<T>(path, {
-      method: "POST",
-      body: body ? JSON.stringify(body) : undefined,
-    }),
-  put: <T = unknown>(path: string, body?: unknown) =>
-    apiFetch<T>(path, {
-      method: "PUT",
-      body: body ? JSON.stringify(body) : undefined,
-    }),
+  post: <T = unknown>(path: string, body?: unknown) => apiFetch<T>(path, withBody('POST', body)),
+  put: <T = unknown>(path: string, body?: unknown) => apiFetch<T>(path, withBody('PUT', body)),
 };
 
 /**
@@ -139,20 +147,9 @@ export const api = {
  */
 export const mediaApi = {
   get: <T = unknown>(path: string) => mediaFetch<T>(path),
-  post: <T = unknown>(path: string, body?: unknown) =>
-    mediaFetch<T>(path, {
-      method: "POST",
-      body: body ? JSON.stringify(body) : undefined,
-    }),
-  put: <T = unknown>(path: string, body?: unknown) =>
-    mediaFetch<T>(path, {
-      method: "PUT",
-      body: body ? JSON.stringify(body) : undefined,
-    }),
+  post: <T = unknown>(path: string, body?: unknown) => mediaFetch<T>(path, withBody('POST', body)),
+  put: <T = unknown>(path: string, body?: unknown) => mediaFetch<T>(path, withBody('PUT', body)),
   patch: <T = unknown>(path: string, body?: unknown) =>
-    mediaFetch<T>(path, {
-      method: "PATCH",
-      body: body ? JSON.stringify(body) : undefined,
-    }),
-  del: <T = unknown>(path: string) => mediaFetch<T>(path, { method: "DELETE" }),
+    mediaFetch<T>(path, withBody('PATCH', body)),
+  del: <T = unknown>(path: string) => mediaFetch<T>(path, { method: 'DELETE' }),
 };

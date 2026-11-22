@@ -15,9 +15,21 @@
     "noEmit": true,
 
     /* Linting */
+    /* 严格模式（见 docs/quality-gates.md「TypeScript 严格模式」）：
+       strict 已蕴含 noImplicitAny / strictNullChecks / strictFunctionTypes /
+       strictPropertyInitialization，此处显式列出是为了让开关一目了然。 */
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "strictPropertyInitialization": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "allowUnreachableCode": false
   },
   "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.tsx", "src/**/*.vue"]
 }

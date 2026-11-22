@@ -14,17 +14,17 @@
  *   md  < 992px   平板
  *   lg  ≥ 992px   桌面（本项目的「PC 端」基准）
  */
-import { computed } from 'vue'
-import { Grid } from 'ant-design-vue'
+import { computed } from 'vue';
+import { Grid } from 'ant-design-vue';
 
 /** 桌面基准线——与 `lg` 断点一致。 */
-export const DESKTOP_MIN = 992
+export const DESKTOP_MIN = 992;
 
 /** 平板上限——`md` 断点。 */
-export const TABLET_MAX = 992
+export const TABLET_MAX = 992;
 
 export function useResponsive() {
-  const screens = Grid.useBreakpoint()
+  const screens = Grid.useBreakpoint();
 
   /**
    * 是否手机（< 768px）。
@@ -33,15 +33,13 @@ export function useResponsive() {
    * 但折叠屏展开、某些安卓机是 540px），且 Ant 的 `xs` 语义是
    * 「超小屏」而非「手机」。
    */
-  const isMobile = computed(() => screens.value.sm === false)
+  const isMobile = computed(() => screens.value.sm === false);
 
   /** 是否平板（768px ~ 992px）。 */
-  const isTablet = computed(
-    () => screens.value.sm === true && screens.value.md === false,
-  )
+  const isTablet = computed(() => screens.value.sm === true && screens.value.md === false);
 
   /** 是否桌面（≥ 992px）——本项目的主力形态。 */
-  const isDesktop = computed(() => screens.value.md === true)
+  const isDesktop = computed(() => screens.value.md === true);
 
   /**
    * 是否「窄于桌面」——需要在手机上收紧间距 / 折叠侧栏 / 单列布局。
@@ -50,7 +48,7 @@ export function useResponsive() {
    * 「减少 padding」这类温和调整；`isMobile` 更严，适合
    * 「改布局结构」这类激进调整。
    */
-  const isCompact = computed(() => screens.value.md === false)
+  const isCompact = computed(() => screens.value.md === false);
 
-  return { screens, isMobile, isTablet, isDesktop, isCompact }
+  return { screens, isMobile, isTablet, isDesktop, isCompact };
 }

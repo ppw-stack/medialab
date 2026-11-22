@@ -15,11 +15,11 @@
  * 用法：node web/scripts/check-types-placement.mjs
  */
 
-import { readFileSync, readdirSync, statSync } from 'node:fs'
-import { dirname, join, relative } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { dirname, join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
+const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
 
 /** 允许定义「视图内部类型」的文件白名单（这些类型不是 API 契约）。 */
 const VIEW_LOCAL_ALLOWLIST = new Set([
@@ -30,57 +30,57 @@ const VIEW_LOCAL_ALLOWLIST = new Set([
   'pages/TorrentIndex.vue',
   // 媒体库域：目录树节点（TreeNode）与 tab 描述（Tab）是**视图内部**
   // 结构——由 MediaItem 在前端组装而成，不是后端 DTO。
-  'pages/media/Library.vue',
-])
+  'pages/media/LibraryPage.vue',
+]);
 
 /** 递归列出 src 下的 .ts / .vue 文件 */
 function collectFiles(dir) {
-  const out = []
+  const out = [];
   for (const entry of readdirSync(dir)) {
-    const path = join(dir, entry)
+    const path = join(dir, entry);
     if (statSync(path).isDirectory()) {
-      out.push(...collectFiles(path))
+      out.push(...collectFiles(path));
     } else if (path.endsWith('.ts') || path.endsWith('.vue')) {
-      out.push(path)
+      out.push(path);
     }
   }
-  return out
+  return out;
 }
 
-const failures = []
+const failures = [];
 
 // ---- 1) types.ts 必须存在且导出接口类型
-const typesSrc = readFileSync(join(SRC, 'types.ts'), 'utf-8')
+const typesSrc = readFileSync(join(SRC, 'types.ts'), 'utf-8');
 if (!typesSrc.includes('export interface')) {
-  failures.push('src/types.ts 没有导出任何 interface')
+  failures.push('src/types.ts 没有导出任何 interface');
 }
 
 // ---- 2) 除白名单外，src 下不再有本地 interface 定义
 for (const abs of collectFiles(SRC)) {
-  const rel = relative(SRC, abs)
-  if (rel === 'types.ts') continue
-  if (VIEW_LOCAL_ALLOWLIST.has(rel)) continue
-  const src = readFileSync(abs, 'utf-8')
+  const rel = relative(SRC, abs);
+  if (rel === 'types.ts') continue;
+  if (VIEW_LOCAL_ALLOWLIST.has(rel)) continue;
+  const src = readFileSync(abs, 'utf-8');
   // 只看顶层定义（行首无缩进）
   if (/^(export )?interface \w+/m.test(src)) {
-    failures.push(`src/${rel} 有本地 interface 定义（API 契约类型应放 src/types.ts）`)
+    failures.push(`src/${rel} 有本地 interface 定义（API 契约类型应放 src/types.ts）`);
   }
 }
 
 // ---- 3) 共享类型文件本身不重复定义同名 interface
 {
-  const names = [...typesSrc.matchAll(/^export interface (\w+)/gm)].map((m) => m[1])
-  const seen = new Set()
+  const names = [...typesSrc.matchAll(/^export interface (\w+)/gm)].map((m) => m[1]);
+  const seen = new Set();
   for (const n of names) {
-    if (seen.has(n)) failures.push(`src/types.ts 重复定义 interface ${n}`)
-    seen.add(n)
+    if (seen.has(n)) failures.push(`src/types.ts 重复定义 interface ${n}`);
+    seen.add(n);
   }
 }
 
 if (failures.length) {
-  console.error('前端类型放置检查失败：')
-  for (const f of failures) console.error('  - ' + f)
-  process.exit(1)
+  console.error('前端类型放置检查失败：');
+  for (const f of failures) console.error('  - ' + f);
+  process.exit(1);
 }
 
-console.log('前端类型放置检查通过')
+console.log('前端类型放置检查通过');

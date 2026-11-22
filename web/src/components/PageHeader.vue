@@ -10,25 +10,25 @@
  * 统一后：两个域都用本组件，页面标题成为**稳定契约**，
  * 手机端可以据此做「滚动时收起标题、只留一行」的折叠。
  */
-import { useResponsive } from '../composables/useResponsive'
+import { useResponsive } from '../composables/useResponsive';
 
 defineProps<{
   /** 小标签（英文 + 分类），如「下载器 · DOWNLOADERS」。 */
-  eyebrow?: string
+  eyebrow?: string;
   /** 主标题。 */
-  title: string
+  title: string;
   /** 副标题（一行说明）。 */
-  sub?: string
+  sub?: string;
   /** 是否在手机端隐藏副标题（空间紧张时）。 */
-  hideSubOnMobile?: boolean
+  hideSubOnMobile?: boolean;
   /**
    * 紧凑模式——横向 padding 用 16px（媒体库域的 `.page` 容器窄）。
    * 辅种域默认 32px。
    */
-  compact?: boolean
-}>()
+  compact?: boolean;
+}>();
 
-const { isMobile } = useResponsive()
+const { isMobile } = useResponsive();
 </script>
 
 <template>
@@ -36,10 +36,7 @@ const { isMobile } = useResponsive()
     <div class="page-header__main">
       <div v-if="eyebrow" class="page-header__eyebrow">{{ eyebrow }}</div>
       <h1 class="page-header__title">{{ title }}</h1>
-      <div
-        v-if="sub && !(hideSubOnMobile && isMobile)"
-        class="page-header__sub"
-      >
+      <div v-if="sub && !(hideSubOnMobile && isMobile)" class="page-header__sub">
         <slot name="sub">{{ sub }}</slot>
       </div>
     </div>

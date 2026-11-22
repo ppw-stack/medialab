@@ -1,30 +1,30 @@
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
-import { message } from 'ant-design-vue'
-import { LockOutlined } from '@ant-design/icons-vue'
-import { useAuthStore } from '../stores/auth'
+import { reactive, ref } from 'vue';
+import { message } from 'ant-design-vue';
+import { LockOutlined } from '@ant-design/icons-vue';
+import { useAuthStore } from '../stores/auth';
 
-const auth = useAuthStore()
-const loading = ref(false)
-const form = reactive({ username: '', password: '' })
+const auth = useAuthStore();
+const loading = ref(false);
+const form = reactive({ username: '', password: '' });
 
 async function submitLogin() {
   if (!form.username) {
-    message.warning('请输入用户名')
-    return
+    message.warning('请输入用户名');
+    return;
   }
   if (!form.password) {
-    message.warning('请输入密码')
-    return
+    message.warning('请输入密码');
+    return;
   }
-  loading.value = true
+  loading.value = true;
   try {
-    await auth.login(form.username, form.password)
-    window.location.href = '/'
+    await auth.login(form.username, form.password);
+    window.location.href = '/';
   } catch (exc) {
-    message.error(exc instanceof Error ? exc.message : '登录失败')
+    message.error(exc instanceof Error ? exc.message : '登录失败');
   } finally {
-    loading.value = false
+    loading.value = false;
   }
 }
 </script>
@@ -39,11 +39,8 @@ async function submitLogin() {
       <div class="login-title">登录</div>
       <div class="login-sub">监控下载器，守卫免费窗口，看护做种比例。</div>
 
-      <a-form :model="form" @finish="submitLogin" class="login-form">
-        <a-form-item
-          name="username"
-          :rules="[{ required: true, message: '请输入用户名' }]"
-        >
+      <a-form :model="form" class="login-form" @finish="submitLogin">
+        <a-form-item name="username" :rules="[{ required: true, message: '请输入用户名' }]">
           <a-input
             v-model:value="form.username"
             placeholder="用户名"
@@ -51,10 +48,7 @@ async function submitLogin() {
             size="large"
           />
         </a-form-item>
-        <a-form-item
-          name="password"
-          :rules="[{ required: true, message: '请输入密码' }]"
-        >
+        <a-form-item name="password" :rules="[{ required: true, message: '请输入密码' }]">
           <a-input-password
             v-model:value="form.password"
             placeholder="密码"

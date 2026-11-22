@@ -10,47 +10,49 @@
  * 数据来自 `result.logs`——**只有详情端点返回**（列表端点为控制
  * 响应体积会剥离它）。
  */
-import { computed, ref, watch, nextTick } from 'vue'
-import { message } from 'ant-design-vue'
-import type { JobLogEntry } from '../types'
+import { computed, ref, watch, nextTick } from 'vue';
+import { message } from 'ant-design-vue';
+import type { JobLogEntry } from '../types';
 
 const props = defineProps<{
-  logs: JobLogEntry[] | null | undefined
-}>()
+  logs: JobLogEntry[] | null | undefined;
+}>();
 
 /** 只看警告+错误（默认关——成功运行时 INFO 是主要信息）。 */
-const onlyProblems = ref(false)
+const onlyProblems = ref(false);
 
-const logBox = ref<HTMLElement | null>(null)
+const logBox = ref<HTMLElement | null>(null);
 
 const visible = computed<JobLogEntry[]>(() => {
-  const list = props.logs ?? []
-  if (!onlyProblems.value) return list
-  return list.filter((l) => l.level === 'WARNING' || l.level === 'ERROR' || l.level === 'CRITICAL')
-})
+  const list = props.logs ?? [];
+  if (!onlyProblems.value) return list;
+  return list.filter((l) => l.level === 'WARNING' || l.level === 'ERROR' || l.level === 'CRITICAL');
+});
 
 /** 时间戳（``HH:MM:SS``）。 */
 function logTime(ts: string): string {
-  return ts.length >= 19 ? ts.substring(11, 19) : ts
+  return ts.length >= 19 ? ts.substring(11, 19) : ts;
 }
 
 /** logger 名的末段（``app.services.jobs`` → ``jobs``）——省宽度。 */
 function shortLogger(name: string): string {
-  const parts = name.split('.')
-  return parts[parts.length - 1] || name
+  const parts = name.split('.');
+  // 末段可能为空（如 logger 名以 '.' 结尾）——归一成空串再走 || 兜底
+  const last = parts[parts.length - 1] ?? '';
+  return last || name;
 }
 
 function levelClass(level: string): string {
   switch (level) {
     case 'ERROR':
     case 'CRITICAL':
-      return 'log-line--error'
+      return 'log-line--error';
     case 'WARNING':
-      return 'log-line--warn'
+      return 'log-line--warn';
     case 'DEBUG':
-      return 'log-line--debug'
+      return 'log-line--debug';
     default:
-      return 'log-line--info'
+      return 'log-line--info';
   }
 }
 
@@ -58,24 +60,24 @@ function levelClass(level: string): string {
 watch(
   () => visible.value.length,
   async () => {
-    await nextTick()
-    if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight
-  }
-)
+    await nextTick();
+    if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight;
+  },
+);
 
 async function copyAll(): Promise<void> {
   const text = visible.value
     .map((l) => `[${logTime(l.ts)}] ${l.level} ${l.logger}: ${l.message}`)
-    .join('\n')
+    .join('\n');
   if (!text) {
-    message.warning('没有可复制的日志')
-    return
+    message.warning('没有可复制的日志');
+    return;
   }
   try {
-    await navigator.clipboard.writeText(text)
-    message.success(`已复制 ${visible.value.length} 条日志`)
+    await navigator.clipboard.writeText(text);
+    message.success(`已复制 ${String(visible.value.length)} 条日志`);
   } catch {
-    message.error('复制失败（浏览器不允许）')
+    message.error('复制失败（浏览器不允许）');
   }
 }
 </script>
@@ -91,9 +93,7 @@ async function copyAll(): Promise<void> {
       <button type="button" class="log-copy" @click="copyAll">复制</button>
     </div>
 
-    <div v-if="!logs || !logs.length" class="log-empty dim">
-      本次运行没有采集到日志
-    </div>
+    <div v-if="!logs || !logs.length" class="log-empty dim">本次运行没有采集到日志</div>
 
     <div v-else ref="logBox" class="log-box">
       <div v-for="(l, i) in visible" :key="i" class="log-line" :class="levelClass(l.level)">
@@ -108,8 +108,12 @@ async function copyAll(): Promise<void> {
 </template>
 
 <style scoped>
-.dim { color: var(--text-tertiary); }
-.mono { font-family: var(--font-mono, monospace); }
+.dim {
+  color: var(--text-tertiary);
+}
+.mono {
+  font-family: var(--font-mono, monospace);
+}
 
 .log-viewer {
   display: flex;
@@ -185,11 +189,21 @@ async function copyAll(): Promise<void> {
   min-width: 0;
 }
 
-.log-line--info .log-level { color: var(--text-secondary); }
-.log-line--debug .log-level { color: var(--text-tertiary); }
-.log-line--warn .log-level { color: var(--warning-text, #d97706); }
-.log-line--error .log-level { color: var(--error-text, #f5222d); }
-.log-line--error .log-text { color: var(--error-text, #f5222d); }
+.log-line--info .log-level {
+  color: var(--text-secondary);
+}
+.log-line--debug .log-level {
+  color: var(--text-tertiary);
+}
+.log-line--warn .log-level {
+  color: var(--warning-text, #d97706);
+}
+.log-line--error .log-level {
+  color: var(--error-text, #f5222d);
+}
+.log-line--error .log-text {
+  color: var(--error-text, #f5222d);
+}
 
 .log-empty {
   padding: var(--sp-3);

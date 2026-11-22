@@ -12,12 +12,7 @@
 
     <a-spin :spinning="loading">
       <div class="dir-list">
-        <div
-          v-for="d in dirs"
-          :key="d.id"
-          class="dir-item"
-          @click="$emit('open', d)"
-        >
+        <div v-for="d in dirs" :key="d.id" class="dir-item" @click="$emit('open', d)">
           <FolderOutlined />
           <span class="dir-name">{{ d.name }}</span>
         </div>
@@ -28,23 +23,23 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue"
-import { FolderOutlined } from "@ant-design/icons-vue"
-import type { DirEntry } from "../types"
+import { computed } from 'vue';
+import { FolderOutlined } from '@ant-design/icons-vue';
+import type { DirEntry } from '../types';
 
 const props = defineProps<{
-  title: string
-  stack: DirEntry[]
-  dirs: DirEntry[]
-  loading?: boolean
-}>()
+  title: string;
+  stack: DirEntry[];
+  dirs: DirEntry[];
+  loading?: boolean;
+}>();
 
 defineEmits<{
-  (e: "open", dir: DirEntry): void
-  (e: "go", index: number): void
-}>()
+  (e: 'open', dir: DirEntry): void;
+  (e: 'go', index: number): void;
+}>();
 
-const currentName = computed(() => props.stack[props.stack.length - 1]?.name ?? "—")
+const currentName = computed(() => props.stack[props.stack.length - 1]?.name ?? '—');
 
 /**
  * 面包屑上显示的**目录名**（不是完整路径）。
@@ -53,10 +48,10 @@ const currentName = computed(() => props.stack[props.stack.length - 1]?.name ?? 
  * 直接显示会占满整行。取最后一段即可。
  */
 function crumbName(entry: DirEntry): string {
-  const name = entry.name
-  if (name) return name
-  const parts = entry.id.split("/").filter(Boolean)
-  return parts.length ? parts[parts.length - 1] : "/"
+  const name = entry.name;
+  if (name) return name;
+  const parts = entry.id.split('/').filter(Boolean);
+  return parts.length ? (parts[parts.length - 1] ?? '/') : '/';
 }
 </script>
 

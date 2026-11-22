@@ -13,8 +13,9 @@ WORKDIR /build
 
 # 依赖先行（最大化层缓存命中）
 COPY web/package.json web/package-lock.json* ./
+# HUSKY=0：跳过 git hook 安装——构建上下文里没有 .git，hook 装了也没用。
 RUN --mount=type=cache,target=/root/.npm \
-    npm ci --no-audit --no-fund
+    HUSKY=0 npm ci --no-audit --no-fund
 
 # 拷贝源码并构建
 COPY web/ ./

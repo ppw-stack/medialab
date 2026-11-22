@@ -9,7 +9,7 @@
  * **每个字段都能选预设或写自定义**（无「高级模式」开关——粒度更细，
  * 不用在两种界面间切换）。预设覆盖不到时落「自定义」，仍可编辑。
  */
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue';
 import {
   DAY_PRESETS,
   HOUR_PRESETS,
@@ -23,32 +23,30 @@ import {
   formatNextRuns,
   isCronShapeValid,
   stateToCron,
-} from '../utils/cron'
+} from '../utils/cron';
 
 const props = defineProps<{
   /** 当前 cron 表达式（v-model）。 */
-  modelValue: string
-}>()
+  modelValue: string;
+}>();
 
-const emit = defineEmits<{
-  (e: 'update:modelValue', v: string): void
-}>()
+const emit = defineEmits<(e: 'update:modelValue', v: string) => void>();
 
 /** 字段定义（顺序 = cron 的 5 字段顺序）。 */
 const FIELDS: {
-  key: keyof CronFieldsState
-  label: string
-  presets: { value: string; label: string }[]
-  placeholder: string
+  key: keyof CronFieldsState;
+  label: string;
+  presets: { value: string; label: string }[];
+  placeholder: string;
 }[] = [
   { key: 'minute', label: '分钟', presets: MINUTE_PRESETS, placeholder: '如 5,15,25 或 */10' },
   { key: 'hour', label: '小时', presets: HOUR_PRESETS, placeholder: '如 */3 或 8-20' },
   { key: 'day', label: '日', presets: DAY_PRESETS, placeholder: '如 1-7' },
   { key: 'month', label: '月', presets: MONTH_PRESETS, placeholder: '如 */3' },
   { key: 'weekday', label: '星期', presets: WEEKDAY_PRESETS, placeholder: '如 1-5（周一至周五）' },
-]
+];
 
-const state = ref<CronFieldsState>(cronToState(props.modelValue))
+const state = ref<CronFieldsState>(cronToState(props.modelValue));
 
 /**
  * **内部更新中**标志——区分两个 watch 的方向，避免互相触发。
@@ -60,72 +58,70 @@ const state = ref<CronFieldsState>(cronToState(props.modelValue))
  * 没有标志位时靠「字符串相等」隐式打破循环——一旦出现「语义相同但
  * 字符串不同」的表达式（如 `0 8 * * *` vs `00 8 * * *`），就会来回弹跳。
  */
-let applyingExternal = false
+let applyingExternal = false;
 
 // 外部值变化 → 同步回编辑状态（用户可能从别处改了 cron）
 watch(
   () => props.modelValue,
   (v) => {
-    const next = stateToCron(state.value)
-    if (next === v) return
-    applyingExternal = true
-    state.value = cronToState(v)
+    const next = stateToCron(state.value);
+    if (next === v) return;
+    applyingExternal = true;
+    state.value = cronToState(v);
     // 下一个 tick 复位（watch 回调是同步的，赋值会立即触发下方 watch）
-    void Promise.resolve().then(() => {
-      applyingExternal = false
-    })
+    // 用 Vue 的 nextTick 而不是 Promise.resolve().then()——后者只是下一个
+    // 微任务，nextTick 等的是**调度队列 flush 完**，才是这里真正要的语义。
+    void nextTick(() => {
+      applyingExternal = false;
+    });
   },
-)
+);
 
 // 编辑状态变化 → 生成表达式并抛给父组件
 watch(
   state,
   (s) => {
-    if (applyingExternal) return
-    const expr = stateToCron(s)
-    if (expr !== props.modelValue) emit('update:modelValue', expr)
+    if (applyingExternal) return;
+    const expr = stateToCron(s);
+    if (expr !== props.modelValue) emit('update:modelValue', expr);
   },
   { deep: true },
-)
+);
 
 /** 当前表达式。 */
-const expr = computed(() => stateToCron(state.value))
+const expr = computed(() => stateToCron(state.value));
 
 /** 人类可读描述（cronstrue）。 */
-const description = computed(() => describeCron(expr.value))
+const description = computed(() => describeCron(expr.value));
 
 /** 形状校验（不合法时提示，最终以��端校验为准）。 */
-const shapeOk = computed(() => isCronShapeValid(expr.value))
+const shapeOk = computed(() => isCronShapeValid(expr.value));
 
 /** 下次运行时间（前端算，零请求）。 */
-const nextRuns = computed(() => (shapeOk.value ? formatNextRuns(expr.value, 3) : []))
+const nextRuns = computed(() => (shapeOk.value ? formatNextRuns(expr.value, 3) : []));
 
 /** 某字段当前是否用自定义（决定显示输入框）。 */
 function isCustom(f: CronFieldState): boolean {
-  return f.preset === ''
+  return f.preset === '';
 }
 
 /** 切换某字段的预设：选回预设时清掉自定义串。 */
 function onPresetChange(key: keyof CronFieldsState, value: string) {
-  const field = state.value[key]
-  field.preset = value
-  if (value !== '') field.custom = value
+  const field = state.value[key];
+  field.preset = value;
+  if (value !== '') field.custom = value;
 }
 
 /** 编辑某字段的自定义表达式。 */
 function onCustomChange(key: keyof CronFieldsState, value: string) {
-  state.value[key].custom = value
+  state.value[key].custom = value;
 }
 </script>
 
 <template>
   <div class="cron-builder">
     <div class="cron-fields">
-      <div
-        v-for="f in FIELDS"
-        :key="f.key"
-        class="cron-field"
-      >
+      <div v-for="f in FIELDS" :key="f.key" class="cron-field">
         <label class="cron-field__label">{{ f.label }}</label>
         <a-select
           :value="state[f.key].preset"
@@ -162,11 +158,9 @@ function onCustomChange(key: keyof CronFieldsState, value: string) {
       </div>
       <div v-else-if="nextRuns.length" class="cron-preview__next">
         <span class="cron-preview__label">下次运行</span>
-        <span class="mono">{{ nextRuns.join('　·　') }}</span>
+        <span class="mono">{{ nextRuns.join('\u3000·\u3000') }}</span>
       </div>
-      <div v-else class="cron-preview__invalid">
-        ⚠️ 该表达式在未来一年内不会触发，请检查
-      </div>
+      <div v-else class="cron-preview__invalid">⚠️ 该表达式在未来一年内不会触发，请检查</div>
     </div>
   </div>
 </template>

@@ -1,9 +1,7 @@
-import { defineConfig } from 'vite'
-import vue from '@vitejs/plugin-vue'
+import { defineConfig } from 'vite';
+import vue from '@vitejs/plugin-vue';
 
-const BACKEND_PORT = process.env.VITE_BACKEND_PORT
-  ? Number(process.env.VITE_BACKEND_PORT)
-  : 8080  // 与 app/core/config.py 的 web_port 默认值一致
+const BACKEND_PORT = process.env.VITE_BACKEND_PORT ? Number(process.env.VITE_BACKEND_PORT) : 8080; // 与 app/core/config.py 的 web_port 默认值一致
 
 /**
  * 开发代理。
@@ -17,13 +15,13 @@ const BACKEND_PORT = process.env.VITE_BACKEND_PORT
  * - `/healthz` `/readyz` `/metrics` —— 运维端点
  */
 const proxy = {
-  '/api': `http://127.0.0.1:${BACKEND_PORT}`,
-  '/302': `http://127.0.0.1:${BACKEND_PORT}`,
-  '/dav': `http://127.0.0.1:${BACKEND_PORT}`,
-  '/healthz': `http://127.0.0.1:${BACKEND_PORT}`,
-  '/readyz': `http://127.0.0.1:${BACKEND_PORT}`,
-  '/metrics': `http://127.0.0.1:${BACKEND_PORT}`,
-}
+  '/api': `http://127.0.0.1:${String(BACKEND_PORT)}`,
+  '/302': `http://127.0.0.1:${String(BACKEND_PORT)}`,
+  '/dav': `http://127.0.0.1:${String(BACKEND_PORT)}`,
+  '/healthz': `http://127.0.0.1:${String(BACKEND_PORT)}`,
+  '/readyz': `http://127.0.0.1:${String(BACKEND_PORT)}`,
+  '/metrics': `http://127.0.0.1:${String(BACKEND_PORT)}`,
+};
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -37,4 +35,4 @@ export default defineConfig({
   preview: {
     proxy,
   },
-})
+});

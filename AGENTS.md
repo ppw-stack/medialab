@@ -6,6 +6,7 @@
 3. `app/adapters/sites/user_data.py` + `app/adapters/sites/indexer/parser/nexus_php.py` — FR-1.6 站点用户数据契约（用户数据由规则包的 schema 解析器产出）。
 4. `CHANGELOG.md` — **对外契约变更记录**（HTTP API 状态码 / 响应体语义）。改公开端点语义时必须在此登记（含 BREAKING CHANGE 与迁移步骤）。
 5. `docs/upload-bandwidth.md` — **数据同步上传的带宽瓶颈实测结论**（并发为何无效）。
+6. `docs/quality-gates.md` — **前端工程规范与质量门禁**（ESLint / Prettier / TS 严格模式 / Git Hooks / CI）。改前端代码前必读。
 
 ## 项目定位
 
@@ -623,15 +624,17 @@ uv run ruff check app/ tests/
 uv run mypy app/
 uv run pytest                # 后端测试（1673 例）
 cd web && npx vue-tsc -b    # 前端类型检查
-cd web && npx oxlint .      # 前端 lint
+cd web && npm run lint      # 前端 lint（ESLint，--max-warnings 0）
+cd web && npm run format:check  # 前端格式检查（Prettier）
 cd web && node scripts/check-types-placement.mjs  # 类型放置约束（API 契约类型集中在 src/types.ts）
 cd web && node scripts/check-css-classes.mjs   # CSS class 定义约束（template 用的 class 必须有样式定义）
 cd web && npx vite build    # 前端构建
 ```
 
 静态检查不通过禁止合并。**CI（`.github/workflows/ci.yml`）会跑上述全部闸门**：
-ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集中检查）
-+ css-classes（CSS class 定义检查），全绿才允许合并。
+ruff + mypy + pytest + vue-tsc + ESLint + Prettier + types-placement（API 契约类型集中检查）
++ css-classes（CSS class 定义检查），全绿才允许合并。前端规范详见
+`docs/quality-gates.md`。
 
 - **CSS class 定义检查**（2026-11-03 加入，`web/scripts/check-css-classes.mjs`）：
   - 扫每个 `.vue` 的 template 里用到的 class，校验它在「本文件 `<style>`」或
@@ -640,7 +643,7 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
     把 `Torrents.vue` 并入 `Downloaders.vue` 时**只搬了 template + script，
     没搬 `<style scoped>`**——6 个 class 定义就此丢失，页面样式全坏
     （筛选栏控件挤成一团、进度条与百分比上下堆叠）。**vue-tsc 不管 CSS、
-    oxlint 也不管 CSS** → 没有任何闸门能发现，直到用户截图反馈
+    ESLint 也不管 CSS** → 没有任何闸门能发现，直到用户截图反馈
   - **豁免机制**：BEM 子元素（样式由父元素覆盖）可加进脚本里的
     `EXEMPTIONS`，**必须写豁免理由**——否则会变成垃圾桶
   - **合并 / 重构页面时必须连 `<style>` 一起搬**——这条闸门只防「完全丢失」，
@@ -1138,10 +1141,30 @@ Conventional Commits，作用域示例：`feat(crypto)` / `fix(free-seed)` / `do
 
 ## 前端检查
 ```bash
-cd web && npm run build                          # vue-tsc 类型检查 + vite 构建
-cd web && npm run lint                           # oxlint
+cd web && npm run check                          # lint + format:check + type-check + test（提交前跑这个）
+cd web && npm run lint                           # ESLint（--max-warnings 0）
+cd web && npm run format:check                   # Prettier 格式检查
+cd web && npm run type-check                     # vue-tsc 类型检查
+cd web && npm test                               # 前端单元测试（node:test，零新增依赖，需 Node ≥ 22.18）
+cd web && npm run build                          # vue-tsc -b && vite build
 cd web && node scripts/check-types-placement.mjs # 类型放置约束
 cd web && node scripts/check-css-classes.mjs      # CSS class 定义检查
 ```
-项目**不保留 e2e 测试**（原 Playwright e2e 连真实下载器与真实站点，CI 上无法运行，已整体移除）。前端正确性靠上述静态检查 + 构建 + 人工核对。
+项目**不保留 e2e 测试**（原 Playwright e2e 连真实下载器与真实站点，CI 上无法运行，已整体移除）。前端正确性靠上述静态检查 + 单元测试 + 构建 + 人工核对。
 
+## 前端工程规范（2026-11-23 加入）
+
+完整规范见 **`docs/quality-gates.md`**（含工具职责、规则集、Git Hooks 接线细节、CI 门禁）。要点：
+
+- **工具链**：ESLint 10（flat config，`strictTypeChecked` + `stylisticTypeChecked`）+ Prettier 3 + vue-tsc + Husky/lint-staged。**oxlint 已移除**——它是纯语法检查器，没有类型信息，拿不到 `no-floating-promises` / `no-unnecessary-condition` 这类真 bug 探测器。
+- **插件**：Vue 官方（`eslint-plugin-vue`）、TS（`@vue/eslint-config-typescript` / `typescript-eslint`）+ 三个「推荐」插件（`eslint-plugin-import-x` / `eslint-plugin-promise` / `eslint-plugin-vuejs-accessibility`）。
+  ⚠️ **import-x 必须配 `eslint-import-resolver-vite`**：本项目靠 Vite 的 `resolve.extensions` 允许省略扩展名，import-x 默认 resolver 会把 **39 处正常 import** 误报成「无法解析」。配置里手写了一份等价于 `vite.config.ts` 的 resolve 段——**改 vite 的 resolve 配置时要同步改**（`web/eslint.config.mjs` 的 `import-x/resolver`）。
+- **TypeScript 严格模式已开满**（`tsconfig.app.json` + `tsconfig.node.json`）：`strict` / `noUncheckedIndexedAccess` / `exactOptionalPropertyTypes` / `noImplicitReturns` 等。⚠️ 此前**根本没开 `strict`**——改前端时别再依赖「null 不可见」。
+- **禁止**：显式 `any`、非空断言 `!`、`@ts-ignore` / `@ts-nocheck`、`@ts-expect-error`（必须带 ≥10 字说明）、未处理的 Promise、`console`、宽松相等。
+- **例外必须带明确理由**（写在 `web/eslint.config.mjs` 注释里），不允许用 `eslint-disable` 或批量关规则消错。当前仅三处例外：`scripts/*.mjs` 放行 `no-console`（CI 闸门脚本，stdout 即产物）；`import-x/default` 对 `vite.config.ts` 关闭（resolver 把 `@vitejs/plugin-vue` 解析到 CJS 构建，认不出 default 导出 → 误报）。
+- **`web/src/types.ts` 是后端 DTO 的手写镜像**：`no-unnecessary-condition` 报的「多余 null 判定」多数是类型在说谎或防御写多了——**先核对后端**（`app/db/models.py` / `app/api/routes/`）再决定是删防御还是改类型。后端保证非空 → 删 `?? ''`；前端运行时真会拿到 null（如 `a-input-number` 清空写 null）→ 改类型。
+- **模板串里的数字要显式 `String()`**（`restrict-template-expressions`）：`${id}` → `${String(id)}`；运算表达式整体包（`String((page - 1) * 50)`）。
+- **`prefer-nullish-coalescing` 不许批量 `--fix`**：自动修复会把 `count || 5` 改成 `count ?? 5`（0 变 5，静默改语义）。要保语义就写成 `(x ?? '') || fallback`。
+- **Git Hooks 装在 `web/.husky/`**（hooksPath = `web/.husky/_`），由 `web/package.json` 的 `prepare` 脚本注册。⚠️ husky 必须在**仓库根**跑（找的是 cwd 下的 `.git`），故 prepare 脚本是 `cd .. && husky web/.husky`；hook 脚本内部 cwd 是仓库根，要自己 `cd web`。
+- **前端有单元测试了**（2026-11-23 加入，`web/tests/` + `web/tsconfig.test.json`）：Node 内置 `node:test`（**零新增依赖**），`npm test` 跑。测试代码**单独一个 TS 工程**（`types: ["node"]`）——Node 全局**不进应用工程**（进了会把 `setInterval` 返回类型变成 `NodeJS.Timeout`）。**改 `web/src/api.ts` 这类共享请求层必须同步补用例**（请求头归一化 / 请求体语义）。需 Node ≥ 22.18（原生 TS 类型擦除）。
+- **AI 不得自行修改工程质量配置来规避检查**；确需改规范先说明原因并获维护者认可。

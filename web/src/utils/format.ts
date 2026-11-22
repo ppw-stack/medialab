@@ -15,18 +15,15 @@ export interface FormatBytesOptions {
   integerBytes?: boolean;
 }
 
-export function formatBytes(
-  b: number,
-  opts: FormatBytesOptions = {},
-): string {
+export function formatBytes(b: number, opts: FormatBytesOptions = {}): string {
   const decimals = opts.decimals ?? 2;
   const integerBytes = opts.integerBytes ?? false;
-  if (!b) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  if (!b) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
   const abs = Math.abs(b);
   if (abs < 1) {
     // |b| < 1：Math.log 会取到负指数，导致单位索引为负 → undefined
-    return b.toFixed(decimals) + " B";
+    return b.toFixed(decimals) + ' B';
   }
   const i = Math.floor(Math.log(abs) / Math.log(1024));
   // 防御：超出 units 范围（极大值）时取最大单位
@@ -34,10 +31,8 @@ export function formatBytes(
   const value = b / Math.pow(1024, idx);
   // 字节单位 + 整数数值 → 不显示小数（"500 B" 而非 "500.00 B"）
   const text =
-    integerBytes && idx === 0 && Number.isInteger(value)
-      ? String(value)
-      : value.toFixed(decimals);
-  return text + " " + units[idx];
+    integerBytes && idx === 0 && Number.isInteger(value) ? String(value) : value.toFixed(decimals);
+  return text + ' ' + (units[idx] ?? '');
 }
 
 /**
@@ -48,10 +43,7 @@ export function formatBytes(
  *
  * 空值文案由调用方给（``"—"`` / ``"从未"`` 等场景不同）。
  */
-export function formatTime(
-  ts: string | null | undefined,
-  empty = "—",
-): string {
+export function formatTime(ts: string | null | undefined, empty = '—'): string {
   if (!ts) return empty;
   return ts;
 }

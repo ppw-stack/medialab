@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# Push 前执行全量质量检查（ESLint + Prettier + vue-tsc）。
+#
+# ⚠️ Git hook 的 cwd 是**仓库根**（不是 web/）—— 必须先 cd 进 web/。
+cd web && npm run check

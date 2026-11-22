@@ -1,5 +1,5 @@
-import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
-import { useAuthStore } from './stores/auth'
+import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router';
+import { useAuthStore } from './stores/auth';
 
 /**
  * 路由表。
@@ -31,7 +31,7 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/login',
     name: 'login',
-    component: () => import('./pages/Login.vue'),
+    component: () => import('./pages/LoginPage.vue'),
   },
   {
     path: '/',
@@ -40,54 +40,92 @@ const routes: RouteRecordRaw[] = [
       // -- 辅种域 --
       // 无「总览」页：根路径直接落到列表页（站点是辅种域的第一个页面）。
       { path: '', redirect: '/sites' },
-      { path: 'sites', name: 'sites', component: () => import('./pages/Sites.vue') },
-      { path: 'downloaders', name: 'downloaders', component: () => import('./pages/Downloaders.vue') },
-      { path: 'torrent-index', name: 'torrent-index', component: () => import('./pages/TorrentIndex.vue') },
+      { path: 'sites', name: 'sites', component: () => import('./pages/SitesPage.vue') },
+      {
+        path: 'downloaders',
+        name: 'downloaders',
+        component: () => import('./pages/DownloadersPage.vue'),
+      },
+      {
+        path: 'torrent-index',
+        name: 'torrent-index',
+        component: () => import('./pages/TorrentIndex.vue'),
+      },
       { path: 'cross-seed', name: 'cross-seed', component: () => import('./pages/CrossSeed.vue') },
 
       // -- 系统 --
       // 定时任务（辅种 / 媒体库两栏）与设置（环境变量）是**平级两个菜单**
-      { path: 'scheduler', name: 'scheduler', component: () => import('./pages/Scheduler.vue') },
-      { path: 'settings', name: 'settings', component: () => import('./pages/Settings.vue') },
+      {
+        path: 'scheduler',
+        name: 'scheduler',
+        component: () => import('./pages/SchedulerPage.vue'),
+      },
+      { path: 'settings', name: 'settings', component: () => import('./pages/SettingsPage.vue') },
 
       // -- 媒体库域 --
-      { path: 'drivers', name: 'drivers', component: () => import('./pages/media/Drivers.vue') },
-      { path: 'aggregate', name: 'aggregate', component: () => import('./pages/media/Aggregate.vue') },
-      { path: 'library', name: 'library', component: () => import('./pages/media/Library.vue') },
-      { path: 'migrations', name: 'migrations', component: () => import('./pages/media/Migrations.vue') },
-      { path: 'scrape', name: 'scrape', component: () => import('./pages/media/Scrape.vue') },
-      { path: 'uploads', name: 'uploads', component: () => import('./pages/media/Uploads.vue') },
-      { path: 'health', name: 'health', component: () => import('./pages/media/Health.vue') },
+      {
+        path: 'drivers',
+        name: 'drivers',
+        component: () => import('./pages/media/DriversPage.vue'),
+      },
+      {
+        path: 'aggregate',
+        name: 'aggregate',
+        component: () => import('./pages/media/AggregatePage.vue'),
+      },
+      {
+        path: 'library',
+        name: 'library',
+        component: () => import('./pages/media/LibraryPage.vue'),
+      },
+      {
+        path: 'migrations',
+        name: 'migrations',
+        component: () => import('./pages/media/MigrationsPage.vue'),
+      },
+      { path: 'scrape', name: 'scrape', component: () => import('./pages/media/ScrapePage.vue') },
+      {
+        path: 'uploads',
+        name: 'uploads',
+        component: () => import('./pages/media/UploadsPage.vue'),
+      },
+      { path: 'health', name: 'health', component: () => import('./pages/media/HealthPage.vue') },
       // `/dav` 是 WebDAV 服务端路径（后端 mount_dav），面板页面必须避开
       { path: 'dav-users', name: 'dav', component: () => import('./pages/media/DavUsers.vue') },
-      { path: 'media-settings', name: 'media-settings', component: () => import('./pages/media/Settings.vue') },
+      {
+        path: 'media-settings',
+        name: 'media-settings',
+        component: () => import('./pages/media/MediaSettingsPage.vue'),
+      },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/' },
-]
+];
 
 const router = createRouter({
   history: createWebHistory(),
   routes,
-})
+});
 
-let authChecked = false
+let authChecked = false;
 
 router.beforeEach(async (to) => {
-  const auth = useAuthStore()
+  const auth = useAuthStore();
 
   if (!authChecked) {
-    await auth.refresh()
-    authChecked = true
+    // `refresh()` 内部自带 try/catch（网络异常一律兜住），**不会 reject**——
+    // 这里 await 不会产生未处理的拒绝，导航守卫也不会因此中断。
+    await auth.refresh();
+    authChecked = true;
   }
 
   if (!auth.authenticated && to.path !== '/login') {
-    return '/login'
+    return '/login';
   }
   if (auth.authenticated && to.path === '/login') {
-    return '/'
+    return '/';
   }
-  return true
-})
+  return true;
+});
 
-export default router
+export default router;

@@ -1,27 +1,24 @@
 <script setup lang="ts">
 /** 作业历史顶部统计条：成功率 / 平均耗时 / 最长耗时 / 最近结果摘要。 */
 defineProps<{
-  okPct: number
-  okCount: number
-  total: number
-  avgMs: number
-  maxMs: number
-  summary: string
-}>()
+  okPct: number;
+  okCount: number;
+  total: number;
+  avgMs: number;
+  maxMs: number;
+  summary: string;
+}>();
 
 function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
-  return `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`
+  if (ms < 1000) return `${String(ms)}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${String(Math.floor(ms / 60000))}m${String(Math.round((ms % 60000) / 1000))}s`;
 }
 </script>
 
 <template>
   <div class="history-stats">
-    <span
-      class="stat-pill"
-      :class="okCount < total ? 'stat-pill--warn' : 'stat-pill--ok'"
-    >
+    <span class="stat-pill" :class="okCount < total ? 'stat-pill--warn' : 'stat-pill--ok'">
       {{ okPct }}% ({{ okCount }}/{{ total }})
     </span>
     <span class="stat-pill">平均 {{ formatDuration(avgMs) }}</span>

@@ -17,9 +17,7 @@
       <a-descriptions :column="1" size="small" bordered>
         <a-descriptions-item label="连接地址">
           <div class="mono">{{ davUrl }}</div>
-          <div class="muted">
-            协议选 <b>WebDAV</b>，地址填上面这串，用户名/密码用下方账号。
-          </div>
+          <div class="muted">协议选 <b>WebDAV</b>，地址填上面这串，用户名/密码用下方账号。</div>
         </a-descriptions-item>
         <a-descriptions-item label="媒体库根目录">
           <a-space wrap>
@@ -40,8 +38,8 @@
             </a-button>
           </a-space>
           <div class="muted">
-            DAV 暴露的是「同步下来的媒体库目录」——<code>.strm</code> + 海报 +
-            nfo + 字幕，客户端拿到的就是与 Emby 挂载的同一棵树。
+            DAV 暴露的是「同步下来的媒体库目录」——<code>.strm</code> + 海报 + nfo +
+            字幕，客户端拿到的就是与 Emby 挂载的同一棵树。
           </div>
         </a-descriptions-item>
       </a-descriptions>
@@ -56,7 +54,7 @@
       />
     </a-card>
 
-    <a-tabs v-model:activeKey="activeTab">
+    <a-tabs v-model:active-key="activeTab">
       <!-- 账号 -->
       <a-tab-pane key="users" tab="账号">
         <a-card size="small">
@@ -81,19 +79,19 @@
 
               <template v-else-if="column.key === 'is_active'">
                 <a-tag :color="record.is_active ? 'green' : 'default'">
-                  {{ record.is_active ? "启用" : "停用" }}
+                  {{ record.is_active ? '启用' : '停用' }}
                 </a-tag>
               </template>
 
               <template v-else-if="column.key === 'last_login_at'">
-                <span class="muted">{{ formatTime(record.last_login_at, "从未") }}</span>
+                <span class="muted">{{ formatTime(record.last_login_at, '从未') }}</span>
               </template>
 
               <template v-else-if="column.key === 'action'">
                 <a-space :size="4">
                   <a-button size="small" @click="openReset(record)">重置密码</a-button>
                   <a-button size="small" @click="toggleActive(record)">
-                    {{ record.is_active ? "停用" : "启用" }}
+                    {{ record.is_active ? '停用' : '启用' }}
                   </a-button>
                   <a-popconfirm
                     title="删除该账号？"
@@ -159,7 +157,7 @@
           >
             <template #bodyCell="{ column, record }">
               <template v-if="column.key === 'username'">
-                <span class="mono">{{ record.username || "—" }}</span>
+                <span class="mono">{{ record.username || '—' }}</span>
               </template>
 
               <template v-else-if="column.key === 'method'">
@@ -169,7 +167,7 @@
               <template v-else-if="column.key === 'path'">
                 <a-tooltip :title="record.path">
                   <span class="mono truncate" :class="{ traversal: isTraversal(record.path) }">
-                    {{ isTraversal(record.path) ? "路径穿越尝试" : record.path }}
+                    {{ isTraversal(record.path) ? '路径穿越尝试' : record.path }}
                   </span>
                 </a-tooltip>
               </template>
@@ -180,12 +178,12 @@
 
               <template v-else-if="column.key === 'client'">
                 <span class="truncate" style="display: inline-block; max-width: 180px">
-                  {{ record.client || "—" }}
+                  {{ record.client || '—' }}
                 </span>
               </template>
 
               <template v-else-if="column.key === 'remote_addr'">
-                <span class="mono">{{ record.remote_addr || "—" }}</span>
+                <span class="mono">{{ record.remote_addr || '—' }}</span>
               </template>
 
               <template v-else-if="column.key === 'duration_ms'">
@@ -193,7 +191,7 @@
               </template>
 
               <template v-else-if="column.key === 'created_at'">
-                <span class="muted">{{ formatTime(record.created_at, "从未") }}</span>
+                <span class="muted">{{ formatTime(record.created_at, '从未') }}</span>
               </template>
             </template>
           </DataTable>
@@ -291,215 +289,215 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from "vue"
-import { message } from "ant-design-vue"
-import { errMsg, mediaApi as api } from "../../api"
+import { computed, onMounted, reactive, ref } from 'vue';
+import { message } from 'ant-design-vue';
+import { errMsg, mediaApi as api } from '../../api';
 import type {
   DavAuditItem,
   DavAuditPage,
   DavRootConfig,
   DavRootDriver,
   DavUser,
-} from "../../types"
-import { formatTime } from "../../utils/format"
-import DataTable from '../../components/DataTable.vue'
-import PageHeader from '../../components/PageHeader.vue'
+} from '../../types';
+import { formatTime } from '../../utils/format';
+import DataTable from '../../components/DataTable.vue';
+import PageHeader from '../../components/PageHeader.vue';
 
-const activeTab = ref("users")
+const activeTab = ref('users');
 
 // ---- 账号 ----
-const users = ref<DavUser[]>([])
-const loadingUsers = ref(false)
-const saving = ref(false)
+const users = ref<DavUser[]>([]);
+const loadingUsers = ref(false);
+const saving = ref(false);
 
 const userColumns = [
-  { title: "用户名", key: "username" },
-  { title: "状态", key: "is_active", width: 90 },
-  { title: "上次登录", key: "last_login_at", width: 180 },
-  { title: "操作", key: "action", width: 260 },
-]
+  { title: '用户名', key: 'username' },
+  { title: '状态', key: 'is_active', width: 90 },
+  { title: '上次登录', key: 'last_login_at', width: 180 },
+  { title: '操作', key: 'action', width: 260 },
+];
 
 // ---- 审计 ----
-const auditItems = ref<DavAuditItem[]>([])
-const auditTotal = ref(0)
-const loadingAudit = ref(false)
-const auditFilters = reactive<{ username?: string; method?: string }>({})
+const auditItems = ref<DavAuditItem[]>([]);
+const auditTotal = ref(0);
+const loadingAudit = ref(false);
+const auditFilters = reactive<{ username?: string; method?: string }>({});
 
 const methodOptions = [
-  { value: "GET", label: "GET" },
-  { value: "HEAD", label: "HEAD" },
-  { value: "PROPFIND", label: "PROPFIND" },
-  { value: "OPTIONS", label: "OPTIONS" },
-]
+  { value: 'GET', label: 'GET' },
+  { value: 'HEAD', label: 'HEAD' },
+  { value: 'PROPFIND', label: 'PROPFIND' },
+  { value: 'OPTIONS', label: 'OPTIONS' },
+];
 
 const auditColumns = [
-  { title: "用户", key: "username", width: 120 },
-  { title: "方法", key: "method", width: 100 },
-  { title: "路径", key: "path" },
-  { title: "状态", key: "status", width: 80 },
-  { title: "客户端", key: "client", width: 200 },
-  { title: "来源 IP", key: "remote_addr", width: 130 },
-  { title: "耗时", key: "duration_ms", width: 90 },
-  { title: "时间", key: "created_at", width: 180 },
-]
+  { title: '用户', key: 'username', width: 120 },
+  { title: '方法', key: 'method', width: 100 },
+  { title: '路径', key: 'path' },
+  { title: '状态', key: 'status', width: 80 },
+  { title: '客户端', key: 'client', width: 200 },
+  { title: '来源 IP', key: 'remote_addr', width: 130 },
+  { title: '耗时', key: 'duration_ms', width: 90 },
+  { title: '时间', key: 'created_at', width: 180 },
+];
 
 // ---- 根目录 ----
-const rootConfig = ref<DavRootConfig>({ driver_id: null, drivers: [] })
-const rootDriverId = ref<number | undefined>(undefined)
-const savingRoot = ref(false)
+const rootConfig = ref<DavRootConfig>({ driver_id: null, drivers: [] });
+const rootDriverId = ref<number | undefined>(undefined);
+const savingRoot = ref(false);
 
 // ---- 弹窗 ----
-const createOpen = ref(false)
-const createForm = reactive({ username: "", password: "" })
-const resetOpen = ref(false)
-const resetTarget = ref<DavUser | null>(null)
-const resetForm = reactive({ password: "" })
+const createOpen = ref(false);
+const createForm = reactive({ username: '', password: '' });
+const resetOpen = ref(false);
+const resetTarget = ref<DavUser | null>(null);
+const resetForm = reactive({ password: '' });
 
 // ---- 计算属性 ----
 
 /** DAV 连接地址（用浏览器当前 origin，部署到哪就是哪）。 */
-const davUrl = computed(() => `${window.location.origin}/dav`)
+const davUrl = computed(() => `${window.location.origin}/dav`);
 
 const rootOptions = computed(() => {
   const opts = rootConfig.value.drivers.map((d: DavRootDriver) => ({
     value: d.id,
     label: d.usable ? d.name : `${d.name}（未配置输出目录）`,
     disabled: !d.usable,
-  }))
-  return [{ value: -1, label: "自动（第一个可用）" }, ...opts]
-})
+  }));
+  return [{ value: -1, label: '自动（第一个可用）' }, ...opts];
+});
 
 const rootUsable = computed(() => {
-  const id = rootDriverId.value
+  const id = rootDriverId.value;
   if (id === undefined || id === -1) {
-    return rootConfig.value.drivers.some((d) => d.usable)
+    return rootConfig.value.drivers.some((d) => d.usable);
   }
-  return rootConfig.value.drivers.find((d) => d.id === id)?.usable ?? false
-})
+  return rootConfig.value.drivers.find((d) => d.id === id)?.usable ?? false;
+});
 
 // ---- 加载 ----
 
 async function loadUsers() {
-  loadingUsers.value = true
+  loadingUsers.value = true;
   try {
-    users.value = await api.get<DavUser[]>("/dav-users")
+    users.value = await api.get<DavUser[]>('/dav-users');
   } catch (e) {
-    message.error(`加载账号失败：${errMsg(e)}`)
+    message.error(`加载账号失败：${errMsg(e)}`);
   } finally {
-    loadingUsers.value = false
+    loadingUsers.value = false;
   }
 }
 
 async function loadAudit() {
-  loadingAudit.value = true
+  loadingAudit.value = true;
   try {
-    const params = new URLSearchParams()
-    if (auditFilters.username) params.set("username", auditFilters.username)
-    if (auditFilters.method) params.set("method", auditFilters.method)
-    const qs = params.toString()
-    const page = await api.get<DavAuditPage>(`/dav-users/audit${qs ? `?${qs}` : ""}`)
-    auditItems.value = page.items
-    auditTotal.value = page.total
+    const params = new URLSearchParams();
+    if (auditFilters.username) params.set('username', auditFilters.username);
+    if (auditFilters.method) params.set('method', auditFilters.method);
+    const qs = params.toString();
+    const page = await api.get<DavAuditPage>(`/dav-users/audit${qs ? `?${qs}` : ''}`);
+    auditItems.value = page.items;
+    auditTotal.value = page.total;
   } catch (e) {
-    message.error(`加载审计失败：${errMsg(e)}`)
+    message.error(`加载审计失败：${errMsg(e)}`);
   } finally {
-    loadingAudit.value = false
+    loadingAudit.value = false;
   }
 }
 
 async function loadRoot() {
   try {
-    rootConfig.value = await api.get<DavRootConfig>("/dav-users/root")
-    rootDriverId.value = rootConfig.value.driver_id ?? -1
+    rootConfig.value = await api.get<DavRootConfig>('/dav-users/root');
+    rootDriverId.value = rootConfig.value.driver_id ?? -1;
   } catch (e) {
-    message.error(`加载根目录配置失败：${errMsg(e)}`)
+    message.error(`加载根目录配置失败：${errMsg(e)}`);
   }
 }
 
 async function loadAll() {
-  await Promise.all([loadUsers(), loadAudit(), loadRoot()])
+  await Promise.all([loadUsers(), loadAudit(), loadRoot()]);
 }
 
 // ---- 操作 ----
 
 function openCreate() {
-  createForm.username = ""
-  createForm.password = ""
-  createOpen.value = true
+  createForm.username = '';
+  createForm.password = '';
+  createOpen.value = true;
 }
 
 async function createUser() {
   if (!createForm.username || !createForm.password) {
-    message.warning("用户名和密码都要填")
-    return
+    message.warning('用户名和密码都要填');
+    return;
   }
-  saving.value = true
+  saving.value = true;
   try {
-    await api.post("/dav-users", {
+    await api.post('/dav-users', {
       username: createForm.username,
       password: createForm.password,
-    })
-    message.success("账号已创建")
-    createOpen.value = false
-    await loadUsers()
+    });
+    message.success('账号已创建');
+    createOpen.value = false;
+    await loadUsers();
   } catch (e) {
-    message.error(`创建失败：${errMsg(e)}`)
+    message.error(`创建失败：${errMsg(e)}`);
   } finally {
-    saving.value = false
+    saving.value = false;
   }
 }
 
 function openReset(user: DavUser) {
-  resetTarget.value = user
-  resetForm.password = ""
-  resetOpen.value = true
+  resetTarget.value = user;
+  resetForm.password = '';
+  resetOpen.value = true;
 }
 
 async function resetPassword() {
-  if (!resetTarget.value) return
+  if (!resetTarget.value) return;
   if (!resetForm.password) {
-    message.warning("密码不能为空")
-    return
+    message.warning('密码不能为空');
+    return;
   }
-  saving.value = true
+  saving.value = true;
   try {
-    await api.patch(`/dav-users/${resetTarget.value.id}`, { password: resetForm.password })
-    message.success("密码已重置，旧密码立即失效")
-    resetOpen.value = false
+    await api.patch(`/dav-users/${String(resetTarget.value.id)}`, { password: resetForm.password });
+    message.success('密码已重置，旧密码立即失效');
+    resetOpen.value = false;
   } catch (e) {
-    message.error(`重置失败：${errMsg(e)}`)
+    message.error(`重置失败：${errMsg(e)}`);
   } finally {
-    saving.value = false
+    saving.value = false;
   }
 }
 
 async function toggleActive(user: DavUser) {
   try {
-    await api.patch(`/dav-users/${user.id}`, { is_active: !user.is_active })
-    message.success(user.is_active ? "已停用" : "已启用")
-    await loadUsers()
+    await api.patch(`/dav-users/${String(user.id)}`, { is_active: !user.is_active });
+    message.success(user.is_active ? '已停用' : '已启用');
+    await loadUsers();
   } catch (e) {
-    message.error(`操作失败：${errMsg(e)}`)
+    message.error(`操作失败：${errMsg(e)}`);
   }
 }
 
 async function removeUser(user: DavUser) {
   try {
-    await api.del(`/dav-users/${user.id}`)
-    message.success("账号已删除")
-    await loadUsers()
+    await api.del(`/dav-users/${String(user.id)}`);
+    message.success('账号已删除');
+    await loadUsers();
   } catch (e) {
-    message.error(`删除失败：${errMsg(e)}`)
+    message.error(`删除失败：${errMsg(e)}`);
   }
 }
 
 async function clearAudit() {
   try {
-    await api.del("/dav-users/audit")
-    message.success("审计日志已清空")
-    await loadAudit()
+    await api.del('/dav-users/audit');
+    message.success('审计日志已清空');
+    await loadAudit();
   } catch (e) {
-    message.error(`清空失败：${errMsg(e)}`)
+    message.error(`清空失败：${errMsg(e)}`);
   }
 }
 
@@ -508,18 +506,18 @@ function onRootChange() {
 }
 
 async function saveRoot() {
-  const id = rootDriverId.value
-  savingRoot.value = true
+  const id = rootDriverId.value;
+  savingRoot.value = true;
   try {
-    rootConfig.value = await api.put<DavRootConfig>("/dav-users/root", {
+    rootConfig.value = await api.put<DavRootConfig>('/dav-users/root', {
       driver_id: id === undefined || id === -1 ? null : id,
-    })
-    rootDriverId.value = rootConfig.value.driver_id ?? -1
-    message.success("已应用")
+    });
+    rootDriverId.value = rootConfig.value.driver_id ?? -1;
+    message.success('已应用');
   } catch (e) {
-    message.error(`应用失败：${errMsg(e)}`)
+    message.error(`应用失败：${errMsg(e)}`);
   } finally {
-    savingRoot.value = false
+    savingRoot.value = false;
   }
 }
 
@@ -527,30 +525,30 @@ async function saveRoot() {
 
 function methodColor(method: string): string {
   switch (method) {
-    case "GET":
-      return "blue"
-    case "PROPFIND":
-      return "purple"
-    case "HEAD":
-      return "cyan"
+    case 'GET':
+      return 'blue';
+    case 'PROPFIND':
+      return 'purple';
+    case 'HEAD':
+      return 'cyan';
     default:
-      return "default"
+      return 'default';
   }
 }
 
 function statusColor(status: number): string {
-  if (status >= 200 && status < 300) return "green"
-  if (status === 401 || status === 403) return "orange"
-  if (status === 429) return "red"
-  return "default"
+  if (status >= 200 && status < 300) return 'green';
+  if (status === 401 || status === 403) return 'orange';
+  if (status === 429) return 'red';
+  return 'default';
 }
 
 /** 路径穿越尝试（含 `..` 的路径）。 */
 function isTraversal(path: string): boolean {
-  return path.includes("..")
+  return path.includes('..');
 }
 
-onMounted(loadAll)
+onMounted(loadAll);
 </script>
 
 <style scoped>

@@ -17,17 +17,11 @@
       <template #title>
         配置
         <a-tag :color="config?.ready ? 'green' : 'orange'" class="cfg-tag">
-          {{ config?.ready ? "已就绪" : "未就绪" }}
+          {{ config?.ready ? '已就绪' : '未就绪' }}
         </a-tag>
       </template>
       <template #extra>
-        <a-button
-          size="small"
-          type="primary"
-          ghost
-          :loading="saving"
-          @click="saveConfig"
-        >
+        <a-button size="small" type="primary" ghost :loading="saving" @click="saveConfig">
           保存配置
         </a-button>
       </template>
@@ -36,8 +30,7 @@
         <template #message>配齐下面几项即可启用</template>
         <template #description>
           配置保存在数据库里，<b>改完立即生效</b>——不用改 <code>.env</code>、
-          不用重启容器。需要的条件：
-          <b>① TMDB API Key</b>（themoviedb.org 免费申请）、
+          不用重启容器。需要的条件： <b>① TMDB API Key</b>（themoviedb.org 免费申请）、
           <b>② 本地媒体库目录</b>（容器内绝对路径）、
           <b>③ 下载器与 tag 过滤</b>（圈定要整理的种子，避免误动辅种库）。
         </template>
@@ -59,17 +52,16 @@
         <a-col :xs="24" :md="8">
           <div class="param">
             <div class="param-label">② 本地媒体库目录</div>
-            <a-input
-              v-model:value="form.mediaLibraryDir"
-              placeholder="/media/library"
-            />
+            <a-input v-model:value="form.mediaLibraryDir" placeholder="/media/library" />
           </div>
         </a-col>
         <a-col :xs="24" :md="8">
           <div class="param">
             <div class="param-label">
               ③ 整理源目录
-              <a-tooltip title="要整理的视频来源目录（逗号分隔多个）。文件从哪来无所谓——放进源目录就会被扫描、识别、整理到媒体库。建议与辅种下载目录物理分开">
+              <a-tooltip
+                title="要整理的视频来源目录（逗号分隔多个）。文件从哪来无所谓——放进源目录就会被扫描、识别、整理到媒体库。建议与辅种下载目录物理分开"
+              >
                 <QuestionCircleOutlined class="param-help" />
               </a-tooltip>
             </div>
@@ -156,10 +148,7 @@
           </a-button>
         </a-col>
         <a-col :xs="24" :md="3">
-          <a-checkbox
-            v-model:checked="scrapeRemember"
-            :disabled="!scrapeTmdbId"
-          >
+          <a-checkbox v-model:checked="scrapeRemember" :disabled="!scrapeTmdbId">
             记住此修正
           </a-checkbox>
         </a-col>
@@ -178,8 +167,8 @@
 
       <a-alert type="info" show-icon class="mb">
         <template #message>
-          别名在识别时<b>优先于搜索</b>——固化一次，永久生效。
-          适用于：TMDB 的中文译名很机械、或自动识别选错了剧。
+          别名在识别时<b>优先于搜索</b>——固化一次，永久生效。 适用于：TMDB
+          的中文译名很机械、或自动识别选错了剧。
         </template>
       </a-alert>
 
@@ -297,9 +286,10 @@
       </a-alert>
       <div class="param-label">当前记录</div>
       <p class="muted" style="margin-bottom: 12px">
-        {{ fixRecord?.title }} {{ fixRecord?.season ? `S${fixRecord.season}` : ""
-        }}{{ fixRecord?.episode ? `E${fixRecord.episode}` : "" }}
-        （当前 tmdb={{ fixRecord?.tmdb_id ?? "—" }}）
+        {{ fixRecord?.title }} {{ fixRecord?.season ? `S${fixRecord.season}` : ''
+        }}{{ fixRecord?.episode ? `E${fixRecord.episode}` : '' }} （当前 tmdb={{
+          fixRecord?.tmdb_id ?? '—'
+        }}）
       </p>
       <div class="param-label">正确的 TMDB ID</div>
       <a-input-number
@@ -316,27 +306,27 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from "vue";
-import { message } from "ant-design-vue";
-import { QuestionCircleOutlined } from "@ant-design/icons-vue";
-import DataTable from "../../components/DataTable.vue";
-import PageHeader from "../../components/PageHeader.vue";
-import { mediaApi, errMsg } from "../../api";
+import { onMounted, reactive, ref } from 'vue';
+import { message } from 'ant-design-vue';
+import { QuestionCircleOutlined } from '@ant-design/icons-vue';
+import DataTable from '../../components/DataTable.vue';
+import PageHeader from '../../components/PageHeader.vue';
+import { mediaApi, errMsg } from '../../api';
 import type {
   ScrapeAlias,
   ScrapeConfig,
   ScrapeConfigInput,
   ScrapeFileResult,
   ScrapeRecord,
-} from "../../types";
+} from '../../types';
 
 const config = ref<ScrapeConfig | null>(null);
 const saving = ref(false);
 
 const form = reactive({
-  tmdbApiKey: "",
-  mediaLibraryDir: "",
-  sourceDirs: "",
+  tmdbApiKey: '',
+  mediaLibraryDir: '',
+  sourceDirs: '',
   scrapeEnabled: 0,
   scrapePolicy: 0,
   organizeEnabled: 0,
@@ -346,7 +336,7 @@ const form = reactive({
 // ---- 配置加载与保存 ----
 
 async function loadConfig(): Promise<void> {
-  config.value = await mediaApi.get<ScrapeConfig>("/scrape/config");
+  config.value = await mediaApi.get<ScrapeConfig>('/scrape/config');
   form.mediaLibraryDir = config.value.media_library_dir;
   form.sourceDirs = config.value.organize_source_dirs;
   form.scrapeEnabled = config.value.scrape_enabled;
@@ -368,11 +358,11 @@ async function saveConfig(): Promise<void> {
     };
     // 密钥：留空 = 不修改（与离线下载同一语义）
     if (form.tmdbApiKey) payload.tmdb_api_key = form.tmdbApiKey.trim();
-    config.value = await mediaApi.put<ScrapeConfig>("/scrape/config", payload);
-    form.tmdbApiKey = "";
-    message.success("已保存，下一轮作业生效");
+    config.value = await mediaApi.put<ScrapeConfig>('/scrape/config', payload);
+    form.tmdbApiKey = '';
+    message.success('已保存，下一轮作业生效');
   } catch (e) {
-    message.error(errMsg(e, "保存失败"));
+    message.error(errMsg(e, '保存失败'));
   } finally {
     saving.value = false;
   }
@@ -380,7 +370,7 @@ async function saveConfig(): Promise<void> {
 
 // ---- 手动刮削 ----
 
-const scrapePath = ref("");
+const scrapePath = ref('');
 const scrapeTmdbId = ref<number | undefined>(undefined);
 const scrapeRemember = ref(false);
 const scraping = ref(false);
@@ -388,23 +378,20 @@ const scraping = ref(false);
 async function scrapeFile(): Promise<void> {
   scraping.value = true;
   try {
-    const result = await mediaApi.post<ScrapeFileResult>(
-      "/scrape/file",
-      {
-        path: scrapePath.value.trim(),
-        ...(scrapeTmdbId.value ? { tmdb_id: scrapeTmdbId.value } : {}),
-        ...(scrapeRemember.value ? { remember: true } : {}),
-      },
-    );
-    if (result.status === "ok") message.success(result.detail);
+    const result = await mediaApi.post<ScrapeFileResult>('/scrape/file', {
+      path: scrapePath.value.trim(),
+      ...(scrapeTmdbId.value ? { tmdb_id: scrapeTmdbId.value } : {}),
+      ...(scrapeRemember.value ? { remember: true } : {}),
+    });
+    if (result.status === 'ok') message.success(result.detail);
     else message.warning(result.detail);
     if (result.remembered) {
-      message.info("已记入识别别名——下次同标题直接命中");
+      message.info('已记入识别别名——下次同标题直接命中');
       await loadAliases();
     }
     await loadRecords();
   } catch (e) {
-    message.error(errMsg(e, "刮削失败"));
+    message.error(errMsg(e, '刮削失败'));
   } finally {
     scraping.value = false;
   }
@@ -416,49 +403,50 @@ const aliases = ref<ScrapeAlias[]>([]);
 const savingAlias = ref(false);
 
 const aliasForm = reactive({
-  aliasText: "",
+  aliasText: '',
   tmdbId: undefined as number | undefined,
-  mediaType: "",
-  note: "",
+  mediaType: '',
+  note: '',
 });
 
 const aliasColumns = [
-  { title: "标题", dataIndex: "alias_text", key: "alias_text" },
-  { title: "TMDB ID", dataIndex: "tmdb_id", key: "tmdb_id", width: 110 },
-  { title: "类型", dataIndex: "mediaTypeLabel", key: "mediaTypeLabel", width: 90 },
-  { title: "备注", dataIndex: "note", key: "note" },
-  { title: "操作", key: "action", width: 80 },
+  { title: '标题', dataIndex: 'alias_text', key: 'alias_text' },
+  { title: 'TMDB ID', dataIndex: 'tmdb_id', key: 'tmdb_id', width: 110 },
+  { title: '类型', dataIndex: 'mediaTypeLabel', key: 'mediaTypeLabel', width: 90 },
+  { title: '备注', dataIndex: 'note', key: 'note' },
+  { title: '操作', key: 'action', width: 80 },
 ];
 
 async function loadAliases(): Promise<void> {
   try {
-    const rows = await mediaApi.get<ScrapeAlias[]>("/scrape/aliases");
+    const rows = await mediaApi.get<ScrapeAlias[]>('/scrape/aliases');
     aliases.value = rows.map((item) => ({
       ...item,
-      mediaTypeLabel: item.media_type === "movie" ? "电影" : item.media_type === "tv" ? "剧集" : "不限",
-    })) as unknown as ScrapeAlias[];
+      mediaTypeLabel:
+        item.media_type === 'movie' ? '电影' : item.media_type === 'tv' ? '剧集' : '不限',
+    }));
   } catch (e) {
-    message.error(errMsg(e, "加载别名失败"));
+    message.error(errMsg(e, '加载别名失败'));
   }
 }
 
 async function saveAlias(): Promise<void> {
   savingAlias.value = true;
   try {
-    await mediaApi.post<ScrapeAlias>("/scrape/aliases", {
+    await mediaApi.post<ScrapeAlias>('/scrape/aliases', {
       alias_text: aliasForm.aliasText.trim(),
       tmdb_id: aliasForm.tmdbId,
       ...(aliasForm.mediaType ? { media_type: aliasForm.mediaType } : {}),
       ...(aliasForm.note.trim() ? { note: aliasForm.note.trim() } : {}),
     });
-    message.success("别名已保存");
-    aliasForm.aliasText = "";
+    message.success('别名已保存');
+    aliasForm.aliasText = '';
     aliasForm.tmdbId = undefined;
-    aliasForm.mediaType = "";
-    aliasForm.note = "";
+    aliasForm.mediaType = '';
+    aliasForm.note = '';
     await loadAliases();
   } catch (e) {
-    message.error(errMsg(e, "保存别名失败"));
+    message.error(errMsg(e, '保存别名失败'));
   } finally {
     savingAlias.value = false;
   }
@@ -466,11 +454,11 @@ async function saveAlias(): Promise<void> {
 
 async function removeAlias(id: number): Promise<void> {
   try {
-    await mediaApi.del<void>(`/scrape/aliases/${id}`);
-    message.success("已删除");
+    await mediaApi.del(`/scrape/aliases/${String(id)}`);
+    message.success('已删除');
     await loadAliases();
   } catch (e) {
-    message.error(errMsg(e, "删除失败"));
+    message.error(errMsg(e, '删除失败'));
   }
 }
 
@@ -478,12 +466,12 @@ async function removeAlias(id: number): Promise<void> {
 
 // 列配置直接字面量（列结构是视图内部细节，非 API 契约）
 const recordColumns = [
-  { title: "标题", dataIndex: "title", key: "title" },
-  { title: "类型", dataIndex: "kindLabel", key: "kindLabel", width: 90 },
-  { title: "状态", dataIndex: "statusLabel", key: "statusLabel", width: 90 },
-  { title: "错误", dataIndex: "error", key: "error", width: 240 },
-  { title: "时间", dataIndex: "scraped_at", key: "scraped_at", width: 170 },
-  { title: "操作", key: "action", width: 80 },
+  { title: '标题', dataIndex: 'title', key: 'title' },
+  { title: '类型', dataIndex: 'kindLabel', key: 'kindLabel', width: 90 },
+  { title: '状态', dataIndex: 'statusLabel', key: 'statusLabel', width: 90 },
+  { title: '错误', dataIndex: 'error', key: 'error', width: 240 },
+  { title: '时间', dataIndex: 'scraped_at', key: 'scraped_at', width: 170 },
+  { title: '操作', key: 'action', width: 80 },
 ];
 
 const records = ref<ScrapeRecord[]>([]);
@@ -492,37 +480,37 @@ const page = ref(1);
 const loadingRecords = ref(false);
 
 function kindLabel(row: Record<string, unknown>): string {
-  const kind = String(row.kind ?? "");
+  const kind = typeof row.kind === 'string' ? row.kind : '';
   const season = row.season as number | null;
   const episode = row.episode as number | null;
-  if (kind === "movie") return "电影";
-  if (kind === "tvshow") return "整剧";
-  if (kind === "season") return `季 ${season ?? ""}`;
-  if (kind === "episode") return `S${season}E${episode}`;
+  if (kind === 'movie') return '电影';
+  if (kind === 'tvshow') return '整剧';
+  if (kind === 'season') return `季 ${String(season ?? '')}`;
+  if (kind === 'episode') return `S${String(season ?? 0)}E${String(episode ?? 0)}`;
   return kind;
 }
 
 function statusLabel(row: Record<string, unknown>): string {
-  const status = String(row.status ?? "");
-  if (status === "scraped") return "已刮";
-  if (status === "failed") return "失败";
-  return "跳过";
+  const status = typeof row.status === 'string' ? row.status : '';
+  if (status === 'scraped') return '已刮';
+  if (status === 'failed') return '失败';
+  return '跳过';
 }
 
 async function loadRecords(): Promise<void> {
   loadingRecords.value = true;
   try {
     const pageData = await mediaApi.get<{ total: number; items: ScrapeRecord[] }>(
-      `/scrape/records?limit=50&offset=${(page.value - 1) * 50}`,
+      `/scrape/records?limit=50&offset=${String((page.value - 1) * 50)}`,
     );
     recordTotal.value = pageData.total;
     records.value = pageData.items.map((item) => ({
       ...item,
       kindLabel: kindLabel(item as unknown as Record<string, unknown>),
       statusLabel: statusLabel(item as unknown as Record<string, unknown>),
-    })) as unknown as ScrapeRecord[];
+    }));
   } catch (e) {
-    message.error(errMsg(e, "加载记录失败"));
+    message.error(errMsg(e, '加载记录失败'));
   } finally {
     loadingRecords.value = false;
   }
@@ -552,21 +540,18 @@ async function submitFix(): Promise<void> {
   if (!fixRecord.value) return;
   fixing.value = true;
   try {
-    const result = await mediaApi.post<ScrapeFileResult>(
-      "/scrape/records/rescrape",
-      {
-        scope_key: fixRecord.value.scope_key,
-        ...(fixTmdbId.value ? { tmdb_id: fixTmdbId.value } : {}),
-        ...(fixRemember.value ? { remember: true } : {}),
-      },
-    );
-    if (result.status === "ok") message.success(result.detail);
+    const result = await mediaApi.post<ScrapeFileResult>('/scrape/records/rescrape', {
+      scope_key: fixRecord.value.scope_key,
+      ...(fixTmdbId.value ? { tmdb_id: fixTmdbId.value } : {}),
+      ...(fixRemember.value ? { remember: true } : {}),
+    });
+    if (result.status === 'ok') message.success(result.detail);
     else message.warning(result.detail);
-    if (result.remembered) message.info("已记入识别别名");
+    if (result.remembered) message.info('已记入识别别名');
     fixOpen.value = false;
     await loadRecords();
   } catch (e) {
-    message.error(errMsg(e, "重刮失败"));
+    message.error(errMsg(e, '重刮失败'));
   } finally {
     fixing.value = false;
   }
