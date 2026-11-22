@@ -106,21 +106,23 @@
 - **站点适配层只有一个通用实现（2026-11-20 全量替换）**：旧的 10 个站点专用 adapter
   与 `parsers/`（含 `attendance.py`）**已删除**；站点差异全部由规则包
   （`app/adapters/sites/indexer/rules/indexers.json`）表达，`_registry` 只有 `generic`。
-  随之移除的功能：签到（FR-3.6）、HDWing 逐种优惠查询、时魔（hourly bonus，
-  含 `site_user_data.hourly_bonus*` 四列，已由 bootstrap `drop_column` 删除）。
+  随之移除的功能：签到（FR-3.6）、时魔（hourly bonus，含
+  `site_user_data.hourly_bonus*` 四列，已由 bootstrap `drop_column` 删除）。
+  HDWinG 逐种优惠查询在 2026-11-22 以通用适配器 + service 增量判定的形式恢复，
+  见下方「hdwing 站点的免费判定」。
   字幕由新增契约 `SiteAdapter.search_subtitles()` 提供（无配置返回 `[]`，
   失败抛 `SiteFetchError`）。旧 adapter 的 9 站细节段落保留在此仅供历史参考。
 
 - **规则包移植的遗留问题（2026-11-20 记录，待处理）**：
-  - ⚠️ **HDWinG 目前不识别任何免费种**（`engine.HDWING_PROMOTION_INJECTION = False`）。
-    站点 `ajax_promotion.php` 受 Cloudflare Turnstile 保护，**未过闸时对任意
-    id（含已过期、甚至不存在的）都返回兜底 `pro_free` 且 `timeout` 恒空** →
-    原实现把到期促销当永久免费。实测对照：`promotion.php?id=838960` 显示
-    免费窗口 2026-11-11 22:35 已结束，接口仍回 `pro_free`。
-    现状按「非免费」保守处理（宁可漏推，不误推付费种）。
-    **待办**：接回逐种 `GET /promotion.php?id={tid}` 权威查询（判定=有 `Free`
-    记录且截止时间 > 现在，截止为空=永久免费；404=无优惠；429=熔断），
-    由 service 层做**增量**（只查新增与已过期项），并发 5、单轮上限 200
+  - ✅ **HDWinG 逐种优惠查询已接回（2026-11-22）**：列表页 AJAX 注入
+    （`engine.HDWING_PROMOTION_INJECTION = False`）仍保持关闭——站点
+    `ajax_promotion.php` 受 Cloudflare Turnstile 保护，**未过闸时对任意
+    id（含已过期、甚至不存在的）都返回兜底 `pro_free` 且 `timeout` 恒空**。
+    免费判定改由 service 层逐种查 `GET /promotion.php?id={tid}` 权威 SSR
+    优惠历史表：有 `Free` 记录且截止时间 > 现在 = 限时免费；截止为空 =
+    永久免费；404 / 「页面不存在」= 无优惠；429/403 = 熔断；其它错误 =
+    `SiteFetchError`。实现见 `GenericAdapter.get_promotion()` +
+    `app/services/jobs.py:_resolve_promotions()`；并发 5、单轮上限 200。
   - **API 站（m-team 等）下载走「换票配方」**：`get_torrent_url` 返回
     `[base64]url` 形式的一次性请求配方（`app/adapters/sites/indexer/spider/*.py`
     的 `get_download_url`），**不是**可直接 GET 的普通 URL。旧的逐站 token
@@ -132,9 +134,10 @@
   - ⚠️ **填充它的 `ajax_promotion.php` 被 Cloudflare Turnstile 闸保护**：页面 JS 必须先 `POST ajax_turnstile.php` 带 `cf-turnstile-response` token。**未过闸的请求对任意 id 都返回兜底的 `pro_free` + 空 timeout**——实测连**根本不存在的 id（999999999）**都回「免费」。照它解析会把「限免 6 小时」误判成「永久免费」（`window_parser` 收到 `free_classes=['free']` + 无剩余时间 → 判 `PERMANENT`，窗口永不到期）
   - ✅ **权威源是 `GET /promotion.php?id={tid}`**（SSR 优惠历史表：优惠类型 / 开始时间 / 截止时间 / 操作人）。判定 = 有 `Free` 记录 **且 截止时间 > 现在**；**截止时间为空 = 永久免费**。实测窗口形态：6h / 24h / 48h / 30 天
   - **种子抓取不带任何筛选参数**（`GET /torrents.php?page=N`）：① 站点筛选参数语义随版本漂移（各站 `spstate` 含义都不同）② `spstate=2` 按「免费剩余时长」倒序，会把 2022 年老种（重开 30 天促销）顶到前面，**按发布时间排序的全量列表反而不含它们** ③ 筛选后的结果**仍然没有**每个种子的真实窗口
-  - **代价与增量**：`promotion.php` 是**逐种子**请求（无批量入口，`promotion.php` 不带 id → 404；单条 ~0.25s）→ 由 service 层做**增量判定**：只复查「新增」与「判定已过期/缺失」的条目，其余沿用库里旧判定（回填成等效 free_payload，upsert 后值不变）。适配器用 `supports_promotion_lookup = True` 声明该能力（`app/services/jobs.py:_resolve_promotions`），并发 5、单轮上限 200
-  - ⚠️ **404 = 种子不存在**（NexusPHP 标准 404 页）→ 当「无优惠记录」处理，不算故障；429 → 熔断；其它 4xx/5xx → `SiteFetchError`
-  - fixture 抓取：`scripts/capture_hdwing_promotion_fixtures.py`（裁剪 + 自校验；4 种真实形态：生效中 / 生效+过期混合 / 有表头无记录 / 已过期）
+  - **代价与增量**：`promotion.php` 是**逐种子**请求（无批量入口，`promotion.php` 不带 id → 404；单条实测约 0.4–1.0s）→ 由 service 层做**增量判定**：`PERMANENT` 不复查；`TIMED` 只在截止后复查；已确认非免费的条目在 `free_payload` 写 `promotion_checked_at`，默认 **60 分钟 TTL** 后才复查；新增条目立即查。其余沿用库里旧判定（回填成等效 `free_payload`，upsert 后值不变）。适配器用 `supports_promotion_lookup = True` 声明该能力（`app/services/jobs.py:_resolve_promotions`），并发 5、单轮上限 200。2026-11-22 生产实测：3 页 300 条全量约 61s，300/300 HTTP 200，当前生效免费 34 条；因此**不能**把 `unknown` 当「每轮都查」——否则约 4.3 万请求/天
+  - ⚠️ **404 = 种子不存在**（NexusPHP 标准 404 页）→ 当「无优惠记录」处理，不算故障；另有部分不存在的 id 返回 **HTTP 200 的「页面不存在」页**，同样按无优惠处理。429/403 → 熔断；其它 4xx/5xx / 缺少优惠表头 → `SiteFetchError`（不写判定，下轮重试）
+  - ⚠️ **登录页 = 站点级故障（2026-11-22 审查修复）**：`promotion.php` 返回登录页（cookie 失效）→ adapter 抛 `SitePermanentError`（**永久**失败，与 `SiteFetchError` 分开）→ service 层**中止本轮优惠复查**并把该站记为**站点失败**（`failed_sites` + 明细点名）。**不能当单条失败吞掉**：那会把故障静默写成「非免费」，且下一轮还会对同一批失效 cookie 重打上百个请求（单轮上限 200）。⚠️ **service 层不 import httpx**——传输异常由 adapter 统一翻译成 `SiteFetchError`（分层约束：adapters 翻译，services 只认本层异常）
+  - fixture 抓取：`scripts/capture_hdwing_promotion_fixtures.py`（裁剪 + 自校验；4 种真实形态：生效中 / 生效+过期混合 / 有表头无 Free / 已过期）。抓取脚本读生产库 cookie 时使用 `mode=ro`，只 GET 站点页面
 - **FR-1.6 站点用户数据契约**（2026-10-18 加入，2026-10-18 精简为单方法，2026-10-22 加时魔）：
   - 不抽 9 站 user_data 基类；NexusPHP 7 站共用 `app/adapters/sites/parsers/nexus_php.py` module-level helper（`parse_user_snapshot` / `parse_hourly_bonus`）
   - `SiteUserData` 表是**当前快照**（UNIQUE site_id），不做历史；如需时间序列需先建 `site_user_data_history` 表再迁

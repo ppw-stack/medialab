@@ -94,10 +94,10 @@ _COMMON_SITE_USERDATA_FALLBACK_SCHEMAS = frozenset(
 #: ``promotion.php?id=`` 权威页：838960 的免费窗口 2026-11-11 已结束，
 #: 接口仍回 pro_free。
 #:
-#: 关掉补全后，列表页的优惠占位符不会被填充 → 规则匹配不到 pro_* →
-#: 全部按「非免费」处理。这是**保守且安全**的口径（宁可漏推免费种，
-#: 也不把付费种当免费种推下去）。要恢复精确判定需接回逐种
-#: ``promotion.php?id=`` 查询。
+#: 关掉补全后，列表页的优惠占位符不会被填充 → 规则匹配不到 pro_*。
+#: 精确免费判定由 service 层逐种查权威页
+#: （:meth:`GenericAdapter.get_promotion` + ``jobs._resolve_promotions``），
+#: **不要**再打开这个 AJAX 补全。
 HDWING_PROMOTION_INJECTION = False
 
 
