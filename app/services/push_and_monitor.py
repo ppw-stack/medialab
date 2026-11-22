@@ -29,7 +29,7 @@
 - 推送的选种条件本来就有 ``push_min_remaining_hours`` 过滤，先推后监测
   也不会推错，只是白跑一轮监测——反过来更省。
 
-**节流的状态是进程内的**（``_last_push_at``）：重启后第一次跑会立刻推送
+**节流的状态是进程内的**（``_THROTTLE`` 实例）：重启后第一次跑会立刻推送
 一次。这是刻意的（新进程尽快恢复推送），且推送链路幂等（``task_queue``
 的 ``idem_key`` + 索引行的 ``push_status``），不会重推已推过的种。
 
@@ -65,14 +65,40 @@ __all__ = [
 #: 合并后 cron 心跳是 10 分钟（监测需要），推送仍受这个门槛约束。
 PUSH_MIN_INTERVAL_SEC = 1800
 
-#: 上一次**真正尝试推送**的单调时钟时刻（``None`` = 本进程还没推过）。
-_last_push_at: float | None = None
+class _PushThrottle:
+    """进程内的推送节流状态。
+
+    状态收在实例里——模块级只留一个**不可替换**的实例，避免 ``global``
+    改写模块级可变状态（测试之间互相污染、并发时行为不可预测）。
+    """
+
+    def __init__(self) -> None:
+        #: 上一次**真正尝试推送**的单调时钟时刻（``None`` = 本进程还没推过）。
+        self.last_push_at: float | None = None
+
+    def reset(self) -> None:
+        """清空节流时间戳（测试用；生产不需要调用）。"""
+        self.last_push_at = None
+
+    def remaining(self, now: float) -> float | None:
+        """距下次可推送还剩的秒数；``None`` = 可立即推送。"""
+        if self.last_push_at is None:
+            return None
+        remain = PUSH_MIN_INTERVAL_SEC - (now - self.last_push_at)
+        return remain if remain > 0 else None
+
+    def mark_pushed(self, now: float) -> None:
+        """记录一次**真正尝试过推送**的时刻。"""
+        self.last_push_at = now
+
+
+#: 进程内唯一的节流状态（重启后为空 → 首轮立刻推一次，刻意）。
+_THROTTLE = _PushThrottle()
 
 
 def reset_throttle_state() -> None:
     """重置节流状态（测试用；生产不需要调用）。"""
-    global _last_push_at
-    _last_push_at = None
+    _THROTTLE.reset()
 
 
 async def run_push_and_monitor(factory: Any) -> dict[str, Any]:
@@ -124,22 +150,19 @@ async def _run_push(factory: Any) -> dict[str, Any]:
     空转（无候选 / 未配置下载器 / 选种全被跳过）**不刷新**节流时间戳，
     这样新候选一出现、或用户刚配好下载器，下一轮就能推（≤10 分钟）。
     """
-    global _last_push_at
-
     now = time.monotonic()
-    if _last_push_at is not None:
-        waited = now - _last_push_at
-        if waited < PUSH_MIN_INTERVAL_SEC:
-            remain = PUSH_MIN_INTERVAL_SEC - waited
-            return {
-                "summary": (
-                    f"距上次推送 {int(waited // 60)} 分钟，"
-                    f"未满 {PUSH_MIN_INTERVAL_SEC // 60} 分钟门槛"
-                    f"（还差 {int(remain // 60) + 1} 分钟）"
-                ),
-                "skipped_by_interval": True,
-                "steps": [],
-            }
+    remain = _THROTTLE.remaining(now)
+    if remain is not None:
+        waited = PUSH_MIN_INTERVAL_SEC - remain
+        return {
+            "summary": (
+                f"距上次推送 {int(waited // 60)} 分钟，"
+                f"未满 {PUSH_MIN_INTERVAL_SEC // 60} 分钟门槛"
+                f"（还差 {int(remain // 60) + 1} 分钟）"
+            ),
+            "skipped_by_interval": True,
+            "steps": [],
+        }
 
     from app.services.push_free import PushFreeService
 
@@ -150,5 +173,5 @@ async def _run_push(factory: Any) -> dict[str, Any]:
     selected = int(payload.get("selected") or 0)
     tried = selected > 0 or int(payload.get("pushed") or 0) > 0
     if tried:
-        _last_push_at = time.monotonic()
+        _THROTTLE.mark_pushed(time.monotonic())
     return payload

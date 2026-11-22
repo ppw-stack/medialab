@@ -26,22 +26,21 @@
 - ``cleanup_link_cache`` — 清理过期直链缓存（L1 内存 + L2 表；302 中转用）
 - ``purge_dav_auth_cache`` — 淘汰过期的 WebDAV 认证失败缓存
 
-**数据流触发**（2026-11-22）：
+**数据流触发**（机制已实现，**当前没有作业使用**）：
 
-辅种域的作业不只是各自按 cron 醒，还按数据流串成一条链——
+辅种域的三个作业各自按 cron 独立跑，**没有** ``depends_on`` 边：
 
-```
-站点拉取 ──成功──▶ 免费种推送 ──入队──▶ 任务队列排空（兜底重试）
-（每 10 分钟）      （成功后触发，≥30 分钟一次；2 小时 cron 兜底）
-```
+- ``fetch_all_sites``       每 10 分钟（拉取 + 站点信息，两段）
+- ``push_and_monitor_free`` 10 分钟心跳（推送由作业内部节流 ≥30 分钟）
+- ``drain_task_queue``      每 5 分钟
 
 - 边由 :attr:`JobMeta.depends_on` 声明，语义是**触发时机**（不是数据正确性
   前提）：上游失败时下游照旧按自己的 cron 跑。
-- 门槛 :attr:`JobMeta.min_trigger_interval_sec` 保证频率不变密——推送仍是
-  ≈30 分钟一次，只是触发时刻对齐「拉取刚完成」。
-- ``cron`` 在这条链上退化为**兜底**：上游长期失败时才靠它保底跑一轮。
-- 只有这一条边。其余作业（窗口监测 / 站点信息 / 队列排空 / 辅种维护）
-  各有自己的节奏，**刻意不挂边**（理由见 docs/scheduler-dataflow.md §10）。
+- 门槛 :attr:`JobMeta.min_trigger_interval_sec` 保证频率不变密。
+- **刻意不挂边**：合并「推送 + 监测」后 cron 心跳（10 分钟）已比推送门槛
+  （30 分钟）更细，上游触发不会带来更早的推送——挂了就是永不生效的死边
+  （理由见 docs/scheduler-dataflow.md §10）。机制与测试保留，供将来
+  「真依赖 + 更粗 cron」的作业使用。
 """
 from __future__ import annotations
 
@@ -404,7 +403,13 @@ async def _run_fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
         lambda: refresh_all_sites(factory),
     )
 
-    merged = dict(fetch_result)
+    # 拉取段抛异常时 run_stage 返回空 dict，顶层字段会整批消失；
+    # 先垫默认值再被实际结果覆盖，保证旧调用方 / 前端始终读得到。
+    merged: dict[str, object] = {
+        "total_written": 0,
+        "scanned_sites": 0,
+        **fetch_result,
+    }
     merged.update(
         {
             "summary": build_summary(
@@ -430,7 +435,6 @@ async def _run_push_and_monitor(factory: AdapterFactory) -> dict[str, object]:
     return await run_push_and_monitor(factory)
 
 
-# ============================================================ 作业入口
 async def _run_drain_task_queue(factory: AdapterFactory) -> dict[str, object]:
     """排空任务队列（崩溃恢复 + 退避重试）。"""
     from app.services.task_drain import drain_task_queue

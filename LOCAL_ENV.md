@@ -231,7 +231,7 @@ curl -H "Authorization: Bearer $WEB_TOKEN" http://localhost:8092/api/v1/schedule
   `push_download_interval_ms`（推送侧）+ `monitor_pre_pause_minutes` /
   `monitor_delete_expired`（监测侧）——两组合并到同一个「配置」弹框
 - `cross_seed_maintenance`：`disk_rotation_*` 四项
-- `aggregate_sync` / `scrape_metadata` / `organize_torrents` 各有专属参数
+- `aggregate_sync` / `scrape_metadata` / `organize_files` 各有专属参数
 
 ### 运行历史（2026-11-03 起）
 

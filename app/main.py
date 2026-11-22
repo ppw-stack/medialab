@@ -168,18 +168,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # 再清理已下线作业的残留行。**必须在 apply_overrides 之前**——
         # 否则旧行读出来没人用，新作业又拿不到用户改过的值。
         known_jobs = {meta.name for meta in JOB_META}
-        await migrate_renamed_job(
+        renamed = await migrate_renamed_job(
             "scan_cross_seed", "cross_seed_maintenance", known_jobs
         )
         # 2026-11-22：免费种推送 + 窗口监测合并为一个作业（两旧 → 一新，
         # 启停取 AND：任一边被停用过，新作业也停用——不静默复活用户关掉的
         # 行为）。
-        await merge_job_settings(
+        merged = await merge_job_settings(
             ["push_free_torrents", "monitor_free_window"],
             "push_and_monitor_free",
             known_jobs,
         )
-        await prune_orphaned_settings(known_jobs)
+        # 迁移**没成功** → 旧配置行留着（下次启动重试），别让 prune 当孤儿
+        # 删掉——删了用户的启停状态就永久没了（新作业会按默认启用复活）。
+        keep: set[str] = set()
+        if not renamed:
+            keep.add("scan_cross_seed")
+        if not merged:
+            keep |= {"push_free_torrents", "monitor_free_window"}
+        await prune_orphaned_settings(known_jobs, keep=keep or None)
 
         scheduler_center.apply_overrides(
             await load_enabled_states(),

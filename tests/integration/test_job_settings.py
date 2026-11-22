@@ -14,6 +14,9 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+import pytest
 from app.db.models import AppRuntimeParam, SchedulerJobSetting
 from app.db.session import session_scope
 from app.services.job_settings import (
@@ -27,6 +30,11 @@ from app.services.job_settings import (
     save_enabled_state,
 )
 from sqlalchemy import select
+
+
+def _boom_scope() -> Any:
+    """替身：打开 session 时直接炸（模拟 DB 不可用）。"""
+    raise RuntimeError("炸了")
 
 
 async def _rows() -> list[SchedulerJobSetting]:
@@ -298,3 +306,56 @@ async def test_prune_orphaned_settings_keeps_known_jobs(db: None) -> None:
     removed = await prune_orphaned_settings({"daily_checkin"})
     assert removed == 0
     assert {r.job_name for r in await _rows()} == {"daily_checkin"}
+
+
+async def test_prune_orphaned_settings_keeps_protected_jobs(db: None) -> None:
+    """``keep`` 里的作业名**不删**——迁移没成功时旧行要留着等下次重试。
+
+    删掉等于把用户的启停状态永久丢了（新作业会按默认 enabled=True 复活）。
+    """
+    async with session_scope() as session:
+        session.add(
+            SchedulerJobSetting(
+                job_name="push_free_torrents", enabled=False, cron="0 */2 * * *"
+            )
+        )
+        session.add(SchedulerJobSetting(job_name="scan_orphans", enabled=True))
+        await session.commit()
+
+    removed = await prune_orphaned_settings(
+        set(), keep={"push_free_torrents"}
+    )
+
+    assert removed == 1, "只有未被保护的孤儿行被删"
+    rows = {r.job_name for r in await _rows()}
+    assert rows == {"push_free_torrents"}
+
+
+async def test_merge_failure_is_registered_as_startup_degradation(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """合并失败是**启动降级** → 必须登记到 ``startup_status``（/readyz 看得见）。"""
+    from app.services import job_settings as js
+    from app.services import startup_status
+
+    startup_status.reset()
+    monkeypatch.setattr(
+        js,
+        "session_scope",
+        _boom_scope,
+    )
+
+    try:
+        merged = await merge_job_settings(
+            ["push_free_torrents"],
+            "push_and_monitor_free",
+            {"push_and_monitor_free"},
+        )
+
+        assert merged is False
+        degradations = startup_status.snapshot()
+        assert "job_settings_merge" in degradations
+        assert "炸了" in degradations["job_settings_merge"]["reason"]
+    finally:
+        # 台账是进程级状态，别漏给别的用例（/readyz 的用例断言无降级）
+        startup_status.reset()

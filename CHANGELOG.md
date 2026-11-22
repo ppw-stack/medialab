@@ -82,6 +82,17 @@
     / `monitor_free_window` 这两个 job 名不再存在，调用会 404；改用
     `push_and_monitor_free`。`GET /scheduler` 的 `jobs[]` 里也不会再出现旧名。
 
+    **回滚 / 恢复**（启动期迁移是**不可逆**的 `DELETE`）：
+
+    - 删除前会把旧行内容**打进启动日志**（`作业配置删除快照（合并到新作业）`：
+      `job_name` / `enabled` / `cron`）——这就是恢复依据；
+    - 合并失败时旧行**不会被删**（`prune_orphaned_settings` 收到 `keep` 保护，
+      下次启动自动重试），且失败会登记到 `startup_status`——`/readyz` 的
+      `degradations` 里能看到 `job_settings_merge`；
+    - 需要手工还原时：停容器 → 按日志里的快照往 `scheduler_job_settings`
+      插回旧行（`job_name` / `enabled` / `cron`）→ 重启；或直接在新作业行上
+      按快照改 `enabled` / `cron`（新行已存在时合并不会覆盖它）。
+
 - **作业触发新增「数据流」能力**（`depends_on` + `min_trigger_interval_sec`）：
 
   上游作业本轮**成功后**可主动唤醒下游（"数据流触发"），cron 退为兜底。语
@@ -95,6 +106,31 @@
   **注意**：挂边时 `cron` 必须**显著宽于**门槛，否则边是空操作（上游成功
   的时刻永远差一点够不到门槛，而那一刻 cron 自己也会醒）。`GET /scheduler`
   会下发 `depends_on` / `min_trigger_interval_sec`，当前全为 `null` / `0`。
+
+### Versioning & Deprecation
+
+- **语义化版本影响：minor（v2.1.0）**——`GET /scheduler` **只新增**字段
+  （`module` / `module_title` / `modules[]` / `depends_on` /
+  `min_trigger_interval_sec`），旧客户端忽略未知字段即可；破坏面**仅限**
+  被移除的三个旧作业名（`refresh_user_data` / `push_free_torrents` /
+  `monitor_free_window`），且它们**响亮地 404**（脚本会立刻报错，不会像
+  2.0.0 那次「502 → 202」那样**静默**把「已入队」当成失败）。
+- **弃用时间线**：旧作业名自 **v2.1.0 起立即不可调用**（`POST /scheduler/
+  {job}/…` 返回 404），**无兼容期**——面板自托管、前后端同版本发布，
+  面板前端已在本 PR 内适配；**外部脚本须在升级镜像前改完**。
+
+  | 旧作业名（已移除） | 新作业名 | 备注 |
+  |---|---|---|
+  | `refresh_user_data` | `fetch_all_sites` | 职责并入第二段「站点信息获取」 |
+  | `push_free_torrents` | `push_and_monitor_free` | 与监测合并；启停取 AND |
+  | `monitor_free_window` | `push_and_monitor_free` | 同上（两个旧名 → 一个新名） |
+
+- **受影响调用方**：任何调用 `POST /scheduler/{job}/…`（手动触发 / 改 cron /
+  改启停 / 看历史）的脚本与外部工具；`GET /scheduler` 的消费方只会看到
+  `jobs[]` 少了三个名字、多了 `module` 等字段。
+- **镜像 tag**：git tag `v2.1.0` → 镜像 tag `2.1.0` / `2.1`（见 `DEPLOY.md`）。
+- **关联文档**：[`CHANGELOG.md`](CHANGELOG.md)（本页）；数据流方案与
+  「实施后变更」见 [`docs/scheduler-dataflow.md`](docs/scheduler-dataflow.md)。
 
 ## [2.0.0] - 2026-11-21
 

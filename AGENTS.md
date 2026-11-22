@@ -285,6 +285,7 @@
   - **空转不刷新节流时间戳**（`selected == 0` / 未配下载器）：否则用户刚配好下载器也要白等 30 分钟；节流状态是**进程内**的，重启后首轮会立刻推一次（刻意，链路幂等）
   - **两段各自容错**：一段抛错不影响另一段，失败进 `steps`；子服务的 `steps` 挂成 `children`——**必须保留 JobStep 对象**（`_to_payload`），直接 `asdict` 会把子步骤变成 dict，`isinstance` 失败 → 前端看不到逐站/逐种明细
   - **配置迁移**（`job_settings.merge_job_settings`，启动期在 `apply_overrides` 之前）：两条旧行合并为一条，**启停取 AND**（任一边被停用 → 新作业也停用，不静默复活用户关掉的行为），**cron 不搬**（旧节奏对新作业是错的）
+  - **迁移是不可逆 DELETE → 三道保护**：① 删除前把旧行内容（`job_name`/`enabled`/`cron`）**打进启动日志**（快照 = 事后唯一的恢复依据，恢复步骤见 `CHANGELOG.md` 的「回滚 / 恢复」）② 失败登记 `startup_status`（`job_settings_merge`）→ `/readyz` 的 `degradations` 看得见 ③ 合并失败时**旧行不删**（`prune_orphaned_settings(keep=…)` 保护，留给下次启动重试）——删掉等于用户的启停状态永久丢了
   - **BREAKING**：`push_free_torrents` / `monitor_free_window` 两个 job 名不再存在（`POST /scheduler/{job}/…` 调旧名会 404）
   - 契约由 `tests/unit/test_push_and_monitor.py`（编排/节流/容错/children）+ `tests/integration/test_job_settings.py`（合并迁移 AND 语义）+ `tests/unit/test_scheduler.py` + `tests/integration/test_api.py` 固化
 - **环境变量配置全部落库**（2026-10-26 加入，`app/services/env_settings.py` + `app/db/models.py:AppEnvSetting`）：

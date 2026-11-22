@@ -75,9 +75,14 @@ push 不依赖本轮 fetch **成功**：站点拉取失败时它照样能推库�
 
 **正确配法**：把 push 的 cron 拉长成兜底，节奏交给最小间隔。
 
+> ⚠️ **本节是「合并前」的方案**：`push_free_torrents` 这个作业名**已不存在**
+> （2026-11-22 与 `monitor_free_window` 合并为 `push_and_monitor_free`），
+> 下表记录的是**当时的设想**，当前实现见文首「实施后变更」与
+> `app/services/job_registry.py:DEFAULT_CRON`。
+
 | 参数 | 值 | 作用 |
 |---|---|---|
-| `DEFAULT_CRON["push_free_torrents"]` | `0 */2 * * *` | **兜底**：fetch 连续失败时，push 最多停 2 小时 |
+| `DEFAULT_CRON["push_free_torrents"]`（**旧作业名，已移除**） | `0 */2 * * *` | **兜底**：fetch 连续失败时，push 最多停 2 小时 |
 | `JobSpec.min_trigger_interval_sec` | `1800` | **节奏**：两次推送之间至少 30 分钟（≈ 现状频率） |
 | `JobSpec.depends_on` | `"fetch_all_sites"` | 上游成功后触发判定 |
 
@@ -219,8 +224,12 @@ running → 双方都执行同一 task。
 - **DB**：无迁移。`scheduler_job_settings.cron` 仍是「兜底 cron」；用户改过 push 的
   cron 时 **DB 覆盖优先**（现有逻辑不动），此时实际频率 = `max(cron 节奏, 上游触发门槛)`。
 - **API**：`GET /scheduler` 只**新增** `depends_on` 字段（向后兼容）。
-- **行为**：其他 10 个作业完全不受影响（没声明 `depends_on` 就不参与触发）。
+- **行为**：其他作业完全不受影响（没声明 `depends_on` 就不参与触发）。
 - **回滚**：删掉注册表里 `depends_on=` 一行 + 恢复 `DEFAULT_CRON` 即可，无残留状态。
+- **版本与弃用**：本次改动**没有**引入新的破坏性 API 语义；被移除的旧作业名
+  （`push_free_torrents` / `monitor_free_window` / `refresh_user_data`）自
+  **v2.1.0 起立即 404**、无兼容期，映射表与迁移步骤见
+  [`CHANGELOG.md`](../CHANGELOG.md) 的「Versioning & Deprecation」小节。
 
 ---
 

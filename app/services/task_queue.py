@@ -249,6 +249,10 @@ class TaskQueueService:
                 select(TaskQueue)
                 .where(TaskQueue.id.in_(claimed_ids))
                 .order_by(TaskQueue.run_at)
+                # populate_existing：绕开本 session 可能缓存的旧状态——
+                # 否则 identity map 里若已有这些 id 的过期对象，返回的是
+                # status='pending'、attempts 未 +1 的陈旧实例（与 claim_one 同理）。
+                .execution_options(populate_existing=True)
             )
         ).scalars().all()
         return list(rows)

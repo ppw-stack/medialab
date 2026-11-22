@@ -107,6 +107,10 @@ async def test_fetch_failure_does_not_block_user_data(
     out = await _run_fetch_all_sites(None)  # type: ignore[arg-type]
     assert _stage(out, "站点拉取").status == "fail"
     assert _stage(out, "站点信息获取").status == "ok"
+    # 失败路径上顶层键**仍然存在**（默认值 0）——前端 formatResult 与
+    # 旧调用方读的就是这些键，键整批消失会渲染成空/NaN。
+    assert out["total_written"] == 0
+    assert out["scanned_sites"] == 0
 
 
 async def test_user_data_failure_does_not_lose_fetch_result(
