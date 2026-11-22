@@ -90,9 +90,9 @@ const EXEMPTIONS = {
     'cron-preview__next': 'BEM 子元素，继承 .cron-preview',
   },
   // 2026-11-22：`pages/settings/SchedulerTab.vue` 迁成了独立页面
-  // `pages/Scheduler.vue`（定时任务菜单拆分），豁免要跟着文件走——
+  // `pages/SchedulerPage.vue`（定时任务菜单拆分），豁免要跟着文件走——
   // 否则检查脚本会把它当「样式丢失」报出来。
-  'pages/Scheduler.vue': {
+  'pages/SchedulerPage.vue': {
     // .run-chip 是 inline-flex 胶囊，__time 只是内部的时间文本
     // （.mono 字体由 global.css 提供），不需要独立规则。
     'run-chip__time': 'BEM 子元素，字体由 global.css 的 .mono 提供',

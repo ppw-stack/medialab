@@ -9,7 +9,7 @@ import { message } from 'ant-design-vue';
  *
  * 服务「字符串型」DB 持久化配置（辅种扫描目录 / 未来其它 env→DB 字符串
  * 设置）。2026-11-22 起与「定时任务」是**两个独立菜单**：作业调度在
- * `/scheduler`（`pages/Scheduler.vue`，按业务模块分组），本组件留在
+ * `/scheduler`（`pages/SchedulerPage.vue`，按业务模块分组），本组件留在
  * `/settings`——它是部署级设置，不是作业级配置。
  *
  * 与 SchedulerConfigModal 的区别：本页直接展示表单（不弹框）——
