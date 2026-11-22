@@ -27,13 +27,31 @@
 #      push_status / pushed_at：
 #        · pushed_restore_rollback_<时间戳>.csv —— 原值明细（人工核对用）
 #        · pushed_restore_rollback_<时间戳>.sql —— 可直接执行的逐行还原语句
+#      .backup 不可用时退化为「checkpoint 后 cp」——checkpoint 必须**真的做完**
+#      （busy≠0 说明主库文件还缺 WAL 里的最新页，cp 出来的快照会静默缺失
+#      最近的写入，「整体回滚路径」就废了）→ 校验不通过即中止，不带着一个
+#      不可靠的快照继续写库。
 #   3) 按 id 分批（INTEGER PRIMARY KEY 即 rowid；BATCH 默认 5000 行），每批
 #      独立 BEGIN IMMEDIATE / COMMIT，每批最多重试 3 次；任一批失败即**停手**
 #      （已提交的批次保留，重跑幂等续做——UPDATE 带 `push_status <> 'pushed'`
 #      守卫，重复执行不会改错；中途被 kill 时 SQLite 自动回滚那一批）。
-#   4) 锁影响窗口：每批只在 UPDATE→COMMIT 之间持写锁（毫秒级）。停应用的
-#      前提下对面板零影响；万一忘了停应用，也只阻塞其它写者最多
-#      busy_timeout（10s）后本脚本报错退出，不留半提交（每批单事务）。
+#      批次表 _batch 用 `id INTEGER PRIMARY KEY`（rowid 索引）：UPDATE 里的
+#      相关子查询按 rowid 命中，每批行访问是 O(BATCH)；不建主键时 SQLite
+#      不会为相关子查询自动建索引，单批退化成 O(BATCH²) 的行访问。
+#   4) 锁影响窗口：写锁**只在每批 BEGIN IMMEDIATE→COMMIT 之间**持有，批与
+#      批之间释放（应用可插进来）。单批的行访问量级是万级（默认 5000 行），
+#      实测耗时（本机，2 万行索引 / 每批 5000 行）：_batch 有主键 ~0.01s、
+#      无主键 ~0.2s（批次 1 万行时 ~0.02s vs ~0.77s——无主键是 O(BATCH²)
+#      的线性扫）。所以「每批毫秒级」只在有主键时成立，整轮锁窗口 =
+#      批次数 × 单批耗时，**不是**固定的毫秒级。停应用的前提下对面板零
+#      影响；万一忘了停应用，也只阻塞其它写者最多 busy_timeout（10s）后
+#      本脚本报错退出，不留半提交（每批单事务）。
+#   5) 每批用 `.bail on`：任一语句出错立即中止本批——否则失败语句之后的
+#      COMMIT 仍会把后续语句提交掉，SELECT changes() 还会返回上一条语句的
+#      陈旧值（实测「UPDATE 失败 → 后面语句照样提交 → 报出一个看似正常的
+#      行数」）。批次成功还要求 changes() **等于**该批应恢复的行数，不等
+#      即停手：UPDATE 的守卫会跳过已被标记 pushed 的行，行数对不上说明有
+#      行被并发改动或已删除，不能当成「本批成功」。
 #   PRAGMA 与应用一致（app/db/session.py）：journal_mode=WAL、
 #   synchronous=NORMAL、foreign_keys=ON、busy_timeout=10000。
 #
@@ -114,10 +132,31 @@ else
   echo "生成写前快照：$BACKUP"
   if ! sqlite3 "$DB" ".backup $BACKUP" 2>/dev/null; then
     echo "  .backup 不可用，改为 checkpoint 后复制"
-    sqlite3 "$DB" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null
-    cp -p "$DB" "$BACKUP"
+    # wal_checkpoint(TRUNCATE) 返回三列：busy | WAL 页数 | 已 checkpoint 页数。
+    # busy≠0（有活跃读者/写者）时主库文件仍缺 WAL 里的最新页，此时 cp 出来
+    # 的快照会**静默缺失**最近的写入——「整体回滚路径」就废了。故必须校验
+    # 它真的做完了（WAL 为空 → 0|-1|-1；有内容 → 0|N|N），否则中止。
+    _ckpt=$(sqlite3 "$DB" "PRAGMA wal_checkpoint(TRUNCATE);" 2>/dev/null) || {
+      echo "checkpoint 失败，快照不可靠，已中止（未写入任何数据）" >&2; exit 1; }
+    _busy=${_ckpt%%|*}
+    _rest=${_ckpt#*|}
+    _log=${_rest%%|*}
+    _done=${_rest#*|}
+    _ckpt_ok=0
+    if [ "$_busy" = "0" ]; then
+      if { [ "$_log" = "-1" ] && [ "$_done" = "-1" ]; } \
+         || { [ "$_log" != "-1" ] && [ "$_log" = "$_done" ]; }; then
+        _ckpt_ok=1
+      fi
+    fi
+    [ "$_ckpt_ok" = "1" ] || {
+      echo "checkpoint 未完成（${_ckpt}）：主库仍缺 WAL 里的最新页，" >&2
+      echo "快照会静默缺失写入——已中止（未写入任何数据）。" >&2
+      exit 1; }
+    cp -p "$DB" "$BACKUP" || {
+      echo "复制主库生成快照失败，已中止（未写入任何数据）" >&2; exit 1; }
   fi
-  [ -f "$BACKUP" ] || { echo "快照失败，已中止（未写入任何数据）" >&2; exit 1; }
+  [ -s "$BACKUP" ] || { echo "快照失败，已中止（未写入任何数据）" >&2; exit 1; }
 fi
 
 # --- 2. 导入凭据、算待恢复集合、导出回滚凭据（只读） ---------------------
@@ -139,9 +178,15 @@ JOIN _restore_tmp r
   ON r.site_id = t.site_id
  AND r.item_id = t.item_id
 WHERE coalesce(t.push_status, '') <> 'pushed';
+-- 按 id 去重：凭据 CSV 里若出现重复的 (site_id,item_id)，同一 id 会命中多行，
+-- 导出的批次文件就会含重复 id（行数校验会误判、导入 INTEGER PRIMARY KEY 也会
+-- 撞唯一约束）。取 pushed_at 的最大值（空串 < 任意非空值）。
 CREATE TEMP VIEW _pending AS
-SELECT id, pushed_at FROM _match
-WHERE identity_ok = 1 OR $INCLUDE_MISMATCH = 1;
+SELECT id, max(coalesce(pushed_at, '')) AS pushed_at
+FROM _match
+WHERE identity_ok = 1 OR $INCLUDE_MISMATCH = 1
+GROUP BY id;
+.headers off
 .output $MATCHED
 SELECT id, coalesce(pushed_at, '') FROM _pending ORDER BY id;
 .output $ROLLBACK_CSV
@@ -184,18 +229,26 @@ if [ ! -s "$MATCHED" ]; then
 fi
 
 # --- 3. 分批写入：每批独立事务 + 重试，任一批失败即停手 -------------------
+# write_batch <批次文件> <该批应恢复的行数>
+# 成功时 stdout 输出实际恢复行数；失败返回 1（不输出行数）。
 write_batch() {
   _part=$1
+  _expected=$2
   _try=1
   while [ "$_try" -le 3 ]; do
-    if sqlite3 "$DB" <<SQL
+    # .bail on：任一语句出错立即中止本批（否则失败语句之后的 COMMIT 仍会把
+    # 后续语句提交掉，SELECT changes() 还会返回上一条语句的陈旧值）。
+    # _batch 用 INTEGER PRIMARY KEY（rowid 索引），相关子查询按 rowid 命中，
+    # 单批行访问 O(BATCH)——不建主键会退化成 O(BATCH²)。
+    if _out=$(sqlite3 "$DB" <<SQL
+.bail on
 .output /dev/null
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
 PRAGMA foreign_keys=ON;
 PRAGMA busy_timeout=10000;
 .output stdout
-CREATE TEMP TABLE _batch(id INT, pushed_at TEXT);
+CREATE TEMP TABLE _batch(id INTEGER PRIMARY KEY, pushed_at TEXT);
 .mode csv
 .import $_part _batch
 BEGIN IMMEDIATE;
@@ -209,10 +262,23 @@ WHERE id IN (SELECT id FROM _batch)
 COMMIT;
 SELECT changes();
 SQL
-    then
+    ); then
+      # sqlite3 可能输出多余行，只取最后一行数字
+      _changed=$(printf '%s\n' "$_out" | tail -n 1 | tr -d ' \r')
+      case "$_changed" in
+        ''|*[!0-9]*)
+          echo "    无法解析本批 changes()（原始输出：${_out}）" >&2
+          return 1 ;;
+      esac
+      if [ "$_changed" -ne "$_expected" ]; then
+        echo "    本批实际更新 $_changed 行，与应恢复 $_expected 行不符" >&2
+        echo "    （有行被并发改动/删除，或已被标记 pushed——不能当成成功）" >&2
+        return 1
+      fi
+      printf '%s\n' "$_changed"
       return 0
     fi
-    echo "    第 $_try 次写入失败（写锁争用？），2 秒后重试" >&2
+    echo "    第 $_try 次写入失败（写锁争用？或 SQL 出错——详见上方 sqlite3 报错），2 秒后重试" >&2
     sleep 2
     _try=$((_try + 1))
   done
@@ -226,14 +292,13 @@ npart=0
 for part in "$MATCHED".part.*; do
   [ -f "$part" ] || continue
   npart=$((npart + 1))
-  if ! changed=$(write_batch "$part"); then
-    echo "第 $npart 批写入失败（重试 3 次仍失败），已中止。" >&2
+  # 本批应恢复的行数 = 批次文件的数据行数（MATCHED 无表头、id 已去重）
+  expected=$(wc -l < "$part" | tr -d ' \r\n')
+  if ! changed=$(write_batch "$part" "$expected"); then
+    echo "第 $npart 批写入失败（重试 3 次仍失败，或实际更新行数与应恢复行数不符），已中止。" >&2
     echo "已提交的批次保留（幂等，重跑会跳过已恢复行）；回滚见 $ROLLBACK_SQL" >&2
     exit 1
   fi
-  changed=${changed:-0}
-  # sqlite3 可能输出多余行（PRAGMA 回显等），只取最后一行数字
-  changed=$(printf '%s\n' "$changed" | tail -n 1 | tr -d ' \r')
   total=$((total + changed))
   echo "  批次 ${npart}：恢复 ${changed} 行（累计 ${total}）"
 done
