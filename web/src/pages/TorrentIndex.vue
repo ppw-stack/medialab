@@ -94,7 +94,10 @@ async function loadDownloaders() {
     downloaders.value = all.filter((d) => d.enabled);
     const def = downloaders.value.find((d) => d.is_default);
     if (def) pushDownloaderId.value = def.id;
-    else if (downloaders.value.length > 0) pushDownloaderId.value = downloaders.value[0].id;
+    else if (downloaders.value.length > 0) {
+      const first = downloaders.value[0];
+      if (first) pushDownloaderId.value = first.id;
+    }
   } catch {
     /* ignore */
   }
@@ -110,7 +113,7 @@ async function doPush() {
   pushing.value = true;
   pushingId.value = pushItem.value.id;
   try {
-    const r = await api.post<PushResponse>(`/torrent-index/${pushItem.value.id}/push`, {
+    const r = await api.post<PushResponse>(`/torrent-index/${String(pushItem.value.id)}/push`, {
       downloader_id: pushDownloaderId.value,
     });
     if (r.deferred) {
@@ -178,12 +181,14 @@ async function doBatchPush() {
     });
     // 已入队 → 立刻触发一次队列消化
     void triggerDrain();
-    const parts: string[] = [`已入队 ${r.enqueued} 条`];
-    if (r.skipped > 0) parts.push(`跳过 ${r.skipped} 条（已推送/队列中/无链接）`);
-    if (r.failed > 0) parts.push(`失败 ${r.failed} 条`);
+    const parts: string[] = [`已入队 ${String(r.enqueued)} 条`];
+    if (r.skipped > 0) parts.push(`跳过 ${String(r.skipped)} 条（已推送/队列中/无链接）`);
+    if (r.failed > 0) parts.push(`失败 ${String(r.failed)} 条`);
     if (r.failed > 0) {
       const failed = r.items.filter((i) => i.state === 'failed').slice(0, 3);
-      message.error(`${parts.join('，')}：${failed.map((i) => `#${i.id} ${i.detail}`).join('；')}`);
+      message.error(
+        `${parts.join('，')}：${failed.map((i) => `#${String(i.id)} ${i.detail}`).join('；')}`,
+      );
     } else {
       message.success(`${parts.join('，')}，队列将按节流逐步推送`);
     }
@@ -232,7 +237,7 @@ const STAT_TILES = computed<Tile[]>(() => {
     ...Object.entries(FREE_TYPE_LABELS).map(([key, meta]) => ({
       key,
       label: meta.label,
-      count: (bt as Record<string, number>)[key] || 0,
+      count: bt[key] ?? 0,
       hint: key,
       active: filterFreeType.value === key,
     })),
@@ -243,7 +248,7 @@ function resetFilters() {
   filterSite.value = null;
   filterFreeType.value = null;
   filterQ.value = '';
-  load({ reset: true });
+  void load({ reset: true });
 }
 
 function onTableChange(
@@ -254,23 +259,23 @@ function onTableChange(
     | { field?: string; order?: 'ascend' | 'descend' | null }[],
 ) {
   const s = Array.isArray(sorter) ? sorter[0] : sorter;
-  if (s && s.field) {
-    sortBy.value = String(s.field);
+  if (s?.field) {
+    sortBy.value = s.field;
     sortOrder.value = s.order === 'ascend' ? 'asc' : 'desc';
-  } else if (s && s.order === null) {
+  } else if (s?.order === null) {
     sortBy.value = 'last_seen_at';
     sortOrder.value = 'desc';
   }
-  if (pagination?.current) {
+  if (pagination.current) {
     offset.value = (pagination.current - 1) * limit.value;
   }
-  load();
+  void load();
 }
 
 watch(filterFreeType, () => load({ reset: true }));
 watch(filterSite, () => {
-  load({ reset: true });
-  loadStats();
+  void load({ reset: true });
+  void loadStats();
 });
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 watch(filterQ, () => {
@@ -279,10 +284,10 @@ watch(filterQ, () => {
 });
 
 onMounted(() => {
-  loadMeta();
-  loadStats();
-  loadDownloaders();
-  load({ reset: true });
+  void loadMeta();
+  void loadStats();
+  void loadDownloaders();
+  void load({ reset: true });
 });
 
 onUnmounted(() => {
@@ -305,8 +310,14 @@ function formatDate(s: string | null): string {
 
 function freeTypeLabel(ft: string, discountPct?: number | null) {
   const base = FREE_TYPE_LABELS[ft] ?? { label: ft, color: 'default' };
-  if (ft === 'neutral_leech' && discountPct != null && discountPct > 0 && discountPct < 100) {
-    return { label: `${discountPct}% 折扣`, color: 'blue' };
+  if (
+    ft === 'neutral_leech' &&
+    discountPct !== null &&
+    discountPct !== undefined &&
+    discountPct > 0 &&
+    discountPct < 100
+  ) {
+    return { label: `${String(discountPct)}% 折扣`, color: 'blue' };
   }
   return base;
 }
@@ -333,11 +344,11 @@ function countdownFor(end: string | null): Countdown {
   if (hours >= 24) {
     const d = Math.floor(hours / 24);
     const h = Math.floor(hours % 24);
-    return { ms, label: `${d}D ${h}H`, cls };
+    return { ms, label: `${String(d)}D ${String(h)}H`, cls };
   }
   const h = Math.floor(hours);
   const m = Math.floor((ms / 60 / 1000) % 60);
-  return { ms, label: `${h}H ${m.toString().padStart(2, '0')}M`, cls };
+  return { ms, label: `${String(h)}H ${m.toString().padStart(2, '0')}M`, cls };
 }
 
 function freeEndChip(end: string | null, ft: string) {
@@ -367,23 +378,21 @@ const columns = [
     dataIndex: 'name',
     width: 320,
     ellipsis: true,
-    sorter: (a: TorrentIndexItem, b: TorrentIndexItem) =>
-      (a.name ?? '').localeCompare(b.name ?? ''),
+    sorter: (a: TorrentIndexItem, b: TorrentIndexItem) => a.name.localeCompare(b.name),
   },
   {
     title: '大小',
     key: 'size',
     dataIndex: 'size',
     width: 110,
-    sorter: (a: TorrentIndexItem, b: TorrentIndexItem) => (a.size ?? 0) - (b.size ?? 0),
+    sorter: (a: TorrentIndexItem, b: TorrentIndexItem) => a.size - b.size,
   },
   {
     title: '免费类型',
     key: 'free_type',
     dataIndex: 'free_type',
     width: 120,
-    sorter: (a: TorrentIndexItem, b: TorrentIndexItem) =>
-      (a.free_type ?? '').localeCompare(b.free_type ?? ''),
+    sorter: (a: TorrentIndexItem, b: TorrentIndexItem) => a.free_type.localeCompare(b.free_type),
   },
   {
     title: '剩余时间',
@@ -426,7 +435,7 @@ const columns = [
     width: 150,
     ellipsis: true,
     sorter: (a: TorrentIndexItem, b: TorrentIndexItem) =>
-      (a.last_seen_at ?? '').localeCompare(b.last_seen_at ?? ''),
+      a.last_seen_at.localeCompare(b.last_seen_at),
   },
   { title: '', key: 'action', width: 100 },
 ];

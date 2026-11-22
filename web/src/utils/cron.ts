@@ -96,13 +96,19 @@ export type CronFieldsState = Record<keyof CronFields, CronFieldState>;
 function parseCron(expr: string): CronFields | null {
   const parts = expr.trim().split(/\s+/);
   if (parts.length !== 5) return null;
-  return {
-    minute: parts[0],
-    hour: parts[1],
-    day: parts[2],
-    month: parts[3],
-    weekday: parts[4],
-  };
+  const [minute, hour, day, month, weekday] = parts;
+  // 上面已断言长度是 5，这里的 undefined 判定只为让类型收窄成立
+  //（noUncheckedIndexedAccess 下数组下标取值的类型含 undefined）。
+  if (
+    minute === undefined ||
+    hour === undefined ||
+    day === undefined ||
+    month === undefined ||
+    weekday === undefined
+  ) {
+    return null;
+  }
+  return { minute, hour, day, month, weekday };
 }
 
 /** 把 5 个字段拼成 cron 表达式（模块私有）。 */
@@ -203,15 +209,19 @@ function fieldMatches(spec: string, value: number): boolean {
     if (!Number.isFinite(step) || step <= 0) continue;
     let lo: number;
     let hi: number;
-    if (rangePart === '*' || rangePart === '?') {
+    // seg 非空 → split('/') 至少产出一个元素，rangePart 必然存在
+    const range = rangePart ?? seg;
+    if (range === '*' || range === '?') {
       lo = 0;
       hi = Number.MAX_SAFE_INTEGER;
-    } else if (rangePart.includes('-')) {
-      const [a, b] = rangePart.split('-').map((n) => Number(n));
+    } else if (range.includes('-')) {
+      const [a, b] = range.split('-').map((n) => Number(n));
+      // 含 '-' → split 至少产出两个元素；判定只为让类型收窄成立
+      if (a === undefined || b === undefined) continue;
       lo = a;
       hi = b;
     } else {
-      lo = Number(rangePart);
+      lo = Number(range);
       hi = step > 1 ? lo + step * 10 : lo;
     }
     if (!Number.isFinite(lo) || !Number.isFinite(hi)) continue;
@@ -263,9 +273,9 @@ export function formatNextRuns(expr: string, count = 3): string[] {
     const text = dayjs(d).format('MM-DD HH:mm');
     const diffMin = Math.round((d.getTime() - Date.now()) / 60000);
     let rel: string;
-    if (diffMin < 60) rel = `${diffMin} 分钟后`;
-    else if (diffMin < 60 * 24) rel = `${Math.round(diffMin / 60)} 小时后`;
-    else rel = `${Math.round(diffMin / 1440)} 天后`;
+    if (diffMin < 60) rel = `${String(diffMin)} 分钟后`;
+    else if (diffMin < 60 * 24) rel = `${String(Math.round(diffMin / 60))} 小时后`;
+    else rel = `${String(Math.round(diffMin / 1440))} 天后`;
     return `${text}（${rel}）`;
   });
 }

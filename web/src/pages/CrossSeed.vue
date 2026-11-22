@@ -310,8 +310,9 @@ async function loadDownloaders() {
     downloaders.value = await api.get<CrossSeedDownloader[]>('/cross-seed-monitor/downloaders');
     if (downloaders.value.length) {
       // 保持已选中的 tab（刷新后不跳回第一个）
-      if (selectedId.value == null || !downloaders.value.some((d) => d.id === selectedId.value)) {
-        selectedId.value = downloaders.value[0].id;
+      if (selectedId.value === null || !downloaders.value.some((d) => d.id === selectedId.value)) {
+        const first = downloaders.value[0];
+        if (first) selectedId.value = first.id;
       }
     } else {
       selectedId.value = null;
@@ -353,7 +354,7 @@ async function loadOrphans() {
 /** 当前 tab 的孤儿统计（该下载器的）。 */
 const currentOrphan = computed(() => {
   const id = selectedId.value;
-  if (id == null || !orphanSummary.value) return null;
+  if (id === null || !orphanSummary.value) return null;
   return orphanSummary.value.downloaders.find((d) => d.downloader_id === id) ?? null;
 });
 
@@ -366,11 +367,11 @@ async function loadDetail(id: number) {
   snapshot.value = null;
   try {
     const result = await api.get<CrossSeedSnapshot>(
-      `/cross-seed-monitor/downloaders/${id}/snapshot`,
+      `/cross-seed-monitor/downloaders/${String(id)}/snapshot`,
     );
     if (seq !== detailSeq) return; // 已有更新的请求，丢弃
     snapshot.value = result;
-  } catch (e) {
+  } catch {
     if (seq !== detailSeq) return;
     // 404 = 还没抓过快照（等待定时作业 / 手动刷新）
     snapshot.value = null;
@@ -384,16 +385,18 @@ let refreshSeq = 0;
 
 async function refreshNow() {
   const id = selectedId.value;
-  if (id == null) return;
+  if (id === null) return;
   const seq = ++refreshSeq;
   refreshing.value = true;
   try {
     const result = await api.post<CrossSeedSnapshot>(
-      `/cross-seed-monitor/downloaders/${id}/refresh`,
+      `/cross-seed-monitor/downloaders/${String(id)}/refresh`,
     );
     if (seq !== refreshSeq) return;
     snapshot.value = result;
-    message.success(`已刷新：${result.total_torrents} 个种子，${result.anomaly_count} 个异常`);
+    message.success(
+      `已刷新：${String(result.total_torrents)} 个种子，${String(result.anomaly_count)} 个异常`,
+    );
     await loadSnapshotList();
   } catch (e) {
     if (seq !== refreshSeq) return;
@@ -406,7 +409,7 @@ async function refreshNow() {
 watch(selectedId, (id) => {
   // 换 tab → 清掉上一个 tab 的勾选（hash 属于不同下载器）
   selectedAnomalyHashes.value = [];
-  if (id != null) loadDetail(id);
+  if (id !== null) void loadDetail(id);
 });
 
 /** 异常明细的勾选变化。 */
@@ -437,7 +440,7 @@ function openDeleteGroupModal(row: CrossSeedStatsRow) {
   deleteTarget.value = {
     hashes: [...hashes],
     count: hashes.length,
-    desc: `组「${row.name}」的 ${hashes.length} 个种子（同名同大小）`,
+    desc: `组「${row.name}」的 ${String(hashes.length)} 个种子（同名同大小）`,
     warn: '这些是正常做种的种子，删除后不再做种。',
   };
   deleteModalOpen.value = true;
@@ -447,22 +450,22 @@ function openDeleteGroupModal(row: CrossSeedStatsRow) {
 async function doDelete(deleteData: boolean) {
   const id = selectedId.value;
   const target = deleteTarget.value;
-  if (id == null || !target || target.hashes.length === 0) return;
+  if (id === null || !target || target.hashes.length === 0) return;
   deleteModalOpen.value = false;
   deleting.value = true;
   try {
     const r = await api.post<BatchOpResult>(
-      `/cross-seed-monitor/downloaders/${id}/remove-torrents`,
+      `/cross-seed-monitor/downloaders/${String(id)}/remove-torrents`,
       { hashes: target.hashes, delete_data: deleteData },
     );
     const what = deleteData ? '任务 + 磁盘数据' : '任务';
     if (r.failed > 0) {
       message.warning(
-        `已删除${what} ${r.succeeded} 个，失败 ${r.failed} 个` +
-          (r.errors?.length ? `：${r.errors[0]}` : ''),
+        `已删除${what} ${String(r.succeeded)} 个，失败 ${String(r.failed)} 个` +
+          (r.errors?.length ? `：${r.errors[0] ?? ''}` : ''),
       );
     } else {
-      message.success(`已删除${what} ${r.succeeded} 个`);
+      message.success(`已删除${what} ${String(r.succeeded)} 个`);
     }
     selectedAnomalyHashes.value = [];
     deleteTarget.value = null;
@@ -495,14 +498,13 @@ async function scanOrphansNow() {
   try {
     const r = await api.post<CrossSeedOrphanScanResult>('/cross-seed-monitor/orphans/scan');
     // 响应里带上有孤儿表的新鲜统计 → 直接用，省一次请求
-    if (r.orphans) {
-      orphanSummary.value = r.orphans;
-    } else {
-      await loadOrphans();
-    }
+    // （后端 POST /orphans/scan 必定带 orphans 字段）
+    orphanSummary.value = r.orphans;
     selectedOrphanPaths.value = [];
-    if (r.errors?.length) {
-      message.warning(`扫描完成，但有 ${r.errors.length} 个下载器失败：${r.errors[0]}`);
+    if (r.errors.length) {
+      message.warning(
+        `扫描完成，但有 ${String(r.errors.length)} 个下载器失败：${r.errors[0] ?? ''}`,
+      );
     } else {
       message.success(r.summary || '扫描完成');
     }
@@ -522,16 +524,17 @@ async function doDeleteOrphans() {
       paths: selectedOrphanPaths.value,
     });
     const parts: string[] = [];
-    if (r.succeeded > 0) parts.push(`已删除 ${r.succeeded} 个（${fmtBytes(r.freed_bytes)}）`);
-    if (r.skipped > 0) parts.push(`跳过 ${r.skipped} 个（复核时已有任务）`);
-    if (r.failed > 0) parts.push(`失败 ${r.failed} 个`);
+    if (r.succeeded > 0)
+      parts.push(`已删除 ${String(r.succeeded)} 个（${fmtBytes(r.freed_bytes)}）`);
+    if (r.skipped > 0) parts.push(`跳过 ${String(r.skipped)} 个（复核时已有任务）`);
+    if (r.failed > 0) parts.push(`失败 ${String(r.failed)} 个`);
     if (r.warning) {
       message.warning(r.warning);
     }
     if (r.permission_denied > 0) {
       // 权限失败：error 字段已含可行动提示（NAS 端改属主/权限或换挂载账号）
       // ——用 error 级（红色）醒目，区别于普通失败的 warning
-      message.error(r.error || `${r.permission_denied} 个条目因权限不足删除失败`);
+      message.error((r.error ?? '') || `${String(r.permission_denied)} 个条目因权限不足删除失败`);
     } else if (r.failed > 0) {
       message.warning(parts.join('，'));
     } else {
@@ -626,7 +629,7 @@ function anomalyLabel(t: string): string {
 
 /** 当前 tab 的快照头部（可能还没有快照）。 */
 const currentHeader = computed(() =>
-  selectedId.value == null ? undefined : headers.value.get(selectedId.value),
+  selectedId.value === null ? undefined : headers.value.get(selectedId.value),
 );
 
 /** 当前 tab 是否有快照。 */
@@ -635,14 +638,17 @@ const hasSnapshot = computed(() => currentHeader.value !== undefined);
 /** 磁盘已用字节数（总量未知时为 null）。 */
 const diskUsedBytes = computed<number | null>(() => {
   const s = snapshot.value;
-  if (!s || s.disk_total_bytes === null || s.disk_free_bytes === null) return null;
-  return Math.max(s.disk_total_bytes - s.disk_free_bytes, 0);
+  if (!s) return null;
+  const total = s.disk_total_bytes;
+  const free = s.disk_free_bytes;
+  if (total === null || free === null) return null;
+  return Math.max(total - free, 0);
 });
 
 /** 磁盘已用占比（0–1）。总量未知时为 null——**不画进度条**。 */
 const diskUsagePercent = computed<number | null>(() => {
   const s = snapshot.value;
-  if (!s || !s.disk_total_bytes) return null;
+  if (!s?.disk_total_bytes) return null;
   const used = diskUsedBytes.value ?? 0;
   return Math.min(used / s.disk_total_bytes, 1);
 });
@@ -650,7 +656,7 @@ const diskUsagePercent = computed<number | null>(() => {
 /** 孤儿占用占扫描目录的比例（0–1）。 */
 const orphanRatio = computed<number | null>(() => {
   const o = currentOrphan.value;
-  if (!o || !o.total_scan_bytes) return null;
+  if (!o?.total_scan_bytes) return null;
   return o.orphan_bytes / o.total_scan_bytes;
 });
 
@@ -659,10 +665,10 @@ function freshnessText(scannedAt: string): string {
   if (!scannedAt) return '—';
   const d = new Date(scannedAt.replace(' ', 'T') + '+08:00');
   const diff = (Date.now() - d.getTime()) / 1000;
-  if (diff < 60) return `${Math.floor(diff)} 秒前`;
-  if (diff < 3600) return `${Math.floor(diff / 60)} 分前`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
-  return `${Math.floor(diff / 86400)} 天前`;
+  if (diff < 60) return `${String(Math.floor(diff))} 秒前`;
+  if (diff < 3600) return `${String(Math.floor(diff / 60))} 分前`;
+  if (diff < 86400) return `${String(Math.floor(diff / 3600))} 小时前`;
+  return `${String(Math.floor(diff / 86400))} 天前`;
 }
 
 /**
@@ -698,7 +704,7 @@ const isSnapshotStale = computed<boolean>(() => {
 onMounted(async () => {
   await loadDownloaders();
   await Promise.all([loadSnapshotList(), loadOrphans()]);
-  if (selectedId.value != null) {
+  if (selectedId.value !== null) {
     await loadDetail(selectedId.value);
   }
 });
@@ -712,12 +718,12 @@ onMounted(async () => {
       sub="按下载器分 Tab, 展示 (名称, 大小) 相同的种子分组 · 定时抓取落库, 异常自动暂停"
     >
       <template #actions>
-        <a-button @click="loadSnapshotList" :loading="loading">刷新列表</a-button>
+        <a-button :loading="loading" @click="loadSnapshotList">刷新列表</a-button>
         <a-button
           type="primary"
-          @click="refreshNow"
           :loading="refreshing"
           :disabled="selectedId == null"
+          @click="refreshNow"
         >
           立即抓取
         </a-button>
@@ -895,10 +901,10 @@ onMounted(async () => {
                   <!-- 占用进度条（总量未知时不画——画出来会误导成「磁盘已满」） -->
                   <div v-if="diskUsagePercent !== null" class="space-progress">
                     <div class="space-progress__header">
-                      <span>分区已用 {{ fmtBytes(diskUsedBytes) }}（含非辅种数据）</span>
-                      <span class="dim">{{ (diskUsagePercent * 100).toFixed(1) }}%</span>
+                      <span>分区已用 {{ fmtBytes(diskUsedBytes ?? 0) }}（含非辅种数据）</span>
+                      <span class="dim">{{ ((diskUsagePercent ?? 0) * 100).toFixed(1) }}%</span>
                     </div>
-                    <a-progress :percent="diskUsagePercent * 100" :show-info="false" />
+                    <a-progress :percent="(diskUsagePercent ?? 0) * 100" :show-info="false" />
                   </div>
 
                   <!-- 按目录分布 -->

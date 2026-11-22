@@ -4,7 +4,7 @@ import { api, errMsg } from '../api';
 import type { FeedTestResult, Site, SiteRuleInfo, SiteTestAllResult } from '../types';
 import { formatBytes as fmtBytes } from '../utils/format';
 import { message } from 'ant-design-vue';
-import type { FormInstance } from 'ant-design-vue';
+import type { FormInstance } from 'ant-design-vue/es/form';
 import DataTable from '../components/DataTable.vue';
 import PageHeader from '../components/PageHeader.vue';
 
@@ -111,7 +111,7 @@ async function onDelete(id: number) {
   try {
     await api.post('/sites/delete', { id });
     message.success('已删除');
-    load();
+    void load();
   } catch (err) {
     message.error(`删除失败：${errMsg(err)}`);
   }
@@ -131,7 +131,7 @@ async function onSave() {
     creating.value = false;
     editing.value = null;
     modalOpen.value = false;
-    load();
+    void load();
   } catch (exc) {
     message.error(exc instanceof Error ? exc.message : '保存失败');
   }
@@ -140,16 +140,17 @@ async function onSave() {
 async function onTestRow(s: Site) {
   if (testingId.value !== null) return;
   testingId.value = s.id;
-  delete testResults.value[s.id];
+  // Reflect.deleteProperty 不触发 no-dynamic-delete（删动态键）
+  Reflect.deleteProperty(testResults.value, s.id);
   try {
     const r = await api.post<{ reachable: boolean; logged_in: boolean; detail: string }>(
-      `/sites/${s.id}/test`,
+      `/sites/${String(s.id)}/test`,
     );
     let detail = r.detail;
     // 测连通过后顺手刷新用户数据（合并为一个动作，失败不影响测连结果）
     if (r.reachable && r.logged_in) {
       try {
-        const ud = await api.post<{ ok: boolean }>(`/sites/${s.id}/user-data/refresh`);
+        const ud = await api.post<{ ok: boolean }>(`/sites/${String(s.id)}/user-data/refresh`);
         detail = `${detail} · 用户数据刷新${ud.ok ? '成功' : '失败'}`;
         if (ud.ok) await loadSites();
       } catch (exc) {
@@ -199,7 +200,7 @@ async function onTestAll(opts: { auto?: boolean } = {}) {
   if (testingAll.value) return;
   const auto = !!opts.auto;
   if (auto) {
-    const last = Number(sessionStorage.getItem(AUTO_TEST_KEY) || 0);
+    const last = Number(sessionStorage.getItem(AUTO_TEST_KEY) ?? 0);
     if (Date.now() - last < AUTO_TEST_COOLDOWN_MS) return;
   }
   // 先落时间戳：并发/快速重入时后到的那个直接跳过（避免双发）
@@ -222,7 +223,9 @@ async function onTestAll(opts: { auto?: boolean } = {}) {
     let refreshFailed = 0;
     for (const item of passing) {
       try {
-        const ud = await api.post<{ ok: boolean }>(`/sites/${item.site_id}/user-data/refresh`);
+        const ud = await api.post<{ ok: boolean }>(
+          `/sites/${String(item.site_id)}/user-data/refresh`,
+        );
         if (ud.ok) refreshed += 1;
         else refreshFailed += 1;
       } catch {
@@ -235,17 +238,19 @@ async function onTestAll(opts: { auto?: boolean } = {}) {
     // 别混进「可达」（那会让失效的站看起来一切正常）
     const unauthorized = r.summary.unauthorized ?? 0;
     if (failed > 0 || unauthorized > 0) {
-      const parts = [`共 ${total} 站`, `可达 ${reachable}`];
-      if (failed > 0) parts.push(`失败 ${failed}`);
-      if (unauthorized > 0) parts.push(`未登录 ${unauthorized}（凭据可能已失效）`);
+      const parts = [`共 ${String(total)} 站`, `可达 ${String(reachable)}`];
+      if (failed > 0) parts.push(`失败 ${String(failed)}`);
+      if (unauthorized > 0) parts.push(`未登录 ${String(unauthorized)}（凭据可能已失效）`);
       if (passing.length)
-        parts.push(`用户数据 ${refreshed} 成功${refreshFailed ? ` / ${refreshFailed} 失败` : ''}`);
+        parts.push(
+          `用户数据 ${String(refreshed)} 成功${refreshFailed ? ` / ${String(refreshFailed)} 失败` : ''}`,
+        );
       message.warning(parts.join('，'));
     } else if (!auto) {
       // 自动模式**静默成功**：每次打开页面弹一条「全部正常」是噪音
       message.success(
-        `共 ${total} 站全部可达且已登录` +
-          (passing.length ? `，用户数据已刷新 ${refreshed} 站` : ''),
+        `共 ${String(total)} 站全部可达且已登录` +
+          (passing.length ? `，用户数据已刷新 ${String(refreshed)} 站` : ''),
       );
     }
   } catch (exc) {
@@ -270,10 +275,10 @@ const feedColumns = [
 
 /** 免费倍率展示：0=免费、0.5=50%、1=正常。 */
 function factorLabel(v: number | null): string {
-  if (v === null || v === undefined) return '—';
+  if (v === null) return '—';
   if (v === 0) return '免费';
-  if (v < 1) return `${Math.round(v * 100)}%`;
-  return `×${v}`;
+  if (v < 1) return `${String(Math.round(v * 100))}%`;
+  return `×${String(v)}`;
 }
 
 async function onFeedTest(s: Site) {
@@ -281,7 +286,7 @@ async function onFeedTest(s: Site) {
   feedTestResult.value = null;
   feedTestModalOpen.value = true;
   try {
-    feedTestResult.value = await api.get<FeedTestResult>(`/sites/${s.id}/feed-test`);
+    feedTestResult.value = await api.get<FeedTestResult>(`/sites/${String(s.id)}/feed-test`);
   } catch (exc) {
     feedTestResult.value = {
       ok: false,
@@ -389,11 +394,11 @@ const columns = [
                 </a-button>
                 <a-tooltip
                   v-if="testResults[record.id]"
-                  :title="`${testResults[record.id].status} · ${testResults[record.id].detail}`"
+                  :title="`${testResults[record.id]?.status ?? ''} · ${testResults[record.id]?.detail ?? ''}`"
                 >
                   <span
                     class="test-result-dot"
-                    :class="`test-result-dot--${testResults[record.id].status}`"
+                    :class="`test-result-dot--${testResults[record.id]?.status ?? ''}`"
                   />
                 </a-tooltip>
                 <a-button

@@ -215,14 +215,14 @@ watch(
 );
 
 function onMenuClick({ key }: { key: string }) {
-  router.push(key);
+  void router.push(key);
   // 手机端点了菜单就收起抽屉（否则新页面被遮罩挡住）
   drawerOpen.value = false;
 }
 
 async function handleLogout() {
   await auth.logout();
-  router.push('/login');
+  void router.push('/login');
 }
 </script>
 
@@ -254,8 +254,8 @@ async function handleLogout() {
         </template>
       </div>
       <a-menu
-        mode="inline"
         v-model:open-keys="openKeys"
+        mode="inline"
         :selected-keys="selectedKeys"
         @click="onMenuClick"
       >
@@ -335,8 +335,8 @@ async function handleLogout() {
         <span class="brand__name-mono">v0.2</span>
       </div>
       <a-menu
-        mode="inline"
         v-model:open-keys="openKeys"
+        mode="inline"
         :selected-keys="selectedKeys"
         @click="onMenuClick"
       >

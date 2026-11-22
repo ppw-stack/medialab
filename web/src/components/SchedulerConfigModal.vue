@@ -20,7 +20,14 @@ const config = ref<JobConfig | null>(null);
 const loading = ref(false);
 const saving = ref(false);
 const cronDraft = ref('');
-const paramDraft = ref<Record<string, number>>({});
+/**
+ * 参数草稿。
+ *
+ * ⚠️ 值类型**含 null / undefined**——a-input-number 被用户清空时
+ * v-model 写入的就是 null（见 mergeParams 的注释）。类型如实反映这点，
+ * mergeParams 才能把「空」与「没填」区分开。
+ */
+const paramDraft = ref<Record<string, number | null | undefined>>({});
 
 watch(
   () => props.open,
@@ -46,11 +53,12 @@ async function load() {
 }
 
 function isDirty(): boolean {
-  if (!config.value) return false;
-  if (cronDraft.value.trim() !== config.value.cron) return true;
+  const cfg = config.value;
+  if (!cfg) return false;
+  if (cronDraft.value.trim() !== cfg.cron) return true;
   // 与 onSave 的判定逻辑一致：基于 fullParams 合并后比较，
   // 避免 paramDraft 缺 key 时漏判（后端 params 比 specs 少 key 的情况）
-  return Object.entries(mergeParams()).some(([k, v]) => config.value!.params[k] !== v);
+  return Object.entries(mergeParams()).some(([k, v]) => cfg.params[k] !== v);
 }
 
 /**
@@ -87,7 +95,8 @@ async function onSave() {
     }
     // 只传本任务专属的 param 全量 (覆盖该任务的 param 子集)
     const fullParams = mergeParams();
-    const dirty = Object.entries(fullParams).some(([k, v]) => config.value!.params[k] !== v);
+    const cfg = config.value;
+    const dirty = Object.entries(fullParams).some(([k, v]) => cfg.params[k] !== v);
     if (dirty) {
       await api.put('/scheduler/runtime-params', fullParams);
     }

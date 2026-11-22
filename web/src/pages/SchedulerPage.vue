@@ -36,16 +36,16 @@ const historyJobName = ref('');
  * 在调度页显示原始 job 名（如 "scan_orphans"）和 "—" 描述。
  */
 function jobTitle(job: { title?: string; name: string }): string {
-  return job.title || job.name;
+  return (job.title ?? '') || job.name;
 }
 
 function jobDesc(job: { description?: string }): string {
-  return job.description || '—';
+  return (job.description ?? '') || '—';
 }
 
 /** 按 job 名取中文名（弹框标题用）——从后端下发的作业列表里查。 */
 function jobTitleByName(name: string): string {
-  return data.value?.jobs.find((j) => j.name === name)?.title || name;
+  return (data.value?.jobs.find((j) => j.name === name)?.title ?? '') || name;
 }
 
 /** 某个模块下的作业（保持后端下发顺序）。 */
@@ -72,7 +72,7 @@ const moduleGroups = computed(() => {
     const key = j.module ?? '';
     let group = seen.find((g) => g.key === key);
     if (!group) {
-      group = { key, title: j.module_title || '其它', jobs: [] };
+      group = { key, title: (j.module_title ?? '') || '其它', jobs: [] };
       seen.push(group);
     }
     group.jobs.push(j);
@@ -91,7 +91,8 @@ const activeModule = ref('');
 watch(moduleGroups, (groups) => {
   if (!groups.length) return;
   if (!groups.some((g) => g.key === activeModule.value)) {
-    activeModule.value = groups[0].key;
+    const first = groups[0];
+    if (first) activeModule.value = first.key;
   }
 });
 
@@ -164,8 +165,8 @@ function isFirstIndependent(moduleKey: string, index: number): boolean {
 /** 门槛秒数 → 人话（1800 → 「30 分钟」）。 */
 function minutesLabel(sec: number | undefined): string {
   if (!sec) return '每次上游成功都触发';
-  if (sec % 60 === 0) return `${sec / 60} 分钟`;
-  return `${Math.round(sec / 60)} 分钟`;
+  if (sec % 60 === 0) return `${String(sec / 60)} 分钟`;
+  return `${String(Math.round(sec / 60))} 分钟`;
 }
 
 /** 当前 tab 的统计（启用 / 运行中）——一眼看出这个域在不在干活。 */
@@ -201,25 +202,27 @@ async function load() {
 }
 
 onMounted(() => {
-  load();
-  loadRuns();
+  void load();
+  void loadRuns();
   const timer = setInterval(() => {
-    load();
-    loadRuns();
+    void load();
+    void loadRuns();
   }, 5000);
-  onUnmounted(() => clearInterval(timer));
+  onUnmounted(() => {
+    clearInterval(timer);
+  });
 });
 
 async function toggle(name: string, enabled: boolean) {
   try {
-    await api.post(`/scheduler/${name}/toggle?enabled=${enabled}`);
+    await api.post(`/scheduler/${name}/toggle?enabled=${String(enabled)}`);
     message.success(`${name} → ${enabled ? '启用' : '暂停'}`);
-    load();
+    void load();
   } catch (e) {
     // 失败时重新拉取状态——否则开关停在用户点击后的乐观状态，
     // 与后端实际状态不一致。
     message.error('切换失败：' + errMsg(e));
-    load();
+    void load();
   }
 }
 
@@ -230,7 +233,7 @@ async function runNow(name: string) {
     const r = await api.post<RunResult>(`/scheduler/${name}/run`);
     const summary = formatResult(r);
     if (r.ok) {
-      message.success(`${name} 完成：${summary}（${r.duration_ms} ms）`);
+      message.success(`${name} 完成：${summary}（${String(r.duration_ms)} ms）`);
     } else {
       message.error(`${name} 失败：${summary || r.error || '未知错误'}`);
     }
@@ -239,8 +242,8 @@ async function runNow(name: string) {
   } finally {
     hide();
     runningJob.value = null;
-    load();
-    loadRuns();
+    void load();
+    void loadRuns();
   }
 }
 
@@ -253,7 +256,10 @@ function formatResult(r: RunResult): string {
   // 兜底：老数据（无 summary）时拍平其余字段
   return Object.entries(v)
     .filter(([k]) => k !== 'steps' && k !== 'summary')
-    .map(([key, val]) => `${key}: ${typeof val === 'object' ? JSON.stringify(val) : String(val)}`)
+    .map(
+      ([key, val]) =>
+        `${key}: ${val !== null && typeof val === 'object' ? JSON.stringify(val) : String(val)}`,
+    )
     .join('，');
 }
 
@@ -396,7 +402,7 @@ function formatRunFull(s: string): string {
                 <div v-if="runsByJob[job.name]?.length" class="job-item__runs">
                   <span class="dim mono" style="font-size: var(--text-xs)">最近运行：</span>
                   <a-tooltip
-                    v-for="r in runsByJob[job.name].slice(0, 6)"
+                    v-for="r in (runsByJob[job.name] ?? []).slice(0, 6)"
                     :key="r.id"
                     :title="`${formatRunFull(r.started_at)} · ${r.duration_ms ?? 0}ms · ${r.ok ? 'OK' : 'FAIL'}${r.error ? ' · ' + r.error : ''}`"
                   >

@@ -55,24 +55,40 @@ const routes: RouteRecordRaw[] = [
 
       // -- 系统 --
       // 定时任务（辅种 / 媒体库两栏）与设置（环境变量）是**平级两个菜单**
-      { path: 'scheduler', name: 'scheduler', component: () => import('./pages/SchedulerPage.vue') },
+      {
+        path: 'scheduler',
+        name: 'scheduler',
+        component: () => import('./pages/SchedulerPage.vue'),
+      },
       { path: 'settings', name: 'settings', component: () => import('./pages/SettingsPage.vue') },
 
       // -- 媒体库域 --
-      { path: 'drivers', name: 'drivers', component: () => import('./pages/media/DriversPage.vue') },
+      {
+        path: 'drivers',
+        name: 'drivers',
+        component: () => import('./pages/media/DriversPage.vue'),
+      },
       {
         path: 'aggregate',
         name: 'aggregate',
         component: () => import('./pages/media/AggregatePage.vue'),
       },
-      { path: 'library', name: 'library', component: () => import('./pages/media/LibraryPage.vue') },
+      {
+        path: 'library',
+        name: 'library',
+        component: () => import('./pages/media/LibraryPage.vue'),
+      },
       {
         path: 'migrations',
         name: 'migrations',
         component: () => import('./pages/media/MigrationsPage.vue'),
       },
       { path: 'scrape', name: 'scrape', component: () => import('./pages/media/ScrapePage.vue') },
-      { path: 'uploads', name: 'uploads', component: () => import('./pages/media/UploadsPage.vue') },
+      {
+        path: 'uploads',
+        name: 'uploads',
+        component: () => import('./pages/media/UploadsPage.vue'),
+      },
       { path: 'health', name: 'health', component: () => import('./pages/media/HealthPage.vue') },
       // `/dav` 是 WebDAV 服务端路径（后端 mount_dav），面板页面必须避开
       { path: 'dav-users', name: 'dav', component: () => import('./pages/media/DavUsers.vue') },

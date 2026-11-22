@@ -365,7 +365,7 @@ onMounted(async () => {
   sourceDriverId.value = firstGuangya?.id;
   targetDriverId.value = firstGuangya?.id;
 
-  await resetSourceStack();
+  resetSourceStack();
   if (sourceDriver.value) {
     await loadSource();
   }
@@ -377,9 +377,10 @@ onMounted(async () => {
   // 找回最近一次任务（刷新页面后还能看到进度）
   try {
     const jobs = await api.get<MigrationJob[]>('/migrations/jobs');
-    if (jobs.length) {
-      job.value = jobs[0] as MigrationJob;
-      if (job.value.state === 'running') startPolling();
+    const first = jobs[0];
+    if (first) {
+      job.value = first;
+      if (first.state === 'running') startPolling();
     }
   } catch {
     // 没有任务不算错
@@ -387,7 +388,7 @@ onMounted(async () => {
 });
 
 /** 源目录栈复位——光鸭账号根 fileId 是空串，目录由用户逐层选。 */
-async function resetSourceStack(): Promise<void> {
+function resetSourceStack(): void {
   const driver = sourceDriver.value;
   if (!driver) {
     sourceStack.value = [];
@@ -398,7 +399,7 @@ async function resetSourceStack(): Promise<void> {
 
 /** 换源存储源——目录栈复位并重新加载。 */
 async function onSourceDriverChange(): Promise<void> {
-  await resetSourceStack();
+  resetSourceStack();
   await loadSource();
 }
 
@@ -426,7 +427,7 @@ async function loadSource(): Promise<void> {
   sourceError.value = '';
   try {
     const res = await api.get<{ dirs: DirEntry[] }>(
-      `/migrations/sources?driver_id=${sourceDriver.value.id}&parent_id=${encodeURIComponent(currentSource.value.id)}`,
+      `/migrations/sources?driver_id=${String(sourceDriver.value.id)}&parent_id=${encodeURIComponent(currentSource.value.id)}`,
     );
     sourceDirs.value = res.dirs;
   } catch (e) {
@@ -443,7 +444,7 @@ async function loadTarget(): Promise<void> {
   targetError.value = '';
   try {
     const res = await api.get<{ dirs: DirEntry[] }>(
-      `/migrations/targets?driver_id=${targetDriver.value.id}&parent_id=${encodeURIComponent(currentTarget.value.id)}`,
+      `/migrations/targets?driver_id=${String(targetDriver.value.id)}&parent_id=${encodeURIComponent(currentTarget.value.id)}`,
     );
     targetDirs.value = res.dirs;
   } catch (e) {
@@ -537,7 +538,9 @@ async function tick(): Promise<void> {
     if (job.value.state !== 'running') {
       stopPolling();
       if (job.value.state === 'success') {
-        message.success(`迁移结束：成功 ${job.value.success} 个，失败 ${job.value.failed} 个`);
+        message.success(
+          `迁移结束：成功 ${String(job.value.success)} 个，失败 ${String(job.value.failed)} 个`,
+        );
       } else if (job.value.state === 'paused') {
         message.warning(`迁移已暂停（云添加额度耗尽）：${job.value.error ?? ''}——次日重跑即可续传`);
       }
@@ -584,8 +587,8 @@ function stateColor(state: string): string {
 
 /** 拆出日志行首的时间戳（``[00:41:37]``），没有就返回空串。 */
 function logTime(line: string): string {
-  const m = line.match(/^\[(\d{2}:\d{2}:\d{2})\]\s*/);
-  return m ? m[1] : '';
+  const m = /^\[(\d{2}:\d{2}:\d{2})\]\s*/.exec(line);
+  return m?.[1] ?? '';
 }
 
 /** 去掉时间戳后的正文。 */

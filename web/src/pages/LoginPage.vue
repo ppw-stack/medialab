@@ -39,7 +39,7 @@ async function submitLogin() {
       <div class="login-title">登录</div>
       <div class="login-sub">监控下载器，守卫免费窗口，看护做种比例。</div>
 
-      <a-form :model="form" @finish="submitLogin" class="login-form">
+      <a-form :model="form" class="login-form" @finish="submitLogin">
         <a-form-item name="username" :rules="[{ required: true, message: '请输入用户名' }]">
           <a-input
             v-model:value="form.username"

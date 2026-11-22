@@ -424,7 +424,7 @@ async function loadAliases(): Promise<void> {
       ...item,
       mediaTypeLabel:
         item.media_type === 'movie' ? '电影' : item.media_type === 'tv' ? '剧集' : '不限',
-    })) as unknown as ScrapeAlias[];
+    }));
   } catch (e) {
     message.error(errMsg(e, '加载别名失败'));
   }
@@ -454,7 +454,7 @@ async function saveAlias(): Promise<void> {
 
 async function removeAlias(id: number): Promise<void> {
   try {
-    await mediaApi.del<void>(`/scrape/aliases/${id}`);
+    await mediaApi.del(`/scrape/aliases/${String(id)}`);
     message.success('已删除');
     await loadAliases();
   } catch (e) {
@@ -480,18 +480,18 @@ const page = ref(1);
 const loadingRecords = ref(false);
 
 function kindLabel(row: Record<string, unknown>): string {
-  const kind = String(row.kind ?? '');
+  const kind = typeof row.kind === 'string' ? row.kind : '';
   const season = row.season as number | null;
   const episode = row.episode as number | null;
   if (kind === 'movie') return '电影';
   if (kind === 'tvshow') return '整剧';
-  if (kind === 'season') return `季 ${season ?? ''}`;
-  if (kind === 'episode') return `S${season}E${episode}`;
+  if (kind === 'season') return `季 ${String(season ?? '')}`;
+  if (kind === 'episode') return `S${String(season ?? 0)}E${String(episode ?? 0)}`;
   return kind;
 }
 
 function statusLabel(row: Record<string, unknown>): string {
-  const status = String(row.status ?? '');
+  const status = typeof row.status === 'string' ? row.status : '';
   if (status === 'scraped') return '已刮';
   if (status === 'failed') return '失败';
   return '跳过';
@@ -501,14 +501,14 @@ async function loadRecords(): Promise<void> {
   loadingRecords.value = true;
   try {
     const pageData = await mediaApi.get<{ total: number; items: ScrapeRecord[] }>(
-      `/scrape/records?limit=50&offset=${(page.value - 1) * 50}`,
+      `/scrape/records?limit=50&offset=${String((page.value - 1) * 50)}`,
     );
     recordTotal.value = pageData.total;
     records.value = pageData.items.map((item) => ({
       ...item,
       kindLabel: kindLabel(item as unknown as Record<string, unknown>),
       statusLabel: statusLabel(item as unknown as Record<string, unknown>),
-    })) as unknown as ScrapeRecord[];
+    }));
   } catch (e) {
     message.error(errMsg(e, '加载记录失败'));
   } finally {

@@ -565,7 +565,7 @@ export interface CrossSeedSpace {
     disk_free_bytes: number | null;
     disk_total_bytes: number | null;
   };
-  downloaders: Array<{
+  downloaders: {
     downloader_id: number;
     downloader_name: string;
     scanned_at: string;
@@ -573,7 +573,7 @@ export interface CrossSeedSpace {
     total_size_bytes: number;
     disk_free_bytes: number | null;
     disk_total_bytes: number | null;
-  }>;
+  }[];
 }
 
 /** 辅种快照列表（`GET /cross-seed-monitor/snapshots`）。 */

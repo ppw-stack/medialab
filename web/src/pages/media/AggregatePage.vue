@@ -295,7 +295,7 @@
           :title="`${d.name} 缓冲根`"
           :stack="rootStack(d.id).stack"
           :dirs="rootStack(d.id).dirs"
-          :loading="loadingRoot[d.id]"
+          :loading="loadingRoot[d.id] ?? false"
           @open="(e: DirEntry) => openRootDir(d.id, e)"
           @go="(i: number) => goRootDir(d.id, i)"
         />
@@ -476,7 +476,9 @@ function watchJob(job: AggregateSyncJob, groupId: number) {
 async function resumeRunningJobs(gs: AggregateGroup[]) {
   for (const g of gs) {
     try {
-      const list = await api.get<AggregateSyncJob[]>(`/aggregate/sync-jobs?group_id=${g.id}`);
+      const list = await api.get<AggregateSyncJob[]>(
+        `/aggregate/sync-jobs?group_id=${String(g.id)}`,
+      );
       const running = list.find((j) => j.state === 'running');
       if (running) {
         jobs.value[g.id] = running;
@@ -497,14 +499,14 @@ async function resumeRunningJobs(gs: AggregateGroup[]) {
 function enqueueDisabled(group: AggregateGroup): boolean {
   const m = mappingOf(group.id);
   if (!m?.target_dir_id) return true;
-  return !secondariesOf(group).some((d) => (m?.roots ?? []).some((r) => r.driver_id === d.id));
+  return !secondariesOf(group).some((d) => m.roots.some((r) => r.driver_id === d.id));
 }
 
 /** 「登记在途」的 tooltip（缺配置时点名缺什么，否则说功能）。 */
 function enqueueTip(group: AggregateGroup): string {
   const m = mappingOf(group.id);
   if (!m?.target_dir_id) return '缺少归拢目标目录——请先「配置」目录映射';
-  if (!secondariesOf(group).some((d) => (m?.roots ?? []).some((r) => r.driver_id === d.id))) {
+  if (!secondariesOf(group).some((d) => m.roots.some((r) => r.driver_id === d.id))) {
     return '副盘都没配缓冲根目录——请先「配置」目录映射';
   }
   return '扫描副盘缓冲目录，把里面的文件登记成在途任务（幂等）';
@@ -531,7 +533,7 @@ function secondariesOf(group: AggregateGroup | null): Driver[] {
 function rootPathOf(groupId: number, driverId: number): string {
   const root = mappings.value[groupId]?.roots.find((r) => r.driver_id === driverId);
   if (!root) return '';
-  return root.root_path || `id: ${root.root_id}`;
+  return (root.root_path ?? '') || `id: ${root.root_id}`;
 }
 
 /** 某副盘的浏览状态（不存在则给空壳） */
@@ -549,27 +551,27 @@ function masterName(group: AggregateGroup): string {
 }
 
 function countOf(group: AggregateGroup, state: string): number {
-  return statsOf(group.id)?.counts?.[state] ?? 0;
+  return statsOf(group.id)?.counts[state] ?? 0;
 }
 
 function pendingCount(group: AggregateGroup): number {
   const counts = statsOf(group.id)?.counts ?? {};
   return (
-    (counts['pending'] ?? 0) +
-    (counts['syncing'] ?? 0) +
-    (counts['paused'] ?? 0) +
-    (counts['verified'] ?? 0) +
+    (counts.pending ?? 0) +
+    (counts.syncing ?? 0) +
+    (counts.paused ?? 0) +
+    (counts.verified ?? 0) +
     // failed 与后端 pending_bytes **同口径**（非终态都算「未消化」）——
     // 曾漏算 failed：字节含 failed、个数不含，页面读起来像
     // 「142G 只登记 1 个文件」（2026-11-18 修正）
-    (counts['failed'] ?? 0)
+    (counts.failed ?? 0)
   );
 }
 
 /** 失败 + 暂停行的字节数（失败栏与行数并排展示，口径不再错位）。 */
 function failedPausedBytes(group: AggregateGroup): number {
   const bytes = statsOf(group.id)?.bytes_by_state ?? {};
-  return (bytes['failed'] ?? 0) + (bytes['paused'] ?? 0);
+  return (bytes.failed ?? 0) + (bytes.paused ?? 0);
 }
 
 function pendingBytes(group: AggregateGroup): number {
@@ -649,7 +651,9 @@ async function loadMappings(gs: AggregateGroup[]) {
   await Promise.all(
     gs.map(async (g) => {
       try {
-        map[g.id] = await api.get<AggregateGroupMapping>(`/aggregate/groups/${g.id}/mapping`);
+        map[g.id] = await api.get<AggregateGroupMapping>(
+          `/aggregate/groups/${String(g.id)}/mapping`,
+        );
       } catch {
         // 拉不到就当没配（面板显示「未配置」）
       }
@@ -663,7 +667,7 @@ function openMapping(group: AggregateGroup) {
   mappingGroup.value = group;
   const m = mappings.value[group.id];
   mappingTarget.value = m?.target_dir_id
-    ? { id: m.target_dir_id, path: m.target_dir_path || '' }
+    ? { id: m.target_dir_id, path: m.target_dir_path ?? '' }
     : null;
   targetStack.value = [{ id: '', name: '网盘根目录' }];
   targetDirs.value = [];
@@ -672,7 +676,7 @@ function openMapping(group: AggregateGroup) {
   for (const d of secondariesOf(group)) {
     const root = m?.roots.find((r) => r.driver_id === d.id);
     rootStackState.value[d.id] = { stack: [{ id: '', name: '网盘根目录' }], dirs: [] };
-    rootPicked.value[d.id] = root ? { id: root.root_id, path: root.root_path || '' } : undefined;
+    rootPicked.value[d.id] = root ? { id: root.root_id, path: root.root_path ?? '' } : undefined;
   }
   mappingOpen.value = true;
   void loadTargetDirs('');
@@ -686,9 +690,9 @@ async function loadTargetDirs(parentId: string) {
   loadingTarget.value = true;
   try {
     const resp = await api.get<{ dirs: DirEntry[] }>(
-      `/drivers/${master.id}/browse-dirs?parent_id=${encodeURIComponent(parentId)}`,
+      `/drivers/${String(master.id)}/browse-dirs?parent_id=${encodeURIComponent(parentId)}`,
     );
-    targetDirs.value = resp.dirs ?? [];
+    targetDirs.value = resp.dirs;
   } catch (e) {
     message.error(errMsg(e, '加载主盘目录失败'));
   } finally {
@@ -715,13 +719,13 @@ async function loadRootDirs(driverId: number, parentId: string) {
   loadingRoot.value[driverId] = true;
   try {
     const resp = await api.get<{ dirs: DirEntry[] }>(
-      `/drivers/${driverId}/browse-dirs?parent_id=${encodeURIComponent(parentId)}`,
+      `/drivers/${String(driverId)}/browse-dirs?parent_id=${encodeURIComponent(parentId)}`,
     );
     const st = rootStackState.value[driverId] ?? {
       stack: [{ id: '', name: '网盘根目录' }],
       dirs: [],
     };
-    st.dirs = resp.dirs ?? [];
+    st.dirs = resp.dirs;
     rootStackState.value[driverId] = st;
   } catch (e) {
     message.error(errMsg(e, '加载副盘目录失败'));
@@ -780,7 +784,7 @@ async function saveMapping() {
         return { driver_id: d.id, root_id: picked.id, root_path: picked.path };
       })
       .filter((r): r is { driver_id: number; root_id: string; root_path: string } => r !== null);
-    await api.put(`/aggregate/groups/${group.id}/mapping`, {
+    await api.put(`/aggregate/groups/${String(group.id)}/mapping`, {
       target_dir_id: mappingTarget.value?.id ?? null,
       target_dir_path: mappingTarget.value?.path ?? null,
       roots,
@@ -816,7 +820,7 @@ async function createGroup() {
 
 async function toggleGroup(group: AggregateGroup, enabled: boolean) {
   try {
-    await api.patch(`/aggregate/groups/${group.id}`, { enabled });
+    await api.patch(`/aggregate/groups/${String(group.id)}`, { enabled });
     await loadAll();
   } catch (e) {
     message.error(errMsg(e, '修改聚合组失败'));
@@ -825,7 +829,7 @@ async function toggleGroup(group: AggregateGroup, enabled: boolean) {
 
 async function removeGroup(group: AggregateGroup) {
   try {
-    await api.del(`/aggregate/groups/${group.id}`);
+    await api.del(`/aggregate/groups/${String(group.id)}`);
     message.success('已解散聚合组');
     await loadAll();
   } catch (e) {
@@ -847,7 +851,7 @@ async function assign() {
   }
   saving.value = true;
   try {
-    await api.put(`/aggregate/drivers/${assignDriverId.value}/role`, {
+    await api.put(`/aggregate/drivers/${String(assignDriverId.value)}/role`, {
       group_id: assignGroupId.value,
       role: assignRole.value,
     });
@@ -863,7 +867,7 @@ async function assign() {
 
 async function detach(driver: Driver) {
   try {
-    await api.del(`/aggregate/drivers/${driver.id}/role`);
+    await api.del(`/aggregate/drivers/${String(driver.id)}/role`);
     message.success('已移出聚合组');
     await loadAll();
   } catch (e) {
@@ -875,10 +879,10 @@ async function enqueue(groupId: number) {
   busyGroupId.value = groupId;
   try {
     const result = await api.post<{ scanned: number; added: number; skipped: number }>(
-      `/aggregate/groups/${groupId}/enqueue`,
+      `/aggregate/groups/${String(groupId)}/enqueue`,
     );
     message.success(
-      `扫描 ${result.scanned} 个文件，新登记 ${result.added} 个，已存在 ${result.skipped} 个`,
+      `扫描 ${String(result.scanned)} 个文件，新登记 ${String(result.added)} 个，已存在 ${String(result.skipped)} 个`,
     );
     await loadAll();
   } catch (e) {
@@ -898,7 +902,7 @@ async function syncNow(groupId: number) {
   syncingGroupId.value = groupId;
   try {
     const ref = await api.post<{ job_id: string; state: string }>(
-      `/aggregate/groups/${groupId}/sync`,
+      `/aggregate/groups/${String(groupId)}/sync`,
     );
     const job = await api.get<AggregateSyncJob>(`/aggregate/sync-jobs/${ref.job_id}`);
     // 进度卡实时展示（2s 轮询），结束后 loadAll 刷新水位
@@ -907,10 +911,10 @@ async function syncNow(groupId: number) {
     const final = await waitForJobEnd(job.id);
     if (final?.state === 'success') {
       message.success(
-        `归拢完成：成功 ${final.synced} / 清理 ${final.cleaned} / 暂停 ${final.paused} / 失败 ${final.failed} / 跳过 ${final.skipped}`,
+        `归拢完成：成功 ${String(final.synced)} / 清理 ${String(final.cleaned)} / 暂停 ${String(final.paused)} / 失败 ${String(final.failed)} / 跳过 ${String(final.skipped)}`,
       );
     } else if (final?.state === 'failed') {
-      message.error(errMsg(final.error || '归拢失败', '归拢失败'));
+      message.error(errMsg(final.error ?? '归拢失败', '归拢失败'));
     } else if (final?.state === 'cancelled') {
       message.warning('归拢已取消');
     }
@@ -945,7 +949,7 @@ async function cancelJob(jobId: string) {
 
 async function retry(id: number) {
   try {
-    await api.post(`/aggregate/staging/${id}/retry`);
+    await api.post(`/aggregate/staging/${String(id)}/retry`);
     message.success('已重置为待归拢');
     await loadAll();
   } catch (e) {
@@ -955,7 +959,7 @@ async function retry(id: number) {
 
 async function removeStaging(id: number) {
   try {
-    await api.del(`/aggregate/staging/${id}`);
+    await api.del(`/aggregate/staging/${String(id)}`);
     await loadAll();
   } catch (e) {
     message.error(errMsg(e, '删除失败'));

@@ -54,7 +54,7 @@
       />
     </a-card>
 
-    <a-tabs v-model:activeKey="activeTab">
+    <a-tabs v-model:active-key="activeTab">
       <!-- 账号 -->
       <a-tab-pane key="users" tab="账号">
         <a-card size="small">
@@ -461,7 +461,7 @@ async function resetPassword() {
   }
   saving.value = true;
   try {
-    await api.patch(`/dav-users/${resetTarget.value.id}`, { password: resetForm.password });
+    await api.patch(`/dav-users/${String(resetTarget.value.id)}`, { password: resetForm.password });
     message.success('密码已重置，旧密码立即失效');
     resetOpen.value = false;
   } catch (e) {
@@ -473,7 +473,7 @@ async function resetPassword() {
 
 async function toggleActive(user: DavUser) {
   try {
-    await api.patch(`/dav-users/${user.id}`, { is_active: !user.is_active });
+    await api.patch(`/dav-users/${String(user.id)}`, { is_active: !user.is_active });
     message.success(user.is_active ? '已停用' : '已启用');
     await loadUsers();
   } catch (e) {
@@ -483,7 +483,7 @@ async function toggleActive(user: DavUser) {
 
 async function removeUser(user: DavUser) {
   try {
-    await api.del(`/dav-users/${user.id}`);
+    await api.del(`/dav-users/${String(user.id)}`);
     message.success('账号已删除');
     await loadUsers();
   } catch (e) {

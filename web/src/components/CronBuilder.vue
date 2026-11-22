@@ -30,9 +30,7 @@ const props = defineProps<{
   modelValue: string;
 }>();
 
-const emit = defineEmits<{
-  (e: 'update:modelValue', v: string): void;
-}>();
+const emit = defineEmits<(e: 'update:modelValue', v: string) => void>();
 
 /** 字段定义（顺序 = cron 的 5 字段顺序）。 */
 const FIELDS: {
@@ -158,7 +156,7 @@ function onCustomChange(key: keyof CronFieldsState, value: string) {
       </div>
       <div v-else-if="nextRuns.length" class="cron-preview__next">
         <span class="cron-preview__label">下次运行</span>
-        <span class="mono">{{ nextRuns.join('　·　') }}</span>
+        <span class="mono">{{ nextRuns.join('\u3000·\u3000') }}</span>
       </div>
       <div v-else class="cron-preview__invalid">⚠️ 该表达式在未来一年内不会触发，请检查</div>
     </div>

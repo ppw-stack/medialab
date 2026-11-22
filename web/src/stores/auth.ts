@@ -27,8 +27,8 @@ export const useAuthStore = defineStore('auth', () => {
       body: JSON.stringify({ username: user, password }),
     });
     if (!resp.ok) {
-      const data = await resp.json().catch(() => ({}));
-      throw new Error(data.detail || '登录失败');
+      const data = (await resp.json().catch(() => ({}))) as { detail?: string };
+      throw new Error((data.detail ?? '') || '登录失败');
     }
     await refresh();
   }

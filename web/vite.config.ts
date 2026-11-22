@@ -15,12 +15,12 @@ const BACKEND_PORT = process.env.VITE_BACKEND_PORT ? Number(process.env.VITE_BAC
  * - `/healthz` `/readyz` `/metrics` —— 运维端点
  */
 const proxy = {
-  '/api': `http://127.0.0.1:${BACKEND_PORT}`,
-  '/302': `http://127.0.0.1:${BACKEND_PORT}`,
-  '/dav': `http://127.0.0.1:${BACKEND_PORT}`,
-  '/healthz': `http://127.0.0.1:${BACKEND_PORT}`,
-  '/readyz': `http://127.0.0.1:${BACKEND_PORT}`,
-  '/metrics': `http://127.0.0.1:${BACKEND_PORT}`,
+  '/api': `http://127.0.0.1:${String(BACKEND_PORT)}`,
+  '/302': `http://127.0.0.1:${String(BACKEND_PORT)}`,
+  '/dav': `http://127.0.0.1:${String(BACKEND_PORT)}`,
+  '/healthz': `http://127.0.0.1:${String(BACKEND_PORT)}`,
+  '/readyz': `http://127.0.0.1:${String(BACKEND_PORT)}`,
+  '/metrics': `http://127.0.0.1:${String(BACKEND_PORT)}`,
 };
 
 // https://vite.dev/config/

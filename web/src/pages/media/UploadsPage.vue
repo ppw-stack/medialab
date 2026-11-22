@@ -367,7 +367,7 @@ const editing = ref<UploadTask | null>(null);
 const form = reactive({
   name: '',
   /** 目标模式：``driver`` = 指定存储源 / ``aggregate`` = 网盘聚合 */
-  mode: 'driver' as 'driver' | 'aggregate',
+  mode: 'driver',
   driver_id: undefined as number | undefined,
   aggregate_group_id: undefined as number | undefined,
   /** 目标子目录（聚合模式专属）：组映射的子路径覆盖，空 = 不覆盖 */
@@ -455,7 +455,8 @@ async function reload(): Promise<void> {
     // **默认展示第一个任务的详情**——用户打开页面不用再点一次。
     // 只在没选中任何任务时自动选（避免覆盖用户已选中的任务）。
     if (!current.value && tasks.value.length > 0) {
-      await openDetail(tasks.value[0]);
+      const first = tasks.value[0];
+      if (first) await openDetail(first);
     }
   } catch (e) {
     message.error(errMsg(e, '加载上传任务失败'));
@@ -488,7 +489,7 @@ async function loadAggregateGroups(): Promise<void> {
     const resp = await api.get<{ groups: AggregateTargetGroup[] }>(
       '/upload-tasks/aggregate-targets',
     );
-    aggregateGroups.value = resp.groups ?? [];
+    aggregateGroups.value = resp.groups;
   } catch {
     aggregateGroups.value = [];
   }
@@ -496,13 +497,17 @@ async function loadAggregateGroups(): Promise<void> {
 
 /** 组名（任务列表展示用）。 */
 function groupNameOf(groupId: number): string {
-  return aggregateGroups.value.find((g) => g.group_id === groupId)?.group_name ?? `#${groupId}`;
+  return (
+    aggregateGroups.value.find((g) => g.group_id === groupId)?.group_name ?? `#${String(groupId)}`
+  );
 }
 
 async function poll(): Promise<void> {
   if (!current.value) return;
   try {
-    runtime.value = await api.get<UploadRuntime>(`/upload-tasks/${current.value.id}/status`);
+    runtime.value = await api.get<UploadRuntime>(
+      `/upload-tasks/${String(current.value.id)}/status`,
+    );
     await scrollLogs();
   } catch {
     // 任务被删了就算了
@@ -519,7 +524,7 @@ async function scrollLogs(): Promise<void> {
 async function openDetail(task: UploadTask): Promise<void> {
   current.value = task;
   try {
-    runtime.value = await api.get<UploadRuntime>(`/upload-tasks/${task.id}/status`);
+    runtime.value = await api.get<UploadRuntime>(`/upload-tasks/${String(task.id)}/status`);
   } catch {
     runtime.value = null;
   }
@@ -528,7 +533,7 @@ async function openDetail(task: UploadTask): Promise<void> {
 async function toggleEnabled(task: UploadTask): Promise<void> {
   const next = !task.enabled;
   try {
-    const updated = await api.patch<UploadTask>(`/upload-tasks/${task.id}`, {
+    const updated = await api.patch<UploadTask>(`/upload-tasks/${String(task.id)}`, {
       enabled: next,
     });
     message.success(next ? '已启用' : '已停用');
@@ -545,7 +550,7 @@ async function toggleEnabled(task: UploadTask): Promise<void> {
 
 async function remove(task: UploadTask): Promise<void> {
   try {
-    await api.del(`/upload-tasks/${task.id}`);
+    await api.del(`/upload-tasks/${String(task.id)}`);
     message.success('已删除');
     if (current.value?.id === task.id) {
       current.value = null;
@@ -561,13 +566,13 @@ async function syncNow(): Promise<void> {
   if (!current.value) return;
   syncing.value = true;
   try {
-    const result = await api.post<SyncNowResult>(`/upload-tasks/${current.value.id}/sync`);
+    const result = await api.post<SyncNowResult>(`/upload-tasks/${String(current.value.id)}/sync`);
     message.success(
-      `同步完成：上传 ${result.uploaded}，覆盖 ${result.overwritten}，` +
-        `已存在 ${result.unchanged}，失败 ${result.failed}` +
-        (result.deleted_local ? `，本地已删除 ${result.deleted_local}` : '') +
+      `同步完成：上传 ${String(result.uploaded)}，覆盖 ${String(result.overwritten)}，` +
+        `已存在 ${String(result.unchanged)}，失败 ${String(result.failed)}` +
+        (result.deleted_local ? `，本地已删除 ${String(result.deleted_local)}` : '') +
         (result.skipped_inflight
-          ? `，在传跳过 ${result.skipped_inflight}（事件队列处理中，不会重复上传）`
+          ? `，在传跳过 ${String(result.skipped_inflight)}（事件队列处理中，不会重复上传）`
           : ''),
     );
     await reload();
@@ -618,12 +623,12 @@ function openEdit(task: UploadTask): void {
   form.include_subdirs = task.include_subdirs;
   form.enabled = task.enabled;
   form.delete_after_upload = task.delete_after_upload;
-  form.conflict_policy = task.conflict_policy ?? 1;
+  form.conflict_policy = task.conflict_policy;
   form.target_file_id = task.target_file_id;
   form.target_path = task.target_path ?? '';
   // 目录浏览器从**目标目录本身**开始（部分网盘没有「路径 ↔ id」反查，
   // 只能从 id 往下钻，无法回到父级）
-  targetStack.value = [{ id: task.target_file_id, name: task.target_path || '目标目录' }];
+  targetStack.value = [{ id: task.target_file_id, name: (task.target_path ?? '') || '目标目录' }];
   targetDirs.value = [];
   formOpen.value = true;
   if (form.mode === 'driver') void loadTargetDirs(task.target_file_id);
@@ -639,7 +644,8 @@ function onModeChange(): void {
     targetStack.value = [{ id: '', name: '网盘根目录' }];
     targetDirs.value = [];
     if (!form.aggregate_group_id && aggregateGroups.value.length > 0) {
-      form.aggregate_group_id = aggregateGroups.value[0].group_id;
+      const firstGroup = aggregateGroups.value[0];
+      if (firstGroup) form.aggregate_group_id = firstGroup.group_id;
     }
   } else {
     form.aggregate_group_id = undefined;
@@ -688,7 +694,7 @@ async function save(): Promise<void> {
             conflict_policy: form.conflict_policy,
           };
     if (editing.value) {
-      await api.patch(`/upload-tasks/${editing.value.id}`, payload);
+      await api.patch(`/upload-tasks/${String(editing.value.id)}`, payload);
       message.success('已保存');
     } else {
       await api.post('/upload-tasks', payload);
@@ -725,9 +731,9 @@ async function loadTargetDirs(parentId: string, driverId?: number): Promise<void
   loadingTarget.value = true;
   try {
     const resp = await api.get<{ dirs: DirEntry[] }>(
-      `/upload-tasks/targets?driver_id=${driver}&parent_id=${encodeURIComponent(parentId)}`,
+      `/upload-tasks/targets?driver_id=${String(driver)}&parent_id=${encodeURIComponent(parentId)}`,
     );
-    targetDirs.value = resp.dirs ?? [];
+    targetDirs.value = resp.dirs;
   } catch (e) {
     message.error(errMsg(e, '加载目标网盘目录失败'));
   } finally {
@@ -756,7 +762,7 @@ async function loadLocalDirs(path: string): Promise<void> {
     const resp = await api.get<{ dirs: DirEntry[] }>(
       `/upload-tasks/local-dirs?path=${encodeURIComponent(path)}`,
     );
-    localDirs.value = resp.dirs ?? [];
+    localDirs.value = resp.dirs;
   } catch (e) {
     message.error(errMsg(e, '加载本地目录失败'));
     localDirs.value = [];
@@ -809,7 +815,7 @@ function goTarget(index: number): void {
 /** 日志行的时间戳（后端格式 ``[HH:MM:SS] 内容``）。 */
 function logTime(line: string): string {
   const m = /^\[(\d{2}:\d{2}:\d{2})\]/.exec(line);
-  return m ? m[1] : '';
+  return m?.[1] ?? '';
 }
 
 /** 去掉时间戳后的内容。 */

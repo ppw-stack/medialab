@@ -80,7 +80,7 @@ async function onSave() {
 }
 
 onMounted(() => {
-  load();
+  void load();
 });
 </script>
 

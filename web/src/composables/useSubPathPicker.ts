@@ -39,9 +39,9 @@ export function useSubPathPicker(group: () => AggregateTargetGroup | undefined) 
     loadingSubPath.value = true;
     try {
       const resp = await api.get<{ dirs: DirEntry[] }>(
-        `/drivers/${g.master_driver_id}/browse-dirs?parent_id=${encodeURIComponent(parentId)}`,
+        `/drivers/${String(g.master_driver_id)}/browse-dirs?parent_id=${encodeURIComponent(parentId)}`,
       );
-      subPathDirs.value = resp.dirs ?? [];
+      subPathDirs.value = resp.dirs;
     } catch (e) {
       message.error(errMsg(e, '读取主盘目录失败'));
       subPathDirs.value = [];
@@ -58,7 +58,9 @@ export function useSubPathPicker(group: () => AggregateTargetGroup | undefined) 
       message.warning('该聚合组未配置「归拢目标目录」——请先到「网盘聚合」页配置');
       return;
     }
-    subPathStack.value = [{ id: g.target_dir_id, name: g.target_dir_path || '归拢目标目录' }];
+    subPathStack.value = [
+      { id: g.target_dir_id, name: (g.target_dir_path ?? '') || '归拢目标目录' },
+    ];
     subPathDirs.value = [];
     subPathOpen.value = true;
     void loadSubPathDirs(g.target_dir_id);

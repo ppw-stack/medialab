@@ -32,7 +32,7 @@ export function formatBytes(b: number, opts: FormatBytesOptions = {}): string {
   // 字节单位 + 整数数值 → 不显示小数（"500 B" 而非 "500.00 B"）
   const text =
     integerBytes && idx === 0 && Number.isInteger(value) ? String(value) : value.toFixed(decimals);
-  return text + ' ' + units[idx];
+  return text + ' ' + (units[idx] ?? '');
 }
 
 /**

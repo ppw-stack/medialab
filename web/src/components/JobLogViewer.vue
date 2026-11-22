@@ -37,7 +37,9 @@ function logTime(ts: string): string {
 /** logger 名的末段（``app.services.jobs`` → ``jobs``）——省宽度。 */
 function shortLogger(name: string): string {
   const parts = name.split('.');
-  return parts[parts.length - 1] || name;
+  // 末段可能为空（如 logger 名以 '.' 结尾）——归一成空串再走 || 兜底
+  const last = parts[parts.length - 1] ?? '';
+  return last || name;
 }
 
 function levelClass(level: string): string {
@@ -73,7 +75,7 @@ async function copyAll(): Promise<void> {
   }
   try {
     await navigator.clipboard.writeText(text);
-    message.success(`已复制 ${visible.value.length} 条日志`);
+    message.success(`已复制 ${String(visible.value.length)} 条日志`);
   } catch {
     message.error('复制失败（浏览器不允许）');
   }

@@ -14,9 +14,7 @@ const props = defineProps<{
   jobLabel: string;
 }>();
 
-const emit = defineEmits<{
-  (e: 'update:open', v: boolean): void;
-}>();
+const emit = defineEmits<(e: 'update:open', v: boolean) => void>();
 
 const runs = ref<RunItem[]>([]);
 const loading = ref(false);
@@ -57,7 +55,7 @@ async function load() {
 async function loadDetail(id: number): Promise<void> {
   detailLoading.value = true;
   try {
-    const r = await api.get<RunItem>(`/scheduler/runs/${id}`);
+    const r = await api.get<RunItem>(`/scheduler/runs/${String(id)}`);
     // 用详情替换列表里的精简条目（保持 selectedRun 指向同一条）
     selectedRun.value = r;
   } catch (e) {
@@ -75,8 +73,8 @@ function pickSummary(rawSummary: unknown, latestSteps: JobStep[], latest: RunIte
     const last = latestSteps[latestSteps.length - 1];
     // detail 可能是 null / 非字符串（后端 steps 来自 JSON）——
     // 只有字符串才能直接返回，否则回退到 name
-    const detail = typeof last.detail === 'string' ? last.detail : '';
-    return detail || last.name;
+    const detail = typeof last?.detail === 'string' ? last.detail : '';
+    return detail || (last?.name ?? '');
   }
   if (latest?.error) return '失败';
   return '—';
@@ -113,7 +111,7 @@ function formatResult(r: unknown): string {
   }
   for (const [k, v] of Object.entries(obj)) {
     if (k === 'steps' || k === 'summary' || k === 'logs') continue;
-    out.push(`${k}: ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`);
+    out.push(`${k}: ${v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v)}`);
   }
   return out.join('\n');
 }
@@ -131,7 +129,8 @@ const stats = computed(() => {
     : 0;
   const maxMs = durations.length ? Math.max(...durations) : 0;
   // 最近一次的结果摘要：优先后端 summary，兜底取最后一步 detail
-  const latest = list[0];
+  // noUncheckedIndexedAccess：数组下标取值可能是 undefined → 归一成 null
+  const latest = list[0] ?? null;
   const latestSteps = getSteps(latest);
   const rawSummary = latest?.result?.summary;
   const summary = pickSummary(rawSummary, latestSteps, latest);
@@ -147,10 +146,10 @@ const stats = computed(() => {
 
 /** 耗时格式化（毫秒 → 人类可读）。与 HistoryStats 同一口径。 */
 function formatDuration(ms: number | null): string {
-  if (ms == null) return '—';
-  if (ms < 1000) return `${ms}ms`;
+  if (ms === null) return '—';
+  if (ms < 1000) return `${String(ms)}ms`;
   if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`;
+  return `${String(Math.floor(ms / 60000))}m${String(Math.round((ms % 60000) / 1000))}s`;
 }
 
 /**

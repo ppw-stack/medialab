@@ -94,7 +94,7 @@ async function onRotate(): Promise<void> {
     }>('/media/rotate-secret', newSecret.value ? { new_secret: newSecret.value } : {});
     rotatedSecret.value = res.new_secret;
     newSecret.value = '';
-    message.success(`已重签 ${res.resigned} 条，重写 ${res.rewritten} 个文件`);
+    message.success(`已重签 ${String(res.resigned)} 条，重写 ${String(res.rewritten)} 个文件`);
   } catch (e) {
     message.error(errMsg(e, '轮换失败'));
   } finally {

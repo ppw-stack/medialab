@@ -51,7 +51,7 @@ function crumbName(entry: DirEntry): string {
   const name = entry.name;
   if (name) return name;
   const parts = entry.id.split('/').filter(Boolean);
-  return parts.length ? parts[parts.length - 1] : '/';
+  return parts.length ? (parts[parts.length - 1] ?? '/') : '/';
 }
 </script>
 

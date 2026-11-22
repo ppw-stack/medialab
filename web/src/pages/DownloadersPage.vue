@@ -58,7 +58,8 @@ async function load() {
     data.value = await api.get<Downloader[]>('/downloaders');
     // 默认选中第一个下载器（下方任务列表显示它的任务）
     if (activeDownloaderId.value === null && data.value.length > 0) {
-      selectDownloader(data.value[0].id);
+      const first = data.value[0];
+      if (first) selectDownloader(first.id);
     }
     // 任务数**异步补**（实时统计慢，不阻塞列表渲染）
     void loadTorrentCounts();
@@ -96,7 +97,7 @@ async function loadTorrentCounts(): Promise<void> {
   await Promise.all(
     ids.map(async (id) => {
       try {
-        const r = await api.get<DownloaderTorrentCount>(`/downloaders/${id}/torrent-count`);
+        const r = await api.get<DownloaderTorrentCount>(`/downloaders/${String(id)}/torrent-count`);
         torrentCounts.value[id] = r.count;
       } catch {
         torrentCounts.value[id] = null;
@@ -137,9 +138,9 @@ function onEdit(d: Downloader) {
     name: d.name,
     type: d.type,
     url: d.url,
-    username: d.username || '',
+    username: d.username ?? '',
     password: '',
-    save_path: d.save_path || '',
+    save_path: d.save_path ?? '',
     is_default: d.is_default,
     enabled: d.enabled,
     verify_tls: d.verify_tls,
@@ -151,7 +152,7 @@ async function onDelete(id: number) {
   try {
     await api.post('/downloaders/delete', { id });
     message.success('已删除');
-    load();
+    void load();
   } catch (e) {
     message.error(errMsg(e, '删除失败'));
   }
@@ -167,7 +168,8 @@ async function onSave() {
     }
     const payload: Record<string, unknown> = { ...formState };
     if (!payload.password) delete payload.password;
-    if (!payload.username) payload.username = null;
+    // 空串 = 明确清空（发 null）——不能用 ??=，那只在 null/undefined 时才赋值
+    if (payload.username === '') payload.username = null;
     if (creating.value) {
       await api.post('/downloaders', payload);
       message.success('已创建');
@@ -176,7 +178,7 @@ async function onSave() {
       message.success('已更新');
     }
     closeModal();
-    load();
+    void load();
   } catch (e) {
     // validate 抛错是字段级 ValidationError（无 message，是数组）；API 抛 ApiError
     // 两者都走 errMsg 取出可读文本，避免 [object Object]
@@ -202,7 +204,7 @@ async function onTest(record?: Downloader) {
   try {
     if (record) {
       // 列表行测连：测 DB 里已保存的配置
-      const r = await api.post<DownloaderTestResult>(`/downloaders/${record.id}/test`, {});
+      const r = await api.post<DownloaderTestResult>(`/downloaders/${String(record.id)}/test`, {});
       testResult.value = { reachable: r.reachable, detail: r.detail };
     } else {
       // 弹窗测连：用**表单里的值**测（用户可能刚改了 URL/账号/密码），
@@ -230,7 +232,7 @@ async function onTest(record?: Downloader) {
 }
 
 function typeLabel(type: string): string {
-  return TYPES.find((t) => t.value === type)?.label || type;
+  return TYPES.find((t) => t.value === type)?.label ?? type;
 }
 
 function isImplemented(type: string): boolean {
@@ -298,7 +300,7 @@ async function loadItems() {
     }
     if (filterCategory.value.trim()) params.set('category', filterCategory.value.trim());
     const resp = await api.get<DownloaderTorrentList>(
-      `/downloaders/${dlId}/torrents?${params.toString()}`,
+      `/downloaders/${String(dlId)}/torrents?${params.toString()}`,
     );
     items.value = resp.items;
     total.value = resp.total;
@@ -308,7 +310,7 @@ async function loadItems() {
     // loadItems 由多个 watch 触发（切 tab / 改筛选 / 搜索防抖），
     // 一次网络抖动会连弹多个 toast。全局限一次，避免刷屏。
     message.error({
-      content: `下载器 ${activeDownloaderId.value} 拉取失败：${errMsg(err)}`,
+      content: `下载器 ${String(dlId)} 拉取失败：${errMsg(err)}`,
       key: 'torrents-load-failed',
     });
   } finally {
@@ -319,15 +321,15 @@ async function loadItems() {
 watch(activeDownloaderId, () => {
   page.value = 1;
   selectedRowKeys.value = [];
-  loadItems();
+  void loadItems();
 });
 watch(filterState, () => {
   page.value = 1;
-  loadItems();
+  void loadItems();
 });
 watch(filterCategory, () => {
   page.value = 1;
-  loadItems();
+  void loadItems();
 });
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -335,7 +337,7 @@ watch(filterQ, () => {
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
     page.value = 1;
-    loadItems();
+    void loadItems();
   }, 300);
 });
 
@@ -389,17 +391,19 @@ async function onBatchPause(paused: boolean) {
   if (hashes.length === 0 || dlId === null) return;
   batchLoading.value = true;
   try {
-    const r = await api.post<BatchOpResult>(`/downloaders/${dlId}/torrents/pause`, {
+    const r = await api.post<BatchOpResult>(`/downloaders/${String(dlId)}/torrents/pause`, {
       hashes,
       paused,
     });
     if (r.failed > 0) {
-      message.warning(`已${paused ? '暂停' : '恢复'} ${r.succeeded} 个，失败 ${r.failed} 个`);
+      message.warning(
+        `已${paused ? '暂停' : '恢复'} ${String(r.succeeded)} 个，失败 ${String(r.failed)} 个`,
+      );
     } else {
-      message.success(`已${paused ? '暂停' : '恢复'} ${r.succeeded} 个任务`);
+      message.success(`已${paused ? '暂停' : '恢复'} ${String(r.succeeded)} 个任务`);
     }
     selectedRowKeys.value = [];
-    loadItems();
+    void loadItems();
   } catch (e) {
     message.error(e instanceof Error ? e.message : '操作失败');
   } finally {
@@ -419,18 +423,18 @@ async function doDelete(deleteData: boolean) {
   deleteModalOpen.value = false;
   batchLoading.value = true;
   try {
-    const r = await api.post<BatchOpResult>(`/downloaders/${dlId}/torrents/remove`, {
+    const r = await api.post<BatchOpResult>(`/downloaders/${String(dlId)}/torrents/remove`, {
       hashes,
       delete_data: deleteData,
     });
     const what = deleteData ? '任务 + 磁盘数据' : '任务';
     if (r.failed > 0) {
-      message.warning(`已删除${what} ${r.succeeded} 个，失败 ${r.failed} 个`);
+      message.warning(`已删除${what} ${String(r.succeeded)} 个，失败 ${String(r.failed)} 个`);
     } else {
-      message.success(`已删除${what} ${r.succeeded} 个`);
+      message.success(`已删除${what} ${String(r.succeeded)} 个`);
     }
     selectedRowKeys.value = [];
-    loadItems();
+    void loadItems();
   } catch (e) {
     message.error(e instanceof Error ? e.message : '删除失败');
   } finally {
@@ -568,7 +572,7 @@ const manageColumns = [
           row-key="id"
           :pagination="{ pageSize: 20 }"
           :row-class-name="manageRowClass"
-          @rowClick="(record: Downloader) => selectDownloader(record.id)"
+          @row-click="(record: Downloader) => selectDownloader(record.id)"
         >
           <template #bodyCell="{ column, record }">
             <template v-if="column.key === 'name'">

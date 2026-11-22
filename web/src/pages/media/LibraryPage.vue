@@ -23,7 +23,7 @@
       <a-spin :spinning="loadingTabs">
         <a-tabs
           v-if="tabs.length"
-          v-model:activeKey="activeDriverId"
+          v-model:active-key="activeDriverId"
           size="small"
           @change="onTabChange"
         >
@@ -155,8 +155,11 @@ async function loadTabs(): Promise<void> {
     }
     tabs.value = list;
     if (list.length) {
-      activeDriverId.value = list[0].id;
-      await loadTree(list[0].id);
+      const first = list[0];
+      if (first) {
+        activeDriverId.value = first.id;
+        await loadTree(first.id);
+      }
     } else {
       rawItems.value = [];
     }
@@ -182,7 +185,7 @@ async function loadTree(driverId: number): Promise<void> {
     const all: MediaItem[] = [];
     let offset = 0;
     // 后端 limit 上限 500，循环拉取该 driver 全量条目
-    while (true) {
+    for (;;) {
       const params = new URLSearchParams({
         driver_id: String(driverId),
         limit: String(PAGE),
@@ -220,7 +223,8 @@ function buildTree(items: MediaItem[]): TreeNode[] {
   for (const item of items) {
     const parts = item.path.split('/').filter(Boolean);
     // 文件名优先用 name（更干净），目录段用 path 切出来的
-    const filePart = item.name || parts[parts.length - 1] || item.path;
+    const lastPart = parts[parts.length - 1] ?? '';
+    const filePart = item.name || lastPart || item.path;
     const dirParts = parts.slice(0, -1);
 
     let cur = root;
@@ -243,7 +247,7 @@ function buildTree(items: MediaItem[]): TreeNode[] {
       cur = child;
     }
     cur.children?.push({
-      key: `f:${item.id}`,
+      key: `f:${String(item.id)}`,
       name: filePart,
       size: item.size,
       strm_url: item.strm_url,
@@ -303,7 +307,7 @@ function collectLeafIds(nodes: TreeNode[], selected: Set<string>, out: Set<numbe
       } else if (n.children) {
         collectLeafIds(n.children, selected, out);
       }
-    } else if (n.id != null && selected.has(n.key)) {
+    } else if (n.id !== undefined && selected.has(n.key)) {
       out.add(n.id);
     }
   }
@@ -315,7 +319,7 @@ function gatherFileIds(node: TreeNode, out: Set<number>): void {
     if (node.children) {
       for (const c of node.children) gatherFileIds(c, out);
     }
-  } else if (node.id != null) {
+  } else if (node.id !== undefined) {
     out.add(node.id);
   }
 }
@@ -326,10 +330,10 @@ async function onResign(): Promise<void> {
     const res = await api.post<{ resigned: number }>('/media/resign', {
       media_ids: selectedIds.value,
     });
-    message.success(`已重签 ${res.resigned} 条`);
+    message.success(`已重签 ${String(res.resigned)} 条`);
     selectedIds.value = [];
     selectedKeys.value = [];
-    if (activeDriverId.value != null) await loadTree(activeDriverId.value);
+    if (activeDriverId.value !== null) await loadTree(activeDriverId.value);
   } catch (e) {
     message.error(errMsg(e, '重签失败'));
   }
@@ -339,7 +343,7 @@ async function onResignOne(id: number): Promise<void> {
   try {
     await api.post('/media/resign', { media_ids: [id] });
     message.success('已重签');
-    if (activeDriverId.value != null) await loadTree(activeDriverId.value);
+    if (activeDriverId.value !== null) await loadTree(activeDriverId.value);
   } catch (e) {
     message.error(errMsg(e, '重签失败'));
   }

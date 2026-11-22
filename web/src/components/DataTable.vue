@@ -18,10 +18,24 @@
  * 右侧），也不要少给（少给会被压缩，文字截断）。
  */
 import { computed, useSlots } from 'vue';
+import type { ColumnType } from 'ant-design-vue/es/table';
+
+/**
+ * 列定义（columns 属性）。
+ *
+ * 以 antd 的 ColumnType 为底，另加两项本组件自己用的字段：
+ * - `minWidth`：最小列宽（antd 没有，滚动宽度计算用）
+ * - `children`：列组子列（antd 放在 ColumnGroupType 上，这里合并到一处
+ *   方便统一遍历算宽度）
+ */
+type DataTableColumn = ColumnType & {
+  minWidth?: number | string;
+  children?: readonly DataTableColumn[];
+};
 
 const props = withDefaults(
   defineProps<{
-    columns: readonly any[];
+    columns: readonly DataTableColumn[];
     /** 列宽总和的**下限**——列少 / 列窄时保证一个合理的最小滚动宽度。 */
     minScrollX?: number;
     /**
@@ -45,8 +59,8 @@ const totalWidth = computed(() => {
   let sum = 0;
   for (const col of props.columns) {
     // 列组（children）按其子列累加
-    if (Array.isArray((col as any).children)) {
-      for (const child of (col as any).children) {
+    if (Array.isArray(col.children)) {
+      for (const child of col.children) {
         sum += columnWidth(child);
       }
       continue;
@@ -56,14 +70,14 @@ const totalWidth = computed(() => {
   return sum;
 });
 
-function columnWidth(col: any): number {
-  const w = col?.width;
+function columnWidth(col: DataTableColumn): number {
+  const w = col.width;
   if (typeof w === 'number' && w > 0) return w;
   if (typeof w === 'string') {
     const n = parseFloat(w);
     if (Number.isFinite(n) && n > 0) return n;
   }
-  const mw = col?.minWidth;
+  const mw = col.minWidth;
   if (typeof mw === 'number' && mw > 0) return mw;
   return DEFAULT_COL_WIDTH;
 }

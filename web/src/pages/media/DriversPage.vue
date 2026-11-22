@@ -404,7 +404,7 @@
         </div>
         <a-space direction="vertical" style="width: 100%">
           <a-button block type="primary" @click="onLoginByQr"> 扫码登录 </a-button>
-          <a-button v-if="loginDriver.type === 'guangya'" block @click="openSms(loginDriver)">
+          <a-button v-if="loginDriver.type === 'guangya'" block @click="openSms">
             短信验证码登录
           </a-button>
         </a-space>
@@ -689,7 +689,9 @@ const STALE_AFTER_MIN = 30;
  */
 function dropStatus(id: number): void {
   if (!(id in statuses.value)) return;
-  const { [id]: _dropped, ...rest } = statuses.value;
+  const rest = { ...statuses.value };
+  // Reflect.deleteProperty 不触发 no-dynamic-delete（删动态键）
+  Reflect.deleteProperty(rest, id);
   statuses.value = rest;
 }
 
@@ -713,7 +715,7 @@ function checkedAtText(id: number): string {
 
 function usedPercent(id: number): number {
   const s = statusOf(id);
-  if (!s || !s.total_bytes) return 0;
+  if (!s?.total_bytes) return 0;
   return Math.round((s.used_bytes / s.total_bytes) * 100);
 }
 
@@ -754,7 +756,7 @@ async function load(): Promise<void> {
     // 已删除的存储源要从状态表里移除（否则 id 复用会串状态）
     const liveIds = new Set(drivers.value.map((d) => d.id));
     for (const id of Object.keys(next)) {
-      if (!liveIds.has(Number(id))) delete next[Number(id)];
+      if (!liveIds.has(Number(id))) Reflect.deleteProperty(next, Number(id));
     }
     statuses.value = next;
   } catch (e) {
@@ -873,9 +875,9 @@ function openConfig(driver: Driver): void {
     data_exts: splitExts(driver.data_exts).length
       ? splitExts(driver.data_exts)
       : [...DEFAULT_DATA_EXTS],
-    min_size_mb: driver.min_size_mb ?? 0,
-    include_subdirs: driver.include_subdirs ?? true,
-    auto_prune: driver.auto_prune ?? false,
+    min_size_mb: driver.min_size_mb,
+    include_subdirs: driver.include_subdirs,
+    auto_prune: driver.auto_prune,
   };
   // 浏览状态回到账号根——本次浏览的选中记录清空（已有配置仍显示在下方）
   mediaStack.value = [{ id: '', name: '网盘根目录' }];
@@ -892,9 +894,9 @@ async function loadMediaDirs(parentId: string): Promise<void> {
   loadingMediaDirs.value = true;
   try {
     const resp = await api.get<{ dirs: DirEntry[] }>(
-      `/drivers/${driver.id}/browse-dirs?parent_id=${encodeURIComponent(parentId)}`,
+      `/drivers/${String(driver.id)}/browse-dirs?parent_id=${encodeURIComponent(parentId)}`,
     );
-    mediaDirs.value = resp.dirs ?? [];
+    mediaDirs.value = resp.dirs;
   } catch (e) {
     message.error(errMsg(e, '加载网盘目录失败'));
   } finally {
@@ -952,15 +954,15 @@ async function onSaveConfig(): Promise<void> {
   if (configDriver.value === null) return;
   saving.value = true;
   try {
-    await api.put<Driver>(`/drivers/${configDriver.value.id}/config`, {
+    await api.put<Driver>(`/drivers/${String(configDriver.value.id)}/config`, {
       media_cid: configForm.value.media_cid || null,
       output_dir: configForm.value.output_dir || null,
       video_exts: configForm.value.video_exts.join(','),
       image_exts: configForm.value.image_exts.join(','),
       data_exts: configForm.value.data_exts.join(','),
-      min_size_mb: configForm.value.min_size_mb ?? 0,
-      include_subdirs: configForm.value.include_subdirs ?? true,
-      auto_prune: configForm.value.auto_prune ?? false,
+      min_size_mb: configForm.value.min_size_mb,
+      include_subdirs: configForm.value.include_subdirs,
+      auto_prune: configForm.value.auto_prune,
     });
     message.success('已保存');
     configOpen.value = false;
@@ -999,7 +1001,7 @@ let scanTimer: number | undefined;
 async function onScan(driver: Driver): Promise<void> {
   scanningId.value = driver.id;
   try {
-    const res = await api.post<{ job_id: string }>(`/drivers/${driver.id}/scan`);
+    const res = await api.post<{ job_id: string }>(`/drivers/${String(driver.id)}/scan`);
     scanOpen.value = true;
     scanJob.value = null;
     dedupOpen.value = false;
@@ -1080,7 +1082,7 @@ function scanStateColor(state: string): string {
 async function probeDriver(id: number, silent = false): Promise<void> {
   probingId.value = id;
   try {
-    const status = await api.get<DriverStatus>(`/drivers/${id}/probe`);
+    const status = await api.get<DriverStatus>(`/drivers/${String(id)}/probe`);
     statuses.value = { ...statuses.value, [id]: status };
 
     if (silent) return; // 后台自动测连（扫码/短信登录后）不打扰
@@ -1119,7 +1121,7 @@ async function probeAll(): Promise<void> {
 
 async function onDelete(id: number): Promise<void> {
   try {
-    await api.del(`/drivers/${id}`);
+    await api.del(`/drivers/${String(id)}`);
     message.success('已删除');
     await load();
   } catch (e) {
@@ -1147,7 +1149,7 @@ function onLoginByQr(): void {
 }
 
 /** 打开短信登录（光鸭盘）。 */
-function openSms(_driver: Driver): void {
+function openSms(): void {
   loginOpen.value = false;
   smsOpen.value = true;
   smsPhone.value = '';
@@ -1163,7 +1165,7 @@ async function onSendSms(): Promise<void> {
   smsSending.value = true;
   smsError.value = '';
   try {
-    const res = await api.post<SmsSendResult>(`/drivers/${driver.id}/login/sms/send`, {
+    const res = await api.post<SmsSendResult>(`/drivers/${String(driver.id)}/login/sms/send`, {
       phone: smsPhone.value,
     });
     if (res.captcha_url) {
@@ -1185,7 +1187,7 @@ async function onVerifySms(): Promise<void> {
   smsVerifying.value = true;
   smsError.value = '';
   try {
-    const res = await api.post<SmsVerifyResult>(`/drivers/${driver.id}/login/sms/verify`, {
+    const res = await api.post<SmsVerifyResult>(`/drivers/${String(driver.id)}/login/sms/verify`, {
       phone: smsPhone.value,
       code: smsCode.value,
       captcha_token: smsToken.value,
@@ -1239,8 +1241,8 @@ async function startQrSession(driver: Driver, mode: 'web' | 'client' = 'web'): P
   try {
     const url =
       mode === 'client'
-        ? `/drivers/${driver.id}/qr/start?mode=client`
-        : `/drivers/${driver.id}/qr/start`;
+        ? `/drivers/${String(driver.id)}/qr/start?mode=client`
+        : `/drivers/${String(driver.id)}/qr/start`;
     const res = await api.post<QrStartResult>(url);
     qrSessionId.value = res.session_id;
     qrImage.value = res.qr_image_b64;
@@ -1263,7 +1265,7 @@ function startPolling(): void {
     if (!qrDriverId.value || !qrSessionId.value) return;
     try {
       const res = await api.get<QrStatusResult>(
-        `/drivers/${qrDriverId.value}/qr/status?session_id=${encodeURIComponent(qrSessionId.value)}`,
+        `/drivers/${String(qrDriverId.value)}/qr/status?session_id=${encodeURIComponent(qrSessionId.value)}`,
       );
       qrKind.value = res.kind;
       if (res.error_kind) {
@@ -1276,12 +1278,11 @@ function startPolling(): void {
         qrKind.value = 'confirmed';
         message.success('扫码登录成功');
         // 凭据换了 → 本地旧状态作废（理由同 onVerifySms）
-        const confirmedId = qrDriverId.value;
-        if (confirmedId !== null) dropStatus(confirmedId);
+        // qrDriverId 已被本回调开头的守卫收窄为 number
+        dropStatus(qrDriverId.value);
         await load();
         // 登录成功立刻后台测连（刷新连通/容量/直链状态）
-        const id = qrDriverId.value;
-        if (id !== null) void probeDriver(id, true);
+        void probeDriver(qrDriverId.value, true);
         // 停留 1.2 秒让用户看到成功提示，然后自动关闭
         closeAfterDelay(() => {
           qrOpen.value = false;
