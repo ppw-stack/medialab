@@ -10,7 +10,35 @@
 
 ## [Unreleased]
 
-（暂无）
+### Removed（BREAKING，下一个 major：v3.0.0）
+
+- **115 网盘支持整体移除**——媒体库域现在只支持光鸭盘。
+
+  **删除的端点**（调用方会拿到 404）：
+
+  - `GET /api/drivers/device-types`（115 设备类型清单）
+  - `POST /api/drivers/{id}/incremental` 与
+    `POST /api/drivers/{id}/incremental/baseline`（基于 115 生活事件流的
+    增量同步）
+  - `GET /api/incremental-jobs/{id}`（增量任务进度）
+  - `GET /api/drivers/{id}/diag/{remote_id}`（115 直链参数诊断）
+
+  **响应体字段删除**：`GET/POST/PATCH /api/drivers*` 不再返回 / 接受
+  `device_type`；`POST /api/drivers` 的 `device_type` 字段现在会被
+  `extra="forbid"` 拒绝（400）。
+
+  **迁移端点语义收窄**：`POST /api/migrations/run` 与
+  `GET /api/migrations/sources` 的**源必须是光鸭盘**；115 源返回 400。
+  `submit_interval_sec` 上限从「按源类型 60s/5s」统一为 **5s**。
+
+  **持久化变更**：`drivers.device_type` 列由启动迁移删除（幂等；
+  旧镜像回滚前需加回该列）。`link_cache` 的 UA 分桶保留（对绑定 UA 的
+  驱动仍是正确性要求）。
+
+  **迁移步骤**：① 删掉脚本里对上述端点的调用（增量同步改用全量扫描
+  `POST /api/drivers/{id}/scan`，它是幂等的）；② 115 存储源行会保留但
+  不可用（驱动类型未注册）——确需清理请手工删除对应行与磁盘上的 strm，
+  没有自动清理（避免误删）；③ 依赖 `device_type` 的调用方改为不传。
 
 ## [2.0.0] - 2026-11-21
 

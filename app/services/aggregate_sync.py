@@ -55,8 +55,8 @@ from app.domain.aggregate_types import (
 )
 from app.services.aggregate_staging import enqueue_from_staging_root
 from app.services.driver_factory import build_driver
+from app.services.driver_service import guangya_refresh_callback
 from app.services.errors import ServiceError
-from app.services.migration import persist_guangya_credential
 from app.services.migration_pipeline import (
     GUANGYA_LANDED_NAME,
     VERIFY_DELAY_SEC,
@@ -64,6 +64,8 @@ from app.services.migration_pipeline import (
     SubmitGate,
     TargetIndex,
     TaskWatcher,
+    is_quota_error,
+    landed_name_from_url,
 )
 
 logger = get_logger(__name__)
@@ -78,7 +80,7 @@ __all__ = [
 #: 光鸭源的提交间隔（秒）——**1s**（2026-11-16 从 5s 下调）。
 #:
 #: 额度是**按天**的（撞墙即停、当日不恢复），提交间隔快慢**不影响额度消耗**
-#: ——它只影响单轮时长。光鸭源没有 115 的下载频控（那个才需要 60s 间隔），
+#: ——它只影响单轮时长。光鸭源没有下载频控（那种才需要分钟级间隔），
 #: 限速由全局限速器（0.2s/请求）兜底 → 1s 足够礼貌。
 SUBMIT_INTERVAL_SEC = 1.0
 
@@ -198,9 +200,6 @@ SHARE_BATCH_MAX_BYTES = 10 * 1024 * 1024 * 1024
 #: 注意：**暂停**（``paused``，文案明确是额度耗尽）**仍会自动续传**——
 #: 次日额度窗口打开，作业把 ``paused`` 行捡起来继续。
 
-#: 云添加额度耗尽的文案特征（命中即暂停，不硬撞不重试）。
-QUOTA_ERROR_MARKERS = ("次数超限", "额度", "配额", "每日上限")
-
 #: 单个云下载任务的**最大等待时长**（秒）——2 小时。
 #:
 #: ⚠️ 光鸭已知会把任务**卡在活跃列表不结束**（AGENTS.md 实测：15MB 任务
@@ -247,23 +246,6 @@ class _QuotaExceeded(Exception):
     """云添加额度耗尽——本组转 ``paused``（当日不恢复，次日续传）。"""
 
 
-def _is_quota_error(message: str) -> bool:
-    """错误文案里是否含「额度耗尽」特征。"""
-    text = str(message or "")
-    return any(marker in text for marker in QUOTA_ERROR_MARKERS)
-
-
-def _landed_name_from_url(url: str) -> str:
-    """从直链 URL 推导云下载的落盘名（取路径末段）。
-
-    光鸭云下载按 URL 末段命名——光鸭 CDN 直链末段是 ``download``（实测）。
-    """
-    if not url:
-        return ""
-    path = str(url).split("?", 1)[0].rstrip("/")
-    return path.rsplit("/", 1)[-1] if "/" in path else ""
-
-
 def _landed_candidate_names(url: str = "") -> tuple[str, ...]:
     """落盘名候选**全集**（不做任何排除）。
 
@@ -272,7 +254,7 @@ def _landed_candidate_names(url: str = "") -> tuple[str, ...]:
     rename_landed` 已支持该形态）。
     """
     names = {GUANGYA_LANDED_NAME}
-    derived = _landed_name_from_url(url)
+    derived = landed_name_from_url(url)
     if derived:
         names.add(derived)
     return tuple(sorted(name for name in names if name))
@@ -290,13 +272,6 @@ def _landed_candidates_for_submit(existing: dict[str, int], url: str) -> tuple[s
     故候选保持完整，改名时只跳过「目录里原有的同名条目」。
     """
     return _landed_candidate_names(url)
-
-
-def _refresh_callback(driver_id: int) -> Any:
-    async def _cb(cred: Any) -> None:
-        await persist_guangya_credential(driver_id, cred)
-
-    return _cb
 
 
 # --------------------------------------------------------------------------
@@ -568,7 +543,6 @@ async def _sync_group_locked(
             return
         master_id = int(master.id)
         master_credential = master.credential
-        master_device_type = master.device_type
         root_id = str(group.target_dir_id)
         group_name = group.name
 
@@ -581,8 +555,7 @@ async def _sync_group_locked(
     master_driver = build_driver(
         "guangya",
         master_credential,
-        master_device_type,
-        on_token_refresh=_refresh_callback(master_id),
+        on_token_refresh=guangya_refresh_callback(master_id),
     )
     index = TargetIndex(master_driver, root_id)
     # ⚠️ 轮询间隔显式 **2s**（默认 5s → 完成判定要 2 次缺席 ≈ 10s/文件，
@@ -937,7 +910,7 @@ async def _sync_one(
     try:
         task_id = await index.create_offline_task(link.url, target_dir_id)
     except DriverError as exc:
-        if _is_quota_error(str(exc)):
+        if is_quota_error(str(exc)):
             raise _QuotaExceeded(f"云添加额度耗尽：{exc}") from exc
         raise
     await index.note_submitted(row.target_dir, row.file_name, row.size_bytes)
@@ -990,7 +963,7 @@ async def _sync_one(
             await asyncio.sleep(VERIFY_DELAY_SEC)
 
     reason = await index.failure_reason(task_id)
-    if _is_quota_error(reason):
+    if is_quota_error(reason):
         raise _QuotaExceeded(f"云添加额度耗尽：{reason}")
     raise DriverError(
         reason or "云下载已结束，但主盘目录未出现同名同大小文件", kind="unknown"
@@ -1626,14 +1599,12 @@ async def _active_task_ids(rows: list[_Row]) -> set[str] | None:
         if driver_row is None:
             return None
         credential = driver_row.credential
-        device_type = driver_row.device_type
         driver_id = int(driver_row.id)
 
     driver = build_driver(
         "guangya",
         credential,
-        device_type,
-        on_token_refresh=_refresh_callback(driver_id),
+        on_token_refresh=guangya_refresh_callback(driver_id),
     )
     try:
         items = await driver.list_active_offline_tasks()  # type: ignore[attr-defined]
@@ -1735,13 +1706,11 @@ async def _build_source_driver(row: _Row) -> Any:
                 f"存储源「{driver_row.name}」已不是副数据源", status=400
             )
         credential = driver_row.credential
-        device_type = driver_row.device_type
         driver_id = int(driver_row.id)
     return build_driver(
         "guangya",
         credential,
-        device_type,
-        on_token_refresh=_refresh_callback(driver_id),
+        on_token_refresh=guangya_refresh_callback(driver_id),
     )
 
 

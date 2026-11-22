@@ -65,7 +65,6 @@ async def _run_job(job: scan_jobs.ScanJob, *, prune: bool) -> None:
             driver_impl = build_driver(
                 row.type,
                 row.credential,
-                row.device_type,
                 on_token_refresh=_on_refresh,
             )
 

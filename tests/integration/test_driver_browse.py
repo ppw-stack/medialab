@@ -2,7 +2,7 @@
 
 覆盖：
 
-1. 根 id 映射（p115 → ``"0"`` / guangya → ``""``）——浏览起点是账号根
+1. 根 id 映射（guangya → ``""``）——浏览起点是账号根
 2. 只返回目录（文件不进目录浏览器）
 3. 存储源不存在 → 404
 4. 驱动不支持按 id 浏览 → 400
@@ -38,14 +38,6 @@ class _NoBrowseDriver:
     """不实现 ``list_dir_by_cid`` 的驱动。"""
 
     name = "nobrowse"
-
-
-@pytest.fixture
-async def p115_id(db) -> int:
-    row = await driver_service.add_driver(
-        driver_type="p115", name="测试115", device_type="web"
-    )
-    return row.id
 
 
 @pytest.fixture
@@ -112,15 +104,6 @@ async def client(settings, db_engine):
 # ---------------------------------------------------------------- 根 id 映射
 
 
-async def test_p115_browse_starts_at_account_root(
-    p115_id: int, fake_driver
-) -> None:
-    """p115 的账号根 cid 是 ``0``——``parent_id`` 留空时后端自己解析。"""
-    dirs = await driver_service.browse_driver_dirs(p115_id)
-    assert fake_driver["driver"].seen_parent == "0"
-    assert dirs == [("d1", "电影"), ("d2", "剧集")]
-
-
 async def test_guangya_browse_starts_at_empty_root(
     guangya_id: int, fake_driver
 ) -> None:
@@ -131,16 +114,16 @@ async def test_guangya_browse_starts_at_empty_root(
 
 
 async def test_explicit_parent_id_is_passed_through(
-    p115_id: int, fake_driver
+    guangya_id: int, fake_driver
 ) -> None:
     """显式给了 parent_id 就用它（不解析成根）。"""
-    await driver_service.browse_driver_dirs(p115_id, "12345")
+    await driver_service.browse_driver_dirs(guangya_id, "12345")
     assert fake_driver["driver"].seen_parent == "12345"
 
 
-async def test_files_are_filtered_out(p115_id: int, fake_driver) -> None:
+async def test_files_are_filtered_out(guangya_id: int, fake_driver) -> None:
     """目录浏览器只列目录——文件不进列表。"""
-    dirs = await driver_service.browse_driver_dirs(p115_id)
+    dirs = await driver_service.browse_driver_dirs(guangya_id)
     assert all(name in {"电影", "剧集"} for _, name in dirs)
     assert "a.mkv" not in [name for _, name in dirs]
 
@@ -157,7 +140,7 @@ async def test_missing_driver_raises_404(db) -> None:
 
 
 async def test_driver_without_browse_support_raises_400(
-    p115_id: int, monkeypatch: pytest.MonkeyPatch
+    guangya_id: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """驱动没实现 ``list_dir_by_cid`` → 400（不是 500）。"""
     from app.services.driver_service import DriverServiceError
@@ -166,11 +149,11 @@ async def test_driver_without_browse_support_raises_400(
         driver_service, "build_driver", lambda *a, **k: _NoBrowseDriver()
     )
     with pytest.raises(DriverServiceError) as exc:
-        await driver_service.browse_driver_dirs(p115_id)
+        await driver_service.browse_driver_dirs(guangya_id)
     assert exc.value.status_code == 400
 
 
-async def test_upstream_failure_raises_400(p115_id: int, fake_driver) -> None:
+async def test_upstream_failure_raises_400(guangya_id: int, fake_driver) -> None:
     """上游调用失败 → 400（不是 500）——网盘限流 / 凭据失效都归这一类。"""
     from app.services.driver_service import DriverServiceError
 
@@ -179,19 +162,19 @@ async def test_upstream_failure_raises_400(p115_id: int, fake_driver) -> None:
     fake_driver["driver"] = driver
 
     with pytest.raises(DriverServiceError) as exc:
-        await driver_service.browse_driver_dirs(p115_id)
+        await driver_service.browse_driver_dirs(guangya_id)
     assert exc.value.status_code == 400
 
 
 # ---------------------------------------------------------------- HTTP 端点
 
 
-async def test_browse_dirs_endpoint(client, p115_id: int, fake_driver) -> None:
+async def test_browse_dirs_endpoint(client, guangya_id: int, fake_driver) -> None:
     """端点返回 ``{driver_id, parent_id, dirs:[{id,name}]}``（与上传任务同形）。"""
-    resp = await client.get(f"/api/drivers/{p115_id}/browse-dirs")
+    resp = await client.get(f"/api/drivers/{guangya_id}/browse-dirs")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["driver_id"] == p115_id
+    assert data["driver_id"] == guangya_id
     assert data["parent_id"] == ""
     assert data["dirs"] == [
         {"id": "d1", "name": "电影"},
@@ -202,14 +185,6 @@ async def test_browse_dirs_endpoint(client, p115_id: int, fake_driver) -> None:
 async def test_browse_dirs_endpoint_404(client) -> None:
     resp = await client.get("/api/drivers/999999/browse-dirs")
     assert resp.status_code == 404
-
-
-async def test_driver_out_carries_media_cid_label(client, p115_id: int) -> None:
-    """``media_cid_label`` 按驱动类型给出——前端不写类型分支。"""
-    resp = await client.get("/api/drivers")
-    assert resp.status_code == 200
-    rows = {r["id"]: r for r in resp.json()}
-    assert rows[p115_id]["media_cid_label"] == "115 媒体库 cid"
 
 
 async def test_driver_out_media_cid_label_guangya(client, guangya_id: int) -> None:

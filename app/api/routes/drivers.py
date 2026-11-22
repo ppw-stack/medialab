@@ -1,7 +1,7 @@
 """存储源路由：列出 / 创建 / 删除 / 扫码登录。
 
 **路由层只做参数校验与响应组装**——DB 与适配层的访问全在
-:mod:`app.services.driver_service`（CRUD、扫描、探测、诊断）与
+:mod:`app.services.driver_service`（CRUD、扫描、探测）与
 :mod:`app.services.driver_auth`（扫码 / 短信登录）。
 
 分层约束（``api`` 不依赖 ``db`` / ``adapters``）由
@@ -14,7 +14,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.auth import require_session
-from app.domain.device_types import DeviceTypeLiteral
 from app.domain.driver_types import media_cid_label
 from app.services import driver_auth
 from app.services.driver_auth import DriverAuthError
@@ -25,13 +24,9 @@ from app.services.driver_service import (
     add_driver,
     browse_driver_dirs,
     cached_probe,
-    diagnose_driver_direct_link,
-    list_device_types,
     list_drivers,
     probe_driver,
     remove_driver,
-    set_incremental_baseline,
-    start_incremental_task,
     start_scan_task,
     update_driver,
     update_driver_config,
@@ -47,20 +42,17 @@ class DriverIn(BaseModel):
 
     type: str = Field(..., min_length=1, max_length=32)
     name: str = Field(..., min_length=1, max_length=128)
-    #: 115 设备类型。**留空则用默认值**（115android）。
-    #: 用 Literal 枚举做校验——裸 str 会让拼错的值一路溜到 115 API 才炸。
-    device_type: DeviceTypeLiteral | None = None
 
 
 class DriverConfigIn(BaseModel):
     """媒体库配置（每个存储源一套）。
 
-    字段对应参考图：115媒体库cid / 本地媒体库目录 / 三类后缀 / 最小视频。
+    字段：媒体库目录 id / 本地媒体库目录 / 三类后缀 / 最小视频。
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    #: 115 媒体库 cid（**字符串**）。用 cid 而非路径：目录改名后 id 不变。
+    #: 媒体库目录 id（光鸭是 fileId）。用 id 而非路径：目录改名后 id 不变。
     media_cid: str | None = Field(default=None, max_length=32)
     #: 本地媒体库目录（STRM 输出根）
     output_dir: str | None = Field(default=None, max_length=1024)
@@ -80,24 +72,12 @@ class DriverConfigIn(BaseModel):
     auto_prune: bool = False
 
 
-class DeviceTypeOut(BaseModel):
-    """设备类型清单项。"""
-
-    value: str
-    label: str
-    #: 能否用于扫码登录（实测：18 个里只有 10 个能取到二维码）
-    qr_capable: bool
-    #: 补充说明
-    note: str = ""
-
-
 class DriverUpdate(BaseModel):
     """修改存储源的请求体（只传要改的字段）。"""
 
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = Field(default=None, min_length=1, max_length=128)
-    device_type: DeviceTypeLiteral | None = None
 
 
 class DriverConnStatusOut(BaseModel):
@@ -122,14 +102,13 @@ class DriverOut(BaseModel):
     id: int
     type: str
     name: str
-    device_type: str | None
     enabled: bool
     credential_masked: str
 
     # -- 媒体库配置 --
     media_cid: str | None = None
     media_path: str | None = None
-    #: 媒体库目录 id 的**展示名**（115 叫 cid、光鸭叫 fileId）。
+    #: 媒体库目录 id 的**展示名**（光鸭叫 fileId）。
     #: 后端按驱动类型给出——前端**不写** ``if type == "guangya"``。
     media_cid_label: str = ""
     output_dir: str | None = None
@@ -213,7 +192,7 @@ class ProbeOut(BaseModel):
     状态取值：
 
     - ``ok`` —— 一切正常
-    - ``needs_verify`` —— 登录态正常但换直链被 115 账号安全验证挡住
+    - ``needs_verify`` —— 登录态正常但换直链被网盘账号安全验证挡住
       （需在手机 APP 里验证，**重新扫码无效**）
     - ``no_credential`` —— 尚未扫码登录
     - ``error`` —— 其它问题
@@ -238,19 +217,6 @@ class ProbeOut(BaseModel):
     checked_at: str | None = None
 
 
-class DirectLinkDiagOut(BaseModel):
-    """直链参数诊断。"""
-
-    url_masked: str
-    expires_at: int | None = None
-    ttl_seconds: int | None = None
-    flag: str | None = None
-    concurrent: str | None = None
-    user_id: str | None = None
-    ua_required: bool = False
-    cookie_required: bool = False
-
-
 def _to_out(row: DriverRow, conn: CachedProbe | None = None) -> DriverOut:
     """service 层 dataclass → 输出模型。``conn`` = 测连缓存（可缺）。"""
     conn_out = None
@@ -271,7 +237,6 @@ def _to_out(row: DriverRow, conn: CachedProbe | None = None) -> DriverOut:
         id=row.id,
         type=row.type,
         name=row.name,
-        device_type=row.device_type,
         enabled=row.enabled,
         credential_masked=row.credential_masked,
         media_cid=row.media_cid,
@@ -305,7 +270,6 @@ async def add_driver_route(payload: DriverIn) -> DriverOut:
         row = await add_driver(
             driver_type=payload.type,
             name=payload.name,
-            device_type=payload.device_type,
         )
     except DriverServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -314,15 +278,11 @@ async def add_driver_route(payload: DriverIn) -> DriverOut:
 
 @router.patch("/{driver_id}", response_model=DriverOut)
 async def update_driver_route(driver_id: int, payload: DriverUpdate) -> DriverOut:
-    """修改存储源。
-
-    改 ``device_type`` 后，下次扫码登录会绑定新设备类型。
-    """
+    """修改存储源（名称）。"""
     try:
         row = await update_driver(
             driver_id,
             name=payload.name,
-            device_type=payload.device_type,
         )
     except DriverServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -333,8 +293,7 @@ async def update_driver_route(driver_id: int, payload: DriverUpdate) -> DriverOu
 async def update_config_route(driver_id: int, payload: DriverConfigIn) -> DriverOut:
     """保存媒体库配置。
 
-    ``media_cid`` 保存时会**实时解析出路径**填入 ``media_path``（只读展示）。
-    cid 无效 → 400（**不做路径降级**——按设计，cid 失效就是配置错误）。
+    ``media_path`` 恒为空：光鸭接口只接受 fileId，没有反查路径的能力。
     """
     try:
         row = await update_driver_config(
@@ -358,7 +317,7 @@ async def browse_driver_dirs_route(driver_id: int, parent_id: str = "") -> dict[
     """列出存储源某个目录下的**子目录**（媒体库配置页选目录用）。
 
     ``parent_id`` **留空 = 账号根目录**（按驱动类型解析：光鸭的根是空串、
-    115 的根是 ``0``）——浏览起点只能是根，此时 ``media_cid`` 还没配。
+    光鸭的根是空串）——浏览起点只能是根，此时 ``media_cid`` 还没配。
 
     返回 ``{"driver_id", "parent_id", "dirs": [{"id", "name"}]}``，形状与
     ``GET /api/upload-tasks/targets`` 一致（前端同一个 ``DirBrowser`` 组件
@@ -373,39 +332,6 @@ async def browse_driver_dirs_route(driver_id: int, parent_id: str = "") -> dict[
         "parent_id": parent_id,
         "dirs": [{"id": rid, "name": name} for rid, name in dirs],
     }
-
-
-@router.post("/{driver_id}/incremental")
-async def incremental_driver_route(driver_id: int) -> dict[str, object]:
-    """启动增量同步（**立即返回 job_id**，后台跑）。
-
-    与全量扫描的区别：只处理「上次同步之后」的变化（基于 115 生活事件流），
-    不遍历目录树。
-
-    **必须先跑过一次全量扫描**建立基线——没有基线就无法判断哪些是新增。
-
-    进度用 ``GET /api/incremental-jobs/{job_id}`` 轮询。
-    """
-    try:
-        job = await start_incremental_task(driver_id)
-    except DriverServiceError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    return {"job_id": job.job_id, "state": job.state}
-
-
-@router.post("/{driver_id}/incremental/baseline")
-async def set_incremental_baseline_route(driver_id: int) -> dict[str, object]:
-    """把**今天**记为增量基线（**不扫任何文件**）。
-
-    用途：已经跑过全量扫描、但当时没记游标时，用它手动补一个基线。
-
-    语义：**从此刻起**的事件才算变化——之前的事件一律不处理。
-    """
-    try:
-        cursor = await set_incremental_baseline(driver_id)
-    except DriverServiceError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    return {"cursor": cursor}
 
 
 @router.post("/{driver_id}/scan")
@@ -441,27 +367,6 @@ async def remove_driver_route(driver_id: int) -> dict[str, bool]:
     return {"ok": True}
 
 
-@router.get("/device-types", response_model=list[DeviceTypeOut])
-async def device_types() -> list[DeviceTypeOut]:
-    """115 设备类型清单（**单一真源**）。
-
-    前端下拉**从这里取**，不手写——本项目踩过「前端手写 4 个、后端
-    另一份、扫码时压根没传」的坑。
-
-    ``qr_capable=false`` 的类型**不能用于扫码**（实测：18 个里只有 10 个
-    能取到二维码，其余 8 个返回 ``state=1`` 却无 ``qrcode`` 字段）。
-    """
-    return [
-        DeviceTypeOut(
-            value=d.value,
-            label=d.label,
-            qr_capable=d.qr_capable,
-            note=d.note,
-        )
-        for d in await list_device_types()
-    ]
-
-
 @router.post("/{driver_id}/qr/start", response_model=QRStartOut)
 async def start_qr(
     driver_id: int,
@@ -471,10 +376,7 @@ async def start_qr(
         description="光鸭登录身份：client 用客户端 clientId（token 的 aud 即客户端）",
     ),
 ) -> QRStartOut:
-    """启动扫码登录。
-
-    **按存储源类型分派**：115 走 p115client 的扫码（绑设备类型），
-    光鸭走 Device Code（``account.guangyapan.com``）。
+    """启动扫码登录（光鸭 Device Code，``account.guangyapan.com``）。
 
     ``mode=client`` 时用客户端 clientId + ``offline`` scope 取码：
     签发出的 token ``aud = 客户端``（能取非会员大文件直链），且带
@@ -554,7 +456,7 @@ async def probe_driver_route(driver_id: int) -> ProbeOut:
 
     检查三项：**凭据有效** → **账号信息 / 容量** → **能否换到直链**。
 
-    只读——不修改任何状态。第三项最关键：前两项通过但换直链被 115 的
+    只读——不修改任何状态。第三项最关键：前两项通过但换直链被网盘的
     账号安全验证挡住，是**常见情况**，故单独报 ``needs_verify``。
 
     未配置凭据时返回 200 + ``status=no_credential``（而不是 400）——
@@ -576,33 +478,4 @@ async def probe_driver_route(driver_id: int) -> ProbeOut:
         remain_bytes=status.remain_bytes,
         can_get_link=status.can_get_link,
         checked_at=cached.checked_at if cached else None,
-    )
-
-
-@router.get("/{driver_id}/diag/{remote_id}", response_model=DirectLinkDiagOut)
-async def diag_direct_link(
-    driver_id: int,
-    remote_id: str,
-    user_agent: str = "",
-) -> DirectLinkDiagOut:
-    """诊断直链参数（``f`` / ``t`` / ``c``）。
-
-    **用途**：115 直链的 ``f`` 参数实际取值未实测确认（``docs/design.md`` §11）。
-    ``f=1`` 决定缓存必须按 UA 分桶；``f=3`` 还要回吐 Cookie 头。
-
-    直链 URL **脱敏后**返回（避免截图泄露可分享的链接）。
-    """
-    try:
-        diag = await diagnose_driver_direct_link(driver_id, remote_id, user_agent)
-    except DriverServiceError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    return DirectLinkDiagOut(
-        url_masked=diag.url_masked,
-        expires_at=diag.expires_at,
-        ttl_seconds=diag.ttl_seconds,
-        flag=diag.flag,
-        concurrent=diag.concurrent,
-        user_id=diag.user_id,
-        ua_required=diag.ua_required,
-        cookie_required=diag.cookie_required,
     )

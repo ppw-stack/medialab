@@ -22,7 +22,10 @@ from app.services.account_status import (
 
 
 class FakeDriver:
-    """假驱动——可编排各步骤的成败。"""
+    """假驱动——可编排各步骤的成败。
+
+    容量走驱动契约 ``get_space_info()``（真实驱动各自适配自己的接口）。
+    """
 
     def __init__(
         self,
@@ -37,7 +40,6 @@ class FakeDriver:
         self.space_error = space_error
         self.files = files if files is not None else []
         self.link_calls: list[str] = []
-        self._client_instance = FakeClient(space_error=space_error)
 
     async def check_login(self) -> bool:
         return self.logged_in
@@ -55,28 +57,15 @@ class FakeDriver:
 
         return DirectLink(url="https://cdn/f?t=1&f=1")
 
-    @property
-    def _client(self) -> Any:
-        return self._client_instance
-
-
-class FakeClient:
-    """假 115 客户端。"""
-
-    def __init__(self, space_error: Exception | None = None) -> None:
-        self.space_error = space_error
-        self.user_id = "102140588"
-
-    async def user_space_info(self, **kwargs: Any) -> dict:
+    async def get_space_info(self) -> dict[str, Any]:
+        """容量信息（与真实驱动的契约一致）。"""
         if self.space_error:
             raise self.space_error
         return {
-            "state": True,
-            "data": {
-                "all_total": {"size": 1000, "size_format": "1000B"},
-                "all_use": {"size": 400, "size_format": "400B"},
-                "all_remain": {"size": 600, "size_format": "600B"},
-            },
+            "account_id": "102140588",
+            "total_bytes": 1000,
+            "used_bytes": 400,
+            "remain_bytes": 600,
         }
 
 

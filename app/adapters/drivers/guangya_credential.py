@@ -7,7 +7,7 @@
 - ``device_id`` —— 设备标识（扫码 / 短信登录时绑定）
 - ``expires_at`` —— access_token 过期时间（unix 秒）
 
-故明文用 **JSON** 序列化，整体走与 115 相同的 encrypt-then-MAC 方案，
+故明文用 **JSON** 序列化，整体走统一的 encrypt-then-MAC 方案，
 只是 scheme 前缀不同（``gypcipher:v2:``）——这样能一眼看出库里存的是哪家的
 凭据，也避免两种凭据被误当成同一种解密。
 """
@@ -29,7 +29,7 @@ SCHEME = "gypcipher:v2:"
 #: 任意 gypcipher 前缀（用于识别「这是密文」）
 SCHEME_PREFIX = "gypcipher:"
 
-#: 解密密钥的环境变量名（与 115 共用同一个密钥）
+#: 解密密钥的环境变量名（与其它凭据共用同一个密钥）
 SECRET_ENV = "CREDENTIAL_ENCRYPTION_SECRET"
 
 #: 光鸭 Web 端的固定 client_id（官方自己的值，不是用户申请的）

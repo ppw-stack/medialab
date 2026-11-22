@@ -25,7 +25,7 @@ def init_services(settings: AppSettings | None = None) -> None:
     resolved = settings or get_settings()
     _link_cache = LinkCache(resolved)
     _redirect_service = RedirectService(resolved, _link_cache)
-    logger.info("服务初始化完成 ua_policy=%s", resolved.ua_policy)
+    logger.info("服务初始化完成（直链缓存 + 中转服务）")
 
 
 def get_link_cache() -> LinkCache:

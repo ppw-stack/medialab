@@ -11,9 +11,9 @@
 
 两种登录方式：
 
-1. **Device Code 扫码**（:func:`start_qr_session`）——与 115 的 UX 一致。
+1. **Device Code 扫码**（:func:`start_qr_session`）。
    服务端直接给 ``verification_uri_complete``，本地渲染二维码即可
-   （不像 115 要自己拼 canonical URL）。
+   （不需要自己拼 canonical URL）。
 2. **短信验证码**（:func:`send_sms_code` / :func:`verify_sms_code`）——
    四步：``captcha/init`` → ``verification`` → ``verification/verify``
    → ``signin``。

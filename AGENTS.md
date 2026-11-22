@@ -29,11 +29,11 @@
     （不再静默放行）
   - `services` 层**不 import fastapi**，抛 `ServiceError` 由 API 层翻译成 HTTP 状态码
   - `adapters` 层可独立单测（不依赖 db / services）
-  - `domain` 层是业务概念与常量（如 `DeviceType` / `FreeType`），不依赖任何层
+  - `domain` 层是业务概念与常量（如 `FreeType` / `DriverType`），不依赖任何层
   - 改完跑 `uv run pytest tests/unit/test_layering.py` 验证
 - **应用只能单实例运行**（2026-11-17 加固）：`app/services/instance_lease.py`
   在 lifespan 里抢 DB 租约（TTL 60s + 心跳），第二个 worker / 副本直接启动失败。
-  调度中心、四套 `*_jobs` 内存表、`watch_manager` 的 10 组全局字典、QR session
+  调度中心、三套 `*_jobs` 内存表、`watch_manager` 的 10 组全局字典、QR session
   都是进程内状态，**没有跨进程方案**——不要改 Dockerfile 的 `--workers 1`，
   也不要用多副本共享同一个 DB 卷。测试环境（`env="test"`）跳过租约。
 - **启动降级必须登记**：以前「只记日志继续启动」的失败路径（监听器加载 /
@@ -90,16 +90,16 @@
   - **随之删除**：6 个后端文件（`offline_download` / `offline_files` / `offline_config` / `offline_jobs` + 两个路由）+ 「离线下载」页 + 三项环境变量配置（`OFFLINE_HMAC_SECRET` / `OFFLINE_PUBLIC_BASE` / `OFFLINE_FILES_ROOT`）。存量配置行由幂等迁移 `delete_offline_env_settings` 清掉（连带那个死密钥）
   - **光鸭的「离线任务」机制仍在用**（迁移功能）：`guangya.py` 的 `create_offline_task` / `list_active_offline_tasks` / `list_failed_offline_tasks` **保留**，别跟着删
   - **仍然有效的坑（2026-11-11 实测补充）**：光鸭的 `progress` 字段**不是可靠的百分比**（2.3GB 文件下载到 88% 时它只有 4）→ **不用它判定完成，也不再展示**——迁移在途列表只报「路径 + 大小」（假百分比曾误导用户，已随展示一起移除）。判定走「活跃列表消失 + 目标目录同名同大小校验」。实测还确认：任务项初始结构**没有** `progress` 字段（只有 taskId/fileName/totalSize/status/createTime/res/parentDirType），它只在真实拉取时动态出现；对**非媒体 URL**（TUNA 的 .iso/.gz）云添加会挂 3 分钟后统一 `code=8 云添加失败`——历史成功案例全是媒体文件（.mkv / 115 直链），**疑似云添加只接受媒体类 URL（待证）**；`get_task_status()` 是**上传任务**的接口，查云下载任务返回 145；**中途删目标目录会静默终止或卡住任务**（探测时踩到：一个 15MB 任务卡在活跃列表不结束）
-- **迁移功能支持「115 → 光鸭」与「光鸭 → 光鸭」**（2026-11-13 新增光鸭源，`app/services/migration.py`）：
-  - **只有一条传输路线**：直链 → **云下载**（`cloud_create_task`）→ **改名**。光鸭源的直链**不绑 UA**（115 源绑 `GUANGYA_DOWNLOAD_UA`）
-  - **云下载按 URL 末段落名**——115 直链末段是文件名（落名正确），**光鸭 CDN 直链末段是 `download`** → 光鸭源落盘后必须 `fs_rename` 改回原名（驱动层 `rename_file`）
-  - **光鸭源恒串行**（并发 1）+ 提交间隔收紧到 5s：落盘名撞车会触发服务端自动改名 `download(1)`，改名完成前不能提交下一个；光鸭源没有 115 的频控，瓶颈是云添加额度
+- **迁移功能只支持「光鸭 → 光鸭」**（2026-11-22 移除 115 源，`app/services/migration.py`）：
+  - **只有一条传输路线**：直链 → **云下载**（`cloud_create_task`）→ **改名**。光鸭源的直链**不绑 UA**
+  - **云下载按 URL 末段落名**——**光鸭 CDN 直链末段是 `download`** → 落盘后必须 `fs_rename` 改回原名（驱动层 `rename_file`）
+  - **光鸭源恒串行**（并发 1）+ 提交间隔收紧到 5s：落盘名撞车会触发服务端自动改名 `download(1)`，改名完成前不能提交下一个；瓶颈是云添加额度
   - **能搬分享审核拒绝的文件**：`shareAuditStatus=3`（`canShare=None`）的影视文件**分享不出去但直链+云下载完全可用**（实测 336MB / 7s ≈ 48MB/s）
   - **同名不同大小 → 「保留大的」**（2026-11-13，与数据同步 `conflict_policy` 口径一致）：目标更大 → **保留目标那份**、跳过传输（清理源开启时把源的冗余小副本清掉）；源更大 → **删目标侧的小文件**（进回收站，可恢复）→ 重传，最终目标侧是大的那份。**同名同大小** → 跳过传输（清理源开启时清掉源的冗余副本）——否则「跳过」会留下源副本，腾空间的目的落空
   - ⚠️ **云添加额度是硬墙：实测 3 次/账号/天**（前端文案「VIP 1000 次/天」对实测账号不成立；**失败也扣**）→ 撞限额转 **`paused`** 状态（不硬撞不重试），幂等设计保证**次日重跑自动续传**
   - ✅ **直链流量不是迁移的约束**（实测）：**取直链不吃流量**（批量取 141 条，计数器 `used` 1→1 纹丝不动）、**云下载是服务端内部复制也不吃**（1.09GB 传进目标，目标计数器不动）→ 流量只影响 **302 播放**（那才是「用直链下载数据」）；主库放 VIP 账号正是为此。**真正的墙只有目标账号的云添加次数**（记在**目标**账号上；直链流量记在**源**账号上）
   - → 因此可把「取链」与「提交」拆两段：**批量预取直链存着**（免费、不限速），等额度窗口再集中提交。工具：`scripts/fetch_guangya_links.py`（批量取链 + **连目录结构一起备份**，光鸭接口不返回路径，只有 `fullParentIds` id 链 + 目录名映射能还原位置）、`scripts/submit_guangya_links.py`（按清单建目录→云下载→改名→校验，额度耗尽即停）；⚠️ 直链有效期 **6 小时**（`urlDuration=21600`），过期需重取（取链免费，约 1 条/秒）
-  - **「搬完清理源」是显式开关（默认关）**（2026-11-13 加，`migration.py` 的 `_delete_source_file` + 驱动 `delete_file`）：**只删目标侧已确认落盘同名同大小**的文件；删除走 `fs_delete` **进回收站**（可恢复，非永久删除）；**记审计日志**（`logger.warning` + 作业日志「已清理源」）——删数据不可逆，必须能回答「删了什么」；**单个清理失败不炸整轮**（记失败明细继续）；**仅光鸭源支持**（115 驱动无删除能力 → 忽略开关并在日志说明）。**顺序不可反**：先删源再传，一旦传失败就是数据没了。**中断恢复**多一条——认领上一轮「已落盘但没改名」的 `download` 残留（按大小匹配后改名），不重复提交
+  - **「搬完清理源」是显式开关（默认关）**（2026-11-13 加，`migration.py` 的 `_delete_source_file` + 驱动 `delete_file`）：**只删目标侧已确认落盘同名同大小**的文件；删除走 `fs_delete` **进回收站**（可恢复，非永久删除）；**记审计日志**（`logger.warning` + 作业日志「已清理源」）——删数据不可逆，必须能回答「删了什么」；**单个清理失败不炸整轮**（记失败明细继续）；**源驱动须支持删除**（当前唯一的光鸭驱动支持；没有删除能力的驱动会被忽略并在日志说明）。**顺序不可反**：先删源再传，一旦传失败就是数据没了。**中断恢复**多一条——认领上一轮「已落盘但没改名」的 `download` 残留（按大小匹配后改名），不重复提交
   - 光鸭源的目录浏览**从账号根开始**（根 id 是空串，`ROOT_DIR_IDS`）；`fullParentIds` 链首是**账号根的直接子目录**（不是媒体库根）→ `iter_tree_by_cid` 支持**任意目录**作根（扫描传 media_cid，迁移传选中的源目录）
   - 探针 `scripts/probe_guangya_migration.py`（`probe` = 单文件端到端；`engine` = 跑真实引擎 + 幂等复跑；未部署时可用 `MEDIALAB_APP_PATH` 指向注入的新代码，不动生产镜像）
 - **Bearer 长期凭据只用 `WEB_TOKEN`**（2026-10-30 加入）：`verify_bearer` 同时接受 API Token（`WEB_TOKEN`）与 session cookie 值两种口径，但 session cookie 值 24h 过期（`SESSION_MAX_AGE`）。CLI / 脚本长期使用应存 `WEB_TOKEN`，不可把 session cookie 值当长期 token 存储——后者会突然 401。session 值口径仅为面板/CLI 同源便利，非长期凭据。
@@ -393,13 +393,13 @@
   - 契约由 `tests/integration/test_driver_probe_cache.py`（17 例）固化
 
 - **媒体库目录用目录浏览器选，不手填 id**（2026-11-11 加入，`app/services/driver_service.py:browse_driver_dirs`）：
-  - **起因**：光鸭的 fileId 是 19 位数字（115 的 cid 同理），让用户照着网盘网页手抄——抄错一位扫描就扫不到东西，且无从核对。生产上就出现过「光鸭盘扫描按钮点不动」——**按钮禁用条件是 `!media_cid || !output_dir`，与驱动类型无关**，用户只看到一个灰按钮，不知道缺什么
+  - **起因**：光鸭的 fileId 是 19 位数字，让用户照着网盘网页手抄——抄错一位扫描就扫不到东西，且无从核对。生产上就出现过「光鸭盘扫描按钮点不动」——**按钮禁用条件是 `!media_cid || !output_dir`，与驱动类型无关**，用户只看到一个灰按钮，不知道缺什么
   - **禁用原因必须写出来**：扫描按钮禁用时给 tooltip，**点名缺哪一项**（`scanDisabledTip`）。tooltip 内层包 `<span>`——antd 的 disabled 按钮**不派发鼠标事件**，tooltip 直接包按钮完全不触发
   - **后端新增 `GET /api/drivers/{id}/browse-dirs?parent_id=`**：列出某目录下的**子目录**（逐层懒加载），响应 `{"driver_id","parent_id","dirs":[{id,name}]}`，形状与 `GET /api/upload-tasks/targets` 一致
-    - **不能复用 `/upload-tasks/targets`**——它有 `is_uploadable` 校验，而 `UPLOADABLE_DRIVER_TYPES = {"guangya"}`，**115 会被 400 挡掉**。浏览是 CloudDriver 的**读能力**，不是上传能力
-    - `list_dir_by_cid` **不在 `CloudDriver` 协议里**（115 / 光鸭都有，协议只要求 `list_dir`），故用 `getattr` 取——与 `migration.py` 同一做法
-  - **浏览起点只能是账号根**（此时 `media_cid` 还没配，没有更深的入口）：根 id 按类型解析 —— **光鸭 `""` / 115 `"0"`**，收敛在 `app/domain/driver_types.py:ROOT_DIR_IDS`（domain 层单一真源）。115 的根会列出「手机相册 / 资料 / 密钥」等私人目录，故前端用 alert 明说
-  - **`media_cid` 的叫法也是单一真源**：`app/domain/driver_types.py:MEDIA_CID_LABELS`（115 叫 cid、光鸭叫 fileId）+ `DriverOut.media_cid_label` 随接口下发——**前端不写 `if type === "guangya"`**，后端报错文案也用它
+    - **不能复用 `/upload-tasks/targets`**——它有 `is_uploadable` 校验，而 `UPLOADABLE_DRIVER_TYPES` 只含**支持写入**的类型，不支持上传的会被 400 挡掉。浏览是 CloudDriver 的**读能力**，不是上传能力
+    - `list_dir_by_cid` **不在 `CloudDriver` 协议里**（协议只要求 `list_dir`），故用 `getattr` 取——与 `migration.py` 同一做法
+  - **浏览起点只能是账号根**（此时 `media_cid` 还没配，没有更深的入口）：根 id 收敛在 `app/domain/driver_types.py:ROOT_DIR_IDS`（domain 层单一真源；光鸭的根 fileId 就是空串）
+  - **`media_cid` 的叫法也是单一真源**：`app/domain/driver_types.py:MEDIA_CID_LABELS`（光鸭叫 fileId）+ `DriverOut.media_cid_label` 随接口下发——**前端不写 `if type === "guangya"`**，后端报错文案也用它
   - **前端复用现成的 `DirBrowser`**（`web/src/components/DirBrowser.vue`，面包屑 + 逐层懒加载，状态由父组件持有）——与「数据同步 / 迁移 / 离线下载」三处同一交互模式，**项目不用 `a-tree`**
   - **语义：进入子目录即选中它**（正在看哪个目录 = 要用哪个目录），面包屑回退即改选；回到根 = 取消选择
   - 契约由 `tests/unit/test_driver_types.py` + `tests/integration/test_driver_browse.py`（11 例）固化
@@ -532,7 +532,7 @@
     - 结论：只要手上有一份**未过期**的账号 token（客户端库里那份即可），就能自助换出可续期的客户端会话；需要人参与的只剩「种子 token 也过期」这一种情况
     - 工具：`scripts/probe_guangya_client_aud_login.py`（`--token-file <export 输出>` 全自动；不带则打印授权链接人工确认）
   - ✅ **扫码登录新增 `mode=client`**（`POST /api/drivers/{id}/qr/start?mode=client`）：用客户端 clientId + `offline` scope 取码，签发出的就是客户端身份 token（`QRStartOut.mode` 回显）
-  - 前端入口：登录方式弹框里 **单选组「扫码身份」**（Web / 客户端，仅光鸭显示）+ 单个「扫码登录」按钮——**不是两个按钮**（枚举型选项按项目规范用 `a-radio-group`）。选中的身份经 `onLoginByQr` 传给 `openQr(driver, mode)`；每次打开弹框复位为 `web`（上次的客户端选择不该静默延续）。扫码弹框内「重新获取二维码」走 `refreshQr`，**沿用同一身份**，不会偷偷退回 Web。可用性判定用 `qrRefreshCapable`（光鸭恒 true / 115 看 `device_type`）——别用 `configDriver`：登录流程里它是 `null`，`isQrCapable(null)=false` 会把按钮禁掉
+  - 前端入口：登录方式弹框里 **单选组「扫码身份」**（Web / 客户端，仅光鸭显示）+ 单个「扫码登录」按钮——**不是两个按钮**（枚举型选项按项目规范用 `a-radio-group`）。选中的身份经 `onLoginByQr` 传给 `openQr(driver, mode)`；每次打开弹框复位为 `web`（上次的客户端选择不该静默延续）。扫码弹框内「重新获取二维码」走 `refreshQr`，**沿用同一身份**，不会偷偷退回 Web。可用性判定直接看「重新获取二维码」按钮（不再依赖 `configDriver`——登录流程里它是 `null`）
   - ⚠️ **光鸭凭据落库必须「合并两层」**（`driver_auth._store_guangya_credential`）：`store_credential` 是整串替换，直接新建对象会把另一层抹掉。client 模式登录还会把**主 `access_token` 也设成客户端那把**（实测客户端 aud 对扫描 / 列目录 / 上传全部生效），并清空 Web 的 `refresh_token`——否则主 token 过期时会被 Web 刷新（`guangyaclient` 硬编码 Web client_id）刷成 `aud=web`，客户端身份丢失
   - **迁移 / 归拢无需改业务代码**：两处取链都走 `source.get_direct_link`（`migration.py:550` / `aggregate_sync.py:921`）→ 覆盖层在驱动层自动生效；云添加（主盘 `create_offline_task`）对链接**不校验 UA/Referer**（实测 1.07 GB 直链 12 秒落地、大小精确一致、落盘名 `download` 需改名）
   - 实测（迁移单文件，源=驱动 5（非会员客户端 token）→ 目标=驱动 2 VIP）：`min/max=1024/1025 MB` 只匹配一集 → `success`，1.00 GB，落盘改名 `download → 走马上任 - S01E01 - 第 1 集.mkv`，耗 1 次云添加额度
@@ -697,7 +697,7 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
       作业自动续传（`paused` 行会被捡起来）
     - ⚠️ **额度消耗在接收端，不在源端**：云添加是**目标盘去拉直链**的消耗。
       **源端取直链不吃额度**——源账号头上记的是**直链流量**，与云添加额度
-      是两回事。故 115 → 光鸭A 消耗 **光鸭A** 的额度；光鸭B → 光鸭A 消耗
+      是两回事。故 光鸭B → 光鸭A 消耗 **光鸭A** 的额度；同账号 → 同账号消耗
       **光鸭A** 的额度，**副盘的额度分文不动**
     - ⚠️ **泛化失败不自动重试**（2026-11-15 决策，2026-11-18 修订）：光鸭撞额度时**可能只回
       泛化的「云添加失败」**（code=8，无「次数超限」字样）——认不出是不是额度
@@ -815,7 +815,7 @@ ruff + mypy + pytest + vue-tsc + oxlint + types-placement（API 契约类型集�
       （作业每次执行前读最新值，无缓存）
     - 迁移：`MigrationParams` **没有并发参数**（API 也拒绝传——`extra="forbid"`
       → 422 **显式拒绝**而非静默忽略）；`MIGRATION_CONCURRENCY = 1` 写死
-    - 提交间隔仍按源类型收紧：115 源 60s（避开下载频控 403）、光鸭源 5s
+    - 提交间隔统一收紧到 ≤5s（额度是瓶颈，不是下载频控）
     - 契约：`test_migration_is_strictly_serial`（任何时刻只有一个在途任务）
   - **顺序不可反**：副盘副本**只在主盘确认落盘同名同大小之后**才删。先删源
     再传，一旦传失败就是数据没了

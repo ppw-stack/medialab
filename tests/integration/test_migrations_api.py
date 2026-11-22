@@ -47,10 +47,9 @@ async def _add_driver(db_session, **kwargs) -> None:
     from app.db.models import Driver
 
     defaults = {
-        "type": "p115",
-        "name": "115",
+        "type": "guangya",
+        "name": "光鸭",
         "credential": None,
-        "device_type": None,
         "enabled": True,
         "media_cid": "111",
         "media_path": "/影视",
@@ -68,12 +67,12 @@ async def _add_driver(db_session, **kwargs) -> None:
     await db_session.commit()
 
 
-class TestBrowseSourcesFallback:
-    async def test_uses_media_cid_not_account_root(
+class TestBrowseSources:
+    async def test_empty_parent_starts_at_account_root(
         self, client, db_session, monkeypatch
     ) -> None:
-        """空 parent_id 时必须用**媒体库 cid**，不是账号根目录 ``"0"``。"""
-        await _add_driver(db_session, id=1, media_cid="999888")
+        """空 ``parent_id`` = 账号根（光鸭根 fileId 是空串）。"""
+        await _add_driver(db_session, id=1)
 
         seen: list[str] = []
 
@@ -94,29 +93,30 @@ class TestBrowseSourcesFallback:
         resp = await client.get("/api/migrations/sources?driver_id=1")
 
         assert resp.status_code == 200
-        assert seen == ["999888"], f"兜底 cid 错了：{seen}（'0' = 115 账号根目录）"
+        assert seen == [""], f"浏览起点应是账号根：{seen}"
 
-    async def test_errors_when_media_cid_missing(
+    async def test_explicit_parent_is_passed_through(
         self, client, db_session, monkeypatch
     ) -> None:
-        """没配媒体库 cid 时**报错**，不暴露账号根目录。"""
-        await _add_driver(db_session, id=1, media_cid=None)
+        """显式 parent_id 原样透传。"""
+        await _add_driver(db_session, id=1)
+        seen: list[str] = []
 
         class _FakeDriver:
             def __init__(self, *args, **kwargs) -> None:
                 pass
 
             async def list_dir_by_cid(self, cid, parent_path="", relative_dir=""):
-                raise AssertionError(f"不该被调用（cid={cid}）")
+                seen.append(str(cid))
+                return []
 
         import app.services.migration as mod
 
         monkeypatch.setattr(mod, "build_driver", lambda *a, **k: _FakeDriver(), raising=False)
 
-        resp = await client.get("/api/migrations/sources?driver_id=1")
-
-        assert resp.status_code == 400
-        assert "媒体库" in resp.json()["detail"]
+        resp = await client.get("/api/migrations/sources?driver_id=1&parent_id=abc")
+        assert resp.status_code == 200
+        assert seen == ["abc"]
 
 
 class TestRunValidation:
@@ -176,8 +176,8 @@ class TestRunValidation:
 
     async def test_rejects_non_guangya_target(self, client, db_session) -> None:
         """目标必须���光鸭盘 → 400。"""
-        await _add_driver(db_session, id=1, type="p115", name="115")
-        await _add_driver(db_session, id=2, type="p115", name="115 二号")
+        await _add_driver(db_session, id=1, type="guangya", name="光鸭源")
+        await _add_driver(db_session, id=2, type="fake", name="非光鸭")
 
         resp = await client.post(
             "/api/migrations/run",

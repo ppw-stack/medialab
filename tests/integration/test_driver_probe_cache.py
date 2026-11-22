@@ -18,10 +18,8 @@ from httpx import ASGITransport, AsyncClient
 
 @pytest.fixture
 async def driver_id(db) -> int:
-    """建一个 p115 存储源并写入假凭据（走正规 store_credential 路径）。"""
-    row = await driver_service.add_driver(
-        driver_type="p115", name="测试115", device_type="web"
-    )
+    """建一个光鸭存储源并写入假凭据（走正规 store_credential 路径）。"""
+    row = await driver_service.add_driver(driver_type="guangya", name="测试光鸭")
     async with driver_service.session_scope() as db2:
         await driver_service.store_credential(db2, row.id, "fake-cookie-string")
     return row.id
@@ -30,7 +28,7 @@ async def driver_id(db) -> int:
 @pytest.fixture(autouse=True)
 def _encryption_secret_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """凭据加密密钥（store_credential 需要；生产来自 CREDENTIAL_ENCRYPTION_SECRET）。"""
-    from app.adapters.drivers.p115_credential import SECRET_ENV
+    from app.adapters.drivers.credential_crypto import SECRET_ENV
 
     monkeypatch.setenv(SECRET_ENV, "test-encryption-secret-32-chars")
 
@@ -141,7 +139,7 @@ async def test_store_credential_invalidates_cache(driver_id: int) -> None:
 async def test_no_credential_still_caches(db_session) -> None:
     """未配置凭据 → no_credential 也进缓存（面板显示「未登录」而非「未测连」）。"""
     row = await driver_service.add_driver(
-        driver_type="p115", name="无凭据", device_type="web"
+        driver_type="guangya", name="无凭据"
     )
     status = await driver_service.probe_driver(row.id)
     assert status.status == STATUS_NO_CREDENTIAL
@@ -236,7 +234,7 @@ class TestTokenRefreshPersisted:
         """``probe_driver`` 构造驱动时必须传 ``on_token_refresh``。"""
         captured: dict[str, object] = {}
 
-        def fake_build_driver(driver_type, credential, device_type, **kwargs):
+        def fake_build_driver(driver_type, credential, **kwargs):
             captured.update(kwargs)
             return object()
 
@@ -276,7 +274,6 @@ class TestTokenRefreshPersisted:
                 self,
                 driver_type,
                 credential,
-                device_type=None,
                 *,
                 on_token_refresh=None,
             ):
@@ -391,7 +388,7 @@ class TestDeleteClearsCache:
     async def test_new_driver_does_not_inherit_state(self, db) -> None:
         """删掉再建 → 新存储源**不能**继承旧状态（id 会被 SQLite 复用）。"""
         row = await driver_service.add_driver(
-            driver_type="p115", name="A", device_type="web"
+            driver_type="guangya", name="A"
         )
         driver_service._cache_probe(
             row.id,
@@ -405,7 +402,7 @@ class TestDeleteClearsCache:
         await driver_service.remove_driver(row.id)
 
         row2 = await driver_service.add_driver(
-            driver_type="p115", name="B", device_type="web"
+            driver_type="guangya", name="B"
         )
         assert row2.id == row.id, "SQLite 应该复用了 id（这是本用例的前提）"
         assert (
@@ -426,7 +423,7 @@ class TestProbeResultsRetention:
         from sqlalchemy import select
 
         row = await driver_service.add_driver(
-            driver_type="p115", name="探测源", device_type="web"
+            driver_type="guangya", name="探测源"
         )
         old = ProbeResult(
             driver_id=row.id,

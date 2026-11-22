@@ -39,7 +39,7 @@ def test_可上传类型登记表非空() -> None:
 
     assert UPLOADABLE_DRIVER_TYPES
     assert is_uploadable("guangya")
-    assert not is_uploadable("p115")
+    assert not is_uploadable("fake")
 
 
 def test_登记的类型与工厂支持的一致() -> None:
@@ -63,7 +63,7 @@ def test_登记的类型与工厂支持的一致() -> None:
 
 @pytest.mark.parametrize(
     "driver_type",
-    ["p115", "unknown", "", "guangyaa"],
+    ["fake", "unknown", "", "guangyaa"],
 )
 def test_不支持的类型被拒(driver_type: str) -> None:
     """不支持上传的类型 → 工厂直接抛错（而不是构造到一半才炸）。"""

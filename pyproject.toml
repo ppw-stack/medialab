@@ -59,18 +59,6 @@ dev = [
     "ruamel.yaml>=0.18,<1",
 ]
 
-# 115 驱动依赖。
-#
-# **必须是 optional-dependencies**——写在 `[project.dependencies-115]`
-# 不是合法的 PEP 508 字段，uv 会**静默忽略**它（曾因此 p115client 一直没装上）。
-# 装法：uv sync --extra p115
-p115 = [
-    "p115client>=0.0.9.4.6.1",
-    "p115cipher>=0.0.5.4",
-    "p115pickcode>=0.0.5.4",
-    "qrcode[pil]>=7.4",
-]
-
 # 光鸭盘驱动依赖。装法：uv sync --extra guangya
 guangya = [
     "guangyaclient>=0.0.2",
@@ -133,7 +121,7 @@ disable_error_code = ["no-untyped-call", "no-untyped-def", "union-attr", "misc",
 
 # 无类型存根的第三方包（PyPI 上的纯 Python 包）
 [[tool.mypy.overrides]]
-module = ["p115client.*", "p115cipher.*", "p115pickcode.*", "qrcode.*", "cryptography.*"]
+module = ["qrcode.*", "cryptography.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

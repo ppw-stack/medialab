@@ -1,4 +1,4 @@
-"""迁移引擎（115 → 光鸭）的契约测试。
+"""迁移引擎（光鸭 → 光鸭）的契约测试。
 
 覆盖的关键行为：
 
@@ -18,31 +18,11 @@ from typing import Any
 import pytest
 from app.adapters.drivers.base import CloudFile, DirectLink, DriverError
 from app.db.models import Driver
-from app.services import migration, migration_jobs
+from app.services import migration, migration_jobs, migration_pipeline
 
 # --------------------------------------------------------------------------
 # 假驱动
 # --------------------------------------------------------------------------
-
-
-class _FakeP115:
-    """按 cid 遍历的假 115：cid = 根路径。"""
-
-    name = "p115"
-
-    def __init__(self, files: list[CloudFile]) -> None:
-        self._files = files
-        self.links: list[tuple[str, str]] = []
-
-    async def iter_tree_by_cid(
-        self, cid: str, parent_path: str = "", include_subdirs: bool = True
-    ) -> AsyncIterator[CloudFile]:
-        for entry in self._files:
-            yield entry
-
-    async def get_direct_link(self, remote_id: str, user_agent: str) -> DirectLink:
-        self.links.append((remote_id, user_agent))
-        return DirectLink(url=f"fake://{remote_id}", ua_required=True)
 
 
 class _FakeGuangya:
@@ -220,31 +200,6 @@ def _fast_poll(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(migration, "POLL_INTERVAL_SEC", 0.01)
 
 
-async def _seed_drivers(db_session) -> None:
-    db_session.add(
-        Driver(
-            id=101,
-            type="p115",
-            name="115",
-            credential=None,
-            enabled=True,
-            video_exts="mkv,mp4",
-            created_at=int(time.time()),
-        )
-    )
-    db_session.add(
-        Driver(
-            id=102,
-            type="guangya",
-            name="光鸭",
-            credential=None,
-            enabled=True,
-            created_at=int(time.time()),
-        )
-    )
-    await db_session.commit()
-
-
 # --------------------------------------------------------------------------
 # 纯函数
 # --------------------------------------------------------------------------
@@ -316,25 +271,11 @@ def test_filter_threshold_and_disc() -> None:
     )
 
 
-def test_pickcode_from_task_url() -> None:
-    item = {
-        "taskId": "1",
-        "res": "https://cdn.example/a.mkv?t=1&u=2&d=vip-1001300205-az4ojdw6rzs2qht9x-1-0&c=2",
-    }
-    assert migration._pickcode_from_task(item) == "az4ojdw6rzs2qht9x"
-    assert migration._pickcode_from_task({"taskId": "1"}) == ""
-
-
-# --------------------------------------------------------------------------
-# 引擎
-# --------------------------------------------------------------------------
-
-
 async def test_run_migration_end_to_end(
     db_session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """一次跑通：成功 / 已存在 / 冲突 / 在途 / 过滤。"""
-    await _seed_drivers(db_session)
+    await _seed_guangya_drivers(db_session)
 
     base = "/影视/电视剧/亚洲剧"
     show = f"{base}/Show (2025)/Season 1"
@@ -347,9 +288,10 @@ async def test_run_migration_end_to_end(
         _entry(f"{show}/E05.mkv", 10, "tiny1"),
         _entry(f"{show}/poster.jpg", 100, "jpg1"),
     ]
-    p115 = _FakeP115(files)
+    src = _FakeGuangyaSource(files)
     gyp = _FakeGuangya(
-        {e.remote_id: (e.name, e.size) for e in files if e.name.endswith(".mkv")}
+        {e.remote_id: (e.name, e.size) for e in files if e.name.endswith(".mkv")},
+        landed_name="download",
     )
 
     # 目标侧：E02 已存在（同大小）、E03 同名但大小不同
@@ -359,20 +301,19 @@ async def test_run_migration_end_to_end(
     gyp._legacy.append(
         {
             "taskId": "legacy-1",
-            "res": "https://cdn/x?d=vip-1-inflight1-1-0",
+            "fileName": "E04.mkv",
+            "totalSize": 4_000_000_000,
+            "res": "https://sh01-httpdown.guangyacdn.com/download/?fid=inflight1",
         }
     )
 
-    def _build(driver_type: str, *args: Any, **kwargs: Any) -> Any:
-        return p115 if driver_type == "p115" else gyp
-
-    monkeypatch.setattr(migration, "build_driver", _build)
+    monkeypatch.setattr(migration, "build_driver", _guangya_build(src, gyp))
 
     params = migration_jobs.MigrationParams(
-        source_driver_id=101,
+        source_driver_id=201,
         source_cid="root-cid",
         source_path=base,
-        target_driver_id=102,
+        target_driver_id=202,
         target_file_id="root",
         target_path="/影视",
         min_size_mb=1,
@@ -410,23 +351,21 @@ async def test_run_migration_skips_fully_migrated_dir(
     db_session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """全部已存在时不提交任何任务（可重复执行）。"""
-    await _seed_drivers(db_session)
+    await _seed_guangya_drivers(db_session)
 
     base = "/影视/电影/动画电影"
     files = [_entry(f"{base}/A (2020)/A.mkv", 5_000_000_000, "a1")]
-    p115 = _FakeP115(files)
-    gyp = _FakeGuangya({"a1": ("A.mkv", 5_000_000_000)})
+    src = _FakeGuangyaSource(files)
+    gyp = _FakeGuangya({"a1": ("A.mkv", 5_000_000_000)}, landed_name="download")
     gyp.seed_file("A (2020)", "A.mkv", 5_000_000_000)
 
-    monkeypatch.setattr(
-        migration, "build_driver", lambda *a, **k: p115 if a[0] == "p115" else gyp
-    )
+    monkeypatch.setattr(migration, "build_driver", _guangya_build(src, gyp))
 
     params = migration_jobs.MigrationParams(
-        source_driver_id=101,
+        source_driver_id=201,
         source_cid="root-cid",
         source_path=base,
-        target_driver_id=102,
+        target_driver_id=202,
         target_file_id="root",
         target_path="/影视/电影/动画电影",
     )
@@ -444,29 +383,28 @@ async def test_submit_gate_spaces_out_submissions(
 ) -> None:
     """提交必须错开：相邻两次提交的时间差 ≥ 设定间隔。
 
-    **这是避开 115 下载频控的关键**——并发提交会让直链返回
-    ``403 "115 pmt user 11-10"``，光鸭记为「云添加失败 code=8」。
+    提交过快会撞落盘名（同目录并发改名 ``download(1)``）并消耗云添加额度。
     """
-    await _seed_drivers(db_session)
+    await _seed_guangya_drivers(db_session)
 
     base = "/影视/电影/动画电影"
     files = [
         _entry(f"{base}/A (2020)/A{i}.mkv", 5_000_000_000, f"p{i}")
         for i in range(1, 4)
     ]
-    p115 = _FakeP115(files)
-    gyp = _FakeGuangya({e.remote_id: (e.name, e.size) for e in files})
-
-    monkeypatch.setattr(
-        migration, "build_driver", lambda *a, **k: p115 if a[0] == "p115" else gyp
+    src = _FakeGuangyaSource(files)
+    gyp = _FakeGuangya(
+        {e.remote_id: (e.name, e.size) for e in files}, landed_name="download"
     )
+
+    monkeypatch.setattr(migration, "build_driver", _guangya_build(src, gyp))
 
     interval = 0.2
     params = migration_jobs.MigrationParams(
-        source_driver_id=101,
+        source_driver_id=201,
         source_cid="root-cid",
         source_path=base,
-        target_driver_id=102,
+        target_driver_id=202,
         target_file_id="root",
         target_path="/影视/电影/动画电影",
         submit_interval_sec=interval,
@@ -779,16 +717,16 @@ async def test_quota_exhausted_pauses_job(db_session, monkeypatch: pytest.Monkey
 def test_landed_name_from_url() -> None:
     """落盘名 = URL 末段（光鸭 CDN 直链末段是 ``download``）。"""
     assert (
-        migration._landed_name_from_url(
+        migration_pipeline.landed_name_from_url(
             "https://sh01-httpdown.guangyacdn.com/download/?fid=abc"
         )
         == "download"
     )
     assert (
-        migration._landed_name_from_url("https://cdn.115.com/影视/A.mkv?uid=1")
+        migration_pipeline.landed_name_from_url("https://cdn.example.com/影视/A.mkv?x=1")
         == "A.mkv"
     )
-    assert migration._landed_name_from_url("") == ""
+    assert migration_pipeline.landed_name_from_url("") == ""
 
 
 # --------------------------------------------------------------------------
@@ -913,37 +851,6 @@ async def test_delete_source_failure_does_not_break_job(
     assert job.deleted_source == 0
     assert job.failed == 1
     assert any("清理源失败" in (f.get("reason") or "") for f in job.failed_items)
-
-
-async def test_delete_source_ignored_for_p115_source(
-    db_session, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """115 源没有删除能力 → 忽略该开关并记日志（不误删）。"""
-    await _seed_drivers(db_session)
-
-    files = [_entry("/影视/电影/A (2020)/A.mkv", 3_000_000, "new1")]
-    p115 = _FakeP115(files)
-    gyp = _FakeGuangya({"new1": ("A.mkv", 3_000_000)})
-
-    monkeypatch.setattr(
-        migration, "build_driver", lambda *a, **k: p115 if a[0] == "p115" else gyp
-    )
-
-    params = migration_jobs.MigrationParams(
-        source_driver_id=101,
-        source_cid="root-cid",
-        source_path="/影视/电影",
-        target_driver_id=102,
-        target_file_id="root",
-        delete_source=True,
-    )
-    job = migration_jobs.MigrationJob(id="deljob5", params=params)
-
-    await migration.run_migration(job)
-
-    assert job.success == 1, job.logs
-    assert any("115 源不支持清理源" in line for line in job.logs)
-    assert job.deleted_source == 0
 
 
 async def test_delete_source_removes_already_existing(

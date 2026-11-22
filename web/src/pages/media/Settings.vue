@@ -64,7 +64,7 @@
           换取直链（几 KB）+ 维护本地直链缓存 + 管理 STRM 库
         </a-descriptions-item>
         <a-descriptions-item label="缓存分桶">
-          按 (media_id, UA) 分桶 —— 115 直链 f=1 绑定 UA，混用会 403
+          按 (media_id, UA) 分桶 —— 直链若绑定 UA，混用会 403
         </a-descriptions-item>
         <a-descriptions-item label="直连播放器">
           Infuse / Kodi 直连模式 / VidHub / SPlayer / VLC 直开 strm

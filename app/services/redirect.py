@@ -5,7 +5,7 @@
     GET /302/<media_id>/<sig>
       → 校验 HMAC 签名（常量时间比较）
       → 查 media_files 条目 → driver_id + remote_id
-      → 解析 UA（无 UA 客户端按 ua_policy 兜底）
+      → 取请求 UA（无 UA 客户端用默认 UA 兜底）
       → 查本地直链缓存 (media_id, ua_hash)
       → miss: 单飞 → 调驱动换直链 → 写缓存
       → 302 Location: <网盘 CDN 直链>
@@ -83,16 +83,14 @@ class RedirectResult:
 
     #: 重定向目标 URL（网盘 CDN 直链）
     url: str
-    #: 直链是否绑定了 UA（True 时播放器必须用同一 UA 访问）
-    ua_required: bool
-    #: 访问直链必须携带的额外请求头（115 的 ``f=3`` 模式需要 Cookie）
+    #: 访问直链必须携带的额外请求头（驱动通过 DirectLink 声明）
     extra_headers: dict[str, str]
 
 
 class RedirectService:
     """302 中转服务。
 
-    驱动实例按 ``driver_id`` 缓存复用——每次请求新建驱动会让 115 客户端
+    驱动实例按 ``driver_id`` 缓存复用——每次请求新建驱动会让客户端
     反复重建（连接池、cookie 状态全丢），且换直链的 API 调用频率暴涨。
     """
 
@@ -104,18 +102,13 @@ class RedirectService:
     # -- UA 解析 --
 
     def resolve_user_agent(self, request_ua: str) -> str:
-        """按 ``ua_policy`` 解析实际用于换直链的 UA。
+        """解析实际用于换直链的 UA。
 
-        - ``strict``           —— 原样使用请求的 UA（包括空）
-        - ``fallback_default`` —— 请求无 UA 时用配置的默认 UA
-        - ``relaxed``          —— 同 fallback，但直链不要求绑定 UA
+        请求带了 UA 就用它（缓存按 UA 分桶，同一播放器复用同一份直链）；
+        没带就用配置里的默认 UA——空 UA 会让部分网盘的直链接不出来。
         """
         ua = request_ua.strip()
-        if ua:
-            return ua
-        if self._settings.ua_policy == "strict":
-            return ""
-        return self._settings.default_user_agent
+        return ua or self._settings.default_user_agent
 
     # -- 签名 --
 
@@ -155,7 +148,6 @@ class RedirectService:
             driver = build_driver(
                 row.type,
                 row.credential,
-                row.device_type,
                 on_token_refresh=_on_refresh,
             )
         except DriverError as exc:
@@ -221,8 +213,4 @@ class RedirectService:
             return link.url, expires_at
 
         cached = await self._cache.get_or_fetch(media_id, key, _fetch)
-        return RedirectResult(
-            url=cached.url,
-            ua_required=self._settings.ua_policy != "relaxed",
-            extra_headers={},
-        )
+        return RedirectResult(url=cached.url, extra_headers={})

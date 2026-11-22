@@ -250,7 +250,7 @@ def fake_driver() -> FakeDriver:
     测试里 ``add_file`` 加的文件就找不到了。
     """
     driver = FakeDriver()
-    register_driver("fake", lambda credential=None, device_type=None: driver)
+    register_driver("fake", lambda credential=None: driver)
     return driver
 
 

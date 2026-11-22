@@ -9,7 +9,7 @@
   还要报备出口 IP；Web 端用的 ``client_id`` 是光鸭官方自己的固定值
 - 官方那套域名对未注册的 client_id 返回 ``client_id not registered``
 
-**直链不绑 UA**（与 115 的 ``f=1`` 不同）——``get_res_download_url``
+**直链不绑 UA**——``get_res_download_url``
 返回的 ``signedURL`` 直接可 GET。故 :attr:`DirectLink.ua_required` 为
 False，中转层不必按 UA 分桶（但保留分桶也无害）。
 
@@ -119,15 +119,6 @@ MISSING_DIR_NAME_LIMIT = 10
 #: Token 过期前多少秒就刷新
 TOKEN_REFRESH_MARGIN_SEC = 300
 
-#: 光鸭离线下载器的固定 UA（实测 httpbin / httpbingo / postman-echo 三家一致）。
-#:
-#: **迁移 115 文件时必须用它去换直链**：115 的 ``f=1`` 绑定「换链时用的
-#: UA」，用别的 UA 换来的链接交给光鸭下载器会返回 403。
-GUANGYA_DOWNLOAD_UA = (
-    "Mozilla/5.0 (Linux; Android) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/34.0.1847.131 Safari/537.36"
-)
-
 #: ``fs_create_dir`` 的「同名目录已存在」业务码。
 #:
 #: 配合 ``fail_if_name_exist=True``：新建成功返回 ``code=0``，已存在返回
@@ -226,7 +217,6 @@ class GuangyaDriver:
     def __init__(
         self,
         credential: str | None,
-        device_type: str | None = None,
         *,
         on_token_refresh: Callable[[GuangyaCredential], Any] | None = None,
     ) -> None:
@@ -234,10 +224,8 @@ class GuangyaDriver:
 
         Args:
             credential: 加密后的凭据（``gypcipher:v2:``）或明文 JSON。
-            device_type: 未使用（光鸭没有设备类型概念）。
             on_token_refresh: Token 刷新后的回调（用于写回 DB）。
         """
-        self._device_type = device_type
         self._on_token_refresh = on_token_refresh
         self._cred: GuangyaCredential | None = None
         self._client: Any = None
@@ -893,7 +881,7 @@ class GuangyaDriver:
     async def rename_file(self, file_id: str, new_name: str) -> None:
         """重命名文件（**不移动位置**，只改名）。
 
-        用途：光鸭「云下载」的落盘名取自 URL 末段——115 直链末段是文件名
+        用途：光鸭「云下载」的落盘名取自 URL 末段
         （落名正确），而**光鸭直链末段是 ``download``**（实测 2026-11-13），
         故「光鸭 → 光鸭」迁移必须把落盘文件改回原名。
 
@@ -1156,7 +1144,7 @@ class GuangyaDriver:
 
         用来判断「任务还在不在跑」：任务从活跃列表消失即视为结束。
         实测任务项在活跃阶段**不带** ``fileId`` / ``parentId``，但 ``res``
-        字段里的 115 直链带 ``d=`` 参数（其中含 pickcode），调用方可据此
+        字段里的 ``res`` 是源直链（光鸭 CDN 带 ``fid``），调用方可据此
         把任务匹配回源文件。
 
         **``page_size`` 上限是 100**：传 200/500 会返回 ``code 112 参数错误``
@@ -1204,7 +1192,7 @@ class GuangyaDriver:
         ``aud`` 判定客户端身份，非会员的大文件只有客户端 token 能取到；
         失败则回退 Web token（可用性优先，代价可能是 ``254``）。
 
-        **不绑 UA**——光鸭的 ``signedURL`` 可直接 GET，与 115 的 ``f=1``
+        **不绑 UA**——光鸭的 ``signedURL`` 可直接 GET，与绑定 UA 的旧实现
         语义不同。
 
         **过期时间用 ``urlDuration``**——``signedURL`` 里没有可解析的
@@ -1584,7 +1572,6 @@ def _map_code(code: Any) -> str:
 
 def build_guangya_driver(
     credential: str | None,
-    device_type: str | None = None,
     *,
     on_token_refresh: Callable[[GuangyaCredential], Any] | None = None,
 ) -> GuangyaDriver:
@@ -1594,6 +1581,4 @@ def build_guangya_driver(
     :func:`app.services.driver_factory.build_driver` 传进来的回调会被
     ``TypeError`` 兜底逻辑静默丢弃，Token 刷新后就没人写回 DB 了。
     """
-    return GuangyaDriver(
-        credential, device_type, on_token_refresh=on_token_refresh
-    )
+    return GuangyaDriver(credential, on_token_refresh=on_token_refresh)

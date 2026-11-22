@@ -531,14 +531,12 @@ class Driver(Base):
     __tablename__ = "drivers"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    #: 驱动类型标识，如 ``p115``。后续加 ``aliyun`` / ``quark`` / ``webdav``
+    #: 驱动类型标识，如 ``guangya``。后续加 ``aliyun`` / ``quark`` / ``webdav``
     type: Mapped[str] = mapped_column(String(32), nullable=False)
     #: 展示名
     name: Mapped[str] = mapped_column(String(128), nullable=False)
-    #: 加密后的凭据（115 cookie 等）。密文格式自带 scheme 前缀。
+    #: 加密后的凭据（光鸭 token 三件套等）。密文格式自带 scheme 前缀。
     credential: Mapped[str | None] = mapped_column(Text, nullable=True)
-    #: 设备类型（115 扫码登录绑定的 app，如 ``115android``）
-    device_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     #: 创建时间（北京时间字符串）
     created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
@@ -548,10 +546,10 @@ class Driver(Base):
 
     # -- 媒体库配置（与存储源一对一）--
 
-    #: 115 媒体库 cid（**字符串**）。
+    #: 媒体库目录 id（光鸭是 fileId，**字符串**）。
     #:
-    #: 用 cid 而非路径：115 的目录 id 在改名后**不变**，路径会失效
-    #: （``dir_getid`` 抛 ``P115FileNotFoundError``）。且 cid 只需 1 次
+    #: 用 id 而非路径：网盘的目录 id 在改名后**不变**，路径会失效
+    #: （反查接口会抛「找不到」）。且 id 只需 1 次
     #: ``iterdir``，路径要 ``dir_getid`` + ``iterdir``。
     media_cid: Mapped[str | None] = mapped_column(String(32), nullable=True)
     #: 媒体库路径（**只读展示**）——保存时用 cid 实时解析填入
@@ -760,7 +758,7 @@ class MediaFile(Base):
     driver_id: Mapped[int] = mapped_column(
         ForeignKey("drivers.id", ondelete="CASCADE"), nullable=False
     )
-    #: 存储源内的文件标识（115 为 pickcode）。不出现在对外 URL 里。
+    #: 存储源内的文件标识（光鸭为 fileId）。不出现在对外 URL 里。
     remote_id: Mapped[str] = mapped_column(String(255), nullable=False)
     #: 完整路径（存储源内）
     path: Mapped[str] = mapped_column(Text, nullable=False)

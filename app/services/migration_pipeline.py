@@ -37,7 +37,15 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-__all__ = ["SubmitGate", "TargetIndex", "TaskWatcher", "norm_dir"]
+__all__ = [
+    "QUOTA_ERROR_MARKERS",
+    "SubmitGate",
+    "TargetIndex",
+    "TaskWatcher",
+    "is_quota_error",
+    "landed_name_from_url",
+    "norm_dir",
+]
 
 #: 轮询离线任务状态的间隔（秒）。
 POLL_INTERVAL_SEC = 5.0
@@ -61,6 +69,29 @@ VERIFY_DELAY_SEC = 5.0
 #:
 #: 云下载按 URL 末段落名，故光鸭源的每个文件都先落成这个名字，再改名。
 GUANGYA_LANDED_NAME = "download"
+
+#: 「云添加额度耗尽」的错误文案特征。
+#:
+#: 服务端**不提供**剩余次数查询 → 只能撞墙判定。撞到这些字样就暂停作业，
+#: 次日额度窗口打开时重跑自然续传（重试只会再扣一次额度）。
+QUOTA_ERROR_MARKERS = ("次数超限", "额度", "配额", "每日上限")
+
+
+def is_quota_error(message: str) -> bool:
+    """错误文案里是否含「额度耗尽」特征。"""
+    text = str(message or "")
+    return any(marker in text for marker in QUOTA_ERROR_MARKERS)
+
+
+def landed_name_from_url(url: str) -> str:
+    """从直链 URL 推导云下载的落盘名（取路径末段）。
+
+    光鸭云下载按 URL 末段命名——光鸭 CDN 直链末段是 ``download``（实测）。
+    """
+    if not url:
+        return ""
+    path = str(url).split("?", 1)[0].rstrip("/")
+    return path.rsplit("/", 1)[-1] if "/" in path else ""
 
 
 def norm_dir(rel: str) -> str:
@@ -124,7 +155,7 @@ class TargetIndex:
     ) -> str:
         """把「已落盘但还没改名」的文件改名成 ``new_name``。
 
-        云下载按 **URL 末段**落名——115 直链末段是文件名（落名正确），
+        云下载按 **URL 末段**落名——光鸭直链末段是 ``download``，
         光鸭直链末段是 ``download``（实测），故光鸭源必须改名。
 
         匹配条件（都要满足，避免误改用户自己的文件）：

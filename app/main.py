@@ -186,10 +186,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     init_services(settings)
 
-    # 媒体库域的请求限速（115 / 光鸭分桶）。
-    from app.core.rate_limit import configure_provider_rate_limit, configure_rate_limit
+    # 媒体库域的请求限速（按驱动分桶）。
+    from app.core.rate_limit import configure_provider_rate_limit
 
-    configure_rate_limit(settings.rate_limit_interval_sec)
     configure_provider_rate_limit("guangya", settings.guangya_rate_limit_interval_sec)
     # 换直链单独一个桶：官方限频 2 次/秒，比列目录的 5 次/秒严
     configure_provider_rate_limit(
@@ -210,7 +209,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # 存储源启动测连（后台并发，不阻塞启动）
     #
-    # 所有启用且有凭据的 p115 / 光鸭驱动自动测连一次，结果缓存供
+    # 所有启用且有凭据的光鸭驱动自动测连一次，结果缓存供
     # ``GET /drivers`` 携带——面板打开即见连通状态，不用逐个手动点。
     # fire-and-forget：失败只记日志；任务引用挂到 app.state 防 GC。
     from app.services.driver_service import probe_all_enabled
@@ -330,7 +329,6 @@ def _mount_routes(app: FastAPI) -> None:
         drivers,
         env_settings,
         health,
-        incremental_jobs,
         media,
         migrations,
         redirect,
@@ -369,7 +367,6 @@ def _mount_routes(app: FastAPI) -> None:
         scrape.router,
         health.router,
         scan_jobs.router,
-        incremental_jobs.router,
         migrations.router,
         upload_tasks.router,
         dav_users.router,

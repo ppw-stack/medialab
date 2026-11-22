@@ -1,6 +1,6 @@
 """存储源驱动抽象。
 
-第一版只实现 115，但接口先抽象好：新增阿里/夸克/WebDAV 只新增实现，
+接口先抽象好：新增阿里/夸克/WebDAV 只新增实现，
 **中转层与缓存层完全不改**。
 
 契约（所有驱动必须遵守）：
@@ -34,7 +34,7 @@ class DriverError(RuntimeError):
 class CloudFile:
     """存储源内的文件或目录。"""
 
-    #: 存储源内的文件标识（115 为 pickcode）。不出现在对外 URL 里。
+    #: 存储源内的文件标识（光鸭为 fileId）。不出现在对外 URL 里。
     remote_id: str
     #: 存储源内的完整路径（绝对）
     path: str
@@ -51,8 +51,8 @@ class CloudFile:
     #: **相对媒体库根**的路径（目录部分），用于算落盘位置。
     #:
     #: 为什么单独有这个字段：不同驱动**拿到根路径的方式不同**——
-    #: 115 有 ``tool.get_path`` 能把 cid 反解成 ``/影视``；光鸭**没有**
-    #: 反查接口，根路径只有 ``fileId``，拿不到「/影视」这样的字符串。
+    #: 有的驱动能把目录 id 反解成路径；光鸭**没有**反查接口，根路径只有
+    #: ``fileId``，拿不到「/影视」这样的字符串。
     #: 若靠 ``path`` 减去根路径字符串，光鸭就永远减不掉 → 目录结构全丢
     #: （附件全平铺在输出根下）。
     #:
@@ -68,11 +68,10 @@ class DirectLink:
     Attributes:
         url: 播放器可直接 GET 的 URL。
         expires_at: 过期时间戳（unix 秒）。``None`` 表示驱动认为它不过期。
-        extra_headers: 访问该 URL **必须**携带的额外请求头。
-            115 直链的 ``f=3`` 模式要求携带 ``Set-Cookie`` 响应头里返回的
-            Cookie——此时中转层需要把该头透传给播放器。
-        ua_required: 该直链是否绑定了 UA（``f=1``/``f=3``）。
-            True 时中转层必须按 UA 分桶缓存。
+        extra_headers: 访问该 URL **必须**携带的额外请求头——中转层会
+            把它们透传给播放器。
+        ua_required: 该直链是否绑定了 UA。True 时播放器必须用同一 UA
+            访问（缓存因此按 UA 分桶）。
     """
 
     url: str
@@ -85,7 +84,7 @@ class DirectLink:
 class CloudDriver(Protocol):
     """存储源驱动协议。"""
 
-    #: 驱动类型标识（``p115`` 等）
+    #: 驱动类型标识（``guangya`` 等）
     name: str
 
     async def list_dir(self, path: str) -> list[CloudFile]:

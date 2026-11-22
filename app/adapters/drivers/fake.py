@@ -5,7 +5,7 @@
 假驱动复刻真实驱动的关键行为：
 
 - 直链带 ``?t=`` 过期时间戳与 ``f`` 参数
-- **UA 绑定**：UA 不符时拒绝（模拟 115 的 ``f=1`` 语义）
+- **UA 绑定**：UA 不符时拒绝（模拟「直链绑定 UA」的驱动语义）
 - 可配置直链有效期，用于验证缓存 TTL 提前失效
 """
 
@@ -25,7 +25,7 @@ class FakeDriver:
     Attributes:
         files: ``remote_id -> CloudFile``。
         link_ttl_sec: 生成的直链有效期（秒）。
-        ua_required: 直链是否绑定 UA（模拟 115 的 ``f=1``）。
+        ua_required: 直链是否绑定 UA。
         call_counts: 各 remote_id 的换直链次数（用于断言单飞/缓存命中）。
     """
 
@@ -97,7 +97,7 @@ class FakeDriver:
             yield cf
 
     async def get_direct_link(self, remote_id: str, user_agent: str) -> DirectLink:
-        """换直链。UA 不符时抛错（模拟 115 的 ``f=1`` 校验）。"""
+        """换直链。UA 不符时抛错（模拟「直链绑定 UA」的驱动）。"""
         self.call_counts[remote_id] = self.call_counts.get(remote_id, 0) + 1
         if remote_id not in self.files:
             raise DriverError(f"文件不存在：{remote_id}", kind="not_found")
@@ -117,7 +117,6 @@ class FakeDriver:
 
 def build_fake_driver(
     credential: str | None = None,
-    device_type: str | None = None,
 ) -> FakeDriver:
     """工厂函数（签名与注册表一致）。"""
     return FakeDriver()

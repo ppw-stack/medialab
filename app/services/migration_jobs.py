@@ -1,7 +1,6 @@
 """迁移任务的后台执行（内存态）。
 
-与 :mod:`app.services.scan_jobs` / :mod:`app.services.incremental_jobs`
-同款结构：后台 ``asyncio.Task`` + 内存进度表 + 环形日志。
+与 :mod:`app.services.scan_jobs` 同款结构：后台 ``asyncio.Task`` + 内存进度表 + 环形日志。
 
 **为什么不需要数据库表**：光鸭目标目录就是唯一真相源——重跑时「同名 +
 同大小」会被判定为已存在并跳过。所以参数随请求传入，进度丢了重跑即可。
@@ -57,14 +56,13 @@ class MigrationParams:
     max_size_mb: int = 0
     # 注：**没有并发参数**——迁移恒串行（2026-11-15 决策，理由见
     # ``app.services.migration.MIGRATION_CONCURRENCY``）
-    #: 两次提交给光鸭之间的最小间隔（秒）——错开提交，避开 115 下载频控
-    submit_interval_sec: float = 60.0
+    #: 两次提交给光鸭之间的最小间隔（秒）——错开提交，避开落盘名撞车
+    submit_interval_sec: float = 5.0
     #: 排除原盘（iso / m2ts / BDMV / CERTIFICATE）
     exclude_disc: bool = True
     #: 「搬完清理源」——迁移成功后删除源端文件（**默认关**）
     #:
-    #: 只删**目标侧已确认落盘同名同大小**的文件；删除走回收站（可恢复）；
-    #: **仅光鸭源支持**（115 驱动无删除能力，会被忽略并在日志里说明）。
+    #: 只删**目标侧已确认落盘同名同大小**的文件；删除走回收站（可恢复）。
     delete_source: bool = False
 
     def to_dict(self) -> dict[str, Any]:

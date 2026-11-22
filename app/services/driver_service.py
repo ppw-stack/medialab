@@ -28,22 +28,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.drivers.base import DriverError
 from app.adapters.drivers.credential_crypto import (
+    SECRET_ENV,
     CredentialCryptoError,
     encrypt,
     encrypt_with_scheme,
 )
-from app.adapters.drivers.p115 import P115Driver, reset_clients
-from app.adapters.drivers.p115_credential import SECRET_ENV, decode_credential
-from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.timeutils import bj_now
 from app.db.models import Driver, ProbeResult
 from app.db.session import session_scope
-from app.domain.device_types import (
-    ALL_DEVICE_TYPES,
-    DEFAULT_DEVICE_TYPE,
-    DeviceTypeLiteral,
-)
 from app.domain.driver_types import (
     PROBEABLE_DRIVER_TYPES,
     is_probeable,
@@ -54,7 +47,6 @@ from app.services.account_status import (
     AccountStatus,
     probe_account,
 )
-from app.services.diag import DirectLinkDiag, diagnose_direct_link
 from app.services.driver_factory import build_driver
 
 logger = get_logger(__name__)
@@ -80,16 +72,14 @@ class DriverRow:
     """一条存储源（供 API 组装响应）。"""
 
     id: int
-    #: 驱动类型标识（``p115`` / ``guangya`` …）
+    #: 驱动类型标识（``guangya``）
     type: str
     name: str
-    #: 115 设备类型（扫码登录绑定的 app）；非 115 存储源为 None
-    device_type: str | None
     enabled: bool
     #: 凭据掩码（**永不回传明文**）
     credential_masked: str
     # -- 媒体库配置 --
-    #: 115 媒体库 cid
+    #: 媒体库目录 id（光鸭是 fileId）
     media_cid: str | None
     #: 媒体库路径（**只读展示**，保存时用 cid 实时解析）
     media_path: str | None
@@ -119,17 +109,6 @@ class DriverRow:
 
 
 @dataclass(slots=True)
-class DeviceTypeInfo:
-    """一个 115 设备类型（供 API 组装响应）。"""
-
-    value: str
-    label: str
-    #: 能否用于扫码登录（实测：18 个里只有 10 个能取到二维码）
-    qr_capable: bool
-    note: str = ""
-
-
-@dataclass(slots=True)
 class JobRef:
     """后台任务的引用（立即返回，前端拿 ``job_id`` 轮询）。"""
 
@@ -143,7 +122,6 @@ def to_driver_row(row: Driver) -> DriverRow:
         id=row.id,
         type=row.type,
         name=row.name,
-        device_type=row.device_type,
         enabled=row.enabled,
         credential_masked=mask_credential(row.credential),
         media_cid=row.media_cid,
@@ -211,21 +189,13 @@ async def create_driver(
     *,
     driver_type: str,
     name: str,
-    device_type: str | None = None,
 ) -> Driver:
-    """创建存储源（尚无凭据）。
-
-    ``device_type`` 是 **115 专属**的概念（扫码登录绑定的 app）。
-    其它驱动（光鸭）没有这个概念 → 存 None，否则界面上会出现
-    「光鸭盘的设备类型是 115android」这种 nonsensical 的值。
-    """
+    """创建存储源（尚无凭据）。"""
     now = bj_now()
-    resolved_device = device_type if driver_type == "p115" else None
     row = Driver(
         type=driver_type,
         name=name,
         credential=None,
-        device_type=resolved_device or (DEFAULT_DEVICE_TYPE if driver_type == "p115" else None),
         enabled=True,
         created_at=now,
         updated_at=now,
@@ -259,6 +229,21 @@ def _make_token_refresh_persist(driver_id: int) -> Callable[[Any], Any]:
         await persist_guangya_credential(driver_id, cred)
 
     return _persist
+
+
+def guangya_refresh_callback(driver_id: int) -> Callable[[Any], Any]:
+    """造一个「光鸭 Token 刷新后写回 DB」的回调（驱动构造用）。
+
+    **漏传的后果**：access_token 只活 1~2 小时，刷新后的新 token 只存在于
+    驱动实例内存 → 实例丢弃后 DB 里还是旧 token → 重启后 401。
+
+    写回语义见 :func:`persist_guangya_credential`（合并两层、失败只记日志）。
+    """
+
+    async def _cb(cred: Any) -> None:
+        await persist_guangya_credential(driver_id, cred)
+
+    return _cb
 
 
 async def persist_guangya_credential(driver_id: int, cred: Any) -> None:
@@ -379,7 +364,6 @@ async def store_credential(
     db: AsyncSession,
     driver_id: int,
     credential: str,
-    device_type: str | None = None,
     *,
     scheme: str | None = None,
     invalidate_cache: bool = True,
@@ -389,9 +373,8 @@ async def store_credential(
     Args:
         db: DB session。
         driver_id: 存储源 id。
-        credential: 明文凭据（115 是 cookie 字符串；光鸭是 JSON）。
-        device_type: 115 设备类型（可同时写入）。
-        scheme: 加密方案前缀。``None`` = 用默认的 115 方案；光鸭传
+        credential: 明文凭据（光鸭是一组字段的 JSON）。
+        scheme: 加密方案前缀。``None`` = 用默认方案；光鸭传
             ``"gypcipher:v2:"``。
         invalidate_cache: 凭据变更后是否作废测连缓存。**默认 True**
             （重新扫码登录 → 旧状态确实过期了）。
@@ -416,13 +399,9 @@ async def store_credential(
         ) from exc
 
     row.credential = encrypted
-    if device_type:
-        row.device_type = device_type
     row.updated_at = bj_now()
     await db.commit()
     await db.refresh(row)
-    # 凭据变了 → 缓存的 115 客户端实例失效
-    reset_clients()
     # 凭据变了 → 旧的测连状态作废（调用方登录成功后会自动重探）
     #
     # 但**光鸭 Token 刷新写回要传 invalidate_cache=False**——见参数说明。
@@ -437,7 +416,6 @@ async def delete_driver(db: AsyncSession, driver_id: int) -> None:
     row = await get_driver(db, driver_id)
     await db.delete(row)
     await db.commit()
-    reset_clients()
     # 删除存储源 → 测连缓存必须清掉。
     #
     # **为什么必须清**：SQLite 的 ``id`` 是普通 ``INTEGER PRIMARY KEY``
@@ -499,7 +477,6 @@ async def add_driver(
     *,
     driver_type: str,
     name: str,
-    device_type: str | None = None,
 ) -> DriverRow:
     """创建存储源（尚无凭据）。"""
     async with session_scope() as db:
@@ -507,7 +484,6 @@ async def add_driver(
             db,
             driver_type=driver_type,
             name=name,
-            device_type=device_type,
         )
         return to_driver_row(row)
 
@@ -516,23 +492,12 @@ async def update_driver(
     driver_id: int,
     *,
     name: str | None = None,
-    device_type: str | None = None,
 ) -> DriverRow:
-    """修改存储源（名称 / 设备类型）。
-
-    改 ``device_type`` 后，下次扫码登录会绑定新设备类型。
-    """
+    """修改存储源（名称）。"""
     async with session_scope() as db:
         row = await get_driver(db, driver_id)
         if name is not None:
             row.name = name
-        if device_type is not None:
-            # device_type 是 115 专属——光鸭没有这个概念
-            if row.type != "p115":
-                raise DriverServiceError(
-                    "该存储源不支持设备类型设置", status_code=400
-                )
-            row.device_type = device_type
         row.updated_at = bj_now()
         await db.commit()
         await db.refresh(row)
@@ -553,8 +518,8 @@ async def update_driver_config(
 ) -> DriverRow:
     """保存媒体库配置。
 
-    ``media_cid`` 保存时会**实时解析出路径**填入 ``media_path``（只读展示）。
-    cid 无效 → 400（**不做路径降级**——按设计，cid 失效就是配置错误）。
+    ``media_path`` 恒为空串：光鸭接口只接受 ``fileId``，**没有反查路径的
+    接口**——留空是正确行为，不是缺数据（界面上按「id 即事实」展示）。
 
     ``auto_prune``：扫描时自动清理「网盘上已消失」的条目。清理会**永久
     删除**本地 strm（不进回收站），故默认关。
@@ -562,12 +527,8 @@ async def update_driver_config(
     async with session_scope() as db:
         row = await get_driver(db, driver_id)
 
-        media_path = row.media_path
-        if media_cid:
-            media_path = await resolve_media_path(row, media_cid)
-
         row.media_cid = media_cid
-        row.media_path = media_path
+        row.media_path = ""
         row.output_dir = output_dir
         row.video_exts = video_exts or ""
         row.image_exts = image_exts or ""
@@ -587,32 +548,12 @@ async def remove_driver(driver_id: int) -> None:
         await delete_driver(db, driver_id)
 
 
-async def list_device_types() -> list[DeviceTypeInfo]:
-    """115 设备类型清单（**单一真源**）。
-
-    前端下拉**从这里取**，不手写——本项目踩过「前端手写 4 个、后端
-    另一份、扫码时压根没传」的坑。
-
-    ``qr_capable=false`` 的类型**不能用于扫码**（实测：18 个里只有 10 个
-    能取到二维码，其余 8 个返回 ``state=1`` 却无 ``qrcode`` 字段）。
-    """
-    return [
-        DeviceTypeInfo(
-            value=d.value,
-            label=d.label,
-            qr_capable=d.qr_capable,
-            note=d.note,
-        )
-        for d in ALL_DEVICE_TYPES
-    ]
-
-
 async def probe_driver(driver_id: int) -> AccountStatus:
     """探测存储源状态（测连）。
 
     检查三项：**凭据有效** → **账号信息 / 容量** → **能否换到直链**。
 
-    只读——不修改任何状态。第三项最关键：前两项通过但换直链被 115 的
+    只读——不修改任何状态。第三项最关键：前两项通过但换直链被网盘的
     账号安全验证挡住，是**常见情况**，故单独报 ``needs_verify``。
 
     未配置凭据时返回 ``status=no_credential``（而不是 400）——
@@ -625,7 +566,6 @@ async def probe_driver(driver_id: int) -> AccountStatus:
         row = await get_driver(db, driver_id)
         driver_type = row.type
         credential = row.credential
-        device_type = row.device_type
 
     if not is_probeable(driver_type):
         raise DriverServiceError("该存储源暂不支持探测", status_code=400)
@@ -643,7 +583,6 @@ async def probe_driver(driver_id: int) -> AccountStatus:
         driver = build_driver(
             driver_type,
             credential,
-            device_type,
             on_token_refresh=_make_token_refresh_persist(driver_id),
         )
     except DriverError as exc:
@@ -756,39 +695,6 @@ async def probe_all_enabled() -> dict[int, CachedProbe]:
     return dict(_probe_cache)
 
 
-async def diagnose_driver_direct_link(
-    driver_id: int,
-    remote_id: str,
-    user_agent: str = "",
-) -> DirectLinkDiag:
-    """诊断直链参数（``f`` / ``t`` / ``c``）。
-
-    **用途**：115 直链的 ``f`` 参数实际取值未实测确认（``docs/design.md`` §11）。
-    ``f=1`` 决定缓存必须按 UA 分桶；``f=3`` 还要回吐 Cookie 头。
-
-    直链 URL **脱敏后**返回（避免截图泄露可分享的链接）。
-    """
-    async with session_scope() as db:
-        row = await get_driver(db, driver_id)
-        driver_type = row.type
-        credential_raw = row.credential
-        device_type = row.device_type
-
-    if driver_type != "p115":
-        raise DriverServiceError("该存储源暂不支持直链诊断", status_code=400)
-
-    credential = _decode_p115_credential(credential_raw)
-    driver = P115Driver(credential, device_type)
-    ua = user_agent or get_settings().default_user_agent
-    try:
-        return await diagnose_direct_link(driver, remote_id, ua)
-    except DriverError as exc:
-        # 账号需安全验证 → 403（不是 502：那不是上游故障，是账号状态问题）
-        if exc.kind == "auth_verify":
-            raise DriverServiceError(str(exc), status_code=403, kind="auth") from exc
-        raise DriverServiceError(str(exc), status_code=502, kind="upstream") from exc
-
-
 async def start_scan_task(driver_id: int, *, prune: bool | None = None) -> JobRef:
     """启动扫描任务（**立即返回 job_id**，扫描在后台跑）。
 
@@ -818,7 +724,7 @@ async def start_scan_task(driver_id: int, *, prune: bool | None = None) -> JobRe
                 kind="config",
             )
 
-    # 同一存储源不允许并发扫描（限速下并发只会互相拖慢，且会打爆 115）
+    # 同一存储源不允许并发扫描（限速下并发只会互相拖慢，且会打出限频）
     running = await find_running(driver_id)
     if running is not None:
         raise DriverServiceError(
@@ -831,113 +737,6 @@ async def start_scan_task(driver_id: int, *, prune: bool | None = None) -> JobRe
     return JobRef(job_id=job.id, state=job.state)
 
 
-async def start_incremental_task(driver_id: int) -> JobRef:
-    """启动增量同步（**立即返回 job_id**，后台跑）。
-
-    与全量扫描的区别：只处理「上次同步之后」的变化（基于 115 生活事件流），
-    不遍历目录树。
-
-    **必须先跑过一次全量扫描**建立基线——没有基线就无法判断哪些是新增。
-
-    进度用 ``GET /api/incremental-jobs/{job_id}`` 轮询。
-    """
-    from app.services.incremental_jobs import find_running, start_incremental_job
-
-    async with session_scope() as db:
-        row = await get_driver(db, driver_id)
-        driver_type = row.type
-        driver_name = row.name
-
-    if driver_type != "p115":
-        raise DriverServiceError("增量同步目前只支持 115 存储源", status_code=400)
-
-    running = await find_running(driver_id)
-    if running is not None:
-        raise DriverServiceError(
-            f"该存储源已有增量任务在跑（job={running.id}）",
-            status_code=409,
-            kind="conflict",
-        )
-
-    job = await start_incremental_job(driver_id, driver_name)
-    return JobRef(job_id=job.id, state=job.state)
-
-
-async def set_incremental_baseline(driver_id: int) -> str:
-    """把**今天**记为增量基线（**不扫任何文件**）。
-
-    用途：已经跑过全量扫描、但当时没记游标时，用它手动补一个基线。
-
-    语义：**从此刻起**的事件才算变化——之前的事件一律不处理。
-    """
-    from app.adapters.drivers import p115_events
-    from app.services import settings_store
-
-    async with session_scope() as db:
-        row = await get_driver(db, driver_id)
-        driver_type = row.type
-        credential = row.credential
-        device_type = row.device_type
-
-        if driver_type != "p115":
-            raise DriverServiceError("增量同步目前只支持 115 存储源", status_code=400)
-
-        driver_impl = build_driver(driver_type, credential, device_type)
-        client = getattr(driver_impl, "_client", None)
-        if client is None:
-            raise DriverServiceError("115 客户端不可用", status_code=503, kind="config")
-
-        today = p115_events.today_str()
-        await settings_store.set_value(
-            db, settings_store.cursor_key(driver_id), today
-        )
-        await db.commit()
-        return today
-
-
-# ================================================================ 内部辅助
-
-
-def _decode_p115_credential(credential: str | None) -> str:
-    """解密 115 凭据。
-
-    Raises:
-        DriverServiceError: 解密失败（500）/ 尚未配置凭据（400）。
-    """
-    try:
-        plain = decode_credential(credential)
-    except Exception as exc:
-        raise DriverServiceError(
-            f"凭据解密失败：{exc}", status_code=500, kind="config"
-        ) from exc
-    if not plain:
-        raise DriverServiceError(
-            "尚未配置凭据，请先扫码登录", status_code=400, kind="config"
-        )
-    return plain
-
-
-async def resolve_media_path(row: Driver, media_cid: str) -> str:
-    """用 cid 解析出路径（只读展示用）。
-
-    **光鸭没有这个能力**（接口只接受 fileId，没有反查）→ 直接返回空串，
-    路径栏留空即可，**不算错误**。
-
-    Raises:
-        DriverServiceError: 115 的 cid 无效（400）/ 凭据不可用。
-    """
-    if row.type == "guangya":
-        # 光鸭的 fileId 无法反查路径——接口只接受 ID，不接受路径
-        return ""
-
-    credential = _decode_p115_credential(row.credential)
-    driver = P115Driver(credential, row.device_type)
-    try:
-        return await driver.resolve_path(media_cid)
-    except DriverError as exc:
-        raise DriverServiceError(f"cid 无效：{exc}", status_code=400) from exc
-
-
 async def browse_driver_dirs(driver_id: int, parent_id: str = "") -> list[tuple[str, str]]:
     """列出存储源某个目录下的**子目录**（按 id 逐层浏览）。
 
@@ -946,8 +745,7 @@ async def browse_driver_dirs(driver_id: int, parent_id: str = "") -> list[tuple[
 
     与 :func:`app.services.upload_tasks.browse_target_dirs` 的**关键差异**：
     **不做「是否支持上传」的校验**——浏览是 CloudDriver 的**读能力**，
-    而 115 不支持上传（``UPLOADABLE_DRIVER_TYPES`` 只有光鸭），但媒体库
-    扫描用的恰恰就是 115。
+    与谁能上传无关（``UPLOADABLE_DRIVER_TYPES`` 只约束写入）。
 
     Args:
         driver_id: 存储源 id。
@@ -966,7 +764,6 @@ async def browse_driver_dirs(driver_id: int, parent_id: str = "") -> list[tuple[
         row = await get_driver(db, driver_id)
         driver_type = row.type
         credential = row.credential
-        device_type = row.device_type
 
     root = root_dir_id(driver_type)
     if root is None:
@@ -979,7 +776,6 @@ async def browse_driver_dirs(driver_id: int, parent_id: str = "") -> list[tuple[
         driver = build_driver(
             driver_type,
             credential,
-            device_type,
             on_token_refresh=_make_token_refresh_persist(driver_id),
         )
     except DriverError as exc:
@@ -987,8 +783,8 @@ async def browse_driver_dirs(driver_id: int, parent_id: str = "") -> list[tuple[
             f"驱动初始化失败：{exc}", status_code=500, kind="config"
         ) from exc
 
-    # ``list_dir_by_cid`` 不在 CloudDriver 协议里（115 / 光鸭都有，但协议只
-    # 要求 ``list_dir``），故用 getattr 取——与 migration.py 同一做法。
+    # ``list_dir_by_cid`` 不在 CloudDriver 协议里（协议只要求
+    # ``list_dir``），故用 getattr 取——与 migration.py 同一做法。
     lister = getattr(driver, "list_dir_by_cid", None)
     if lister is None:
         raise DriverServiceError(
@@ -1002,10 +798,7 @@ async def browse_driver_dirs(driver_id: int, parent_id: str = "") -> list[tuple[
 
 
 __all__ = [
-    "DEFAULT_DEVICE_TYPE",
     "CachedProbe",
-    "DeviceTypeInfo",
-    "DeviceTypeLiteral",
     "DriverRow",
     "DriverServiceError",
     "JobRef",
@@ -1014,20 +807,17 @@ __all__ = [
     "cached_probe",
     "create_driver",
     "delete_driver",
-    "diagnose_driver_direct_link",
     "get_driver",
+    "guangya_refresh_callback",
     "invalidate_probe",
     "latest_probe",
-    "list_device_types",
     "list_drivers",
     "mask_credential",
+    "persist_guangya_credential",
     "probe_all_enabled",
     "probe_driver",
     "record_probe",
     "remove_driver",
-    "resolve_media_path",
-    "set_incremental_baseline",
-    "start_incremental_task",
     "start_scan_task",
     "store_credential",
     "to_driver_row",

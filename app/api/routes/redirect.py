@@ -38,6 +38,7 @@ async def redirect_302(media_id: int, sig: str, request: Request) -> Response:
         )
 
     headers: dict[str, str] = {}
-    # 直链若要求额外请求头（115 的 f=3 模式要 Cookie），必须透传给播放器。
+    # 直链若要求额外请求头（驱动通过 DirectLink.extra_headers 声明），
+    # 必须透传给播放器。
     headers.update(result.extra_headers)
     return RedirectResponse(result.url, status_code=302, headers=headers)

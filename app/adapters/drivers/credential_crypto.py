@@ -1,6 +1,6 @@
 """凭据的加密 / 解密。
 
-文件或 DB 字段里的 115 cookie **必须加密存储**——cookie 等价于账号密码。
+文件或 DB 字段里的网盘凭据 **必须加密存储**——凭据等价于账号密码。
 
 格式（encrypt-then-MAC）::
 
@@ -40,7 +40,14 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-#: 当前方案
+#: 解密密钥的环境变量名（加密 / 解密都要用它）
+SECRET_ENV = "CREDENTIAL_ENCRYPTION_SECRET"
+
+#: 当前方案。
+#:
+#: 前缀里的 ``p115`` 是**历史命名**（最初只为 115 实现），现作为默认方案
+#: 保留：存量密文都带这个前缀，改名会让它们解不开。新代码按驱动传自己的
+#: scheme（如光鸭的 ``gypcipher:v2:``）。
 _SCHEME = "p115cipher:v2:"
 #: 任意 p115cipher 前缀（用于识别「这是密文」）
 _SCHEME_PREFIX = "p115cipher:"
@@ -104,7 +111,7 @@ def encrypt(plaintext: str, secret: str) -> str:
     """加密凭据，返 ``p115cipher:v2:<base64(iv || ct || hmac)>``。
 
     Args:
-        plaintext: 明文凭据（115 cookie 字符串）。
+        plaintext: 明文凭据（cookie 字符串 / JSON 等）。
         secret: 加密密钥（任意串，内部派生 AES key 与 MAC key）。
 
     Raises:

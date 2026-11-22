@@ -595,7 +595,7 @@ async def browse_target_dirs(driver_id: int, parent_id: str = "") -> list[tuple[
     from app.adapters.drivers.upload_base import is_uploadable
     from app.db.models import Driver
     from app.services.driver_factory import build_driver
-    from app.services.migration import persist_guangya_credential
+    from app.services.driver_service import persist_guangya_credential
 
     async with session_scope() as db:
         driver_row = (
@@ -610,13 +610,12 @@ async def browse_target_dirs(driver_id: int, parent_id: str = "") -> list[tuple[
                 kind="config",
             )
         credential = driver_row.credential
-        device_type = driver_row.device_type
         row_id = driver_row.id
 
     async def _on_refresh(cred: Any) -> None:
         await persist_guangya_credential(row_id, cred)
 
-    driver = build_driver(driver_row.type, credential, device_type, on_token_refresh=_on_refresh)
+    driver = build_driver(driver_row.type, credential, on_token_refresh=_on_refresh)
     lister = getattr(driver, "list_dir_by_cid", None)
     if lister is None:
         raise UploadTaskError("该驱动不支持按 id 浏览目录", status_code=400, kind="config")

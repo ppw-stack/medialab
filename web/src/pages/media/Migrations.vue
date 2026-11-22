@@ -2,7 +2,7 @@
   <div class="page">
     <PageHeader
       eyebrow="媒体库 · MEDIA"
-      title="迁移（115 / 光鸭 → 光鸭盘）"
+      title="迁移（光鸭 → 光鸭盘）"
       sub="边扫边迁——爬到合格文件就提交光鸭云下载"
       compact
     >
@@ -21,17 +21,9 @@
         </template>
       </a-alert>
 
-      <a-alert v-if="sourceDriver?.type === 'p115'" type="warning" show-icon :closable="false" class="tip">
+      <a-alert type="warning" show-icon :closable="false" class="tip">
         <template #message>
-          115 对「短时间拉取不同文件」有频控，超限会返回 403
-          <span class="mono">115 pmt user</span>，光鸭记为<b>「云添加失败 code=8」</b>。
-          故提交必须<b>错开</b>——「提交间隔」越大越稳（默认 60 秒）。
-        </template>
-      </a-alert>
-
-      <a-alert v-else-if="sourceDriver?.type === 'guangya'" type="warning" show-icon :closable="false" class="tip">
-        <template #message>
-          光鸭源没有 115 的频控，但<b>云添加额度有限</b>（每天每账号，失败也扣）。
+          <b>云添加额度有限</b>（每天每账号，失败也扣）。
           云下载按 URL 末段落名（<span class="mono">download</span>），落盘后会自动<b>改名回原名</b>；
           <b>恒串行</b>提交（同目录并发会撞名）。撞到额度上限会<b>暂停</b>作业，次日重跑即可续传。
         </template>
@@ -118,10 +110,10 @@
             :min="0"
             :max="600"
             :step="10"
-            :disabled="isGuangyaSource"
+            disabled
             style="width: 90px"
           />
-          <span class="hint">{{ isGuangyaSource ? "光鸭源自动收紧到 5s" : "秒，0 = 不限速" }}</span>
+          <span class="hint">秒，上限 5s（额度是瓶颈，不是下载频控）</span>
           <span class="hint">恒串行提交，不支持并发</span>
         </a-form-item>
         <a-form-item label="排除原盘">
@@ -129,10 +121,10 @@
           <span class="hint">iso / m2ts / BDMV</span>
         </a-form-item>
         <a-form-item label="搬完清理源">
-          <a-switch v-model:checked="form.deleteSource" :disabled="!isGuangyaSource" />
+          <a-switch v-model:checked="form.deleteSource" />
           <span class="hint">
             {{
-              isGuangyaSource
+              true
                 ? "只删已校验成功的；进回收站可恢复"
                 : "仅光鸭源支持"
             }}
@@ -318,14 +310,11 @@ const conflictColumns = [
   { title: "光鸭", key: "remote", width: 110 },
 ]
 
-/** 源可选：115 或任意光鸭账号（光鸭 → 光鸭也是支持的）。 */
+/** 源只能是光鸭账号（光鸭 → 光鸭）。 */
 const sourceDriverOptions = computed(() =>
   drivers.value
-    .filter((d) => d.type === "p115" || d.type === "guangya")
-    .map((d) => ({
-      value: d.id,
-      label: `${d.name}（${d.type === "p115" ? "115" : "光鸭"}）`,
-    })),
+    .filter((d) => d.type === "guangya")
+    .map((d) => ({ value: d.id, label: d.name })),
 )
 
 /** 目标只能是光鸭盘。 */
@@ -345,13 +334,7 @@ const targetDriver = computed(
 const currentSource = computed(() => sourceStack.value[sourceStack.value.length - 1])
 const currentTarget = computed(() => targetStack.value[targetStack.value.length - 1])
 
-/** 源浏览器标题随驱动类型变（115 叫 cid、光鸭叫 fileId）。 */
-const sourceBrowserTitle = computed(() =>
-  sourceDriver.value?.type === "guangya" ? "① 光鸭源目录" : "① 115 源目录",
-)
-
-/** 源是光鸭账号——提交间隔由后端强制收紧，前端置灰说明。 */
-const isGuangyaSource = computed(() => sourceDriver.value?.type === "guangya")
+const sourceBrowserTitle = "① 光鸭源目录"
 
 /** 在途任务（提交顺序） */
 const inFlightList = computed(() => {
@@ -382,10 +365,8 @@ onMounted(async () => {
     return
   }
 
-  // 源：优先 115，没有就退到光鸭账号（光鸭 → 光鸭）
-  const first115 = drivers.value.find((d) => d.type === "p115")
   const firstGuangya = drivers.value.find((d) => d.type === "guangya")
-  sourceDriverId.value = (first115 ?? firstGuangya)?.id
+  sourceDriverId.value = firstGuangya?.id
   targetDriverId.value = firstGuangya?.id
 
   await resetSourceStack()
@@ -409,31 +390,19 @@ onMounted(async () => {
   }
 })
 
-/** 源目录栈复位——起点按驱动类型不同（115 从媒体库 cid 起，光鸭从账号根起）。 */
+/** 源目录栈复位——光鸭账号根 fileId 是空串，目录由用户逐层选。 */
 async function resetSourceStack(): Promise<void> {
   const driver = sourceDriver.value
   if (!driver) {
     sourceStack.value = []
     return
   }
-  if (driver.type === "guangya") {
-    // 光鸭账号根 id 是空串——目录由用户在下面逐层选
-    sourceStack.value = [{ id: "", name: "光鸭根目录" }]
-  } else {
-    sourceStack.value = [
-      {
-        id: driver.media_cid || "0",
-        name: driver.media_path || "115 根目录",
-      },
-    ]
-  }
+  sourceStack.value = [{ id: "", name: "光鸭根目录" }]
 }
 
 /** 换源存储源——目录栈复位并重新加载。 */
 async function onSourceDriverChange(): Promise<void> {
   await resetSourceStack()
-  // 115 源不支持清理源 → 切过去时把开关关掉（避免带着无效开关开跑）
-  if (!isGuangyaSource.value) form.deleteSource = false
   await loadSource()
 }
 

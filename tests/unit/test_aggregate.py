@@ -20,7 +20,7 @@ from app.domain.aggregate_types import (
     STAGING_TERMINAL,
     is_valid_role,
 )
-from app.services.aggregate_sync import _is_quota_error, _landed_name_from_url
+from app.services.migration_pipeline import is_quota_error, landed_name_from_url
 from app.services.migration_pipeline import (
     GUANGYA_LANDED_NAME,
     SubmitGate,
@@ -69,7 +69,7 @@ def test_staging_states_and_terminal_set() -> None:
 )
 def test_quota_error_markers_are_detected(message: str) -> None:
     """撞额度的文案要能识别——识别后转 paused，不硬撞不重试。"""
-    assert _is_quota_error(message)
+    assert is_quota_error(message)
 
 
 @pytest.mark.parametrize(
@@ -78,18 +78,18 @@ def test_quota_error_markers_are_detected(message: str) -> None:
 )
 def test_other_errors_are_not_quota(message: str) -> None:
     """普通失败不能被误判成额度耗尽（否则会白白暂停一整天）。"""
-    assert not _is_quota_error(message)
+    assert not is_quota_error(message)
 
 
-def test_landed_name_from_url() -> None:
+def testlanded_name_from_url() -> None:
     """光鸭 CDN 直链末段是 ``download``——云下载会按它落名。"""
     assert (
-        _landed_name_from_url(
+        landed_name_from_url(
             "https://pool-httpdown.guangyacdn.com/download/?fid=abc"
         )
         == "download"
     )
-    assert _landed_name_from_url("") == ""
+    assert landed_name_from_url("") == ""
 
 
 def test_norm_dir() -> None:

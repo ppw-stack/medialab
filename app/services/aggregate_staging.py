@@ -41,8 +41,8 @@ from app.domain.aggregate_types import (
     STAGING_TERMINAL,
 )
 from app.services.driver_factory import build_driver
+from app.services.driver_service import guangya_refresh_callback
 from app.services.errors import ServiceError
-from app.services.migration import persist_guangya_credential
 
 __all__ = [
     "StagedEntry",
@@ -353,7 +353,7 @@ async def enqueue_from_staging_root(group_id: int) -> dict[str, int]:
 
         master_id = int(master.id)
         secondary_specs = [
-            (int(s.id), root_by_driver[int(s.id)], s.credential, s.device_type)
+            (int(s.id), root_by_driver[int(s.id)], s.credential)
             for s in secondaries
             if s.enabled and int(s.id) in root_by_driver
         ]
@@ -361,9 +361,9 @@ async def enqueue_from_staging_root(group_id: int) -> dict[str, int]:
     scanned = 0
     added = 0
     skipped = 0
-    for driver_id, root_id, credential, device_type in secondary_specs:
+    for driver_id, root_id, credential in secondary_specs:
         entries = await _list_staging_root_files(
-            driver_id, root_id, credential, device_type
+            driver_id, root_id, credential
         )
         scanned += len(entries)
         if not entries:
@@ -411,7 +411,6 @@ async def _list_staging_root_files(
     driver_id: int,
     root_id: str,
     credential: str | None,
-    device_type: str | None,
 ) -> list[dict[str, Any]]:
     """列副盘缓冲根目录下的文件（**递归**，保留相对目录结构）。
 
@@ -424,8 +423,7 @@ async def _list_staging_root_files(
     driver = build_driver(
         "guangya",
         credential,
-        device_type,
-        on_token_refresh=_refresh_callback(driver_id),
+        on_token_refresh=guangya_refresh_callback(driver_id),
     )
     entries: list[dict[str, Any]] = []
     iterator = getattr(driver, "iter_tree_by_cid", None)
@@ -460,15 +458,6 @@ async def _list_staging_root_files(
             }
         )
     return entries
-
-
-def _refresh_callback(driver_id: int) -> Any:
-    """光鸭 Token 刷新写回 DB 的回调（**漏传会导致重启后 401**）。"""
-
-    async def _cb(cred: Any) -> None:
-        await persist_guangya_credential(driver_id, cred)
-
-    return _cb
 
 
 # --------------------------------------------------------------------------
