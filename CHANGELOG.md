@@ -10,7 +10,11 @@
 
 ## [Unreleased]
 
-### Removed（BREAKING，下一个 major：v3.0.0）
+（暂无）
+
+## [3.0.0] - 2026-11-22
+
+### Removed（BREAKING，major：v3.0.0）
 
 - **115 网盘支持整体移除**——媒体库域现在只支持光鸭盘。
 
@@ -31,9 +35,10 @@
   `GET /api/migrations/sources` 的**源必须是光鸭盘**；115 源返回 400。
   `submit_interval_sec` 上限从「按源类型 60s/5s」统一为 **5s**。
 
-  **持久化变更**：`drivers.device_type` 列由启动迁移删除（幂等；
-  旧镜像回滚前需加回该列）。`link_cache` 的 UA 分桶保留（对绑定 UA 的
-  驱动仍是正确性要求）。
+  **持久化变更**：`drivers.device_type` **不再被 ORM 映射**（读 / 写都
+  不再经过它），但**表中的列会保留**——本次没有对应的 `DROP COLUMN`
+  迁移（列留着对旧代码同样无害，反而让**回滚旧镜像不需要加回该列**）。
+  `link_cache` 的 UA 分桶保留（对绑定 UA 的驱动仍是正确性要求）。
 
   **迁移步骤**：① 删掉脚本里对上述端点的调用（增量同步改用全量扫描
   `POST /api/drivers/{id}/scan`，它是幂等的）；② 115 存储源行会保留但
@@ -188,16 +193,19 @@
 
 ### Versioning & Deprecation
 
-- **语义化版本影响：minor（v2.1.0）**——`GET /scheduler` **只新增**字段
+- **语义化版本影响：major（v3.0.0）**——调度重构**本身**只属 minor
+  （`GET /scheduler` **只新增**字段
   （`module` / `module_title` / `modules[]` / `depends_on` /
-  `min_trigger_interval_sec`），旧客户端忽略未知字段即可；破坏面**仅限**
-  被移除的三个旧作业名（`refresh_user_data` / `push_free_torrents` /
+  `min_trigger_interval_sec`），旧客户端忽略未知字段即可）；但**同批发布**
+  还含「115 网盘支持整体移除」（删除端点 / 删除字段 / 迁移源收窄）——
+  那是**真 major**，故整批按 **v3.0.0** 发布（不是 v2.1.0）。调度侧的破坏面
+  **仅限**被移除的三个旧作业名（`refresh_user_data` / `push_free_torrents` /
   `monitor_free_window`）。失效**要按端点区分**：`toggle` / `cron` / `config`
   返 **404**（响亮失败，脚本会立刻报错）；`run` 返 **200 + `ok=false`**——
   **只查状态码的脚本会静默通过**，必须按 `ok` 判成败（与 2.0.0 那次
   「502 → 202」同属「状态码不再报错、判据要改」的一类，不能当无害升级）。
   端点对照表见下方「旧作业名的端点行为」。
-- **弃用时间线**：旧作业名自 **v2.1.0 起立即不可调用**，**无兼容期**——面板自托管、
+- **弃用时间线**：旧作业名自 **v3.0.0 起立即不可调用**，**无兼容期**——面板自托管、
   前后端同版本发布，面板前端已在本 PR 内适配；**外部脚本须在升级镜像前改完**。
 
   | 旧作业名（已移除） | 新作业名 | 备注 |
@@ -225,7 +233,7 @@
 - **受影响调用方**：任何调用 `POST /scheduler/{job}/…`（手动触发 / 改 cron /
   改启停 / 看配置）的脚本与外部工具；`GET /scheduler` 的消费方只会看到
   `jobs[]` 少了三个名字、多了 `module` 等字段。
-- **镜像 tag**：git tag `v2.1.0` → 镜像 tag `2.1.0` / `2.1`（见 `DEPLOY.md`）。
+- **镜像 tag**：git tag `v3.0.0` → 镜像 tag `3.0.0` / `3.0`（见 `DEPLOY.md`）。
 - **关联文档**：[`CHANGELOG.md`](CHANGELOG.md)（本页）；数据流方案与
   「实施后变更」见 [`docs/scheduler-dataflow.md`](docs/scheduler-dataflow.md)。
 
