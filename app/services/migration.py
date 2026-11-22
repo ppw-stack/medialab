@@ -62,9 +62,7 @@ from app.services.migration_pipeline import (
     TaskWatcher,
     is_quota_error,
     landed_name_from_url,
-)
-from app.services.migration_pipeline import (
-    norm_dir as _norm_dir,
+    norm_dir,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - 仅类型
@@ -643,12 +641,12 @@ def _relative_dir(path: str, base_path: str) -> str:
     parent = posixpath.dirname(path.rstrip("/"))
     base = base_path.rstrip("/")
     if not base or base == "/":
-        return _norm_dir(parent)
+        return norm_dir(parent)
     if parent == base:
         return ""
     prefix = f"{base}/"
     if parent.startswith(prefix):
-        return _norm_dir(parent[len(prefix) :])
+        return norm_dir(parent[len(prefix) :])
     # 路径不在源目录下（cid 与后端反解的路径不一致）→ 落到目标根
     return ""
 
