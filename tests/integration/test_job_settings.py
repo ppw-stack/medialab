@@ -473,6 +473,10 @@ async def test_snapshot_failure_keeps_old_rows(
     startup_status.reset()
 
     async def _boom_snapshot(*_args: object, **_kwargs: object) -> None:
+        """模拟快照写失败，验证调用方回滚而非吞异常。
+
+        :raises RuntimeError: 总是抛出。
+        """
         raise RuntimeError("快照写不进去")
 
     monkeypatch.setattr(js, "_snapshot_settings", _boom_snapshot)

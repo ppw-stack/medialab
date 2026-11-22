@@ -100,23 +100,47 @@
       ① 新增 `scheduler_job_settings_backup` 表 = SQLite `CREATE TABLE`，
       **只建空表**，不改任何既有表结构、不重建索引（写锁毫秒级，**不停机**）；
       ② 删的行数 ≤ 3（两条旧作业 + `refresh_user_data` 一行），单条小事务；
-      ③ 回滚本迁移本身 = 停容器 → 跑下面的还原 SQL → 启动；回滚新表 =
-      留表无害（旧代码读不到）或 `DROP TABLE scheduler_job_settings_backup`；
-    - **还原步骤**（停容器后用 sqlite3 执行；新作业行已存在时合并不会覆盖它，
-      想恢复旧行为可二选一）：
+      ③ 回滚本迁移本身 = 停容器 → 跑下面的还原 SQL → 启动（当前镜像用 ②；
+      ① 需同时把镜像回退到 v2.0.x，否则启动期迁移会再次删除旧行）；回滚
+      新表 = 留表无害（旧代码读不到）或 `DROP TABLE scheduler_job_settings_backup`；
+    - **还原步骤**（停容器后用 sqlite3 执行）——**两条路径不等价**，按目标选：
+
+      **② 还原用户设置到新作业（当前镜像上唯一生效的路径，推荐）**：
+      保留合并后的单一作业，只把启停 / cron 改回去。启停按 **AND** 语义
+      还原（与合并逻辑一致：任一旧作业被停用过，新作业也停用），**不能**
+      只取单边值——否则用户关掉的推送会被静默复活。
+
       ```sql
-      -- ① 还原成两条旧作业（旧的 push_free_torrents / monitor_free_window）
+      -- ② 还原到新作业（保留 push_and_monitor_free，只还原启停 / cron）
+      --    启停取 AND：任一边 enabled = 0 则新作业也 0
+      --    cron 取 monitor_free_window 的快照；若两条旧行的 cron 不同，
+      --    没有「正确的那条」可自动还原 → 需要人工二选一后手改
+      UPDATE scheduler_job_settings
+         SET enabled = (SELECT MIN(enabled) FROM scheduler_job_settings_backup b
+                         WHERE b.job_name IN ('push_free_torrents', 'monitor_free_window')),
+             cron    = (SELECT cron FROM scheduler_job_settings_backup b
+                         WHERE b.job_name = 'monitor_free_window')
+       WHERE job_name = 'push_and_monitor_free';
+      ```
+
+      **① 彻底回退到旧版本（仅在同时把镜像回退到 v2.0.x 时有效）**：
+      当前镜像**已不再注册** `push_free_torrents` / `monitor_free_window`，
+      插回的旧行不会被任何作业读取，而且**下次启动的合并迁移会把它们再次
+      合并 / 删除**（新作业行已存在时不覆盖，旧行的 `enabled` / `cron` 会被
+      丢弃）——只跑 SQL 不换镜像等于没回滚。正确顺序是：
+      **停容器 → 跑下面的 SQL → 启动 v2.0.x 旧镜像**（顺序不可反）。
+
+      ```sql
+      -- ① 还原成两条旧作业（必须先回退镜像到 v2.0.x，否则启动即被再删）
       INSERT OR REPLACE INTO scheduler_job_settings (job_name, enabled, cron, updated_at)
       SELECT job_name, enabled, cron, datetime('now', 'localtime')
       FROM scheduler_job_settings_backup
       WHERE job_name IN ('push_free_torrents', 'monitor_free_window');
-
-      -- ② 或还原到新作业（保留合并后的单一作业，只把启停 / cron 改回去）
-      UPDATE scheduler_job_settings SET enabled = (SELECT enabled FROM scheduler_job_settings_backup b WHERE b.job_name = 'monitor_free_window'),
-                                         cron    = (SELECT cron    FROM scheduler_job_settings_backup b WHERE b.job_name = 'monitor_free_window')
-      WHERE job_name = 'push_and_monitor_free';
       ```
-      查快照：`SELECT * FROM scheduler_job_settings_backup;`
+
+      **还原后校验**：`SELECT * FROM scheduler_job_settings_backup;` 与
+      `SELECT * FROM scheduler_job_settings;` 对照，确认 `enabled` 与
+      `cron` 符合预期（AND 语义下两边都启用才会是 `enabled = 1`）。
 
 - **作业触发新增「数据流」能力**（`depends_on` + `min_trigger_interval_sec`）：
 

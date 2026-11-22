@@ -166,6 +166,10 @@ async def _snapshot_settings(
     失败会登记到 ``startup_status``（由调用方处理）。
 
     恢复步骤见 ``CHANGELOG.md`` 的「回滚 / 恢复」小节。
+
+    :raises Exception: 快照写入（``session.get`` / ``session.add``）或其它
+        session 操作失败时向上抛——**绝不静默吞掉**；调用方据此回滚事务
+        （旧行因此不删）并登记 ``startup_status`` 降级。
     """
     for row in rows:
         backup = await session.get(SchedulerJobSettingBackup, row.job_name)
