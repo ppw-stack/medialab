@@ -18,6 +18,10 @@ UI 里的修改会"复活"。
 - **DB 写失败不回滚内存**：配置已在调度中心生效，回滚需要反向操作
   APScheduler 的 job 槽，实现复杂且可能失败。改为让 API 层返 500，
   用户能立刻知道"生效了但没存住"。
+- **删除旧行前先留快照**：作业合并 / 改名 / 孤儿清理会 ``DELETE`` 旧行
+  （不可逆）。删除前把旧行内容写进 ``scheduler_job_settings_backup``
+  （**与 DELETE 同一事务**）并打一条启动日志——见 :func:`_snapshot_settings`。
+  恢复步骤见 ``CHANGELOG.md`` 的「回滚 / 恢复」。
 """
 from __future__ import annotations
 
@@ -25,9 +29,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
-from app.db.models import SchedulerJobSetting
+from app.core.timeutils import bj_now
+from app.db.models import SchedulerJobSetting, SchedulerJobSettingBackup
 from app.db.session import session_scope
 from app.services import startup_status
 
@@ -139,14 +145,44 @@ async def save_cron(job_name: str, cron: str) -> None:
             row.cron = cron
 
 
-def _log_settings_snapshot(rows: Sequence[SchedulerJobSetting], reason: str) -> None:
-    """删除前把旧行内容**打进日志**（不可逆迁移的唯一恢复依据）。
+async def _snapshot_settings(
+    session: AsyncSession,
+    rows: Sequence[SchedulerJobSetting],
+    reason: str,
+) -> None:
+    """删除前把旧行内容**留快照**（不可逆迁移的恢复依据）。
 
-    启动期的迁移是 ``DELETE``：用户自定义的 cron / 启停状态删掉就没了。
-    日志是运维事后回答「删了什么、怎么还原」的依据（恢复步骤见
-    ``CHANGELOG.md`` 的「回滚 / 恢复」小节）。
+    三条删除路径（合并 / 孤儿清理 / 改名迁移）都走这里——**每条路径都先
+    留快照**，不留快照就不删。
+
+    快照落在两处：
+
+    1. **快照表**（``scheduler_job_settings_backup``）——与 ``DELETE`` 在
+       **同一个事务**里：要么都成、要么都回滚 → 不会出现「删了却没记录」。
+       比日志可靠（日志会轮转、会随容器重建而丢），且能用 SQL 还原。
+    2. **启动日志**——人读的线索（``作业配置删除快照（…）``）。
+
+    快照写失败 → 事务回滚 → 旧行**不删**（本次迁移放弃，下次启动重试），
+    失败会登记到 ``startup_status``（由调用方处理）。
+
+    恢复步骤见 ``CHANGELOG.md`` 的「回滚 / 恢复」小节。
     """
     for row in rows:
+        backup = await session.get(SchedulerJobSettingBackup, row.job_name)
+        if backup is None:
+            session.add(
+                SchedulerJobSettingBackup(
+                    job_name=row.job_name,
+                    enabled=bool(row.enabled),
+                    cron=row.cron,
+                    reason=reason,
+                )
+            )
+        else:
+            backup.enabled = bool(row.enabled)
+            backup.cron = row.cron
+            backup.reason = reason
+            backup.deleted_at = bj_now()
         logger.info(
             "作业配置删除快照（%s）：job_name=%s enabled=%s cron=%r",
             reason,
@@ -212,8 +248,9 @@ async def merge_job_settings(
                         cron=None,
                     )
                 )
-            # 删除前先打快照（不可逆 → 事后能回答「删了什么」）
-            _log_settings_snapshot(rows, "合并到新作业")
+            # 删除前先留快照（不可逆 → 事后能回答「删了什么」）；快照与
+            # DELETE 同一事务 → 写不进去就整体回滚，旧行不删
+            await _snapshot_settings(session, rows, "合并到新作业")
             await session.execute(
                 delete(SchedulerJobSetting).where(
                     SchedulerJobSetting.job_name.in_(old_names)
@@ -247,7 +284,8 @@ async def prune_orphaned_settings(
     配置失败时，旧行必须留着给下次启动重试——删掉等于把用户的启停状态
     永久丢了（新作业会按默认 ``enabled=True`` 复活）。
 
-    删除前会把旧行内容打进日志（快照，见 :func:`_log_settings_snapshot`）。
+    删除前会把旧行内容**留快照**（快照表 + 日志，见
+    :func:`_snapshot_settings`）——三条删除路径都先留快照，不留就不删。
 
     删除失败只记日志——启动期不该因清理失败而中断（但会登记到
     ``startup_status``，让 ``/readyz`` 看得见）。
@@ -267,8 +305,9 @@ async def prune_orphaned_settings(
             ]
             if not orphans:
                 return 0
-            # 删除前先打快照（不可逆 → 事后能回答「删了什么」）
-            _log_settings_snapshot(orphans, "清理已下线作业")
+            # 删除前先留快照（不可逆 → 事后能回答「删了什么」）；快照与
+            # DELETE 同一事务 → 写不进去就整体回滚，旧行不删
+            await _snapshot_settings(session, orphans, "清理已下线作业")
             await session.execute(
                 delete(SchedulerJobSetting).where(
                     SchedulerJobSetting.job_name.in_(
@@ -324,8 +363,9 @@ async def migrate_renamed_job(
                         cron=None,
                     )
                     session.add(new_row)
-                # 删除前先打快照（不可逆 → 事后能回答「删了什么」）
-                _log_settings_snapshot([old_row], "迁移到新作业")
+                # 删除前先留快照（不可逆 → 事后能回答「删了什么」）；快照与
+                # DELETE 同一事务 → 写不进去就整体回滚，旧行不删
+                await _snapshot_settings(session, [old_row], "迁移到新作业")
                 await session.execute(
                     delete(SchedulerJobSetting).where(
                         SchedulerJobSetting.job_name == old_name

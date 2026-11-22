@@ -86,14 +86,37 @@
 
     **回滚 / 恢复**（启动期迁移是**不可逆**的 `DELETE`）：
 
-    - 删除前会把旧行内容**打进启动日志**（`作业配置删除快照（合并到新作业）`：
-      `job_name` / `enabled` / `cron`）——这就是恢复依据；
-    - 合并失败时旧行**不会被删**（`prune_orphaned_settings` 收到 `keep` 保护，
-      下次启动自动重试），且失败会登记到 `startup_status`——`/readyz` 的
-      `degradations` 里能看到 `job_settings_merge`；
-    - 需要手工还原时：停容器 → 按日志里的快照往 `scheduler_job_settings`
-      插回旧行（`job_name` / `enabled` / `cron`）→ 重启；或直接在新作业行上
-      按快照改 `enabled` / `cron`（新行已存在时合并不会覆盖它）。
+    - **删除前先留快照**（三条删除路径都留：合并 / 孤儿清理 / 改名迁移）：
+      旧行内容写进**新表 `scheduler_job_settings_backup`**（`job_name` /
+      `enabled` / `cron` / `reason` / `deleted_at`），**与 `DELETE` 在同一
+      事务**里——要么都成、要么都回滚，绝不出现「删了却没记录」；同时打一条
+      启动日志（`作业配置删除快照（…）`）作为人读线索。**快照表才是恢复依据**
+      （容器日志会轮转、随重建而丢，不能当唯一依据）；
+    - **合并失败时旧行不会被删**（`prune_orphaned_settings` 收到 `keep` 保护，
+      下次启动自动重试）——此时**没有快照**（因为没删），旧行本身还在库里，
+      直接查 `scheduler_job_settings` 即可；且失败会登记到 `startup_status`
+      ——`/readyz` 的 `degradations` 里能看到 `job_settings_merge`；
+    - **风险评估**（本次迁移涉及的两处 schema / 数据变更）：
+      ① 新增 `scheduler_job_settings_backup` 表 = SQLite `CREATE TABLE`，
+      **只建空表**，不改任何既有表结构、不重建索引（写锁毫秒级，**不停机**）；
+      ② 删的行数 ≤ 3（两条旧作业 + `refresh_user_data` 一行），单条小事务；
+      ③ 回滚本迁移本身 = 停容器 → 跑下面的还原 SQL → 启动；回滚新表 =
+      留表无害（旧代码读不到）或 `DROP TABLE scheduler_job_settings_backup`；
+    - **还原步骤**（停容器后用 sqlite3 执行；新作业行已存在时合并不会覆盖它，
+      想恢复旧行为可二选一）：
+      ```sql
+      -- ① 还原成两条旧作业（旧的 push_free_torrents / monitor_free_window）
+      INSERT OR REPLACE INTO scheduler_job_settings (job_name, enabled, cron, updated_at)
+      SELECT job_name, enabled, cron, datetime('now', 'localtime')
+      FROM scheduler_job_settings_backup
+      WHERE job_name IN ('push_free_torrents', 'monitor_free_window');
+
+      -- ② 或还原到新作业（保留合并后的单一作业，只把启停 / cron 改回去）
+      UPDATE scheduler_job_settings SET enabled = (SELECT enabled FROM scheduler_job_settings_backup b WHERE b.job_name = 'monitor_free_window'),
+                                         cron    = (SELECT cron    FROM scheduler_job_settings_backup b WHERE b.job_name = 'monitor_free_window')
+      WHERE job_name = 'push_and_monitor_free';
+      ```
+      查快照：`SELECT * FROM scheduler_job_settings_backup;`
 
 - **作业触发新增「数据流」能力**（`depends_on` + `min_trigger_interval_sec`）：
 
@@ -115,8 +138,11 @@
   （`module` / `module_title` / `modules[]` / `depends_on` /
   `min_trigger_interval_sec`），旧客户端忽略未知字段即可；破坏面**仅限**
   被移除的三个旧作业名（`refresh_user_data` / `push_free_torrents` /
-  `monitor_free_window`），且它们**响亮地失败**（脚本会立刻报错，不会像
-  2.0.0 那次「502 → 202」那样**静默**把「已入队」当成失败）。
+  `monitor_free_window`）。失效**要按端点区分**：`toggle` / `cron` / `config`
+  返 **404**（响亮失败，脚本会立刻报错）；`run` 返 **200 + `ok=false`**——
+  **只查状态码的脚本会静默通过**，必须按 `ok` 判成败（与 2.0.0 那次
+  「502 → 202」同属「状态码不再报错、判据要改」的一类，不能当无害升级）。
+  端点对照表见下方「旧作业名的端点行为」。
 - **弃用时间线**：旧作业名自 **v2.1.0 起立即不可调用**，**无兼容期**——面板自托管、
   前后端同版本发布，面板前端已在本 PR 内适配；**外部脚本须在升级镜像前改完**。
 
@@ -138,8 +164,10 @@
 - **`scheduler_job_settings` 的旧行**：启动期迁移把 `push_free_torrents` +
   `monitor_free_window` 合并成 `push_and_monitor_free` 一行（**启停取 AND**、
   **cron 不搬**）；`refresh_user_data` 的旧行按「孤儿清理」删除。迁移是**不可逆
-  DELETE**——删除前把旧行内容打进启动日志（`作业配置删除快照（…）`），恢复步骤
-  见上文「免费种推送与免费窗口监测合并为一个作业 → 回滚 / 恢复」。
+  DELETE**——删除前把旧行内容**持久化到快照表 `scheduler_job_settings_backup`**
+  （与 `DELETE` 同一事务，三条删除路径都留），并打一条启动日志
+  （`作业配置删除快照（…）`）；恢复步骤见上文「免费种推送与免费窗口监测合并为
+  一个作业 → 回滚 / 恢复」。
 - **受影响调用方**：任何调用 `POST /scheduler/{job}/…`（手动触发 / 改 cron /
   改启停 / 看配置）的脚本与外部工具；`GET /scheduler` 的消费方只会看到
   `jobs[]` 少了三个名字、多了 `module` 等字段。
