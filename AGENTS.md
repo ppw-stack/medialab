@@ -1141,15 +1141,16 @@ Conventional Commits，作用域示例：`feat(crypto)` / `fix(free-seed)` / `do
 
 ## 前端检查
 ```bash
-cd web && npm run check                          # lint + format:check + type-check（提交前跑这个）
+cd web && npm run check                          # lint + format:check + type-check + test（提交前跑这个）
 cd web && npm run lint                           # ESLint（--max-warnings 0）
 cd web && npm run format:check                   # Prettier 格式检查
 cd web && npm run type-check                     # vue-tsc 类型检查
+cd web && npm test                               # 前端单元测试（node:test，零新增依赖，需 Node ≥ 22.18）
 cd web && npm run build                          # vue-tsc -b && vite build
 cd web && node scripts/check-types-placement.mjs # 类型放置约束
 cd web && node scripts/check-css-classes.mjs      # CSS class 定义检查
 ```
-项目**不保留 e2e 测试**（原 Playwright e2e 连真实下载器与真实站点，CI 上无法运行，已整体移除）。前端正确性靠上述静态检查 + 构建 + 人工核对。
+项目**不保留 e2e 测试**（原 Playwright e2e 连真实下载器与真实站点，CI 上无法运行，已整体移除）。前端正确性靠上述静态检查 + 单元测试 + 构建 + 人工核对。
 
 ## 前端工程规范（2026-11-23 加入）
 
@@ -1165,6 +1166,5 @@ cd web && node scripts/check-css-classes.mjs      # CSS class 定义检查
 - **模板串里的数字要显式 `String()`**（`restrict-template-expressions`）：`${id}` → `${String(id)}`；运算表达式整体包（`String((page - 1) * 50)`）。
 - **`prefer-nullish-coalescing` 不许批量 `--fix`**：自动修复会把 `count || 5` 改成 `count ?? 5`（0 变 5，静默改语义）。要保语义就写成 `(x ?? '') || fallback`。
 - **Git Hooks 装在 `web/.husky/`**（hooksPath = `web/.husky/_`），由 `web/package.json` 的 `prepare` 脚本注册。⚠️ husky 必须在**仓库根**跑（找的是 cwd 下的 `.git`），故 prepare 脚本是 `cd .. && husky web/.husky`；hook 脚本内部 cwd 是仓库根，要自己 `cd web`。
+- **前端有单元测试了**（2026-11-23 加入，`web/tests/` + `web/tsconfig.test.json`）：Node 内置 `node:test`（**零新增依赖**），`npm test` 跑。测试代码**单独一个 TS 工程**（`types: ["node"]`）——Node 全局**不进应用工程**（进了会把 `setInterval` 返回类型变成 `NodeJS.Timeout`）。**改 `web/src/api.ts` 这类共享请求层必须同步补用例**（请求头归一化 / 请求体语义）。需 Node ≥ 22.18（原生 TS 类型擦除）。
 - **AI 不得自行修改工程质量配置来规避检查**；确需改规范先说明原因并获维护者认可。
-
-

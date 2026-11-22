@@ -33,10 +33,26 @@ export const useAuthStore = defineStore('auth', () => {
     await refresh();
   }
 
-  async function logout() {
-    await fetch('/api/v1/auth/logout', { method: 'POST' });
+  /**
+   * 登出。
+   *
+   * ⚠️ **服务端登出失败也必须清本地登录态**——否则请求一失败，
+   *    未处理的拒绝会向上抛，界面停在「已登录」状态。
+   *
+   * @returns `true` = 服务端登出成功；`false` = 请求失败（本地**已**清理），
+   *          由调用方决定要不要提示用户。
+   */
+  async function logout(): Promise<boolean> {
+    let ok = true;
+    try {
+      await fetch('/api/v1/auth/logout', { method: 'POST' });
+    } catch {
+      // 网络中断 / 服务端异常——记下失败，继续走本地清理
+      ok = false;
+    }
     authenticated.value = false;
     username.value = null;
+    return ok;
   }
 
   return { authenticated, username, loading, login, logout, refresh };

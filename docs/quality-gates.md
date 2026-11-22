@@ -179,6 +179,26 @@ flat config 的**最后**（关闭与 Prettier 冲突的 ESLint 格式规则）�
 - 前端运行时确实可能拿到 null（如 `a-input-number` 清空时 v-model 写
   null）→ **改类型**，不要删防御。
 
+### 5.2 单元测试工程（`web/tsconfig.test.json`）
+
+前端**不保留 e2e**（Playwright 连真实下载器与站点，CI 跑不了），但**行为
+变更要有回归保护**——故引入**零新增依赖**的单元测试：
+
+- 跑在 **Node** 环境，用 Node 内置的 `node:test` + `node:assert/strict`
+  （`npm test` → `node --test "tests/**/*.test.ts"`）。
+- 需要 **Node ≥ 22.18**（原生 TypeScript 类型擦除，`.ts` 直接可跑）；
+  CI 与 Docker 都是 `node:22` ✓。
+- 测试代码放 `web/tests/`（**不放 `web/src/`**），类型由
+  `web/tsconfig.test.json` 单独一个工程管：
+  - `types: ["node"]` —— Node 全局只进测试工程，**不进应用工程**
+    （进了会把 `setInterval` 的返回类型从 `number` 变成 `NodeJS.Timeout`）
+  - 其余严格模式开关与 `tsconfig.app.json` 同款
+- 现有用例：`web/tests/api.test.ts` —— 锁住 `api.ts` 的请求头归一化与
+  请求体语义（`0` / `false` / `''` / `null` 不再被吞成「无 body」）。
+
+> ⚠️ `node:test` 的 `describe` / `it` 返回 Promise，ESLint 的
+> `no-floating-promises` 会报错——顶层用例用 `void` 显式标注「有意忽略」。
+
 ---
 
 ## 6. Git Hooks
@@ -222,7 +242,8 @@ npm run lint:fix       # eslint . --fix
 npm run format         # prettier --write .
 npm run format:check   # prettier --check .
 npm run type-check     # vue-tsc -b
-npm run check          # lint && format:check && type-check（提交前跑这个）
+npm test              # node --test（前端单元测试，需 Node ≥ 22.18）
+npm run check          # lint && format:check && type-check && test（提交前跑这个）
 
 # 两条项目自研的存量闸门（与本规范并行，独立 node 脚本）
 node scripts/check-types-placement.mjs   # API 契约类型集中在 src/types.ts
@@ -233,13 +254,14 @@ node scripts/check-css-classes.mjs      # template 用到的 class 有样式定�
 
 ## 8. CI 门禁
 
-`.github/workflows/ci.yml` 的 `frontend` job，5 步全绿才允许合并：
+`.github/workflows/ci.yml` 的 `frontend` job，6 步全绿才允许合并：
 
 1. `npm run build`（vue-tsc 类型检查 + 构建）
 2. `node scripts/check-types-placement.mjs`
 3. `node scripts/check-css-classes.mjs`
 4. `npm run lint`
 5. `npm run format:check`
+6. `npm test`（单元测试）
 
 ---
 
@@ -251,6 +273,7 @@ node scripts/check-css-classes.mjs      # template 用到的 class 有样式定�
 | ESLint warnings | 0（`--max-warnings 0`） |
 | TypeScript errors | 0 |
 | Prettier 格式问题 | 0 |
+| 单元测试失败 | 0 |
 | 未处理 Promise | 0 |
 | 显式 any | 0 |
 | 禁止的 TS 注释 | 0 |

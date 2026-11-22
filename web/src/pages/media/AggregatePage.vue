@@ -339,7 +339,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { message } from 'ant-design-vue';
 import DataTable from '../../components/DataTable.vue';
 import DirBrowser from '../../components/DirBrowser.vue';
@@ -417,6 +417,20 @@ function mappingOf(groupId: number): AggregateGroupMapping | undefined {
 /** 各组进行中 / 最近一次的归拢 job（group_id → job） */
 const jobs = ref<Record<number, AggregateSyncJob>>({});
 let jobTimer: number | undefined;
+
+/**
+ * 组件卸载时清掉轮询定时器。
+ *
+ * ⚠️ 定时器只在 job 结束或新 job 启动时清理——**离开页面时 job 往往还在跑**，
+ * 不在这里兜底的话，卸载后仍每 2 秒打一次 `/aggregate/sync-jobs/:id`，
+ * 并继续写 `jobs.value`（定时器泄漏 + 无意义请求）。
+ */
+onUnmounted(() => {
+  if (jobTimer !== undefined) {
+    window.clearInterval(jobTimer);
+    jobTimer = undefined;
+  }
+});
 
 /** 某组的归拢 job（没有则 undefined）。 */
 function jobOf(groupId: number): AggregateSyncJob | undefined {

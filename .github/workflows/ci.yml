@@ -123,6 +123,13 @@ jobs:
         working-directory: web
         run: npm run format:check
 
+      - name: Unit tests
+        # 请求层回归测试（Node 内置 node:test，**零新增依赖**）——
+        # 锁住 api.ts 的请求头 / 请求体语义，防止后续重构再次静默改变行为。
+        # 需要 Node ≥ 22.18（原生 TypeScript 类型擦除）；CI 用 node:22 ✓
+        working-directory: web
+        run: npm test
+
   compose:
     name: compose (配置语法)
     runs-on: ubuntu-latest

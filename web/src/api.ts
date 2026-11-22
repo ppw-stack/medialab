@@ -18,8 +18,12 @@ const BASE_MEDIA = '/api';
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
-    super(message);
+  /**
+   * @param options 透传给 `Error` 的选项——`cause` 用于挂底层失败原因
+   *   （如响应体不是 JSON 时的解析异常），**不静默吞掉**。
+   */
+  constructor(status: number, message: string, options?: ErrorOptions) {
+    super(message, options);
     this.status = status;
   }
 }
@@ -80,14 +84,18 @@ async function request<T = unknown>(
 
   if (!resp.ok) {
     let detail = `HTTP ${String(resp.status)}`;
+    let cause: unknown;
     try {
       const data = (await resp.json()) as { detail?: string };
       // 空串也退回 HTTP 状态文案（后端不会返回空 detail，这里只是保险）
       detail = (data.detail ?? '') || detail;
-    } catch {
-      // 响应体不是 JSON（网关错误页等）——保留 HTTP 状态文案
+    } catch (err) {
+      // 响应体不是 JSON（网关错误页等）——保留 HTTP 状态文案，
+      // 并把解析失败作为 `cause` 挂到 ApiError 上：**不静默吞掉**，
+      // 否则「detail 为何退回状态文案」完全不可观测。
+      cause = err;
     }
-    throw new ApiError(resp.status, detail);
+    throw new ApiError(resp.status, detail, { cause });
   }
 
   if (resp.status === 204) return undefined as T;

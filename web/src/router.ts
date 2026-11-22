@@ -113,6 +113,8 @@ router.beforeEach(async (to) => {
   const auth = useAuthStore();
 
   if (!authChecked) {
+    // `refresh()` 内部自带 try/catch（网络异常一律兜住），**不会 reject**——
+    // 这里 await 不会产生未处理的拒绝，导航守卫也不会因此中断。
     await auth.refresh();
     authChecked = true;
   }

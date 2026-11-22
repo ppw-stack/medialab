@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
+import { message } from 'ant-design-vue';
 import {
   CloudServerOutlined,
   ApiOutlined,
@@ -221,8 +222,13 @@ function onMenuClick({ key }: { key: string }) {
 }
 
 async function handleLogout() {
-  await auth.logout();
+  // 服务端登出失败时**本地登录态照样清理**（store 内部保证），
+  // 这里只是把失败告诉用户——不能静默吞掉。
+  const ok = await auth.logout();
   void router.push('/login');
+  if (!ok) {
+    message.error('服务端登出失败，已清除本地登录态');
+  }
 }
 </script>
 
