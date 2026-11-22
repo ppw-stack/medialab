@@ -929,7 +929,7 @@ async function syncNow(groupId: number) {
 /** 等一个 job 结束（2s 轮询），返回最终状态。 */
 async function waitForJobEnd(jobId: string): Promise<AggregateSyncJob | null> {
   for (;;) {
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((resolve) => setTimeout(resolve, 2000));
     const j = await api.get<AggregateSyncJob>(`/aggregate/sync-jobs/${jobId}`);
     if (j.state !== 'running') {
       jobs.value[j.group_id] = j;

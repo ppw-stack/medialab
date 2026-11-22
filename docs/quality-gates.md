@@ -27,6 +27,13 @@ AI 生成的代码不能只靠人工审查。**AI 可以自由完成业务实现
 | 工具 | 职责 | 命令 |
 |---|---|---|
 | **ESLint 10** | 代码质量 + **类型感知**规则 | `npm run lint` |
+| ├ `eslint-plugin-vue` | Vue 官方规则 | |
+| ├ `@vue/eslint-config-typescript` | Vue + TS 集成（类型感知） | |
+| ├ `typescript-eslint` | TS 严格规则 | |
+| ├ `eslint-plugin-import-x` | 模块导入规范 | |
+| ├ `eslint-plugin-promise` | Promise 使用规范 | |
+| ├ `eslint-plugin-vuejs-accessibility` | Vue 无障碍规范 | |
+| ├ `eslint-import-resolver-vite` | 让 import-x 认 Vite 的解析规则 | |
 | **Prettier 3** | 代码格式统一 | `npm run format:check` |
 | **vue-tsc** | Vue SFC 类型检查 | `npm run type-check` |
 | **Husky + lint-staged** | 提交前只查暂存文件 | `pre-commit` 钩子 |
@@ -52,9 +59,41 @@ AI 生成的代码不能只靠人工审查。**AI 可以自由完成业务实现
 pluginVue.configs['flat/recommended-error']   // Vue 官方完整推荐，全部 error
 vueTsConfigs.strictTypeChecked                // TypeScript 严格类型安全
 vueTsConfigs.stylisticTypeChecked             // TypeScript 编码风格
+
+// 三个「推荐」插件（方案 §2.2）
+importX.configs.recommended.rules             // 模块导入规范
+promise.configs.recommended.rules             // Promise 使用规范
+vueA11y.configs['flat/recommended'].rules      // Vue 无障碍规范
 ```
 
-### 3.1 明确禁止
+### 3.1 import-x 必须配 Vite resolver
+
+本项目靠 Vite 的 `resolve.extensions`（`['.vue', '.ts', '.js', '.json']`）**允许
+省略扩展名**（`'../utils/cron'` 实际是 `../utils/cron.ts`）。import-x 的默认
+node resolver 不认这套规则，会把 **39 处正常 import** 误报成「无法解析」。
+
+所以配了 `eslint-import-resolver-vite`：
+
+```js
+settings: {
+  'import-x/resolver': {
+    vite: {
+      viteConfig: {
+        resolve: { extensions: ['.vue', '.ts', '.js', '.json'] },
+      },
+    },
+    node: true,
+  },
+},
+```
+
+⚠️ ESLint 的规则是**同步**的，用不了 Vite 的 `ResolvedConfig` API（异步），
+所以这里是手写一份**等价于 `vite.config.ts` 的 resolve 段**——**改 vite 的
+resolve 配置时这里要同步改**。
+
+⚠️ 扩展名列表**必须含 `.vue`**——import-x 自己的默认列表里没有。
+
+### 3.2 明确禁止
 
 | 检查项 | 规则 |
 |---|---|
@@ -68,7 +107,7 @@ vueTsConfigs.stylisticTypeChecked             // TypeScript 编码风格
 | 宽松相等 | `eqeqeq` |
 | 隐式 any / 不安全类型操作 | `strictTypeChecked` 全套 |
 
-### 3.2 例外规则
+### 3.3 例外规则
 
 **例外必须带明确理由**（写在配置注释里），不允许为了消错批量关闭规则。
 
@@ -79,7 +118,13 @@ vueTsConfigs.stylisticTypeChecked             // TypeScript 编码风格
    就是产物，`console.log` 是业务输出而不是调试残留。同时补上 Node 全局
    （`globals.node`），否则 `console` / `process` 会被 `no-undef` 报出来。
 
-2. **模板串里的数字必须显式 `String()`** —— `restrict-template-expressions`
+2. **`import-x/default` 对 `vite.config.ts` 关闭** —— import-x 的解析器把
+   `@vitejs/plugin-vue` 解析到 **CJS 构建**（`dist/index.cjs`），而代码按
+   package 的 `exports` 映射引的是 **ESM 构建**（`dist/index.mjs`）。规则读
+   CJS 那个文件认不出 default 导出 → 误报。只影响这一个构建配置文件，
+   其余文件该规则照常生效。
+
+3. **模板串里的数字必须显式 `String()`** —— `restrict-template-expressions`
    是 `strictTypeChecked` 自带的规则，不是我们加的。代价是 139 处模板串要
    包一层 `String()`；收益是「`${count}` 到底是数字还是字符串」在代码里
    一目了然。

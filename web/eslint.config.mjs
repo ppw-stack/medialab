@@ -3,6 +3,9 @@ import pluginVue from 'eslint-plugin-vue';
 import { withVueTs, vueTsConfigs } from '@vue/eslint-config-typescript';
 import eslintConfigPrettier from 'eslint-config-prettier/flat';
 import globals from 'globals';
+import importX from 'eslint-plugin-import-x';
+import promise from 'eslint-plugin-promise';
+import vueA11y from 'eslint-plugin-vuejs-accessibility';
 
 /**
  * ESLint 扁平配置（ESLint 10 + flat config）。
@@ -72,6 +75,53 @@ export default withVueTs(
       curly: ['error', 'all'],
       'prefer-const': 'error',
       'no-duplicate-imports': 'error',
+    },
+  },
+
+  {
+    // ---- 三个「推荐」插件（方案 §2.2）----
+    //
+    // import-x：模块导入规范。**必须配 vite resolver**——本项目靠 Vite 的
+    // `resolve.extensions`（['.vue', '.ts', '.js', '.json']）允许省略扩展名，
+    // import-x 的默认 node resolver 不认这套规则，会把 39 处正常 import
+    // 误报成「无法解析」。
+    plugins: {
+      'import-x': importX,
+      promise,
+      'vuejs-accessibility': vueA11y,
+    },
+    settings: {
+      'import-x/resolver': {
+        // 用 Vite 的解析规则——与构建产物一致，不会误报。
+        // ⚠️ ESLint 的规则是同步的，用不了 Vite 的 ResolvedConfig API，
+        // 所以这里手写一份**等价于 vite.config.ts 的 resolve 段**。
+        // ⚠️ 扩展名列表必须与 vite.config.ts 一致，且**必须含 .vue**——
+        // import-x 的默认列表里没有 .vue。
+        vite: {
+          viteConfig: {
+            resolve: {
+              extensions: ['.vue', '.ts', '.js', '.json'],
+            },
+          },
+        },
+        node: true,
+      },
+    },
+    rules: {
+      ...importX.configs.recommended.rules,
+      ...promise.configs.recommended.rules,
+      ...vueA11y.configs['flat/recommended'].rules,
+    },
+  },
+
+  {
+    // import-x 的解析器把 `@vitejs/plugin-vue` 解析到 **CJS 构建**
+    // （dist/index.cjs）——而代码按 package 的 `exports` 映射引的是 **ESM 构建**
+    // （dist/index.mjs）。规则读 CJS 那个文件认不出 default 导出 → 误报。
+    // 只影响这一个构建配置文件，其余文件该规则照常生效。
+    files: ['vite.config.ts'],
+    rules: {
+      'import-x/default': 'off',
     },
   },
 

@@ -9,7 +9,7 @@
  * **每个字段都能选预设或写自定义**（无「高级模式」开关——粒度更细，
  * 不用在两种界面间切换）。预设覆盖不到时落「自定义」，仍可编辑。
  */
-import { computed, ref, watch } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import {
   DAY_PRESETS,
   HOUR_PRESETS,
@@ -69,7 +69,9 @@ watch(
     applyingExternal = true;
     state.value = cronToState(v);
     // 下一个 tick 复位（watch 回调是同步的，赋值会立即触发下方 watch）
-    void Promise.resolve().then(() => {
+    // 用 Vue 的 nextTick 而不是 Promise.resolve().then()——后者只是下一个
+    // 微任务，nextTick 等的是**调度队列 flush 完**，才是这里真正要的语义。
+    void nextTick(() => {
       applyingExternal = false;
     });
   },

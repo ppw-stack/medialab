@@ -1156,9 +1156,11 @@ cd web && node scripts/check-css-classes.mjs      # CSS class 定义检查
 完整规范见 **`docs/quality-gates.md`**（含工具职责、规则集、Git Hooks 接线细节、CI 门禁）。要点：
 
 - **工具链**：ESLint 10（flat config，`strictTypeChecked` + `stylisticTypeChecked`）+ Prettier 3 + vue-tsc + Husky/lint-staged。**oxlint 已移除**——它是纯语法检查器，没有类型信息，拿不到 `no-floating-promises` / `no-unnecessary-condition` 这类真 bug 探测器。
+- **插件**：Vue 官方（`eslint-plugin-vue`）、TS（`@vue/eslint-config-typescript` / `typescript-eslint`）+ 三个「推荐」插件（`eslint-plugin-import-x` / `eslint-plugin-promise` / `eslint-plugin-vuejs-accessibility`）。
+  ⚠️ **import-x 必须配 `eslint-import-resolver-vite`**：本项目靠 Vite 的 `resolve.extensions` 允许省略扩展名，import-x 默认 resolver 会把 **39 处正常 import** 误报成「无法解析」。配置里手写了一份等价于 `vite.config.ts` 的 resolve 段——**改 vite 的 resolve 配置时要同步改**（`web/eslint.config.mjs` 的 `import-x/resolver`）。
 - **TypeScript 严格模式已开满**（`tsconfig.app.json` + `tsconfig.node.json`）：`strict` / `noUncheckedIndexedAccess` / `exactOptionalPropertyTypes` / `noImplicitReturns` 等。⚠️ 此前**根本没开 `strict`**——改前端时别再依赖「null 不可见」。
 - **禁止**：显式 `any`、非空断言 `!`、`@ts-ignore` / `@ts-nocheck`、`@ts-expect-error`（必须带 ≥10 字说明）、未处理的 Promise、`console`、宽松相等。
-- **例外必须带明确理由**（写在 `web/eslint.config.mjs` 注释里），不允许用 `eslint-disable` 或批量关规则消错。当前仅两处例外：`scripts/*.mjs` 放行 `no-console`（CI 闸门脚本，stdout 即产物）。
+- **例外必须带明确理由**（写在 `web/eslint.config.mjs` 注释里），不允许用 `eslint-disable` 或批量关规则消错。当前仅三处例外：`scripts/*.mjs` 放行 `no-console`（CI 闸门脚本，stdout 即产物）；`import-x/default` 对 `vite.config.ts` 关闭（resolver 把 `@vitejs/plugin-vue` 解析到 CJS 构建，认不出 default 导出 → 误报）。
 - **`web/src/types.ts` 是后端 DTO 的手写镜像**：`no-unnecessary-condition` 报的「多余 null 判定」多数是类型在说谎或防御写多了——**先核对后端**（`app/db/models.py` / `app/api/routes/`）再决定是删防御还是改类型。后端保证非空 → 删 `?? ''`；前端运行时真会拿到 null（如 `a-input-number` 清空写 null）→ 改类型。
 - **模板串里的数字要显式 `String()`**（`restrict-template-expressions`）：`${id}` → `${String(id)}`；运算表达式整体包（`String((page - 1) * 50)`）。
 - **`prefer-nullish-coalescing` 不许批量 `--fix`**：自动修复会把 `count || 5` 改成 `count ?? 5`（0 变 5，静默改语义）。要保语义就写成 `(x ?? '') || fallback`。
