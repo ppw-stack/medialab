@@ -281,6 +281,13 @@ class SiteAdapter(ABC):
 
         返回 ``None`` = 该种子当前**没有生效的优惠**（不是免费种；
         不是「查失败」——失败必须抛 :class:`SiteFetchError`）。
+
+        **失败分级**（调用方据此决定「重试」还是「上报人工处理」）：
+
+        - :class:`SitePermanentError`：**永久**失败（登录态失效 → 返回登录页）
+          ——重试也不会成功，调用方应中止本轮并按站点级故障上报。
+        - :class:`SiteFetchError`：瞬时失败（网络 / HTTP / 解析）——下轮重试。
+        - :class:`BreakerTripped`：站点被限流（403/429）——应熔断整站。
         """
         raise NotImplementedError
 

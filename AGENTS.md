@@ -136,6 +136,7 @@
   - **种子抓取不带任何筛选参数**（`GET /torrents.php?page=N`）：① 站点筛选参数语义随版本漂移（各站 `spstate` 含义都不同）② `spstate=2` 按「免费剩余时长」倒序，会把 2022 年老种（重开 30 天促销）顶到前面，**按发布时间排序的全量列表反而不含它们** ③ 筛选后的结果**仍然没有**每个种子的真实窗口
   - **代价与增量**：`promotion.php` 是**逐种子**请求（无批量入口，`promotion.php` 不带 id → 404；单条实测约 0.4–1.0s）→ 由 service 层做**增量判定**：`PERMANENT` 不复查；`TIMED` 只在截止后复查；已确认非免费的条目在 `free_payload` 写 `promotion_checked_at`，默认 **60 分钟 TTL** 后才复查；新增条目立即查。其余沿用库里旧判定（回填成等效 `free_payload`，upsert 后值不变）。适配器用 `supports_promotion_lookup = True` 声明该能力（`app/services/jobs.py:_resolve_promotions`），并发 5、单轮上限 200。2026-11-22 生产实测：3 页 300 条全量约 61s，300/300 HTTP 200，当前生效免费 34 条；因此**不能**把 `unknown` 当「每轮都查」——否则约 4.3 万请求/天
   - ⚠️ **404 = 种子不存在**（NexusPHP 标准 404 页）→ 当「无优惠记录」处理，不算故障；另有部分不存在的 id 返回 **HTTP 200 的「页面不存在」页**，同样按无优惠处理。429/403 → 熔断；其它 4xx/5xx / 缺少优惠表头 → `SiteFetchError`（不写判定，下轮重试）
+  - ⚠️ **登录页 = 站点级故障（2026-11-22 审查修复）**：`promotion.php` 返回登录页（cookie 失效）→ adapter 抛 `SitePermanentError`（**永久**失败，与 `SiteFetchError` 分开）→ service 层**中止本轮优惠复查**并把该站记为**站点失败**（`failed_sites` + 明细点名）。**不能当单条失败吞掉**：那会把故障静默写成「非免费」，且下一轮还会对同一批失效 cookie 重打上百个请求（单轮上限 200）。⚠️ **service 层不 import httpx**——传输异常由 adapter 统一翻译成 `SiteFetchError`（分层约束：adapters 翻译，services 只认本层异常）
   - fixture 抓取：`scripts/capture_hdwing_promotion_fixtures.py`（裁剪 + 自校验；4 种真实形态：生效中 / 生效+过期混合 / 有表头无 Free / 已过期）。抓取脚本读生产库 cookie 时使用 `mode=ro`，只 GET 站点页面
 - **FR-1.6 站点用户数据契约**（2026-10-18 加入，2026-10-18 精简为单方法，2026-10-22 加时魔）：
   - 不抽 9 站 user_data 基类；NexusPHP 7 站共用 `app/adapters/sites/parsers/nexus_php.py` module-level helper（`parse_user_snapshot` / `parse_hourly_bonus`）

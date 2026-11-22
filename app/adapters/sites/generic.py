@@ -442,7 +442,8 @@ class GenericAdapter(SiteAdapter):
 
         返回 ``None`` = 该种子当前没有生效的优惠（不是免费种；不是查失败）。
         404 / 「页面不存在」= 种子被删或 id 不存在 → 也返回 ``None``。
-        403/429 → :class:`BreakerTripped`；其它失败 → :class:`SiteFetchError`。
+        403/429 → :class:`BreakerTripped`；登录页（cookie 失效）→
+        :class:`SitePermanentError`；其它失败 → :class:`SiteFetchError`。
         """
         if not self.supports_promotion_lookup:
             return None

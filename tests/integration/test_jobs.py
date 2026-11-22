@@ -23,6 +23,7 @@ from app.adapters.sites.base import (
     SiteAdapter,
     SiteFetchError,
     SiteHealth,
+    SitePermanentError,
     SiteProfile,
 )
 from app.core.timeutils import bj_now, bj_now_dt, format_bj, parse_bj
@@ -57,6 +58,8 @@ class _FakeAdapter(SiteAdapter):
         promotions: dict[str, Promotion | None] | None = None,
         promo_breaker: bool = False,
         promo_fail_items: set[str] | None = None,
+        promo_permanent_items: set[str] | None = None,
+        item_count: int = 3,
         **_: object,
     ) -> None:
         super().__init__(profile)
@@ -67,8 +70,12 @@ class _FakeAdapter(SiteAdapter):
         self.promotions = promotions or {}
         self.promo_breaker = promo_breaker
         self.promo_fail_items = promo_fail_items or set()
+        self.promo_permanent_items = promo_permanent_items or set()
+        self.item_count = item_count
         self.promotion_calls: list[str] = []
-        self.supports_promotion_lookup = promotions is not None or promo_breaker
+        self.supports_promotion_lookup = (
+            promotions is not None or promo_breaker or bool(promo_permanent_items)
+        )
 
     async def check_reachability(self) -> SiteHealth:
         return SiteHealth(reachable=True, logged_in=True)
@@ -112,7 +119,7 @@ class _FakeAdapter(SiteAdapter):
                     item_id=f"{i}",
                     size=1024 * (i + 1),
                 )
-                for i in range(3)
+                for i in range(self.item_count)
             ]
         return [
             FeedItem(
@@ -145,6 +152,8 @@ class _FakeAdapter(SiteAdapter):
         self.promotion_calls.append(item_id)
         if self.promo_breaker:
             raise BreakerTripped("优惠历史返回 429，需熔断")
+        if item_id in self.promo_permanent_items:
+            raise SitePermanentError("优惠历史返回登录页（cookie 失效）")
         if item_id in self.promo_fail_items:
             raise SiteFetchError("优惠历史临时失败")
         return self.promotions.get(item_id)
@@ -768,5 +777,47 @@ async def test_promotion_lookup_breaker_opens_site_breaker(db: None) -> None:
     await fetch_all_sites(factory)
     assert adapter.promotion_calls == []
 
+
+async def test_promotion_lookup_permanent_error_fails_site_and_aborts_round(
+    db: None,
+) -> None:
+    """优惠查询返回登录页（cookie 失效）→ 站点级失败 + 中止本轮复查。
+
+    不能当单条失败吞掉：那会把故障静默写成「非免费」，且下一轮还会对
+    同一批失效 cookie 重打上百个请求。
+    """
+    await _add_sites("hdwing")
+    adapter = _FakeAdapter(
+        SiteProfile(name="hdwing", domain="hdwing.test"),
+        mode="plain",
+        item_count=20,
+        promotions={},
+        promo_permanent_items={str(i) for i in range(20)},
+    )
+    factory = _factory_with_adapter(adapter)
+
+    result = await fetch_all_sites(factory)
+
+    # 站点级失败：作业统计看得见（不是「全部成功」）
+    assert result["failed_sites"] == 1
+    assert result["skipped_breaker"] == 0
+    # 本轮复查被中止：没有对 20 个种子逐个重打
+    assert 0 < len(adapter.promotion_calls) < 20
+
+    # 明细点名是哪个站、什么原因
+    pull_step = result["steps"][1]
+    items = pull_step.items or []
+    assert any(
+        item.name == "hdwing" and item.status == "fail" for item in items
+    )
+    detail = next(item.detail for item in items if item.name == "hdwing")
+    assert "优惠判定失败" in detail
+
+    async with session_scope() as session:
+        rows = (await session.execute(select(TorrentIndex))).scalars().all()
+        assert rows
+        # 故障**不写成**「已查非免费」：没有标记 → 下一轮还会复查
+        for row in rows:
+            assert not row.free_payload.get("promotion_checked_at")
 
 

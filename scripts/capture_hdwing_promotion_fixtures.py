@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import pathlib
 import re
 import sqlite3
@@ -48,6 +49,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from app.adapters.sites.generic import _current_promotion, _parse_promotion_rows
 from app.core.timeutils import bj_now_dt
+
+logger = logging.getLogger(__name__)
 
 FIXTURES = pathlib.Path(__file__).resolve().parents[1] / "tests" / "fixtures"
 
@@ -73,7 +76,10 @@ _BLOCK_RE = re.compile(
 
 def _read_cookie(db: str | None, cookie_file: str | None) -> str:
     if cookie_file:
-        return pathlib.Path(cookie_file).read_text(encoding="utf-8").strip()
+        try:
+            return pathlib.Path(cookie_file).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise SystemExit(f"读 cookie 文件失败：{cookie_file}: {exc}") from exc
     if db:
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         try:
@@ -135,13 +141,23 @@ async def _capture(cookie: str) -> None:
                     f"{name}: Free 记录数 {len(full_rows)} != 预期 {expected}"
                     "（样本 id 的页面形态变了？）"
                 )
-            (FIXTURES / name).write_text(trimmed + "\n", encoding="utf-8")
+            try:
+                (FIXTURES / name).write_text(trimmed + "\n", encoding="utf-8")
+            except OSError as exc:
+                raise SystemExit(f"写 fixture 失败：{name}: {exc}") from exc
             current = _current_promotion(full_rows, bj_now_dt())
-            print(
-                f"{name}: id={tid} 记录 {len(full_rows)} 条，"
-                f"当前生效={'是（至 ' + str(current.end_at) + '）' if current else '否'}"
+            logger.info(
+                "%s: id=%s 记录 %d 条，当前生效=%s",
+                name,
+                tid,
+                len(full_rows),
+                (
+                    f"是（至 {current.end_at}）"
+                    if current
+                    else "否"
+                ),
             )
-    print(f"\n已写入 {FIXTURES}")
+    logger.info("已写入 %s", FIXTURES)
 
 
 def main() -> None:
@@ -149,6 +165,7 @@ def main() -> None:
     parser.add_argument("--db", help="sqlite 库路径（读 sites.cookies，只读）")
     parser.add_argument("--cookie-file", help="cookie 文本文件")
     args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     cookie = _read_cookie(args.db, args.cookie_file)
     asyncio.run(_capture(cookie))
 

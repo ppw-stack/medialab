@@ -14,8 +14,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta
+from typing import NamedTuple
 
-import httpx
 from sqlalchemy import select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -25,6 +25,7 @@ from app.adapters.sites.base import (
     Promotion,
     SiteAdapter,
     SiteFetchError,
+    SitePermanentError,
 )
 from app.core.logging import get_logger
 from app.core.metrics import feed_pulls, stage_duration
@@ -77,10 +78,10 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
     """
     started = asyncio.get_running_loop().time()
     total_written = 0
-    # (site_id, name, pulled, ok, ko, pull_error)
+    # (site_id, name, pulled, ok, ko, site_error)
     summary: list[tuple[int, str, int, int, int, str | None]] = []
-    # 拉取失败的站（网络/DNS/适配器异常）——与"站点没有种子"区分开
-    pull_failures: list[tuple[str, str]] = []
+    # 站点级失败的站（拉取异常 / 优惠判定永久失败）——与"站点没有种子"区分开
+    site_failures: list[tuple[str, str]] = []
     # 被熔断跳过的站（不发请求）
     breaker_skipped: list[tuple[str, str]] = []
     # 逐站明细（前端「步骤卡片」展开后可见）——回答"是哪个站出了问题"
@@ -108,6 +109,8 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
             continue
 
         adapter: SiteAdapter | None = None
+        # 优惠判定的**站点级**永久失败（凭据失效）——非 None 即站点失败
+        promo_error: str | None = None
         try:
             adapter = factory.site(row)
         except Exception as exc:
@@ -127,24 +130,29 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
         ):
             # 免费判定（仅 hdwing 这类「优惠标记是 AJAX 占位符」的站）：
             # 增量复查新增 / 已过期的条目，其余沿用旧判定。
-            feed_items, promo_breaker = await _resolve_promotions(
-                adapter, row, feed_items
-            )
-            if promo_breaker is not None:
-                breaker_until = await _open_breaker(row, promo_breaker)
+            promo = await _resolve_promotions(adapter, row, feed_items)
+            feed_items = promo.items
+            if promo.breaker is not None:
+                breaker_until = await _open_breaker(row, promo.breaker)
                 logger.warning(
                     "站点 %s 优惠判定触发熔断，暂停拉取至 %s：%s",
                     row.name,
                     breaker_until,
-                    promo_breaker,
+                    promo.breaker,
                 )
+            if promo.error is not None:
+                # 凭据失效等**永久**故障 → 站点级失败。
+                # 不能当单条失败吞掉：那会把故障静默写成「非免费」。
+                promo_error = f"优惠判定失败：{promo.error}"
         ok, ko = await _upsert_site_items(row, feed_items)
         total_written += ok
-        summary.append((row.id, row.name, ok + ko, ok, ko, pull_error))
-        if pull_error is not None:
-            pull_failures.append((row.name, pull_error))
+        # 站点级失败 = 拉取失败 **或** 优惠判定永久失败（凭据失效）
+        site_error = pull_error or promo_error
+        summary.append((row.id, row.name, ok + ko, ok, ko, site_error))
+        if site_error is not None:
+            site_failures.append((row.name, site_error))
             site_items.append(
-                JobStepItem(row.name, "fail", ok + ko, pull_error)
+                JobStepItem(row.name, "fail", ok + ko, site_error)
             )
         elif breaker_until is not None:
             # 本轮触发熔断的站也计入「熔断跳过」——它本轮没拉到数据，
@@ -161,12 +169,13 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
                 JobStepItem(row.name, "ok", ok + ko, f"写入 {ok} 条种子")
             )
 
-    # 失败站 = 拉取失败（网络/DNS/适配器异常）或写入失败（DB 错误）的站。
+    # 失败站 = 拉取失败（网络/DNS/适配器异常）、优惠判定永久失败
+    # （凭据失效）或写入失败（DB 错误）的站。
     # 按站名去重——同一站可能两类错误都命中。
     failed_site_names: set[str] = {
         name for _, name, _, _, ko, _ in summary if ko > 0
     }
-    failed_site_names |= {name for name, _ in pull_failures}
+    failed_site_names |= {name for name, _ in site_failures}
     total_failed = len(failed_site_names)
     total_breaker_skipped = len(breaker_skipped)
 
@@ -177,11 +186,11 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
         )
     else:
         logger.info("站点拉取：无种子写入（站数 %d）", len(rows))
-    if pull_failures:
+    if site_failures:
         logger.warning(
-            "站点拉取失败 %d 站：%s",
-            len(pull_failures),
-            ", ".join(f"{name}({err[:60]})" for name, err in pull_failures),
+            "站点失败 %d 站：%s",
+            len(site_failures),
+            ", ".join(f"{name}({err[:60]})" for name, err in site_failures),
         )
     if breaker_skipped:
         logger.warning(
@@ -418,9 +427,20 @@ def _payload_from_promotion(
     return payload
 
 
+class _PromoResolution(NamedTuple):
+    """优惠复查的结果。"""
+
+    #: 补上免费判定（``free_payload``）后的条目列表
+    items: list[FeedItem]
+    #: 熔断原因（非 None = 站点被限流，本轮复查已中止）
+    breaker: str | None = None
+    #: **站点级**永久失败原因（非 None = 凭据失效等，本轮复查已中止）
+    error: str | None = None
+
+
 async def _resolve_promotions(
     adapter: SiteAdapter, row: Site, feed_items: list[FeedItem]
-) -> tuple[list[FeedItem], str | None]:
+) -> _PromoResolution:
     """给 feed_items 补上**真实**的免费判定（返回带 free_payload 的新列表）。
 
     只有支持优惠查询的适配器（``supports_promotion_lookup``）走这条路：
@@ -433,13 +453,23 @@ async def _resolve_promotions(
     TTL 的条目」，其余沿用库里旧判定（回填成等效 free_payload，upsert 后
     值不变）。否则每轮都要对几百个种子逐个请求站点——既慢又会被限流。
 
-    Returns: ``(新列表, 熔断原因)``——熔断原因非 None = 站点被限流，
-    本轮复查已中止。
+    **故障分级**（传输层异常由 adapter 统一翻译成本层异常，service 不碰
+    HTTP 实现细节）：
+
+    - :class:`SitePermanentError`（登录页 → cookie 失效）= **站点级**故障
+      → 中止本轮复查并上报站点失败。不能当单条失败吞掉：那会把故障静默
+      写成「非免费」，且下一轮还会对同一批失效 cookie 重打上百个请求。
+    - :class:`SiteFetchError`（网络 / HTTP / 解析）= 单条瞬时故障
+      → 该条目本轮不写判定，下轮重试。
+    - :class:`BreakerTripped`（403/429）= 熔断整站。
+
+    Returns: :class:`_PromoResolution`——``breaker`` 非 None = 站点被限流，
+    ``error`` 非 None = 站点级永久失败；两者都会中止本轮复查。
     """
     if not feed_items:
-        return (feed_items, None)
+        return _PromoResolution(items=feed_items)
     if not getattr(adapter, "supports_promotion_lookup", False):
-        return (feed_items, None)
+        return _PromoResolution(items=feed_items)
 
     now = bj_now_dt()
     known = await _known_free_states(row.id)
@@ -461,7 +491,7 @@ async def _resolve_promotions(
             replace(fi, free_payload=payloads[idx]) if idx in payloads else fi
             for idx, fi in enumerate(feed_items)
         ]
-        return (resolved, None)
+        return _PromoResolution(items=resolved)
 
     limited = pending[:_PROMO_LOOKUP_MAX]
     logger.info(
@@ -481,15 +511,30 @@ async def _resolve_promotions(
     semaphore = asyncio.Semaphore(_PROMO_LOOKUP_CONCURRENCY)
     checked_at = format_bj(now)
     failures = 0
+    #: 站点级永久失败（凭据失效）——一旦出现即中止本轮复查
+    permanent_error: str | None = None
 
     async def _one(idx: int, fi: FeedItem) -> None:
-        nonlocal failures
+        nonlocal failures, permanent_error
         async with semaphore:
+            if permanent_error is not None:
+                # 已确认凭据失效 → 不再对站点发请求（避免对失效 cookie 反复重打）
+                return
             try:
                 promo = await adapter.get_promotion(fi.item_id or "")
             except BreakerTripped:
                 raise
-            except (SiteFetchError, httpx.HTTPError) as exc:
+            except SitePermanentError as exc:
+                # 凭据失效 = **站点级**故障：中止本轮复查并上报站点失败。
+                # 不能当单条失败吞掉——那会把故障静默伪装成「非免费」。
+                permanent_error = str(exc)
+                logger.error(
+                    "站点 %s 优惠判定永久失败（中止本轮复查）：%s",
+                    row.name,
+                    exc,
+                )
+                return
+            except SiteFetchError as exc:
                 # 单条查失败不影响其它条目：该条目本轮不写免费判定
                 failures += 1
                 logger.warning(
@@ -513,10 +558,11 @@ async def _resolve_promotions(
             break
         if isinstance(result, Exception):
             failures += 1
-            logger.warning(
+            logger.error(
                 "站点 %s 优惠判定出现未预期异常：%s",
                 row.name,
                 result,
+                exc_info=result,
             )
 
     if failures:
@@ -531,7 +577,7 @@ async def _resolve_promotions(
         replace(fi, free_payload=payloads[idx]) if idx in payloads else fi
         for idx, fi in enumerate(feed_items)
     ]
-    return (resolved, breaker)
+    return _PromoResolution(items=resolved, breaker=breaker, error=permanent_error)
 
 
 async def _upsert_site_items(
