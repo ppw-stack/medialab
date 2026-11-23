@@ -48,7 +48,7 @@ _INDEX_HTML = """
 """
 
 
-def _fixture(name: str) -> str:
+def _promotion_fixture(name: str) -> str:
     return (
         Path(__file__).resolve().parents[1]
         / "fixtures"
@@ -57,7 +57,11 @@ def _fixture(name: str) -> str:
 
 
 #: NexusPHP「下载提示页」的真实页面（2026-11-23 prod 抓取，裁剪自 HDWinG）
-_NOTICE_HTML = _fixture("hdwing_download_notice.html")
+_NOTICE_HTML = (
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
+    / "hdwing_download_notice.html"
+).read_text(encoding="utf-8")
 
 
 def _promotion_table(start: str, end: str) -> str:
@@ -111,7 +115,7 @@ async def test_generic_hdwing_promotion_active(monkeypatch) -> None:
         router.get("https://hdwing.org/promotion.php?id=841134").mock(
             return_value=httpx.Response(
                 200,
-                text=_fixture("hdwing_promotion_active.html"),
+                text=_promotion_fixture("hdwing_promotion_active.html"),
             )
         )
         promo = await adapter.get_promotion("841134")
@@ -140,7 +144,7 @@ async def test_generic_hdwing_promotion_mixed_picks_active(monkeypatch) -> None:
         router.get("https://hdwing.org/promotion.php?id=640343").mock(
             return_value=httpx.Response(
                 200,
-                text=_fixture("hdwing_promotion_mixed.html"),
+                text=_promotion_fixture("hdwing_promotion_mixed.html"),
             )
         )
         promo = await adapter.get_promotion("640343")
@@ -168,13 +172,13 @@ async def test_generic_hdwing_promotion_expired_returns_none(monkeypatch) -> Non
         router.get("https://hdwing.org/promotion.php?id=838960").mock(
             return_value=httpx.Response(
                 200,
-                text=_fixture("hdwing_promotion_expired.html"),
+                text=_promotion_fixture("hdwing_promotion_expired.html"),
             )
         )
         router.get("https://hdwing.org/promotion.php?id=841155").mock(
             return_value=httpx.Response(
                 200,
-                text=_fixture("hdwing_promotion_no_free.html"),
+                text=_promotion_fixture("hdwing_promotion_no_free.html"),
             )
         )
         expired = await adapter.get_promotion("838960")
