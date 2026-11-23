@@ -36,6 +36,14 @@ def parse_download_confirmation(text: str, url: str) -> Optional[tuple[str, dict
     """
     解析下载确认表单，仅向当前下载端点提交有效控件。
 
+    NexusPHP 的下载提示页（``downloadnotice.php``）有两个反直觉形态，
+    必须补齐，否则服务端只回一句 ``error``（2026-11-23 prod 实测）：
+
+    - **需要勾选的同意项**（如「我会提高分享率」）在 HTML 里没有
+      ``checked`` 属性 → lxml 的 ``form_values()`` 会直接跳过它；
+    - **提交按钮**在条件未满足时带 ``disabled``（由页面 JS 在勾选后
+      移除）→ 按「只提交有效控件」的规则会被排除，但服务端要的正是它。
+
     :param text: 下载确认页面文本
     :param url: 当前下载端点的最终地址
     :return: 安全的提交地址及表单字段；没有可用表单时为 None
@@ -59,6 +67,18 @@ def parse_download_confirmation(text: str, url: str) -> Optional[tuple[str, dict
         )
         if submits:
             data[submits[0].get("name")] = submits[0].get("value", "")
+        # 提示页形态补齐（见 docstring）：
+        # ① 未勾选的同意项 checkbox —— 服务端要求「勾了才放行」
+        for el in form.xpath(
+            './/input[@name][not(@disabled)]'
+            '[translate(@type, "CHECKBOX", "checkbox")="checkbox"]'
+        ):
+            data.setdefault(el.get("name"), el.get("value", "on"))
+        # ② 被 JS 禁用的提交按钮 —— 条件未满足时才有 disabled，但它就是提交控件
+        for el in form.xpath(
+            './/input[@name][translate(@type, "SUBMIT", "submit")="submit"]'
+        ):
+            data.setdefault(el.get("name"), el.get("value", ""))
         if data:
             return target, data
     return None

@@ -130,6 +130,32 @@
     下载路径已随 adapter 删除，下游消费方需按配方格式处理
   - m-team 的种子 ID 只能从 `page_url` 的 `/detail/{id}` 提取（spider 不产出
     `id` 键）——`generic._row_item_id()` 已做回退，取不到时下载/幂等键全失效
+  - ✅ **NexusPHP「下载提示页」已接上（2026-11-23）**：`downloadnotice.php`
+    **不是故障**，是站点的正常下载协议——详见下方「NexusPHP 下载提示页」
+- **NexusPHP 下载提示页（2026-11-23 prod 事故修，重要）**：
+  - **现象**：HDWinG 手动推送种子全部失败，报「响应不是 bencoded torrent」，
+    队列重试 5 次全败 → 用户看到「推送失败」
+  - **根因**：站点在**分享率不足**（0.985 < 1）时，`download.php` 会 302 到
+    `downloadnotice.php?torrentid={id}&type=ratio` —— 一个**确认页**（15614
+    字节 HTML，标题「HDWinG :: 下载提示」），要勾选「我会提高分享率的」并
+    提交「下载种子文件」才放行
+  - ⚠️ **确认表单有两个反直觉形态**（缺一个服务端就只回 `error`）：
+    ① 同意项 checkbox **没有 `checked` 属性** → lxml 的 `form_values()` 会
+    跳过它；② 提交按钮在条件未满足时带 **`disabled`**（靠页面 JS 在勾选后
+    移除）→ 按「只提交有效控件」的规则会被排除。两者都由
+    `indexer/download.py:parse_download_confirmation()` 显式补齐
+  - **修复位置**：`GenericAdapter.download_torrent()` 命中提示页 → 走
+    `GenericAdapter._confirm_download_notice()`（解析表单 → POST → 自动跟随
+    重定向 → 拿到真种子）。判据 = 最终地址含 `downloadnotice.php` **或**
+    正文含「下载种子文件」（端点名被改时的兜底）
+  - **实测**：POST 成功 → 302 回 `download.php?…&letdown=1` → 真种子
+    358KB（bencode `d8:announce`）。**注意**：确认后仍拿不到种子时按**瞬时**
+    失败处理（无法确证是封禁，重试仍有可能成功）
+  - ⚠️ **旧代码里 `parse_download_confirmation` / `is_download_confirmation`
+    一直存在却零生产调用点**——规则包移植时带了协议解析器，但通用适配器的
+    下载路径没接上（只在测试里被引用）。这类「移植了但没接线」的代码要查
+  - 契约由 `tests/unit/test_generic_adapter.py`（三类用例）+ 
+    `tests/unit/test_site_indexer_compat_pure.py`（表单补齐）固化
 - **hdwing 站点的免费判定（2026-11-16 实测改版，重要）**：
   - **列表页优惠标记是空占位** `<td class="discount"><span class="sp_state_placeholder" id="{tid}"></span></td>` —— FREE 徽章与倒计时由页面 JS 异步填充，**列表 HTML 里没有**。别再指望从列表行解析 `pro_*`（其它 8 站可以）
   - ⚠️ **填充它的 `ajax_promotion.php` 被 Cloudflare Turnstile 闸保护**：页面 JS 必须先 `POST ajax_turnstile.php` 带 `cf-turnstile-response` token。**未过闸的请求对任意 id 都返回兜底的 `pro_free` + 空 timeout**——实测连**根本不存在的 id（999999999）**都回「免费」。照它解析会把「限免 6 小时」误判成「永久免费」（`window_parser` 收到 `free_classes=['free']` + 无剩余时间 → 判 `PERMANENT`，窗口永不到期）
