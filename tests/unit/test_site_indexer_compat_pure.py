@@ -419,6 +419,37 @@ class TestDownloadProtocol:
     def test_parse_download_confirmation_without_form(self) -> None:
         assert parse_download_confirmation("<html></html>", "https://a.com/x") is None
 
+    def test_parse_download_confirmation_fills_nexusphp_notice_controls(self) -> None:
+        """NexusPHP 下载提示页的控件要**补齐**（否则服务端只回 ``error``）。
+
+        真实形态（HDWinG，2026-11-23 prod）：同意项 checkbox 没有 ``checked``
+        属性（lxml 的 ``form_values()`` 会跳过），提交按钮在条件未满足时带
+        ``disabled``——但服务端要的正是这两个字段。
+        """
+        page = (
+            "<html><body><form action='?' method='post'>"
+            "<input type='hidden' name='id' value='841079'>"
+            "<input type='hidden' name='type' value='ratio'>"
+            "<input type='checkbox' name='hidenotice' value='1' disabled='disabled'>"
+            "<input type='checkbox' name='letmedown' value='ratio'>"
+            "<input type='submit' name='submit' value='下载种子文件' disabled='disabled'>"
+            "</form></body></html>"
+        )
+        parsed = parse_download_confirmation(
+            page, "https://a.com/downloadnotice.php?torrentid=841079&type=ratio"
+        )
+        assert parsed is not None
+        target, data = parsed
+        assert target == (
+            "https://a.com/downloadnotice.php?torrentid=841079&type=ratio"
+        )
+        assert data["id"] == "841079"
+        assert data["type"] == "ratio"
+        assert data["letmedown"] == "ratio"
+        assert data["submit"] == "下载种子文件"
+        # 被禁用的同意项不提交（那是「以后别再提示我」的开关）
+        assert "hidenotice" not in data
+
     def test_parse_download_response_plain(self) -> None:
         params = {"result": "data.url", "result_base_url": "https://a.com"}
         url = parse_download_response(params, 200, {"data": {"url": "https://a.com/t.torrent"}}, None)

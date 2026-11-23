@@ -38,6 +38,10 @@ from app.adapters.sites.base import (
     parse_size_text,
 )
 from app.adapters.sites.indexer.compat.settings import get_runtime_setting
+from app.adapters.sites.indexer.download import (
+    is_download_confirmation,
+    parse_download_confirmation,
+)
 from app.adapters.sites.indexer.engine import SPIDER_PARSER_CLASSES, IndexerEngine
 from app.adapters.sites.indexer.rules import SiteRules, load_site_rules
 from app.adapters.sites.user_data import SiteUserSnapshot
@@ -91,6 +95,13 @@ _LOGIN_FORM_MARKERS = (
     "name='passwd'",
 )
 
+#: NexusPHP「下载提示页」的端点名（``downloadnotice.php``）。
+#:
+#: 站点在某些条件下（分享率不足、首次下载等）不直接给种子，而是先弹一
+#: 个确认页：勾选一项承诺 → 提交「下载种子文件」→ 服务端放行并重定向回
+#: ``download.php``。**这不是故障**，而是站点的正常下载协议。
+_DOWNLOAD_NOTICE_PATH = "downloadnotice.php"
+
 
 def _looks_like_login_response(resp: httpx.Response) -> bool:
     """下载响应看起来是登录页吗（凭据失效的判据）。
@@ -105,6 +116,19 @@ def _looks_like_login_response(resp: httpx.Response) -> bool:
         return True
     head = text[:2000].lower()
     return any(marker in head for marker in _LOGIN_FORM_MARKERS)
+
+
+def _is_download_notice(resp: httpx.Response) -> bool:
+    """响应是不是 NexusPHP 的「下载提示页」。
+
+    两个判据任一命中即可：
+
+    - **端点名**：最终地址落在 ``downloadnotice.php``（最可靠）；
+    - **确认文案**：正文含「下载种子文件」（端点名被站点改过时兜底）。
+    """
+    if _DOWNLOAD_NOTICE_PATH in str(resp.url).lower():
+        return True
+    return is_download_confirmation(resp.content)
 
 
 def _describe_torrent_response(resp: httpx.Response) -> str:
@@ -270,6 +294,9 @@ class GenericAdapter(SiteAdapter):
           下载响应是登录页）、详情页里根本没有下载地址 → **重试也不会
           成功**，交上层报错给用户（而不是骗用户「已入队自动重试」）。
 
+        **NexusPHP 下载提示页**（``downloadnotice.php``）不是失败：站点要求
+        先勾选承诺项才放行下载，按协议确认一次即可拿到种子。
+
         :raises SitePermanentError: 永久失败（凭据失效 / 无下载地址）
         :raises SiteFetchError: 瞬时失败（网络抖动 / 响应不是 .torrent）
         :raises BreakerTripped: 站点返回 403 / 429（触发熔断）
@@ -292,6 +319,15 @@ class GenericAdapter(SiteAdapter):
         resp = await self._fetch_torrent_response(url)
         if resp.content.startswith(_TORRENT_MAGIC):
             return resp.content
+
+        # NexusPHP「下载提示页」：站点要求先确认（勾选承诺项 + 提交）才给
+        # 种子。这是站点的正常协议，不是故障——按协议走一遍即可拿到种子。
+        # 2026-11-23 prod：HDWinG 分享率 0.985 < 1，``download.php`` 落到
+        # ``downloadnotice.php?type=ratio``，此前一律报「响应不是 bencoded」，
+        # 重试 5 次全败 → 用户看到「推送失败」。
+        if _is_download_notice(resp):
+            return await self._confirm_download_notice(resp, item_id)
+
         if _looks_like_login_response(resp):
             # 登录页 → 凭据失效，重试没有意义（不必浪费一次重试）
             raise SitePermanentError(
@@ -336,6 +372,51 @@ class GenericAdapter(SiteAdapter):
             raise SiteFetchError(f"{self.profile.name} 下载失败：{exc}") from exc
         self._check_status_code(resp)
         return resp
+
+    async def _confirm_download_notice(
+        self, resp: httpx.Response, item_id: str
+    ) -> bytes:
+        """走完 NexusPHP 下载提示页的确认流程，取回种子。
+
+        流程：解析提示页里的确认表单 → POST 提交 → 站点放行并重定向回
+        ``download.php``（客户端自动跟随重定向）→ 拿到真种子。
+
+        :return: 种子字节
+        :raises SiteFetchError: 提示页没有可提交的表单 / 网络异常 /
+            站点返回错误状态码 / 确认后仍未给出种子（**按瞬时失败处理**：
+            无法确证是站点封禁，重试仍有可能成功）
+        :raises BreakerTripped: 站点返回 403 / 429
+        """
+        parsed = parse_download_confirmation(resp.text, str(resp.url))
+        if parsed is None:
+            raise SiteFetchError(
+                f"{self.profile.name} 下载提示页没有可提交的确认表单 id={item_id}"
+                f"（{_describe_torrent_response(resp)}）"
+            )
+        target, data = parsed
+        logger.info(
+            "%s 下载 id=%s 命中下载提示页，提交确认表单（字段：%s）",
+            self.profile.name, item_id, ",".join(sorted(data)),
+        )
+        try:
+            confirmed = await self._client.post(
+                target, data=data, timeout=self._timeout
+            )
+        except httpx.HTTPError as exc:
+            raise SiteFetchError(
+                f"{self.profile.name} 下载确认失败：{exc}"
+            ) from exc
+        self._check_status_code(confirmed)
+        if not confirmed.content.startswith(_TORRENT_MAGIC):
+            raise SiteFetchError(
+                f"{self.profile.name} 下载提示页确认后仍未给出种子 id={item_id}"
+                f"（{_describe_torrent_response(confirmed)}）"
+            )
+        logger.info(
+            "%s 下载 id=%s 经下载提示页确认后取得种子（%d bytes）",
+            self.profile.name, item_id, len(confirmed.content),
+        )
+        return confirmed.content
 
     # ------------------------------------------------------------------ 3.5 下载地址
     async def get_torrent_url(self, item_id: str) -> str | None:

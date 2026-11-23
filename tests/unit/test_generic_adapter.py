@@ -56,6 +56,14 @@ def _promotion_fixture(name: str) -> str:
     ).read_text(encoding="utf-8")
 
 
+#: NexusPHP「下载提示页」的真实页面（2026-11-23 prod 抓取，裁剪自 HDWinG）
+_NOTICE_HTML = (
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
+    / "hdwing_download_notice.html"
+).read_text(encoding="utf-8")
+
+
 def _promotion_table(start: str, end: str) -> str:
     return f"""
 <div class="noraml_box">
@@ -519,6 +527,147 @@ async def test_generic_download_detail_unreachable_is_transient(monkeypatch) -> 
 
     # 瞬时失败用 SiteFetchError（不是 SitePermanentError）
     assert not isinstance(exc.value, SitePermanentError)
+
+
+async def test_generic_download_confirms_nexusphp_notice_page() -> None:
+    """NexusPHP「下载提示页」→ 走确认流程拿到种子（2026-11-23 prod 修复）。
+
+    HDWinG 分享率 0.985 < 1 时 ``download.php`` 落到
+    ``downloadnotice.php?type=ratio``：必须勾选「我会提高分享率的」并提交
+    「下载种子文件」才放行。此前一律报「响应不是 bencoded」→ 手动推送失败、
+    队列重试 5 次全败。
+    """
+    from urllib.parse import parse_qs
+
+    torrent = b"d8:announce30:download-notice-confirmed-torente"
+    posted: list[dict[str, str]] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        posted.append(
+            {
+                key: value[0]
+                for key, value in parse_qs(request.content.decode()).items()
+            }
+        )
+        return httpx.Response(
+            302,
+            headers={
+                "location": (
+                    "https://pt.0ff.cc/download.php"
+                    "?id=12345&passkey=abc&letdown=1"
+                )
+            },
+        )
+
+    adapter = GenericAdapter(
+        SiteProfile(name="HDWinG", domain="pt.0ff.cc"),
+        cookies="uid=1",
+    )
+    with respx.mock(assert_all_called=False) as router:
+        router.get(url__startswith="https://pt.0ff.cc/details.php?id=12345").mock(
+            return_value=httpx.Response(200, text=_DETAIL_HTML)
+        )
+        router.get("https://pt.0ff.cc/download.php?id=12345&passkey=abc").mock(
+            return_value=httpx.Response(
+                302,
+                headers={
+                    "location": (
+                        "https://pt.0ff.cc/downloadnotice.php"
+                        "?torrentid=12345&type=ratio"
+                    )
+                },
+            )
+        )
+        router.get(url__startswith="https://pt.0ff.cc/downloadnotice.php").mock(
+            return_value=httpx.Response(
+                200,
+                text=_NOTICE_HTML,
+                headers={"content-type": "text/html; charset=utf-8"},
+            )
+        )
+        router.post(url__startswith="https://pt.0ff.cc/downloadnotice.php").mock(
+            side_effect=_capture
+        )
+        router.get(url__startswith="https://pt.0ff.cc/download.php").mock(
+            return_value=httpx.Response(
+                200,
+                content=torrent,
+                headers={"content-type": "application/x-bittorrent"},
+            )
+        )
+        data = await adapter.download_torrent("12345")
+    await adapter.close()
+
+    assert data == torrent
+    # 确认表单的字段必须齐全：少一个（letmedown / submit）站点只回 "error"
+    assert posted, "应向提示页提交一次确认表单"
+    assert posted[0]["letmedown"] == "ratio"
+    assert posted[0]["submit"] == "下载种子文件"
+    assert posted[0]["id"] == "841079"
+    assert posted[0]["type"] == "ratio"
+
+
+async def test_generic_download_notice_detected_by_text_marker() -> None:
+    """提示页端点名被站点改掉时，靠正文「下载种子文件」文案也能识别。"""
+    torrent = b"d8:announce12:text-marker-te"
+    adapter = GenericAdapter(
+        SiteProfile(name="HDWinG", domain="pt.0ff.cc"),
+        cookies="uid=1",
+    )
+    with respx.mock(assert_all_called=False) as router:
+        router.get(url__startswith="https://pt.0ff.cc/details.php?id=12345").mock(
+            return_value=httpx.Response(200, text=_DETAIL_HTML)
+        )
+        router.get(url__startswith="https://pt.0ff.cc/download.php").mock(
+            return_value=httpx.Response(
+                200,
+                text=_NOTICE_HTML,
+                headers={"content-type": "text/html; charset=utf-8"},
+            )
+        )
+        router.post(url__startswith="https://pt.0ff.cc/download.php").mock(
+            return_value=httpx.Response(
+                200,
+                content=torrent,
+                headers={"content-type": "application/x-bittorrent"},
+            )
+        )
+        data = await adapter.download_torrent("12345")
+    await adapter.close()
+
+    assert data == torrent
+
+
+async def test_generic_download_notice_confirm_failure_is_transient() -> None:
+    """提示页确认后站点仍不给种子 → **瞬时**失败（可重试），不是永久失败。
+
+    无法确证是站点封禁（还是限频/抽风），保守按瞬时处理——判永久会让
+    用户立刻看到报错而失去自动恢复的机会。
+    """
+    adapter = GenericAdapter(
+        SiteProfile(name="HDWinG", domain="pt.0ff.cc"),
+        cookies="uid=1",
+    )
+    with respx.mock(assert_all_called=False) as router:
+        router.get(url__startswith="https://pt.0ff.cc/details.php?id=12345").mock(
+            return_value=httpx.Response(200, text=_DETAIL_HTML)
+        )
+        router.get(url__startswith="https://pt.0ff.cc/download.php").mock(
+            return_value=httpx.Response(
+                200,
+                text=_NOTICE_HTML,
+                headers={"content-type": "text/html; charset=utf-8"},
+            )
+        )
+        router.post(url__startswith="https://pt.0ff.cc/download.php").mock(
+            return_value=httpx.Response(200, text="error")
+        )
+        with pytest.raises(SiteFetchError) as exc:
+            await adapter.download_torrent("12345")
+    await adapter.close()
+
+    assert not isinstance(exc.value, SitePermanentError)
+    assert "确认后仍未给出种子" in str(exc.value)
 
 
 async def test_mteam_connectivity_uses_api_tester() -> None:

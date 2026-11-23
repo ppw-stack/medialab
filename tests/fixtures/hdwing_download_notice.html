@@ -1,0 +1,35 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+  <title>HDWinG :: 下载提示</title>
+</head>
+<body>
+<div class="dlnotice-wrap">
+  <p>你的分享率过低，请尽快改善！点击这里。</p>
+  <form action="?" method="post" class="dlnotice-form">
+    <p>了解更多信息，见<a class="faqlink"
+                                       href="rules.php"
+                                       target="_blank">规则</a>和<a
+                         class="faqlink" href="faq.php"
+                         target="_blank">常见问题</a></p>
+    <input type="hidden" name="id" value="841079"/>
+    <input type="hidden" name="type" value="ratio"/>
+    <div>
+      <input type="checkbox" name="hidenotice" id="hidenotice"
+                             value="1" disabled="disabled" /><label
+        for="hidenotice">每次都会显示此提示，直到你改善了分享率为止。</label>
+    </div>
+    <div>
+      <input type="checkbox" name="letmedown" id="letmedown"
+                             value="ratio"
+                             onclick="document.getElementById('continuedownload').disabled = !this.checked;"/>
+      <label for="letmedown"><span
+                                  class="big">我会提高分享率的。</span></label>
+    </div>
+    <div><input type="submit" name="submit" id="continuedownload" class="submit"
+                 value="下载种子文件" disabled="disabled" />
+    </div>
+  </form>
+</div>
+</body>
+</html>
