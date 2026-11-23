@@ -146,6 +146,20 @@ ssh <别名> "cd /mnt/user/appdata/medialab/app && TAG=1.0.2 docker compose -f d
 > manifest not found，2026-11-19 发布 v1.0.1 时踩过）。锁定确定版本用
 > `TAG=1.0.1`，跟随最新发布用默认 `latest`。
 >
+> ⚠️⚠️ **镜像 tag 是 git tag 的完整版本号去掉 `v`，不是「取最后一段」**
+> （2026-11-23 踩过，**生产被静默降级**）：发 `v3.0.1` → 镜像 tag 是
+> **`3.0.1`**；误写 `TAG=1.0.1` 会拉到 **2026-11-18 的旧镜像**（那个 tag
+> 真实存在，不是 manifest not found）→ `up -d` 用旧代码重建容器 →
+> 表现为「刚修好的功能又没了」「报错与代码对不上」。
+> **每次部署后核对镜像对应的 commit**：
+> ```bash
+> docker image inspect ppw111/medialab:3.0.1 \
+>   --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+> # 应等于 git tag v3.0.1 指向的 commit（git rev-list -n1 v3.0.1）
+> ```
+> 容器内也能核对代码是否含目标修复：
+> `docker exec medialab grep -c "<新函数名>" /opt/venv/lib/python3.12/site-packages/app/...`
+>
 > ⚠️ 若容器是旧版本手动创建的（没有 compose label），`up -d` 不会替换它，
 > 需先 `docker stop -t 60 medialab && docker rm medialab`。
 > 60s 宽限期对应 `stop_grace_period`，让在途作业收尾。
