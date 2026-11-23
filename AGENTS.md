@@ -643,6 +643,17 @@
   - **附件下载路径也算**（2026-11-12 补漏）：`attachments.py` 的判重 `stat` / `mkdir` / 每个 chunk 的 `fh.write` / `part.replace` / `.part` 清理曾全部裸跑在事件循环里——当年 `write_strm` / `delete_strm` 改了线程池，这条路径漏了。现在 `_drain_to_file` 逐块丢 `to_thread`（读响应流是异步的，留在事件循环）
   - **运行时守卫**（`app/services/runtime_guard.py`）：① 心跳看门狗——loop 滞后 >10s 自动 py-spy dump 落日志（py-spy 已进镜像）；② 挂载探活线程——`/healthz` 的 `mounts[]` 显示 `ok`/`hang`/`error`，**挂载卡死可见而面板不假死**
   - `snapshot()` 只读缓存（`/healthz` 同步调用，不能被 IO 拖住）
+- **发布到生产：镜像 tag = git tag 的完整版本号去掉 `v`**（2026-11-23 踩过，
+  **生产被静默降级**）：
+  - git tag `v3.0.1` → 镜像 tag **`3.0.1`**（**不是** `1.0.1`！后者是 2026-11-18
+    真实存在的旧 tag，`docker pull` **不会报 not found**，而是拉到旧镜像 →
+    `up -d` 用旧代码重建容器 → 表现为「刚修好的功能又没了」「报错与代码对不上」）
+  - **部署后必须核对镜像的 commit**：
+    `docker image inspect ppw111/medialab:3.0.1 --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'`
+    应等于 `git rev-list -n1 v3.0.1`
+  - 顺带核对目标修复在不在容器里：
+    `docker exec medialab grep -c "<新函数名>" /opt/venv/lib/python3.12/site-packages/app/...`
+  - 详见 `DEPLOY.md` §4
 - **必备命令**
 ```bash
 uv sync --extra dev         # 装依赖
