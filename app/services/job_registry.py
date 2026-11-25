@@ -123,12 +123,22 @@ def _current_max_submissions() -> str:
 
 
 def _current_max_active_downloads() -> str:
-    """当前生效的在途下载水位上限（0 = 不限）。"""
+    """当前生效的在途下载水位上限（0 = 不限）。
+
+    读的是**内存里的运行时参数**（DB 值在 lifespan 加载后驻留内存），所以
+    读失败不是 DB 锁，而是「运行时参数未初始化」或「参数未注册」。
+
+    降级**必须留日志**：静默回落到默认值 10 会让线上水位配置看似生效、
+    实际没生效，且无从排查。
+    """
     from app.services.runtime_params import get_runtime_params, lookup_spec
 
     try:
         value = get_runtime_params().get_int("push_max_active_downloads")
-    except Exception:
+    except (RuntimeError, KeyError) as exc:
+        logger.warning(
+            "读取运行时参数 push_max_active_downloads 失败，回退默认值: %s", exc
+        )
         spec = lookup_spec("push_max_active_downloads")
         value = spec.default if spec is not None else 10
     return "不限" if value <= 0 else str(value)

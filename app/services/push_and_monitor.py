@@ -154,6 +154,12 @@ async def _run_push(
     空转（无候选 / 未配置下载器 / 在途已满暂缓推送 / 选种全被跳过）
     **不刷新**节流时间戳，这样新候选一出现、或下载器腾出槽位，
     下一轮就能立刻补推（≤10 分钟）。
+
+    Args:
+        factory: 服务工厂，用于构造 PushFreeService。
+        active_downloads: 监测阶段统计的剩余在途下载数（可为 0）。为 None
+            表示未知（如监测段失败），此时不按水位裁剪，交由
+            PushFreeService 自行查询下载器决定。
     """
     now = time.monotonic()
     remain = _THROTTLE.remaining(now)
