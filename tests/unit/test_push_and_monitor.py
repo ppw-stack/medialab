@@ -31,22 +31,25 @@ class _FakePushResult:
     pushed: int = 1
     failed: int = 0
     errors: tuple[str, ...] = ()
+    skipped_by_capacity: bool = False
     summary: str = "已推 1"
     steps: tuple[JobStep, ...] = field(default_factory=tuple)
 
 
 class _FakePushService:
-    """替身：记录调用次数，返回可控结果。"""
+    """替身：记录调用次数与透传的在途数，返回可控结果。"""
 
     calls = 0
+    last_active_downloads: int | None = None
     result = _FakePushResult()
     raises: Exception | None = None
 
     def __init__(self, _factory: Any) -> None:
         pass
 
-    async def run(self) -> _FakePushResult:
+    async def run(self, *, active_downloads: int | None = None) -> _FakePushResult:
         type(self).calls += 1
+        type(self).last_active_downloads = active_downloads
         if type(self).raises is not None:
             raise type(self).raises
         return type(self).result
@@ -56,6 +59,7 @@ class _FakePushService:
 class _FakeMonitorResult:
     scanned: int = 3
     matched: int = 1
+    remaining_active_downloads: int | None = 2
     summary: str = "命中 1"
     steps: tuple[JobStep, ...] = field(default_factory=tuple)
 
@@ -83,6 +87,7 @@ def _patched(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(push_mod, "PushFreeService", _FakePushService)
     monkeypatch.setattr(monitor_mod, "MonitorFreeWindowService", _FakeMonitorService)
     _FakePushService.calls = 0
+    _FakePushService.last_active_downloads = None
     _FakePushService.result = _FakePushResult()
     _FakePushService.raises = None
     _FakeMonitorService.calls = 0
@@ -193,3 +198,28 @@ async def _monitor_with_steps(self: Any) -> _FakeMonitorResult:
     return _FakeMonitorResult(
         steps=(JobStep("扫描已推种子", "ok", 3, "3 个"),),
     )
+
+
+async def test_monitor_remaining_active_forwarded_to_push() -> None:
+    """监测段统计的剩余在途数透传给推送段（避免重复 list_torrents）。"""
+    await push_and_monitor.run_push_and_monitor(None)
+    assert _FakePushService.last_active_downloads == 2
+
+
+async def test_capacity_skip_marks_step_skip_and_does_not_refresh_throttle() -> None:
+    """在途水位已满跳过时：步骤标 skip，且不刷新 30 分钟节流时间戳。"""
+    _FakePushService.result = _FakePushResult(
+        selected=0,
+        pushed=0,
+        skipped_by_capacity=True,
+        summary="在途下载 10/10，已达上限暂缓推送",
+    )
+    out = await push_and_monitor.run_push_and_monitor(None)
+    assert _stage(out, "免费种推送").status == "skip"
+    assert _FakePushService.calls == 1
+
+    # 下一轮空出槽位 → 应立刻推送，不被 30 分钟节流挡住
+    _FakePushService.result = _FakePushResult(selected=2, pushed=2, summary="已推 2")
+    out2 = await push_and_monitor.run_push_and_monitor(None)
+    assert _FakePushService.calls == 2
+    assert _stage(out2, "免费种推送").status == "ok"

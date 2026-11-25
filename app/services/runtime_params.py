@@ -95,6 +95,36 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         job="push_and_monitor_free",
     ),
     ParamSpec(
+        key="push_max_active_downloads",
+        label="在途下载数上限（个）",
+        default=10,
+        min=0,
+        max=200,
+        job="push_and_monitor_free",
+        note="默认下载器内全部未完成活跃下载任务达到此上限时暂缓推送；0 = 不限制",
+    ),
+    ParamSpec(
+        key="monitor_stalled_timeout_minutes",
+        label="停滞/龟速超时（分钟）",
+        default=60,
+        min=0,
+        max=1440,
+        job="push_and_monitor_free",
+        note=(
+            "已推未完成种子加入下载器超过此时长，且处于停滞或低于速度阈值时"
+            "自动暂停/删除；0 = 关闭"
+        ),
+    ),
+    ParamSpec(
+        key="monitor_min_dlspeed_kbps",
+        label="龟速判定阈值（KB/s）",
+        default=50,
+        min=0,
+        max=102400,
+        job="push_and_monitor_free",
+        note="下载速度低于此值（KB/s）且超过停滞超时即视为龟速堵塞；0 = 仅处理停滞与 0 速",
+    ),
+    ParamSpec(
         key="aggregate_max_submissions",
         label="单轮提交上限（个）",
         default=20,

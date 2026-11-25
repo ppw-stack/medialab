@@ -122,6 +122,28 @@ def _current_max_submissions() -> str:
     return "不限" if value <= 0 else str(value)
 
 
+def _current_max_active_downloads() -> str:
+    """当前生效的在途下载水位上限（0 = 不限）。
+
+    读的是**内存里的运行时参数**（DB 值在 lifespan 加载后驻留内存），所以
+    读失败不是 DB 锁，而是「运行时参数未初始化」或「参数未注册」。
+
+    降级**必须留日志**：静默回落到默认值 10 会让线上水位配置看似生效、
+    实际没生效，且无从排查。
+    """
+    from app.services.runtime_params import get_runtime_params, lookup_spec
+
+    try:
+        value = get_runtime_params().get_int("push_max_active_downloads")
+    except (RuntimeError, KeyError) as exc:
+        logger.warning(
+            "读取运行时参数 push_max_active_downloads 失败，回退默认值: %s", exc
+        )
+        spec = lookup_spec("push_max_active_downloads")
+        value = spec.default if spec is not None else 10
+    return "不限" if value <= 0 else str(value)
+
+
 def _current_pre_pause_minutes() -> int:
     """当前生效的"提前暂停分钟数"（DB 运行时参数优先，回退到默认值）。
 
@@ -202,8 +224,8 @@ JOB_META: tuple[JobMeta, ...] = (
         name="push_and_monitor_free",
         title="免费种推送与监测",
         description=(
-            "巡检已推免费种（临期/非免费自动暂停）＋ 把新免费种推到默认"
-            "下载器（距上次推送 ≥30 分钟才推）"
+            "巡检已推免费种（临期/非免费/异常/停滞超时自动暂停或删除）＋ "
+            "按下载器在途水位动态补推新免费种（距上次推送 ≥30 分钟才推）"
         ),
         make_func=lambda f: _job_fn(lambda: _run_push_and_monitor(f)),
         module="seed",
@@ -212,6 +234,7 @@ JOB_META: tuple[JobMeta, ...] = (
         # 的边（详见 docs/scheduler-dataflow.md §5）。
         log_extra_fn=lambda: (
             f" (pre_pause={_current_pre_pause_minutes()}min"
+            f"，在途上限={_current_max_active_downloads()}"
             f"，推送间隔={PUSH_MIN_INTERVAL_SEC // 60}min)"
         ),
     ),

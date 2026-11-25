@@ -184,7 +184,8 @@ class QbittorrentAdapter(DownloaderAdapter):
 
         out: list[TorrentInfo] = []
         for row in rows:
-            state = _STATE_MAP.get(str(row.get("state", "")), TorrentState.UNKNOWN)
+            raw_state = str(row.get("state", ""))
+            state = _STATE_MAP.get(raw_state, TorrentState.UNKNOWN)
             tags = frozenset(
                 t.strip()
                 for t in (row.get("tags") or "").split(",")
@@ -215,6 +216,7 @@ class QbittorrentAdapter(DownloaderAdapter):
                 # 下游 `if info.completed_at:` 会把 -1 当真值误判为已完成。
                 completed_at=_completion_to_ts(row.get("completion_on")),
                 eta=row.get("eta"),
+                is_queued=raw_state == "queuedDL",
             )
             if filt is not None and not self._matches(info, filt):
                 continue

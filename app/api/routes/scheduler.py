@@ -162,6 +162,9 @@ class RuntimeParamsUpdateIn(BaseModel):
     monitor_pre_pause_minutes: int | None = None
     monitor_delete_expired: int | None = None
     push_download_interval_ms: int | None = None
+    push_max_active_downloads: int | None = None
+    monitor_stalled_timeout_minutes: int | None = None
+    monitor_min_dlspeed_kbps: int | None = None
     disk_rotation_threshold_pct: int | None = None
     disk_rotation_action: int | None = None
     #: 磁盘流转模式（0 = 实际执行 / 1 = 仅预演）

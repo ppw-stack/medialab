@@ -38,6 +38,7 @@
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
@@ -60,7 +61,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _is_completed(info: TorrentInfo) -> bool:
+def is_completed(info: TorrentInfo) -> bool:
     """是否「已完成」（数据已下完）。
 
     **必须用字节口径，不能用 ``progress >= 1.0``**——校验中
@@ -87,6 +88,50 @@ def _is_completed(info: TorrentInfo) -> bool:
     return info.completed_bytes >= info.size
 
 
+#: 兼容旧测试/内部引用别名
+_is_completed = is_completed
+
+
+def is_active_download(info: TorrentInfo) -> bool:
+    """是否为占槽的「在途下载」任务（推送水位线与监测共享单一口径）。
+
+    口径：未完成（字节口径）且处于下载相关状态
+    （``DOWNLOADING`` / ``STALLED_DL`` / ``CHECKING``，含下载器排队 ``queuedDL``）。
+    排除已完成做种、已暂停与致命错误任务。
+    """
+    return not is_completed(info) and info.state.is_downloading
+
+
+def _stalled_or_slow_reason(
+    info: TorrentInfo,
+    *,
+    now_ts: float,
+    timeout_minutes: int,
+    min_dlspeed_kbps: int,
+) -> str | None:
+    """判断是否命中「停滞/龟速超时」堵塞条件，命中返回中文原因，否则 None。"""
+    if timeout_minutes <= 0:
+        return None
+    if info.is_queued or info.added_at is None:
+        return None
+    elapsed = int(now_ts - info.added_at)
+    if elapsed < timeout_minutes * 60:
+        return None
+    elapsed_min = elapsed // 60
+    if info.state == TorrentState.STALLED_DL:
+        return f"下载停滞超 {elapsed_min} 分钟"
+    if info.state == TorrentState.DOWNLOADING:
+        if min_dlspeed_kbps <= 0:
+            if info.dlspeed <= 0:
+                return f"0 速停滞超 {elapsed_min} 分钟"
+        elif info.dlspeed < min_dlspeed_kbps * 1024:
+            return (
+                f"下载龟速（{info.dlspeed // 1024} KB/s < "
+                f"{min_dlspeed_kbps} KB/s）超 {elapsed_min} 分钟"
+            )
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class MonitorResult:
     """单次监测作业的运行结果。"""
@@ -100,6 +145,12 @@ class MonitorResult:
     skipped_checking: int = 0
     skipped_permanent: int = 0
     skipped_refund: int = 0
+    #: 致命错误（ERROR / MISSING_FILES）命中并成功处理数
+    aborted_fatal: int = 0
+    #: 停滞/龟速超时命中并成功处理数
+    aborted_stalled: int = 0
+    #: 本轮监测动作执行后，默认下载器内剩余的全局在途下载数（供推送水位复用；拉取失败时 None）
+    remaining_active_downloads: int | None = None
     pre_paused: int = 0
     #: 命中条件后被**删除**的任务数（``monitor_delete_expired=1`` 时）。
     #: 为 0 表示本次没有删除——两种模式下它都是 0（暂停模式）。
@@ -189,6 +240,7 @@ class MonitorFreeWindowService:
             logger.info("monitor: 下载器无任务")
             return MonitorResult(
                 scanned=0,
+                remaining_active_downloads=0,
                 summary="下载器无任务",
                 steps=(
                     JobStep("查询默认下载器", "ok", 1, default_dl.name),
@@ -201,10 +253,24 @@ class MonitorFreeWindowService:
         # 这样 qB 已删/从未推的种不会被纳入统计；qB 中所有任务的当前状态都能查到。
         from app.services.runtime_params import get_runtime_params
 
+        rp = get_runtime_params()
         self._pre_pause = timedelta(
-            minutes=get_runtime_params().get_int("monitor_pre_pause_minutes")
+            minutes=rp.get_int("monitor_pre_pause_minutes")
         )
         threshold = format_bj(bj_now_dt() + self._pre_pause)
+        stalled_timeout_min = rp.get_int("monitor_stalled_timeout_minutes")
+        min_dlspeed_kbps = rp.get_int("monitor_min_dlspeed_kbps")
+        now_ts = time.time()
+
+        # 统计默认下载器内全部在途下载任务（含手动推送，共享带宽与槽位）
+        initial_active_hashes: set[str] = {
+            (info.hash or "").lower()
+            for info in infos
+            if info.hash and is_active_download(info)
+        }
+        active_without_hash = sum(
+            1 for info in infos if not info.hash and is_active_download(info)
+        )
 
         qb_hashes: set[str] = {
             (info.hash or "").lower()
@@ -215,6 +281,7 @@ class MonitorFreeWindowService:
             logger.info("monitor: 下载器无任务 hash")
             return MonitorResult(
                 scanned=scanned,
+                remaining_active_downloads=active_without_hash,
                 summary="下载器任务无 hash",
                 steps=(
                     JobStep("查询默认下载器", "ok", 1, default_dl.name),
@@ -264,23 +331,27 @@ class MonitorFreeWindowService:
         skipped_checking = 0
         skipped_permanent = 0
         skipped_refund = 0
+        aborted_fatal = 0
+        aborted_stalled = 0
         pre_paused = 0
         deleted = 0
         failed = 0
         errors: list[str] = []
+        handled_hashes: set[str] = set()
         # 逐种明细（前端「步骤卡片」展开后可见）——回答"动了哪些种子"
         action_items: list[JobStepItem] = []
 
         # 动作模式（0=仅暂停 / 1=删任务+删数据），作业开始时读一次——
         # 一次巡检内保持同一动作，避免中途改参数导致同一批种子一半暂停
         # 一半删除。
-        delete_mode = get_runtime_params().get_int("monitor_delete_expired") == 1
+        delete_mode = rp.get_int("monitor_delete_expired") == 1
 
-        async def _apply(reason: str) -> None:
+        async def _apply(reason: str) -> bool:
             """对当前种子执行动作（暂停 / 删除），并记录明细。
 
             闭包：直接改外层的 ``deleted`` / ``pre_paused`` / ``failed`` /
             ``errors`` / ``action_items``（Python 的 nonlocal 语义）。
+            返回 True 表示动作成功（该种子已脱离在途下载集合）。
             """
             nonlocal deleted, pre_paused, failed
             action, err = await self._act(adapter, info.hash or "", delete_mode)
@@ -291,7 +362,9 @@ class MonitorFreeWindowService:
                 action_items.append(
                     JobStepItem(label, "fail", None, f"{reason}：{err}")
                 )
-            elif action == "deleted":
+                return False
+            handled_hashes.add(hash_key)
+            if action == "deleted":
                 deleted += 1
                 action_items.append(
                     JobStepItem(label, "ok", None, f"{reason} → 已删除（含磁盘数据）")
@@ -301,6 +374,7 @@ class MonitorFreeWindowService:
                 action_items.append(
                     JobStepItem(label, "ok", None, f"{reason} → 已暂停")
                 )
+            return True
 
         for info in infos:
             hash_key = (info.hash or "").lower()
@@ -312,7 +386,7 @@ class MonitorFreeWindowService:
                 continue
             matched += 1
 
-            if _is_completed(info):
+            if is_completed(info):
                 skipped_completed += 1
                 continue
             if info.state.is_paused:
@@ -327,12 +401,28 @@ class MonitorFreeWindowService:
                 skipped_checking += 1
                 continue
 
+            # 1) 致命错误（ERROR / MISSING_FILES）——不受免费类型限制，立即清理
+            if info.state.is_fatal:
+                if await _apply("下载异常（错误/文件丢失）"):
+                    aborted_fatal += 1
+                continue
+
             # 按 db 当前 free_type 决定（fetch_all_sites 已更新为最新值）
             ft = row.free_type
             fea = row.free_end_at
 
             if ft == FreeType.PERMANENT:
-                # 永久免费：用户全程做种赚积分，永不处理
+                # 永久免费：正常下载永不因窗口处理；但长时间停滞/龟速死种仍需清理腾出槽位
+                stalled_reason = _stalled_or_slow_reason(
+                    info,
+                    now_ts=now_ts,
+                    timeout_minutes=stalled_timeout_min,
+                    min_dlspeed_kbps=min_dlspeed_kbps,
+                )
+                if stalled_reason is not None:
+                    if await _apply(stalled_reason):
+                        aborted_stalled += 1
+                    continue
                 skipped_permanent += 1
                 continue
 
@@ -350,17 +440,30 @@ class MonitorFreeWindowService:
                     # 异常：限时种无 end_at → 保守处理
                     await _apply("限时种无截止时间")
                     continue
-                if fea > threshold:
-                    skipped_far += 1
+                if fea <= threshold:
+                    # 即将到期 / 已过期 → 处理
+                    await _apply("临近窗口截止")
                     continue
-                # 即将到期 / 已过期 → 处理
-                await _apply("临近窗口截止")
+                # 窗口尚远：再检查是否停滞/龟速堵塞
+                stalled_reason = _stalled_or_slow_reason(
+                    info,
+                    now_ts=now_ts,
+                    timeout_minutes=stalled_timeout_min,
+                    min_dlspeed_kbps=min_dlspeed_kbps,
+                )
+                if stalled_reason is not None:
+                    if await _apply(stalled_reason):
+                        aborted_stalled += 1
+                    continue
+                skipped_far += 1
                 continue
 
             # 其他 free_type（neutral_leech / unknown / 任何非免费）→ 直接处理
             # 用户规则："当前不是免费种，直接处理"
             await _apply("已非免费种")
 
+        initial_active = len(initial_active_hashes) + active_without_hash
+        remaining_active = len(initial_active_hashes - handled_hashes) + active_without_hash
         action_items, action_items_total = build_items(action_items)
         result = MonitorResult(
             scanned=scanned,
@@ -372,6 +475,9 @@ class MonitorFreeWindowService:
             skipped_checking=skipped_checking,
             skipped_permanent=skipped_permanent,
             skipped_refund=skipped_refund,
+            aborted_fatal=aborted_fatal,
+            aborted_stalled=aborted_stalled,
+            remaining_active_downloads=remaining_active,
             pre_paused=pre_paused,
             deleted=deleted,
             failed=failed,
@@ -382,11 +488,21 @@ class MonitorFreeWindowService:
                     if delete_mode
                     else f"扫描 {scanned}，命中 {matched}，暂停 {pre_paused}"
                 )
+                + (
+                    f"（异常 {aborted_fatal}，停滞 {aborted_stalled}）"
+                    if aborted_fatal or aborted_stalled
+                    else ""
+                )
                 + (f"，{failed} 失败" if failed else "")
             ),
             steps=(
                 JobStep("查询默认下载器", "ok", 1, default_dl.name),
-                JobStep("拉取下载器任务", "ok", scanned, f"{scanned} 个"),
+                JobStep(
+                    "拉取下载器任务",
+                    "ok",
+                    scanned,
+                    f"{scanned} 个（在途 {initial_active}）",
+                ),
                 JobStep(
                     "匹配 torrent_index",
                     "ok",
@@ -401,10 +517,19 @@ class MonitorFreeWindowService:
                     f"校验中 {skipped_checking}",
                 ),
                 JobStep(
-                    "判断免费窗口",
+                    "判断窗口与异常",
                     "ok",
                     pre_paused + deleted,
-                    f"距截止 < {int(self._pre_pause.total_seconds() // 60)}min 需处理",
+                    f"距截止 < {int(self._pre_pause.total_seconds() // 60)}min"
+                    + (
+                        f" / 停滞超 {stalled_timeout_min}min"
+                        if stalled_timeout_min > 0
+                        else ""
+                    )
+                    + (
+                        f"，命中异常 {aborted_fatal}、停滞 {aborted_stalled}"
+                        f"，剩余在途 {remaining_active}"
+                    ),
                 ),
                 JobStep(
                     "自动删除" if delete_mode else "自动暂停",
@@ -421,11 +546,12 @@ class MonitorFreeWindowService:
             ),
         )
         logger.info(
-            "monitor: 下载器 %d，命中 %d，触发%s %d，"
+            "monitor: 下载器 %d，命中 %d，触发%s %d（异常 %d / 停滞 %d），剩余在途 %d，"
             "跳过(无关/远/已完成/已暂停/校验中/永久/退还) %d/%d/%d/%d/%d/%d/%d，失败 %d",
             result.scanned, result.matched,
             "删除" if delete_mode else "暂停",
             result.deleted if delete_mode else result.pre_paused,
+            result.aborted_fatal, result.aborted_stalled, remaining_active,
             result.skipped_unmatched, result.skipped_far_from_window,
             result.skipped_already_completed, result.skipped_already_paused,
             result.skipped_checking,

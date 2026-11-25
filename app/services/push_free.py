@@ -80,6 +80,12 @@ class PushResult:
     skipped_parse_failed: int = 0
     failed: int = 0
     errors: tuple[str, ...] = ()
+    #: 推送前统计到的下载器在途下载数（未启用水位上限时为 None）
+    active_downloads: int | None = None
+    #: 本次生效的在途下载水位上限（0 = 不限）
+    max_active_downloads: int = 0
+    #: True 表示因下载器在途数已达上限而跳过本轮推送
+    skipped_by_capacity: bool = False
     #: 人话摘要（前端直接展示，避免前端硬编码字段名）
     summary: str = ""
     #: 子步骤明细（前端「步骤卡片」数据源）
@@ -108,8 +114,13 @@ class PushFreeService:
         self._factory = factory
         self._rng = rng
 
-    async def run(self) -> PushResult:
-        """执行一次推送作业。"""
+    async def run(self, *, active_downloads: int | None = None) -> PushResult:
+        """执行一次推送作业。
+
+        :param active_downloads: 可选，默认下载器当前在途下载数（由合并作业的
+            监测阶段透传，避免同轮重复调用 ``list_torrents()``）。为 ``None``
+            且启用了在途水位上限时，本方法会主动拉取下载器任务统计。
+        """
         # 1) 找默认下载器
         default_dl = await get_default_downloader()
         if default_dl is None:
@@ -122,18 +133,89 @@ class PushFreeService:
             )
         downloader_id = default_dl.id
 
+        # 1.5) 计算动态推送配额（按在途下载水位线补位，防堵塞）
+        from app.services.monitor import is_active_download
+        from app.services.runtime_params import get_runtime_params
+
+        rp = get_runtime_params()
+        max_per_run = rp.get_int("push_max_per_run")
+        max_active = rp.get_int("push_max_active_downloads")
+        interval_ms = rp.get_int("push_download_interval_ms")
+        min_remaining_h = rp.get_int("push_min_remaining_hours")
+
+        active_count: int | None = None
+        quota = max_per_run
+        capacity_step: JobStep | None = None
+        if max_active > 0:
+            if active_downloads is not None:
+                active_count = active_downloads
+            else:
+                try:
+                    adapter = self._factory.downloader(default_dl)
+                    infos = await adapter.list_torrents()
+                except Exception as exc:
+                    logger.warning("push_free: 查询下载器在途任务失败（不盲推）：%s", exc)
+                    return PushResult(
+                        failed=1,
+                        errors=(f"list_torrents: {exc}",),
+                        max_active_downloads=max_active,
+                        summary=f"查询下载器在途任务失败：{exc}",
+                        steps=(
+                            JobStep("查询默认下载器", "ok", 1, default_dl.name),
+                            JobStep("检查下载器水位", "fail", 0, str(exc)),
+                        ),
+                    )
+                active_count = sum(1 for info in infos if is_active_download(info))
+
+            available = max(0, max_active - active_count)
+            quota = min(max_per_run, available)
+            if quota <= 0:
+                logger.info(
+                    "push_free: 下载器在途 %d/%d，已达上限暂缓推送",
+                    active_count,
+                    max_active,
+                )
+                return PushResult(
+                    active_downloads=active_count,
+                    max_active_downloads=max_active,
+                    skipped_by_capacity=True,
+                    summary=f"在途下载 {active_count}/{max_active}，已达上限暂缓推送",
+                    steps=(
+                        JobStep("查询默认下载器", "ok", 1, default_dl.name),
+                        JobStep(
+                            "检查下载器水位",
+                            "skip",
+                            active_count,
+                            f"在途 {active_count}/{max_active}，无空闲槽位",
+                        ),
+                    ),
+                )
+            capacity_step = JobStep(
+                "检查下载器水位",
+                "ok",
+                active_count,
+                f"在途 {active_count}/{max_active}，本次最多推 {quota} 个",
+            )
+
         # 2) 选候选
         async with session_scope() as session:
-            candidates = await self._select_candidates(session, downloader_id)
+            candidates = await self._select_candidates(
+                session, downloader_id, limit=quota
+            )
 
         if not candidates:
             logger.info("push_free: 无新候选")
+            idle_steps: list[JobStep] = [
+                JobStep("查询默认下载器", "ok", 1, default_dl.name)
+            ]
+            if capacity_step is not None:
+                idle_steps.append(capacity_step)
+            idle_steps.append(JobStep("查询候选免费种", "skip", 0, "无新候选"))
             return PushResult(
+                active_downloads=active_count,
+                max_active_downloads=max_active,
                 summary="无新候选",
-                steps=(
-                    JobStep("查询默认下载器", "ok", 1, default_dl.name),
-                        JobStep("查询候选免费种", "skip", 0, "无新候选"),
-                ),
+                steps=tuple(idle_steps),
             )
 
         # 3) 逐个推送（经 task_queue 入队 → claim → 执行 → mark，
@@ -158,7 +240,6 @@ class PushFreeService:
             for c in candidates
         ]
 
-        from app.services.runtime_params import get_runtime_params
         from app.services.task_executor import PushItemError, execute_add_torrent
         from app.services.task_queue import (
             TaskKind,
@@ -169,11 +250,6 @@ class PushFreeService:
             make_idem_key,
         )
 
-        # 一次性取所有运行时参数，避免循环内/外重复取值导致
-        # "限频值"与"展示值"不一致（AGENTS.md 参数内存-DB 顺序一致关注点）。
-        rp = get_runtime_params()
-        interval_ms = rp.get_int("push_download_interval_ms")
-        min_remaining_h = rp.get_int("push_min_remaining_hours")
         first = True
 
         for c in candidates:
@@ -304,21 +380,13 @@ class PushFreeService:
         push_items, push_items_total = build_items(push_items)
         candidate_items, candidate_items_total = build_items(candidate_items)
 
-        result = PushResult(
-            selected=len(candidates),
-            pushed=pushed,
-            skipped_already_pushed=skipped_dup,
-            skipped_download_failed=skipped_dl_failed,
-            skipped_parse_failed=skipped_parse,
-            failed=failed,
-            errors=tuple(errors[:10]),
-            summary=(
-                f"选中 {len(candidates)}，推送 {pushed} 成功"
-                + (f"，{failed} 失败" if failed else "")
-                + (f"，{retried} 退避重试" if retried else "")
-            ),
-            steps=(
-                JobStep("查询默认下载器", "ok", 1, default_dl.name),
+        steps_list: list[JobStep] = [
+            JobStep("查询默认下载器", "ok", 1, default_dl.name),
+        ]
+        if capacity_step is not None:
+            steps_list.append(capacity_step)
+        steps_list.extend(
+            [
                 JobStep(
                     "查询候选免费种",
                     "ok",
@@ -342,7 +410,25 @@ class PushFreeService:
                     items=push_items,
                     items_total=push_items_total,
                 ),
+            ]
+        )
+
+        result = PushResult(
+            selected=len(candidates),
+            pushed=pushed,
+            skipped_already_pushed=skipped_dup,
+            skipped_download_failed=skipped_dl_failed,
+            skipped_parse_failed=skipped_parse,
+            failed=failed,
+            errors=tuple(errors[:10]),
+            active_downloads=active_count,
+            max_active_downloads=max_active,
+            summary=(
+                f"选中 {len(candidates)}，推送 {pushed} 成功"
+                + (f"，{failed} 失败" if failed else "")
+                + (f"，{retried} 退避重试" if retried else "")
             ),
+            steps=tuple(steps_list),
         )
         logger.info(
             "push_free: 选中 %d，推送 %d，跳过重复 %d，下载失败 %d，"
@@ -354,7 +440,11 @@ class PushFreeService:
         return result
 
     async def _select_candidates(
-        self, session: AsyncSession, downloader_id: int
+        self,
+        session: AsyncSession,
+        downloader_id: int,
+        *,
+        limit: int | None = None,
     ) -> list[_Candidate]:
         """选候选免费种：未推过 + 剩余时间满足阈值 + **按新条目优先排序**。
 
@@ -368,6 +458,9 @@ class PushFreeService:
         from app.services.runtime_params import get_runtime_params
 
         rp = get_runtime_params()
+        max_count = limit if limit is not None else rp.get_int("push_max_per_run")
+        if max_count <= 0:
+            return []
         min_remaining = timedelta(hours=rp.get_int("push_min_remaining_hours"))
         threshold = format_bj(bj_now_dt() + min_remaining)
 
@@ -441,7 +534,7 @@ class PushFreeService:
                     free_end_at=free_end_at,
                 )
             )
-            if len(candidates) >= rp.get_int("push_max_per_run"):
+            if len(candidates) >= max_count:
                 break
         return candidates
 

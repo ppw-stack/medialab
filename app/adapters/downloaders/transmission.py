@@ -319,8 +319,9 @@ class TransmissionAdapter(DownloaderAdapter):
         raw_status = row.get("status")
         if raw_status is None:
             raw_status = -1
+        status_int = int(raw_status)
         state = TransmissionAdapter._status_to_state(
-            int(raw_status), percent, rate_ul
+            status_int, percent, rate_ul
         )
         if row.get("errorString") and state in (
             TorrentState.DOWNLOADING,
@@ -360,6 +361,7 @@ class TransmissionAdapter(DownloaderAdapter):
             added_at=int(row.get("addedDate") or 0) or None,
             completed_at=completed_at,
             eta=eta,
+            is_queued=status_int == 3,
         )
 
     @staticmethod

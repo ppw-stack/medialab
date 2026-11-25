@@ -38,6 +38,7 @@ def _runtime_params() -> None:
     mgr = RuntimeParamManager()
     mgr.set_memory("push_min_remaining_hours", 6)
     mgr.set_memory("push_max_per_run", 20)
+    mgr.set_memory("push_max_active_downloads", 0)  # 既有测试默认不限水位
     mgr.set_memory("push_download_interval_ms", 0)  # 测试里不等
     mgr.set_memory("monitor_pre_pause_minutes", 10)
     set_runtime_params(mgr)
@@ -553,4 +554,119 @@ class TestEnqueueLockContention:
             # 只有成功的候选入了队（撞锁候选没进队列）
             qrows = (await session.execute(select(TaskQueue))).scalars().all()
             assert len(qrows) == 1
+
+
+# ============================================================ 动态水位配额
+
+
+class TestDynamicCapacity:
+    """按默认下载器在途下载数动态计算本次推送配额。"""
+
+    async def test_pushes_only_available_slots(
+        self, db: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """在途 7 / 上限 10，单次上限 20，候选 5 个 → 只推 3 个。"""
+        await _add_downloader()
+        site_id = await _add_site()
+        for i in range(5):
+            await _add_torrent(
+                free_type=FreeType.PERMANENT, item_id=f"cap-{i}", site_id=site_id
+            )
+        get_runtime_params().set_memory("push_max_active_downloads", 10)
+        get_runtime_params().set_memory("push_max_per_run", 20)
+
+        async def _fake_execute(payload, factory, *, category="auto-push"):
+            return {"info_hash": "a" * 40, "name": "t", "idempotent": False}
+
+        monkeypatch.setattr(
+            "app.services.task_executor.execute_add_torrent", _fake_execute
+        )
+
+        result = await _service().run(active_downloads=7)
+        assert result.selected == 3
+        assert result.pushed == 3
+        assert result.active_downloads == 7
+        assert result.max_active_downloads == 10
+        assert result.skipped_by_capacity is False
+        assert any(s.name == "检查下载器水位" for s in result.steps)
+
+    async def test_skips_when_at_capacity(self, db: None) -> None:
+        """在途 10 / 上限 10 → 跳过推送，标记 skipped_by_capacity=True。"""
+        await _add_downloader()
+        site_id = await _add_site()
+        await _add_torrent(
+            free_type=FreeType.PERMANENT, item_id="cap-full", site_id=site_id
+        )
+        get_runtime_params().set_memory("push_max_active_downloads", 10)
+
+        result = await _service().run(active_downloads=10)
+        assert result.selected == 0
+        assert result.pushed == 0
+        assert result.skipped_by_capacity is True
+        assert "已达上限暂缓推送" in result.summary
+
+    async def test_queries_downloader_when_active_downloads_not_passed(
+        self, db: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """未传入 active_downloads 时主动查下载器，仅计未完成活跃下载任务。"""
+        from app.adapters.downloaders.base import TorrentInfo, TorrentState
+
+        await _add_downloader()
+        site_id = await _add_site()
+        for i in range(4):
+            await _add_torrent(
+                free_type=FreeType.PERMANENT, item_id=f"q-{i}", site_id=site_id
+            )
+        get_runtime_params().set_memory("push_max_active_downloads", 5)
+
+        class _FakeDl:
+            async def list_torrents(self) -> list[TorrentInfo]:
+                return [
+                    TorrentInfo(hash="1" * 40, name="dl", state=TorrentState.DOWNLOADING, size=100, completed_bytes=10),
+                    TorrentInfo(hash="2" * 40, name="st", state=TorrentState.STALLED_DL, size=100, completed_bytes=0),
+                    TorrentInfo(hash="3" * 40, name="qd", state=TorrentState.DOWNLOADING, size=100, completed_bytes=0, is_queued=True),
+                    # 以下不计入在途下载
+                    TorrentInfo(hash="4" * 40, name="seed", state=TorrentState.SEEDING, size=100, completed_bytes=100),
+                    TorrentInfo(hash="5" * 40, name="paused", state=TorrentState.PAUSED_DL, size=100, completed_bytes=20),
+                    TorrentInfo(hash="6" * 40, name="err", state=TorrentState.ERROR, size=100, completed_bytes=20),
+                ]
+
+        factory = AdapterFactory()
+        monkeypatch.setattr(factory, "downloader", lambda _dl: _FakeDl())
+
+        async def _fake_execute(payload, factory, *, category="auto-push"):
+            return {"info_hash": "a" * 40, "name": "t", "idempotent": False}
+
+        monkeypatch.setattr(
+            "app.services.task_executor.execute_add_torrent", _fake_execute
+        )
+
+        result = await PushFreeService(factory).run()
+        # 在途 3 / 上限 5 → 推 2 个
+        assert result.active_downloads == 3
+        assert result.selected == 2
+        assert result.pushed == 2
+
+    async def test_downloader_query_failure_does_not_blindly_push(
+        self, db: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """水位查询失败时安全降级（不盲推）。"""
+        await _add_downloader()
+        site_id = await _add_site()
+        await _add_torrent(
+            free_type=FreeType.PERMANENT, item_id="fail-dl", site_id=site_id
+        )
+        get_runtime_params().set_memory("push_max_active_downloads", 10)
+
+        class _BoomDl:
+            async def list_torrents(self) -> list[object]:
+                raise RuntimeError("qb timeout")
+
+        factory = AdapterFactory()
+        monkeypatch.setattr(factory, "downloader", lambda _dl: _BoomDl())
+
+        result = await PushFreeService(factory).run()
+        assert result.pushed == 0
+        assert result.failed == 1
+        assert "查询下载器在途任务失败" in result.summary
 
