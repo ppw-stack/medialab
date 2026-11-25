@@ -118,10 +118,12 @@ async def run_push_and_monitor(factory: Any) -> dict[str, Any]:
     results["monitor"] = mon_result
     steps.append(mon_step)
 
-    # ② 免费种推送（距上次真正推送 ≥ 门槛才跑）
+    # ② 免费种推送（距上次真正推送 ≥ 门槛才跑；复用监测段统计的剩余在途数）
+    raw_active = mon_result.get("remaining_active_downloads")
+    remaining_active = raw_active if isinstance(raw_active, int) else None
     push_result, push_step = await run_stage(
         "免费种推送",
-        lambda: _run_push(factory),
+        lambda: _run_push(factory, active_downloads=remaining_active),
     )
     results["push"] = push_result
     steps.append(push_step)
@@ -144,11 +146,14 @@ async def _run_monitor(factory: Any) -> dict[str, Any]:
     return to_payload(result)
 
 
-async def _run_push(factory: Any) -> dict[str, Any]:
+async def _run_push(
+    factory: Any, *, active_downloads: int | None = None
+) -> dict[str, Any]:
     """跑免费种推送，受 :data:`PUSH_MIN_INTERVAL_SEC` 节流。
 
-    空转（无候选 / 未配置下载器 / 选种全被跳过）**不刷新**节流时间戳，
-    这样新候选一出现、或用户刚配好下载器，下一轮就能推（≤10 分钟）。
+    空转（无候选 / 未配置下载器 / 在途已满暂缓推送 / 选种全被跳过）
+    **不刷新**节流时间戳，这样新候选一出现、或下载器腾出槽位，
+    下一轮就能立刻补推（≤10 分钟）。
     """
     now = time.monotonic()
     remain = _THROTTLE.remaining(now)
@@ -166,7 +171,11 @@ async def _run_push(factory: Any) -> dict[str, Any]:
 
     from app.services.push_free import PushFreeService
 
-    result = await PushFreeService(factory).run()
+    svc = PushFreeService(factory)
+    if active_downloads is not None:
+        result = await svc.run(active_downloads=active_downloads)
+    else:
+        result = await svc.run()
     payload = to_payload(result)
 
     # 只有**真的尝试过**才记时间戳：空转轮次不算，避免把下一次推送推后 30 分钟

@@ -86,7 +86,7 @@ async def run_stage(
     status = "ok"
     if data.get("errors") or data.get("failed"):
         status = "warn"
-    if data.get("skipped_by_interval"):
+    if data.get("skipped_by_interval") or data.get("skipped_by_capacity"):
         status = "skip"
 
     children = [s for s in (data.get("steps") or []) if isinstance(s, JobStep)]

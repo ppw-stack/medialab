@@ -39,8 +39,11 @@ def _runtime_params() -> None:
     mgr = RuntimeParamManager()
     mgr.set_memory("monitor_pre_pause_minutes", 10)
     mgr.set_memory("monitor_delete_expired", 0)
+    mgr.set_memory("monitor_stalled_timeout_minutes", 60)
+    mgr.set_memory("monitor_min_dlspeed_kbps", 50)
     mgr.set_memory("push_min_remaining_hours", 6)
     mgr.set_memory("push_max_per_run", 20)
+    mgr.set_memory("push_max_active_downloads", 10)
     mgr.set_memory("push_download_interval_ms", 0)
     set_runtime_params(mgr)
     yield
@@ -552,3 +555,235 @@ async def test_steps_删除模式明细标注磁盘数据(db: None) -> None:
     assert step.items is not None
     assert "已删除" in (step.items[0].detail or "")
     assert "磁盘数据" in (step.items[0].detail or "")
+
+
+# ============================================================ 异常与停滞监测
+
+
+async def _setup_custom(
+    *,
+    free_type: str = FreeType.TIMED,
+    free_end_at: str | None = None,
+    info: TorrentInfo,
+    extra_infos: list[TorrentInfo] | None = None,
+) -> _FakeDownloader:
+    async with session_scope() as session:
+        session.add(Site(name="s1", domain="s1.test", adapter="generic"))
+        session.add(
+            DownloaderInstance(
+                name="dl1",
+                type="qbittorrent",
+                url="http://localhost:8081",
+                is_default=True,
+                enabled=True,
+            )
+        )
+        session.add(
+            TorrentIndex(
+                site_id=1,
+                item_id="i1",
+                name=info.name or "t",
+                free_type=free_type,
+                free_end_at=free_end_at,
+                push_status=PushStatus.PUSHED,
+                info_hash=info.hash,
+            )
+        )
+        await session.flush()
+    return _FakeDownloader([info, *(extra_infos or [])])
+
+
+@pytest.mark.parametrize("state", [TorrentState.ERROR, TorrentState.MISSING_FILES])
+@pytest.mark.parametrize("free_type", [FreeType.PERMANENT, FreeType.TIMED])
+async def test_fatal_error_aborted_regardless_of_free_type(
+    db: None, state: TorrentState, free_type: str
+) -> None:
+    """致命错误（ERROR / MISSING_FILES）不受免费类型限制，立即暂停/删除。"""
+    far = format_bj(bj_now_dt() + timedelta(hours=12)) if free_type == FreeType.TIMED else None
+    fake = await _setup_custom(
+        free_type=free_type,
+        free_end_at=far,
+        info=TorrentInfo(
+            hash="a" * 40,
+            name="broken-torrent",
+            state=state,
+            progress=0.3,
+            size=1000,
+            completed_bytes=300,
+        ),
+    )
+    result = await _run(fake)
+    assert fake.paused == [["a" * 40]]
+    assert result.aborted_fatal == 1
+    assert result.pre_paused == 1
+
+
+async def test_fatal_error_skips_completed_torrent(db: None) -> None:
+    """已完成做种的种子即使报错也不在免费窗口监测中误删/误动。"""
+    fake = await _setup_custom(
+        free_type=FreeType.PERMANENT,
+        info=TorrentInfo(
+            hash="a" * 40,
+            name="done-torrent",
+            state=TorrentState.ERROR,
+            progress=1.0,
+            size=1000,
+            completed_bytes=1000,
+        ),
+    )
+    result = await _run(fake)
+    assert fake.paused == []
+    assert result.aborted_fatal == 0
+    assert result.skipped_already_completed == 1
+
+
+async def test_stalled_dl_timeout_aborted_for_timed_and_permanent(db: None) -> None:
+    """stalledDL 超过超时时间（默认 60 分钟）→ 永久免费种也会被清理腾出槽位。"""
+    import time as _time
+
+    old_added = int(_time.time()) - 90 * 60
+    fake = await _setup_custom(
+        free_type=FreeType.PERMANENT,
+        info=TorrentInfo(
+            hash="a" * 40,
+            name="stalled-perm",
+            state=TorrentState.STALLED_DL,
+            progress=0.1,
+            size=1000,
+            completed_bytes=100,
+            dlspeed=0,
+            added_at=old_added,
+        ),
+    )
+    result = await _run(fake)
+    assert fake.paused == [["a" * 40]]
+    assert result.aborted_stalled == 1
+    assert result.remaining_active_downloads == 0
+
+
+async def test_slow_downloading_timeout_aborted(db: None) -> None:
+    """DOWNLOADING 速度低于阈值（< 50 KB/s）且超时 → 判定龟速堵塞并处理。"""
+    import time as _time
+
+    far = format_bj(bj_now_dt() + timedelta(hours=12))
+    old_added = int(_time.time()) - 75 * 60
+    fake = await _setup_custom(
+        free_type=FreeType.TIMED,
+        free_end_at=far,
+        info=TorrentInfo(
+            hash="a" * 40,
+            name="slow-dl",
+            state=TorrentState.DOWNLOADING,
+            progress=0.2,
+            size=10_000_000,
+            completed_bytes=2_000_000,
+            dlspeed=10 * 1024,  # 10 KB/s < 50 KB/s
+            added_at=old_added,
+        ),
+    )
+    result = await _run(fake)
+    assert fake.paused == [["a" * 40]]
+    assert result.aborted_stalled == 1
+    assert result.remaining_active_downloads == 0
+
+
+async def test_zero_speed_when_min_speed_is_zero_catches_transmission_stalled(
+    db: None,
+) -> None:
+    """monitor_min_dlspeed_kbps=0 时，DOWNLOADING + 0 速超时也应命中（兼容 TR 无 stalledDL）。"""
+    import time as _time
+
+    from app.services.runtime_params import get_runtime_params
+
+    get_runtime_params().set_memory("monitor_min_dlspeed_kbps", 0)
+    old_added = int(_time.time()) - 70 * 60
+    fake = await _setup_custom(
+        free_type=FreeType.PERMANENT,
+        info=TorrentInfo(
+            hash="a" * 40,
+            name="tr-stalled",
+            state=TorrentState.DOWNLOADING,
+            progress=0.1,
+            size=1000,
+            completed_bytes=100,
+            dlspeed=0,
+            added_at=old_added,
+        ),
+    )
+    result = await _run(fake)
+    assert fake.paused == [["a" * 40]]
+    assert result.aborted_stalled == 1
+
+
+async def test_queued_dl_is_not_aborted_as_stalled_and_counts_as_active(
+    db: None,
+) -> None:
+    """下载器排队中（is_queued=True）即使超时 0 速也不误杀，且计入剩余在途下载数。"""
+    import time as _time
+
+    old_added = int(_time.time()) - 120 * 60
+    fake = await _setup_custom(
+        free_type=FreeType.PERMANENT,
+        info=TorrentInfo(
+            hash="a" * 40,
+            name="queued-dl",
+            state=TorrentState.DOWNLOADING,
+            progress=0.0,
+            size=1000,
+            completed_bytes=0,
+            dlspeed=0,
+            added_at=old_added,
+            is_queued=True,
+        ),
+    )
+    result = await _run(fake)
+    assert fake.paused == []
+    assert result.aborted_stalled == 0
+    assert result.remaining_active_downloads == 1
+
+
+async def test_young_or_fast_or_disabled_timeout_not_aborted(db: None) -> None:
+    """未超时、速度达标或关闭停滞检测（timeout=0）均不触发清理。"""
+    import time as _time
+
+    now = int(_time.time())
+    # 1) 刚加入 10 分钟的 stalledDL
+    fake = await _setup_custom(
+        free_type=FreeType.PERMANENT,
+        info=TorrentInfo(
+            hash="a" * 40,
+            name="young-stalled",
+            state=TorrentState.STALLED_DL,
+            progress=0.0,
+            size=1000,
+            completed_bytes=0,
+            dlspeed=0,
+            added_at=now - 10 * 60,
+        ),
+        extra_infos=[
+            # 手动推送的正在下载任务：不干预，但计入 remaining_active_downloads
+            TorrentInfo(
+                hash="b" * 40,
+                name="manual-dl",
+                state=TorrentState.DOWNLOADING,
+                progress=0.5,
+                size=1000,
+                completed_bytes=500,
+                dlspeed=500 * 1024,
+                added_at=now - 120 * 60,
+            ),
+            # 已完成做种：不计入在途下载
+            TorrentInfo(
+                hash="c" * 40,
+                name="seeding",
+                state=TorrentState.SEEDING,
+                progress=1.0,
+                size=1000,
+                completed_bytes=1000,
+            ),
+        ],
+    )
+    result = await _run(fake)
+    assert fake.paused == []
+    assert result.aborted_stalled == 0
+    assert result.remaining_active_downloads == 2

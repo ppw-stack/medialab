@@ -208,6 +208,9 @@ class TorrentInfo:
     added_at: int | None = None
     completed_at: int | None = None
     eta: int | None = None
+    #: 是否处于下载器自身队列等待中（qB ``queuedDL`` / TR ``status=3``）。
+    #: 排队中的任务占用在途下载水位，但不应被误判为 0 速停滞死种。
+    is_queued: bool = False
 
     @property
     def remaining_bytes(self) -> int:
