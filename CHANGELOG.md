@@ -10,6 +10,10 @@
 
 ## [Unreleased]
 
+（暂无）
+
+## [3.1.0] - 2026-11-26
+
 ### Added
 
 - **免费种推送与监测护栏及可观测性**（向后兼容增量）：
@@ -39,7 +43,7 @@
 
 ### Versioning & Deprecation
 
-- **语义化版本影响：minor**（下一个 tag `v3.1.0`，镜像 tag `3.1.0` / `3.1`）
+- **语义化版本影响：minor**（本次发布 `v3.1.0`，镜像 tag `3.1.0` / `3.1`）
   ——本次仅**新增**只读端点 `GET /api/v1/scheduler/free-seed-status`、
   `SiteOut` 的 `breaker_until` / `breaker_open` 字段与新的 Prometheus 指标，
   并新增运行时参数 `monitor_max_actions_per_run`（默认 `5`，改成 `0`
