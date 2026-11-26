@@ -400,6 +400,7 @@ def preflight_job_imports() -> None:
         "app.services.scrape_jobs",     # _run_scrape_metadata（整理刮削迁移）
         "app.services.organize_service",  # _run_organize（整理刮削迁移）
         "app.services.aggregate_sync",  # _run_aggregate_sync（网盘聚合归拢）
+        "app.services.migration_jobs",  # _run_resume_paused_migrations（暂停迁移续传）
         "app.services.svc_factory",     # _run_cleanup_link_cache（get_link_cache）
         "app.services.link_cache",      # get_link_cache() 返回的缓存实现
         "app.services.dav_auth",        # _run_purge_dav_auth_cache
