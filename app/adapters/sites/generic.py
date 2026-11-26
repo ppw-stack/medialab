@@ -179,11 +179,10 @@ def _host_of(url: str) -> str:
         candidate = url if "//" in url else f"https://{url}"
         return (urlsplit(candidate).hostname or "").lower()
     except ValueError:
-        # 去掉 query / fragment 再截断——避免把票据类参数写进日志
-        logger.warning(
-            "URL 主机解析失败，按不可信主机处理：%s",
-            candidate.split("?", 1)[0].split("#", 1)[0][:120],
-        )
+        # 畸形地址**一个字都不能写进日志**：票据不只在 query 里，TTG 这类
+        # 站点的下载地址形如 ``/dl/{id}/{auth}``（末段即签名票据），userinfo
+        # 也在 host 段前。解析都失败了就没有可信部分可留，只记标记。
+        logger.warning("URL 主机解析失败，按不可信主机处理：<unparsable>")
         return ""
 
 
@@ -557,9 +556,11 @@ class GenericAdapter(SiteAdapter):
                 except (ValueError, httpx.InvalidURL) as exc:
                     # 构造期异常（如 proxy_url 配错）不属于 httpx.HTTPError，
                     # 不转换就会以原始类型冒泡，绕过本函数的 SiteFetchError 契约。
+                    # 同理不写 URL 前缀：host 可信就写 host，否则只写标记——
+                    # 畸形地址的 path 里可能正躺着可用票据。
                     raise SiteFetchError(
                         f"{self.profile.name} 匿名下载客户端初始化失败"
-                        f"（{host or url[:80]}）：{exc}"
+                        f"（{host or '<unparsable>'}）：{exc}"
                     ) from exc
                 async with anonymous_client as anonymous:
                     resp = await anonymous.get(url)

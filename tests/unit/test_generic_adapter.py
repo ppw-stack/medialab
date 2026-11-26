@@ -21,6 +21,10 @@ from app.core.timeutils import parse_bj
 #: 允许环境变量覆盖，代码里不出现任何凭据字面量。
 _TEST_API_KEY = os.environ.get("MTEAM_APIKEY", "test-placeholder")
 
+#: 测试用的占位下载票据（**绝不是真实 token**）：拼进畸形地址，断言它不进日志。
+#: 不复用裸字面量——有人在调试时把真 token 粘进占位处就会永久留在 git 历史。
+_FAKE_DOWNLOAD_TICKET = os.environ.get("MTEAM_APIKEY", "test-placeholder")
+
 _LIST_HTML = """
 <table class="torrents">
 <tr><td>
@@ -923,14 +927,14 @@ def test_row_item_id_supports_ttg_and_promo_maps_30_percent() -> None:
 def test_host_of_logs_invalid_url_without_query(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """非法 URL 返回空串，但必须留 warning（去掉 query，不泄露票据）。"""
+    """非法 URL 返回空串，但必须留 warning（连 path 里的票据都不能泄露）。"""
     from app.adapters.sites.generic import _host_of
 
     with caplog.at_level("WARNING", logger="app.adapters.sites.generic"):
-        assert _host_of("https://[bad-host/path?token=secret") == ""
+        assert _host_of(f"https://[bad-host/dl/12345/{_FAKE_DOWNLOAD_TICKET}") == ""
 
     assert "主机解析失败" in caplog.text
-    assert "token=secret" not in caplog.text
+    assert _FAKE_DOWNLOAD_TICKET not in caplog.text
 
 
 async def test_generic_anonymous_client_init_failure_is_site_fetch_error(
@@ -948,5 +952,26 @@ async def test_generic_anonymous_client_init_failure_is_site_fetch_error(
             await adapter._fetch_torrent_response(
                 "https://cdn.offsite.test/path.torrent"
             )
+    finally:
+        await adapter.close()
+
+
+async def test_anonymous_client_failure_message_hides_malformed_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """畸形地址的失败消息只留 ``<unparsable>``，不回显 path 里的票据。"""
+    adapter = GenericAdapter(SiteProfile(name="OffSite", domain="site.test"))
+    try:
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise httpx.InvalidURL("bad proxy")
+
+        monkeypatch.setattr("app.adapters.sites.generic.httpx.AsyncClient", _boom)
+        with pytest.raises(SiteFetchError) as excinfo:
+            await adapter._fetch_torrent_response(
+                f"https://[bad-host/dl/12345/{_FAKE_DOWNLOAD_TICKET}"
+            )
+        assert "<unparsable>" in str(excinfo.value)
+        assert _FAKE_DOWNLOAD_TICKET not in str(excinfo.value)
     finally:
         await adapter.close()

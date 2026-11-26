@@ -18,6 +18,25 @@
   - `GET /api/v1/sites`（`SiteOut`）新增 `breaker_until` 与 `breaker_open` 字段，透出站点 403/429 熔断状态。
   - `/metrics` 接通并新增 `seedhelper_free_seed_active`、`seedhelper_free_seed_max_active`、`seedhelper_free_seed_outcomes_total`、`seedhelper_cleanup_actions_total`、`seedhelper_sites_breaker_open`、`seedhelper_site_breaker_open`。
 
+### 持久化变更
+
+- **新增表 `migration_paused_jobs`**（`app/db/models.py:MigrationPausedJob`）：
+  保存因云添加额度耗尽而**暂停**的迁移任务参数（`id` / `params_json` /
+  `paused_at` 索引 / `resumed_by` / `created_at`），是「次日自动续传」
+  跨重启的唯一依据。续传成功后该行即被删除，表内只留**暂停且未续传**的任务。
+  - **建表方式与时机**：`DbBootstrap.create_all` 在启动早期执行
+    `Base.metadata.create_all`——纯**新建表**（不是对存量表 ALTER），
+    不触碰既有表，无锁表 / 停机需求；`paused_at` 索引随建表一次性创建，
+    无在线索引步骤。
+  - **降级可见**：落库失败会打
+    `暂停迁移任务落库失败（降级为仅内存续传）` 的 WARNING
+    （`app.services.migration_jobs._persist_paused`），功能退化为仅进程内
+    续传，不影响迁移任务本身。
+  - **回滚**：首选回退镜像——旧代码不读该表，列 / 表留着无害。确需删表执行
+    `DROP TABLE migration_paused_jobs;`，会一并丢掉尚未续传任务的参数：
+    删表前先 `SELECT id, params_json, paused_at FROM migration_paused_jobs;`
+    留档，回滚后按原参数人工重跑这些迁移。
+
 ### Versioning & Deprecation
 
 - **语义化版本影响：minor**（下一个 tag `v3.1.0`，镜像 tag `3.1.0` / `3.1`）
