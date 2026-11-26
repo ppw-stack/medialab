@@ -29,6 +29,7 @@ from app.api.auth import require_session
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.services import job_run_service
+from app.services import push_and_monitor as push_and_monitor_service
 from app.services import runtime_params as runtime_params_service
 from app.services.job_run_service import JobRunRow
 from app.services.job_settings import save_cron, save_enabled_state
@@ -165,6 +166,7 @@ class RuntimeParamsUpdateIn(BaseModel):
     push_max_active_downloads: int | None = None
     monitor_stalled_timeout_minutes: int | None = None
     monitor_min_dlspeed_kbps: int | None = None
+    monitor_max_actions_per_run: int | None = None
     disk_rotation_threshold_pct: int | None = None
     disk_rotation_action: int | None = None
     #: 磁盘流转模式（0 = 实际执行 / 1 = 仅预演）
@@ -199,6 +201,12 @@ def _assert_params_model_covers_specs() -> None:
 
 
 _assert_params_model_covers_specs()
+
+
+@router.get("/scheduler/free-seed-status", summary="免费种推送与监测观测快照")
+async def get_free_seed_status() -> dict[str, Any]:
+    """返回免费种动态水位、推送冷却、上轮清理分布与当前熔断站点（不打下载器网络）。"""
+    return await push_and_monitor_service.get_free_seed_observability()
 
 
 @router.get("/scheduler/runtime-params", summary="查询作业运行参数")

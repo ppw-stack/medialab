@@ -125,6 +125,18 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         note="下载速度低于此值（KB/s）且超过停滞超时即视为龟速堵塞；0 = 仅处理停滞与 0 速",
     ),
     ParamSpec(
+        key="monitor_max_actions_per_run",
+        label="单轮异常/停滞清理上限（个）",
+        default=5,
+        min=0,
+        max=200,
+        job="push_and_monitor_free",
+        note=(
+            "每轮最多暂停/删除的异常或停滞种子数，防止网络抖动引发批量误清；"
+            "0 = 不限（不影响临期窗口止损）"
+        ),
+    ),
+    ParamSpec(
         key="aggregate_max_submissions",
         label="单轮提交上限（个）",
         default=20,

@@ -1569,3 +1569,45 @@ async def test_scheduler_status_with_enabled_setting(
         assert resp.json()["enabled"] is True
     finally:
         set_settings(app_settings)
+
+
+async def test_sites_expose_breaker_status_and_free_seed_observability(
+    client: httpx.AsyncClient,
+) -> None:
+    """站点列表透出熔断状态，观测快照端点返回水位、参数与熔断站点清单。"""
+    from datetime import timedelta
+
+    from app.core.timeutils import bj_now_dt, format_bj
+
+    future_until = format_bj(bj_now_dt() + timedelta(minutes=45))
+    past_until = format_bj(bj_now_dt() - timedelta(minutes=10))
+
+    await _add_site(name="tripped-site", enabled=True, breaker_until=future_until)
+    await _add_site(name="recovered-site", enabled=True, breaker_until=past_until)
+    await _add_site(name="disabled-tripped", enabled=False, breaker_until=future_until)
+
+    sites_resp = await client.get("/api/v1/sites")
+    assert sites_resp.status_code == 200
+    by_name = {item["name"]: item for item in sites_resp.json()}
+    assert by_name["tripped-site"]["breaker_open"] is True
+    assert by_name["tripped-site"]["breaker_until"] == future_until
+    assert by_name["recovered-site"]["breaker_open"] is False
+    assert by_name["recovered-site"]["breaker_until"] == past_until
+
+    obs_resp = await client.get("/api/v1/scheduler/free-seed-status")
+    assert obs_resp.status_code == 200
+    obs = obs_resp.json()
+    assert obs["max_active_downloads"] == 10
+    assert obs["max_actions_per_run"] == 5
+    assert obs["throttle_remaining_sec"] >= 0
+    # 仅启用且仍在熔断期的站点出现在观测快照中
+    assert [b["name"] for b in obs["breaker_sites"]] == ["tripped-site"]
+    assert obs["breaker_sites"][0]["breaker_until"] == future_until
+
+    # 运行时参数 API 支持修改 monitor_max_actions_per_run
+    put_resp = await client.put(
+        "/api/v1/scheduler/runtime-params",
+        json={"monitor_max_actions_per_run": 8},
+    )
+    assert put_resp.status_code == 200
+    assert put_resp.json()["params"]["monitor_max_actions_per_run"] == 8

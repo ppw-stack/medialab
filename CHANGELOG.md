@@ -10,7 +10,13 @@
 
 ## [Unreleased]
 
-（暂无）
+### Added
+
+- **免费种推送与监测护栏及可观测性**（向后兼容增量）：
+  - 新增运行时参数 `monitor_max_actions_per_run`（默认 `5`，`0` = 不限）：限制单轮异常/停滞清理上限（不影响临期窗口止损），防止网络抖动引发批量误清。
+  - 新增只读端点 `GET /api/v1/scheduler/free-seed-status`：返回免费种在途水位、推送冷却、上轮清理分布与当前熔断站点（纯内存 + 轻量查表，不打下载器网络）。
+  - `GET /api/v1/sites`（`SiteOut`）新增 `breaker_until` 与 `breaker_open` 字段，透出站点 403/429 熔断状态。
+  - `/metrics` 接通并新增 `seedhelper_free_seed_active`、`seedhelper_free_seed_max_active`、`seedhelper_free_seed_outcomes_total`、`seedhelper_cleanup_actions_total`、`seedhelper_sites_breaker_open`、`seedhelper_site_breaker_open`。
 
 ## [3.0.0] - 2026-11-22
 

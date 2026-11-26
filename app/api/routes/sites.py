@@ -94,6 +94,9 @@ class SiteOut(BaseModel):
     download: int = 0
     seeding_count: int = 0
     user_data_seen_at: str | None = None
+    # -- 熔断状态（403/429 保护性冷却）--
+    breaker_until: str | None = None
+    breaker_open: bool = False
 
 
 class SiteUserDataOut(BaseModel):

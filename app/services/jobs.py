@@ -28,7 +28,8 @@ from app.adapters.sites.base import (
     SitePermanentError,
 )
 from app.core.logging import get_logger
-from app.core.metrics import feed_pulls, stage_duration
+from app.core.metrics import feed_pulls, site_breaker_open, stage_duration
+from app.core.metrics import state as metric_state
 from app.core.timeutils import bj_now, bj_now_dt, format_bj, parse_bj
 from app.db.models import Site, TorrentIndex
 from app.db.session import session_scope
@@ -178,6 +179,13 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
     failed_site_names |= {name for name, _ in site_failures}
     total_failed = len(failed_site_names)
     total_breaker_skipped = len(breaker_skipped)
+
+    open_breaker_names = {name for name, _ in breaker_skipped}
+    for row in rows:
+        site_breaker_open.labels(site=row.name).set(
+            1 if row.name in open_breaker_names else 0
+        )
+    metric_state["sites_breaker_open"].set(len(open_breaker_names))
 
     if total_written:
         logger.info(

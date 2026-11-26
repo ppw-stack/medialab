@@ -31,6 +31,8 @@ from typing import TYPE_CHECKING
 from sqlalchemy import or_, select, update
 
 from app.core.logging import get_logger
+from app.core.metrics import free_seed_outcomes
+from app.core.metrics import state as metric_state
 from app.core.timeutils import bj_now, bj_now_dt, format_bj
 from app.db.models import Site, TorrentIndex
 from app.db.session import session_scope
@@ -142,6 +144,7 @@ class PushFreeService:
         max_active = rp.get_int("push_max_active_downloads")
         interval_ms = rp.get_int("push_download_interval_ms")
         min_remaining_h = rp.get_int("push_min_remaining_hours")
+        metric_state["free_seed_max_active"].set(max_active)
 
         active_count: int | None = None
         quota = max_per_run
@@ -155,6 +158,9 @@ class PushFreeService:
                     infos = await adapter.list_torrents()
                 except Exception as exc:
                     logger.warning("push_free: 查询下载器在途任务失败（不盲推）：%s", exc)
+                    free_seed_outcomes.labels(
+                        outcome="failed", reason="downloader_query"
+                    ).inc()
                     return PushResult(
                         failed=1,
                         errors=(f"list_torrents: {exc}",),
@@ -167,6 +173,7 @@ class PushFreeService:
                     )
                 active_count = sum(1 for info in infos if is_active_download(info))
 
+            metric_state["free_seed_active"].set(active_count)
             available = max(0, max_active - active_count)
             quota = min(max_per_run, available)
             if quota <= 0:
@@ -175,6 +182,9 @@ class PushFreeService:
                     active_count,
                     max_active,
                 )
+                free_seed_outcomes.labels(
+                    outcome="skipped", reason="capacity"
+                ).inc()
                 return PushResult(
                     active_downloads=active_count,
                     max_active_downloads=max_active,
@@ -430,6 +440,27 @@ class PushFreeService:
             ),
             steps=tuple(steps_list),
         )
+        if active_count is not None:
+            metric_state["free_seed_active"].set(active_count + pushed)
+        if pushed:
+            free_seed_outcomes.labels(outcome="pushed", reason="ok").inc(pushed)
+        if skipped_dup:
+            free_seed_outcomes.labels(
+                outcome="skipped", reason="already_pushed"
+            ).inc(skipped_dup)
+        if skipped_dl_failed:
+            free_seed_outcomes.labels(
+                outcome="skipped", reason="download_failed"
+            ).inc(skipped_dl_failed)
+        if skipped_parse:
+            free_seed_outcomes.labels(
+                outcome="skipped", reason="parse_failed"
+            ).inc(skipped_parse)
+        if failed:
+            free_seed_outcomes.labels(
+                outcome="failed", reason="push_error"
+            ).inc(failed)
+
         logger.info(
             "push_free: 选中 %d，推送 %d，跳过重复 %d，下载失败 %d，"
             "解析失败 %d，推送失败 %d，退避重试 %d",
