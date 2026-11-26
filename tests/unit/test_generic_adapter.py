@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import httpx
@@ -15,6 +16,10 @@ from app.adapters.sites.base import (
 )
 from app.adapters.sites.generic import GenericAdapter
 from app.core.timeutils import parse_bj
+
+#: 测试用的占位凭据（**绝不是真实 API Key**）：只用于断言请求头透传。
+#: 允许环境变量覆盖，代码里不出现任何凭据字面量。
+_TEST_API_KEY = os.environ.get("MTEAM_APIKEY", "test-placeholder")
 
 _LIST_HTML = """
 <table class="torrents">
@@ -805,12 +810,33 @@ def test_parse_download_recipe_boundaries() -> None:
     assert parsed == (cfg, "https://api.example.com/genDlToken")
 
 
+async def test_generic_download_recipe_rejects_off_site_endpoint() -> None:
+    """换票 endpoint 指向站外 / 非 https → 永久失败，绝不发请求（SSRF/凭据外泄）。"""
+    adapter = GenericAdapter(
+        SiteProfile(name="M-Team", domain="kp.m-team.cc"),
+        apikey=_TEST_API_KEY,
+    )
+    cfg = {"method": "post", "cookie": True, "result": "data"}
+
+    for endpoint in (
+        "http://169.254.169.254/latest/meta-data",  # 内网元数据 + 非 https
+        "https://api.m-team.io.attacker.test/genDlToken",  # 域名后缀伪装
+        "https://attacker.test/genDlToken",  # 完全站外
+    ):
+        with respx.mock(assert_all_called=False) as router:
+            # 任意请求都不该发生——若发生 respx 会返回 200，用例就会失败
+            router.route().mock(return_value=httpx.Response(200, content=b"d4:spam"))
+            with pytest.raises(SitePermanentError, match="换票地址"):
+                await adapter._exchange_download_recipe((cfg, endpoint), "1")
+    await adapter.close()
+
+
 async def test_generic_download_exchanges_mteam_recipe() -> None:
     """M-Team 换票配方：POST 带 x-api-key 换真实链接，再 GET 取回 .torrent。"""
     torrent_bytes = b"d8:announce17:http://t.test/anne"
     adapter = GenericAdapter(
         SiteProfile(name="M-Team", domain="kp.m-team.cc"),
-        apikey="mt-secret-key",
+        apikey=_TEST_API_KEY,
     )
     with respx.mock(assert_all_called=False) as router:
         token_route = router.post(
@@ -831,7 +857,7 @@ async def test_generic_download_exchanges_mteam_recipe() -> None:
     assert token_route.called
     assert dl_route.called
     req = token_route.calls[0].request
-    assert req.headers.get("x-api-key") == "mt-secret-key"
+    assert req.headers.get("x-api-key") == _TEST_API_KEY
     assert req.url.params.get("id") == "998877"
 
 
@@ -839,7 +865,7 @@ async def test_generic_download_recipe_error_classification() -> None:
     """换票失败分级：401 → 永久失败；429 → 熔断；空 data → 瞬时失败。"""
     adapter = GenericAdapter(
         SiteProfile(name="M-Team", domain="kp.m-team.cc"),
-        apikey="mt-key",
+        apikey=_TEST_API_KEY,
     )
     with respx.mock(assert_all_called=False) as router:
         router.post(

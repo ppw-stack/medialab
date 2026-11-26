@@ -168,6 +168,35 @@ def resolve_rule(domain: str) -> dict[str, Any] | None:
     return _rules().find_by_domain(domain)
 
 
+def _host_of(url: str) -> str:
+    """取 URL（或裸域名）的 hostname；非法输入返回空串。"""
+    try:
+        candidate = url if "//" in url else f"https://{url}"
+        return (urlsplit(candidate).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _trusted_hosts(sources: list[str]) -> set[str]:
+    """从站点自身的可信地址推导允许的主机集合（含父域）。
+
+    API 站的换票主机常按 ``api.<注册域名>`` 约定另起子域
+    （``xp.m-team.io`` → ``api.m-team.io``），因此每个主机同时允许
+    **父域**（剥掉最左一层标签）。只剥一层，不按「注册域名」猜——
+    多段后缀（``co.uk`` 等）用最后两段会过度放行。
+    """
+    hosts: set[str] = set()
+    for source in sources:
+        host = _host_of(source)
+        if not host:
+            continue
+        hosts.add(host)
+        parts = host.split(".")
+        if len(parts) >= 3:
+            hosts.add(".".join(parts[1:]))
+    return hosts
+
+
 class GenericAdapter(SiteAdapter):
     """规则包驱动的通用适配器。"""
 
@@ -186,6 +215,17 @@ class GenericAdapter(SiteAdapter):
         self._user_agent = get_runtime_setting("USER_AGENT")
         self._rule = resolve_rule(profile.domain)
         self._base_url_value = str((self._rule or {}).get("domain") or profile.domain).rstrip("/")
+        # 换票配方的主机白名单：配方来自站点的详情页/列表页内容，属于
+        # 不可信输入——只允许发往站点自身及其 API 子域（含 ext_domains）。
+        rule = self._rule or {}
+        trusted_sources: list[str] = [self._base_url_value, profile.domain]
+        ext_domains = rule.get("ext_domains")
+        if isinstance(ext_domains, list):
+            trusted_sources.extend(str(item) for item in ext_domains)
+        for key in ("api_url", "api_domain", "api_host"):
+            if rule.get(key):
+                trusted_sources.append(str(rule[key]))
+        self._allowed_recipe_hosts = _trusted_hosts(trusted_sources)
         self.supports_promotion_lookup = (
             str((self._rule or {}).get("parser") or "") in _PROMOTION_LOOKUP_PARSERS
         )
@@ -366,6 +406,16 @@ class GenericAdapter(SiteAdapter):
             f"（重试后：{_describe_torrent_response(retry)}；首次：{first_desc}）"
         )
 
+    def _is_trusted_host(self, host: str) -> bool:
+        """host 是否属于站点自身（含父域与规则声明的 API 子域）。"""
+        host = (host or "").lower()
+        if not host:
+            return False
+        return any(
+            host == trusted or host.endswith(f".{trusted}")
+            for trusted in self._allowed_recipe_hosts
+        )
+
     async def _exchange_download_recipe(
         self,
         recipe: tuple[dict[str, Any], str],
@@ -378,11 +428,31 @@ class GenericAdapter(SiteAdapter):
         ``allow_redirects`` / ``result`` 等字段。结果经
         :func:`parse_download_response` 统一提取与规范化。
 
+        **安全边界**：配方内容随站点的列表/详情响应而来，属不可信输入。
+        换票前强制校验 endpoint 为 ``https`` 且主机属于站点自身（含父域 /
+        ``ext_domains`` / 规则里的 ``api_url``）——否则恶意或注入的配方能
+        让服务端携带站点 Cookie 请求任意主机（SSRF + 会话凭据外泄）。
+        站外主机的 ``cookie: true`` 配方因此被一并拒绝。
+
         :raises BreakerTripped: 站点返回 403 / 429
-        :raises SitePermanentError: 401 鉴权失败（API Key / Token 无效）
+        :raises SitePermanentError: 401 鉴权失败（API Key / Token 无效）或
+            配方指向站外 / 非 https（重试也不会成功）
         :raises SiteFetchError: 网络异常、其他 HTTP 错误或响应未含下载地址
         """
         config, endpoint = recipe
+        try:
+            endpoint_parts = urlsplit(endpoint)
+            scheme = (endpoint_parts.scheme or "").lower()
+            host = (endpoint_parts.hostname or "").lower()
+        except ValueError:
+            raise SitePermanentError(
+                f"{self.profile.name} 换票地址非法（id={item_id}）：{endpoint[:120]}"
+            ) from None
+        if scheme != "https" or not host or not self._is_trusted_host(host):
+            raise SitePermanentError(
+                f"{self.profile.name} 换票地址不在站点域内，已拒绝（疑似 SSRF）"
+                f"：{endpoint[:160]}（id={item_id}）"
+            )
         method = str(config.get("method") or "get").upper()
         raw_headers = config.get("header")
         headers: dict[str, str] = (
@@ -452,12 +522,27 @@ class GenericAdapter(SiteAdapter):
     async def _fetch_torrent_response(self, url: str) -> httpx.Response:
         """GET 下载地址并按统一契约检查状态码。
 
+        **站外主机不带 Cookie**：下载地址同样来自站点响应（不可信），若其
+        主机不属于站点自身，用一次性匿名客户端请求——直链自带签名/票据，
+        不需要会话 Cookie；带上反而是把站点凭据送给第三方主机。
+
         :raises SiteFetchError: 网络请求抛出 ``httpx.HTTPError``，
             或响应状态码 >= 400（403 / 429 由熔断分支先拦）。
         :raises BreakerTripped: 站点返回 403 / 429，需要熔断。
         """
+        host = _host_of(url)
         try:
-            resp = await self._client.get(url, timeout=self._timeout)
+            if host and self._is_trusted_host(host):
+                resp = await self._client.get(url, timeout=self._timeout)
+            else:
+                settings = get_settings()
+                async with httpx.AsyncClient(
+                    headers={"User-Agent": self._user_agent},
+                    follow_redirects=True,
+                    timeout=self._timeout,
+                    proxy=(settings.proxy_url or None),
+                ) as anonymous:
+                    resp = await anonymous.get(url)
         except httpx.HTTPError as exc:
             raise SiteFetchError(f"{self.profile.name} 下载失败：{exc}") from exc
         self._check_status_code(resp)
