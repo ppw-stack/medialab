@@ -918,3 +918,35 @@ def test_row_item_id_supports_ttg_and_promo_maps_30_percent() -> None:
     payload = _promo_payload({"downloadvolumefactor": 0.3, "uploadvolumefactor": 1}, {})
     assert payload is not None
     assert payload["free_classes"] == ["thirtypercent"]
+
+
+def test_host_of_logs_invalid_url_without_query(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """非法 URL 返回空串，但必须留 warning（去掉 query，不泄露票据）。"""
+    from app.adapters.sites.generic import _host_of
+
+    with caplog.at_level("WARNING", logger="app.adapters.sites.generic"):
+        assert _host_of("https://[bad-host/path?token=secret") == ""
+
+    assert "主机解析失败" in caplog.text
+    assert "token=secret" not in caplog.text
+
+
+async def test_generic_anonymous_client_init_failure_is_site_fetch_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """匿名客户端构造失败（如代理配置非法）也映射为 SiteFetchError，不裸冒泡。"""
+    adapter = GenericAdapter(SiteProfile(name="OffSite", domain="site.test"))
+    try:
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise httpx.InvalidURL("bad proxy")
+
+        monkeypatch.setattr("app.adapters.sites.generic.httpx.AsyncClient", _boom)
+        with pytest.raises(SiteFetchError, match="匿名下载客户端初始化失败"):
+            await adapter._fetch_torrent_response(
+                "https://cdn.offsite.test/path.torrent"
+            )
+    finally:
+        await adapter.close()

@@ -241,7 +241,7 @@ async def test_resume_unknown_job_returns_404(client) -> None:
     resp = await client.post("/api/migrations/jobs/nope/resume")
 
     assert resp.status_code == 404
-    assert "不存在" in resp.json()["detail"]
+    assert "不存在" in resp.json().get("detail", "")
 
 
 async def test_resume_non_paused_job_returns_409(client) -> None:
@@ -261,6 +261,6 @@ async def test_resume_non_paused_job_returns_409(client) -> None:
     try:
         resp = await client.post(f"/api/migrations/jobs/{job.id}/resume")
         assert resp.status_code == 409
-        assert "仅支持续传" in resp.json()["detail"]
+        assert "仅支持续传" in resp.json().get("detail", "")
     finally:
         migration_jobs.clear_all()

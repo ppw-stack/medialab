@@ -169,11 +169,21 @@ def resolve_rule(domain: str) -> dict[str, Any] | None:
 
 
 def _host_of(url: str) -> str:
-    """取 URL（或裸域名）的 hostname；非法输入返回空串。"""
+    """取 URL（或裸域名）的 hostname；非法输入返回空串。
+
+    非法 URL 会留一条 warning：空串下游既可能是「无主机」也可能是
+    「地址畸形」，两种分支后果完全不同（换票判成站外永久失败；下载静默
+    降级为匿名请求），不留痕就只能看到「换票地址不在站点域内」。
+    """
     try:
         candidate = url if "//" in url else f"https://{url}"
         return (urlsplit(candidate).hostname or "").lower()
     except ValueError:
+        # 去掉 query / fragment 再截断——避免把票据类参数写进日志
+        logger.warning(
+            "URL 主机解析失败，按不可信主机处理：%s",
+            candidate.split("?", 1)[0].split("#", 1)[0][:120],
+        )
         return ""
 
 
@@ -526,8 +536,9 @@ class GenericAdapter(SiteAdapter):
         主机不属于站点自身，用一次性匿名客户端请求——直链自带签名/票据，
         不需要会话 Cookie；带上反而是把站点凭据送给第三方主机。
 
-        :raises SiteFetchError: 网络请求抛出 ``httpx.HTTPError``，
-            或响应状态码 >= 400（403 / 429 由熔断分支先拦）。
+        :raises SiteFetchError: 网络请求抛出 ``httpx.HTTPError``、匿名客户端
+            构造失败（非法代理配置等），或响应状态码 >= 400（403 / 429 由
+            熔断分支先拦）。
         :raises BreakerTripped: 站点返回 403 / 429，需要熔断。
         """
         host = _host_of(url)
@@ -536,12 +547,21 @@ class GenericAdapter(SiteAdapter):
                 resp = await self._client.get(url, timeout=self._timeout)
             else:
                 settings = get_settings()
-                async with httpx.AsyncClient(
-                    headers={"User-Agent": self._user_agent},
-                    follow_redirects=True,
-                    timeout=self._timeout,
-                    proxy=(settings.proxy_url or None),
-                ) as anonymous:
+                try:
+                    anonymous_client = httpx.AsyncClient(
+                        headers={"User-Agent": self._user_agent},
+                        follow_redirects=True,
+                        timeout=self._timeout,
+                        proxy=(settings.proxy_url or None),
+                    )
+                except (ValueError, httpx.InvalidURL) as exc:
+                    # 构造期异常（如 proxy_url 配错）不属于 httpx.HTTPError，
+                    # 不转换就会以原始类型冒泡，绕过本函数的 SiteFetchError 契约。
+                    raise SiteFetchError(
+                        f"{self.profile.name} 匿名下载客户端初始化失败"
+                        f"（{host or url[:80]}）：{exc}"
+                    ) from exc
+                async with anonymous_client as anonymous:
                     resp = await anonymous.get(url)
         except httpx.HTTPError as exc:
             raise SiteFetchError(f"{self.profile.name} 下载失败：{exc}") from exc

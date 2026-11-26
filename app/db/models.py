@@ -1239,8 +1239,11 @@ class MigrationPausedJob(Base):
     - 容器重启 / 崩溃会清空进程内任务表 → 续传候选为空，静默失效；
     - 内存表超过 ``MAX_JOBS`` 会淘汰最旧任务 → 暂停任务被误当「已完成」。
 
-    本表只存**暂停且未续传**的任务参数（``params_json``），续传成功后由
-    :func:`app.services.migration_jobs.resume_paused_job` 删除对应行。
+    本表只存**暂停且未续传**的任务参数（``params_json``）。续传成功后由
+    :func:`app.services.migration_jobs.resume_paused_job` 先回填
+    ``resumed_by``（记录续传后的新任务 ID），再**删除**对应行——已续传
+    的行不会长期保留，``resumed_by`` 只是「落库完成 → 删行」之间的
+    去重标记（崩溃落在这一步时，重启回灌仍能拒绝重复续传）。
     """
 
     __tablename__ = "migration_paused_jobs"
@@ -1251,6 +1254,6 @@ class MigrationPausedJob(Base):
     params_json: Mapped[str] = mapped_column(Text, nullable=False)
     #: 暂停时刻（北京时间字符串，跨自然日判定用）
     paused_at: Mapped[str] = mapped_column(String(32), default=_bj_now, index=True)
-    #: 续传后的新任务 ID（NULL = 尚未续传）
+    #: 续传后的新任务 ID（NULL = 尚未续传；非空行会在删行前被清理）
     resumed_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)
