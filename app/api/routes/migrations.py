@@ -161,9 +161,11 @@ async def resume(job_id: str) -> dict[str, Any]:
     try:
         new_job = await migration_jobs.resume_paused_job(job_id)
     except MigrationError as exc:
-        msg = str(exc)
-        status = 404 if "不存在" in msg else 409
-        raise HTTPException(status_code=status, detail=msg) from exc
+        # 状态码由 service 层的类型化异常给出（MigrationJobNotFound=404 /
+        # MigrationJobConflict=409）；API 层只做协议翻译，不嗅探文案。
+        raise HTTPException(
+            status_code=getattr(exc, "status_code", 409), detail=str(exc)
+        ) from exc
     return {
         "job_id": new_job.id,
         "state": new_job.state,

@@ -2,24 +2,32 @@
 
 与 :mod:`app.services.scan_jobs` 同款结构：后台 ``asyncio.Task`` + 内存进度表 + 环形日志。
 
-**为什么不需要数据库表**：光鸭目标目录就是唯一真相源——重跑时「同名 +
+**为什么进度不需要数据库表**：光鸭目标目录就是唯一真相源——重跑时「同名 +
 同大小」会被判定为已存在并跳过。所以参数随请求传入，进度丢了重跑即可。
 （代价：容器重启会丢掉本轮进度，但不会丢已迁移的文件。）
+
+**例外：额度耗尽暂停的任务必须落库**（``migration_paused_jobs``）——
+「次日额度窗口自动续传」不能只靠内存表：容器重启会清空整表、超过
+``MAX_JOBS`` 也会淘汰旧任务，两种情况下续传都会**静默失效**（用户只能
+从头重跑）。故暂停时把 :class:`MigrationParams` 落库，启动后回灌内存表。
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import traceback
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
 
 from app.core.logging import get_logger
-from app.db.models import Driver
+from app.core.timeutils import format_bj, parse_bj
+from app.db.models import Driver, MigrationPausedJob
 from app.db.session import session_scope
 from app.services import migration
 from app.services.migration import MigrationError
@@ -38,6 +46,18 @@ STATE_FAILED = "failed"
 STATE_CANCELLED = "cancelled"
 #: 额度耗尽暂停（云添加额度当日不恢复，次日重跑即可续传）
 STATE_PAUSED = "paused"
+
+
+class MigrationJobNotFound(MigrationError):
+    """任务不存在（API 层翻译成 404）。"""
+
+    status_code = 404
+
+
+class MigrationJobConflict(MigrationError):
+    """任务状态冲突（非 paused / 已续传 / 已有运行中任务）——API 层翻译成 409。"""
+
+    status_code = 409
 
 
 @dataclass(frozen=True)
@@ -266,13 +286,19 @@ async def create_job(params: MigrationParams) -> MigrationJob:
 
 
 async def get_job(job_id: str) -> MigrationJob | None:
-    """按 id 取任务。"""
+    """按 id 取任务（内存没有时回读 DB 里持久化的暂停任务）。"""
+    async with _LOCK:
+        job = _JOBS.get(job_id)
+    if job is not None:
+        return job
+    await _hydrate_paused_from_db()
     async with _LOCK:
         return _JOBS.get(job_id)
 
 
 async def list_jobs() -> list[MigrationJob]:
-    """列出任务（最新在前）。"""
+    """列出任务（最新在前）。重启后先回灌持久化的暂停任务。"""
+    await _hydrate_paused_from_db()
     async with _LOCK:
         jobs = list(_JOBS.values())
     return sorted(jobs, key=lambda j: j.seq, reverse=True)
@@ -309,10 +335,20 @@ async def cancel_job(job_id: str) -> bool:
 
 
 def _evict_old() -> None:
-    """超出上限时清掉最旧的**已完成**任务。"""
+    """超出上限时清掉最旧的**已完成**任务。
+
+    **不淘汰待续传的暂停任务**（``paused`` 且 ``resumed_by is None``）：
+    它们是「次日额度窗口自动续传」的依据，被当成普通「已完成」淘汰后
+    ``POST /jobs/{id}/resume`` 会 404、自动续传也扫不到。
+    """
     if len(_JOBS) <= MAX_JOBS:
         return
-    finished = [j for j in _JOBS.values() if j.done]
+    finished = [
+        j
+        for j in _JOBS.values()
+        if j.done
+        and not (j.state == STATE_PAUSED and j.resumed_by is None)
+    ]
     finished.sort(key=lambda j: j.seq)
     for job in finished[: len(_JOBS) - MAX_JOBS]:
         _JOBS.pop(job.id, None)
@@ -339,6 +375,11 @@ async def _run_job(job: MigrationJob) -> None:
         job.log(f"源：{source.name}　目标：{target.name}")
 
         await migration.run_migration(job)
+
+        # 额度耗尽 → 暂停：把参数落库，否则容器重启后「次日自动续传」
+        # 会静默失效（内存表被清空，候选为空）。
+        if job.state == STATE_PAUSED:
+            await _persist_paused(job)
 
         # 额度耗尽时 worker 已把状态置为 paused——**别覆盖**成 success
         if job.state == STATE_RUNNING:
@@ -375,34 +416,162 @@ def clear_all() -> None:
     _JOBS.clear()
 
 
+def _params_from_json(raw: str) -> MigrationParams | None:
+    """反序列化暂停任务的参数；脏行 / 结构已变时返回 None（跳过该行）。"""
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        return MigrationParams(**data)
+    except TypeError:
+        return None
+
+
+async def _persist_paused(job: MigrationJob) -> None:
+    """把暂停任务参数落库（跨重启续传的唯一依据）。
+
+    **持久化是增强而非前提**：DB 写失败只记 warning 降级为纯内存续传，
+    不能因为「续传信息存不下」把迁移任务本身打成失败。
+    """
+    paused_at = format_bj(
+        datetime.fromtimestamp(
+            job.finished_at if job.finished_at is not None else time.time(), UTC
+        )
+    )
+    payload = json.dumps(job.params.to_dict(), ensure_ascii=False)
+    try:
+        async with session_scope() as db:
+            row = await db.get(MigrationPausedJob, job.id)
+            if row is None:
+                db.add(
+                    MigrationPausedJob(
+                        id=job.id,
+                        params_json=payload,
+                        paused_at=paused_at,
+                        resumed_by=job.resumed_by,
+                    )
+                )
+            else:
+                row.params_json = payload
+                row.paused_at = paused_at
+                row.resumed_by = job.resumed_by
+    except Exception as exc:  # 落库失败降级为内存态，不影响迁移
+        logger.warning("暂停迁移任务落库失败（降级为仅内存续传）：%s", exc)
+        return
+    logger.info("暂停迁移任务已落库（id=%s，跨重启可续传）", job.id)
+
+
+async def _delete_paused_row(job_id: str) -> None:
+    """删除持久化行（已续传 / 已终结的任务不再需要跨重启提示）。"""
+    try:
+        async with session_scope() as db:
+            row = await db.get(MigrationPausedJob, job_id)
+            if row is not None:
+                await db.delete(row)
+    except Exception as exc:  # 删除失败只影响「重启后不重复提示」
+        logger.warning("清理暂停迁移记录失败（id=%s）：%s", job_id, exc)
+
+
+async def _load_persisted_paused() -> list[tuple[str, MigrationParams, int, str | None]]:
+    """从 DB 读暂停任务；DB 不可用 / 脏行时跳过（或返回空）。"""
+    try:
+        async with session_scope() as db:
+            rows = (
+                await db.execute(
+                    select(MigrationPausedJob).order_by(MigrationPausedJob.created_at)
+                )
+            ).scalars().all()
+            raw = [(r.id, r.params_json, r.paused_at, r.resumed_by) for r in rows]
+    except Exception as exc:  # 读不到就按内存态继续
+        logger.warning("读取持久化暂停迁移失败（按内存态继续）：%s", exc)
+        return []
+
+    loaded: list[tuple[str, MigrationParams, int, str | None]] = []
+    for job_id, params_raw, paused_at, resumed_by in raw:
+        params = _params_from_json(params_raw)
+        if params is None:
+            logger.warning("持久化暂停迁移参数无法解析，跳过 id=%s", job_id)
+            continue
+        dt = parse_bj(paused_at)
+        paused_ts = int(dt.timestamp()) if dt is not None else int(time.time())
+        loaded.append((job_id, params, paused_ts, resumed_by))
+    return loaded
+
+
+async def _hydrate_paused_from_db() -> None:
+    """把库里的暂停任务回灌内存表（容器重启后仍能续传 / 在面板可见）。"""
+    persisted = await _load_persisted_paused()
+    if not persisted:
+        return
+    global _SEQ
+    async with _LOCK:
+        for job_id, params, paused_ts, resumed_by in persisted:
+            if job_id in _JOBS:
+                continue
+            _SEQ += 1
+            _JOBS[job_id] = MigrationJob(
+                id=job_id,
+                params=params,
+                seq=_SEQ,
+                state=STATE_PAUSED,
+                started_at=paused_ts,
+                finished_at=paused_ts,
+                resumed_by=resumed_by,
+            )
+
+
 async def resume_paused_job(job_id: str) -> MigrationJob:
     """用原参数续传一个因额度耗尽暂停的迁移任务。
 
-    :raises MigrationError: 任务不存在 / 非暂停状态 / 已被续传 / 已有运行中迁移。
+    检查与「占位 running」在同一把锁内完成（``start_migration_job`` 内部
+    会再取 ``_LOCK``，锁不可重入，故先占位再释放）——否则定时续传与面板
+    续传同时触发时两者都能通过检查，起两个迁移互相抢云添加额度。
+
+    :raises MigrationJobNotFound: 任务不存在（含重启后已清理的记录）。
+    :raises MigrationJobConflict: 非暂停状态 / 已被续传 / 已有运行中迁移。
     """
-    running = await find_running()
-    if running is not None:
-        raise MigrationError(f"已有迁移任务在跑（job={running.id}）")
     old = await get_job(job_id)
     if old is None:
-        raise MigrationError("迁移任务不存在")
-    if old.state != STATE_PAUSED:
-        raise MigrationError(f"任务状态为 {old.state}，仅支持续传 paused 任务")
-    if old.resumed_by is not None:
-        raise MigrationError(f"任务已被续传（新任务 {old.resumed_by}）")
+        raise MigrationJobNotFound("迁移任务不存在")
 
-    new_job = await start_migration_job(old.params)
-    old.resumed_by = new_job.id
+    async with _LOCK:
+        running = next(
+            (j for j in _JOBS.values() if j.state == STATE_RUNNING), None
+        )
+        if running is not None:
+            raise MigrationJobConflict(f"已有迁移任务在跑（job={running.id}）")
+        if old.state != STATE_PAUSED:
+            raise MigrationJobConflict(
+                f"任务状态为 {old.state}，仅支持续传 paused 任务"
+            )
+        if old.resumed_by is not None:
+            raise MigrationJobConflict(f"任务已被续传（新任务 {old.resumed_by}）")
+        # 占位为 running：并发的续传请求会在上面的 find-running 分支被拒。
+        old.state = STATE_RUNNING
+
+    try:
+        new_job = await start_migration_job(old.params)
+    except BaseException:
+        async with _LOCK:
+            old.state = STATE_PAUSED
+        raise
+
+    async with _LOCK:
+        old.state = STATE_PAUSED
+        old.resumed_by = new_job.id
     old.log(f"▶️ 已触发续传 → 新任务 {new_job.id}")
+    # 先落 resumed_by（重启回灌后仍能拒绝重复续传），再删行（不再提示）；
+    # 删除失败也安全——下一次启动会把它当成「已续传」的暂停任务。
+    await _persist_paused(old)
+    await _delete_paused_row(old.id)
     return new_job
 
 
 def _is_next_bj_day(paused_ts: int, now_ts: int) -> bool:
     """判断是否已跨过北京时间自然日（云添加额度按自然日重置）。"""
-    from datetime import UTC, datetime
-
-    from app.core.timeutils import format_bj
-
     paused_day = format_bj(datetime.fromtimestamp(paused_ts, UTC))[:10]
     now_day = format_bj(datetime.fromtimestamp(now_ts, UTC))[:10]
     return now_day > paused_day
@@ -410,6 +579,7 @@ def _is_next_bj_day(paused_ts: int, now_ts: int) -> bool:
 
 async def resume_due_paused_migrations(*, now_ts: int | None = None) -> dict[str, Any]:
     """定时检查因额度耗尽暂停的迁移任务，跨北京自然日后自动续传。"""
+    await _hydrate_paused_from_db()
     running = await find_running()
     if running is not None:
         return {

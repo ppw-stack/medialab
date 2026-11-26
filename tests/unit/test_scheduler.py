@@ -306,6 +306,7 @@ def test_default_cron_covers_all_registered_jobs() -> None:
         "aggregate_sync",
         "cleanup_link_cache",
         "purge_dav_auth_cache",
+        "resume_paused_migrations",
     }
 
 
