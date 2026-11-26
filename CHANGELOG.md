@@ -18,6 +18,17 @@
   - `GET /api/v1/sites`（`SiteOut`）新增 `breaker_until` 与 `breaker_open` 字段，透出站点 403/429 熔断状态。
   - `/metrics` 接通并新增 `seedhelper_free_seed_active`、`seedhelper_free_seed_max_active`、`seedhelper_free_seed_outcomes_total`、`seedhelper_cleanup_actions_total`、`seedhelper_sites_breaker_open`、`seedhelper_site_breaker_open`。
 
+### Versioning & Deprecation
+
+- **语义化版本影响：minor**（下一个 tag `v3.1.0`，镜像 tag `3.1.0` / `3.1`）
+  ——本次仅**新增**只读端点 `GET /api/v1/scheduler/free-seed-status`、
+  `SiteOut` 的 `breaker_until` / `breaker_open` 字段与新的 Prometheus 指标，
+  并新增运行时参数 `monitor_max_actions_per_run`（默认 `5`，改成 `0`
+  即恢复旧行为「不限单轮清理」）。旧客户端忽略未知字段即可，无删除 /
+  改名，无破坏面。
+- **弃用项：无。** 本次不弃用任何端点、字段或作业名；后续若有替代
+  计划，会在此处补充弃用时间线与迁移步骤。
+
 ## [3.0.0] - 2026-11-22
 
 ### Removed（BREAKING，major：v3.0.0）

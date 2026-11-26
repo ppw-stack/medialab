@@ -181,6 +181,10 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
     total_breaker_skipped = len(breaker_skipped)
 
     open_breaker_names = {name for name, _ in breaker_skipped}
+    # 先清空本轮之前的 label 序列再写——站点被删除 / 停用 / 改名后，旧
+    # label 会永远停在最后一次写入的 1，Prometheus 上留下不存在的熔断站且
+    # 无法自愈（改名还会每次新增一条无主序列）。
+    site_breaker_open.clear()
     for row in rows:
         site_breaker_open.labels(site=row.name).set(
             1 if row.name in open_breaker_names else 0

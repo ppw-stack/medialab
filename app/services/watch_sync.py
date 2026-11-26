@@ -66,7 +66,11 @@ async def run_full_sync(
                 try:
                     stat = await asyncio.to_thread(path.stat)
                     file_size = stat.st_size
-                except OSError:
+                except OSError as exc:
+                    # CIFS 上 stat 失败通常是权限 / 挂载断开 / 并发删除，与
+                    # 「文件确实是 0 字节」是两回事——静默降级会掩盖真实原因，
+                    # 且后续上传与限速计算都会失真。显式降级 + 留痕。
+                    runtime.log(f"⚠️ [{index}] 读取文件大小失败：{rel}（{exc}）")
                     file_size = 0
                 if lock is not None:
                     async with lock:

@@ -26,6 +26,13 @@ def _build_payload(
     app_name: str,
     env: str,
 ) -> dict[str, Any]:
+    """组装 Webhook 请求体（结构化字段 + 通用机器人的纯文本 ``text``）。
+
+    :param degradations: 组件名 → ``{reason, at}`` 的降级明细。
+    :param app_name: 应用名（``AppSettings.app_name``）。
+    :param env: 运行环境（``AppSettings.env``）。
+    :returns: 可直接 ``json=`` 提交的字典。
+    """
     lines = [
         f"[{app_name}/{env}] /readyz 存在 {len(degradations)} 项启动降级："
     ]
@@ -48,7 +55,12 @@ async def notify_startup_degradations(
     *,
     webhook_url: str | None = None,
 ) -> bool:
-    """将启动降级明细推送到 Webhook；未配置或无降级时直接返回 False。"""
+    """将启动降级明细推送到 Webhook；未配置或无降级时直接返回 False。
+
+    :param degradations: :func:`app.services.startup_status.snapshot` 的结果。
+    :param webhook_url: 覆盖配置里的 ``ALERT_WEBHOOK_URL``（测试用）。
+    :returns: True = 已成功推送；False = 未配置 / 无降级 / 推送失败（不抛异常）。
+    """
     if not degradations:
         return False
     settings = get_settings()
@@ -71,8 +83,14 @@ async def notify_startup_degradations(
                     resp.text[:200],
                 )
                 return False
-    except httpx.HTTPError as exc:
-        logger.warning("启动降级告警 Webhook 发送失败：%s", exc)
+    except Exception as exc:  # 告警是旁路：绝不能让异常逃逸成无人回收的 task
+        # 不只 ``httpx.HTTPError``：``ALERT_WEBHOOK_URL`` 配成无 scheme 的
+        # 地址时 httpx 抛的是 ``InvalidURL``（不属于 HTTPError），旧实现会
+        # 让 fire-and-forget task 出现 "Task exception was never retrieved"，
+        # 告警本身也静默丢失。告警链路必须是「尽力而为、绝不外抛」。
+        logger.warning(
+            "启动降级告警 Webhook 发送失败（%s）：%s", type(exc).__name__, exc
+        )
         return False
     logger.info("已发送启动降级告警（%d 项）", len(degradations))
     return True
