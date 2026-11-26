@@ -333,6 +333,8 @@ async def test_e2e_action_cap_limits_stalled_without_blocking_window_stop(
     assert mon["aborted_stalled"] == 2
     assert mon["skipped_action_cap"] == 3
     assert mon["pre_paused"] == 3  # 2 停滞 + 1 临期
+    # 窗口止损必须独立计数：pre_paused 同时也含停滞清理，减法反推会虚高
+    assert mon["aborted_window"] == 1
     assert _h("9") in fake_dl.paused_hashes
 
 

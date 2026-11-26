@@ -154,6 +154,13 @@ class MonitorResult:
     aborted_fatal: int = 0
     #: 停滞/龟速超时命中并成功处理数
     aborted_stalled: int = 0
+    #: 「窗口到期」命中并成功处理数（限时种临近/已过期 + 限时种无截止时间）
+    #:
+    #: **必须独立计数，不能用 ``pre_paused + deleted - 其它`` 反推**：
+    #: 退还种（refund）与非免费种（non_free）同样累加 ``pre_paused`` /
+    #: ``deleted``，减法会把它们算进窗口桶，面板「上轮清理 · 窗口 N」虚高，
+    #: 运维据此判断临期止损规模会得到错误结论。
+    aborted_window: int = 0
     #: 因达到单轮异常/停滞清理上限而延至下轮处理的种子数
     skipped_action_cap: int = 0
     #: 本轮监测动作执行后，默认下载器内剩余的全局在途下载数（供推送水位复用；拉取失败时 None）
@@ -203,6 +210,14 @@ class MonitorFreeWindowService:
         :param adapter: 下载器适配器。
         :param hash_: 种子 infohash（40 位 hex，由适配器校验）。
         :param delete_mode: True=删任务 + 删磁盘数据；False=仅暂停。
+        :param downloader_name: 下载器名（审计日志用）。
+        :param name: 种子名（审计日志 / 明细展示用）。
+        :param reason: 触发原因的中文描述（写进审计日志与逐种明细）。
+        :param completed_bytes: 已下载字节数（审计日志用，单位字节）。
+        :param size: 种子总大小（字节）；未知时为 0。
+        :param dlspeed: 当前下载速度（字节/秒）；0 = 停滞。
+        :param elapsed_min: 从入队至今的分钟数；``None`` = 入队时刻未知
+            （适配器没给 ``added_at``），审计日志记成 ``unknown``。
         :return: ``(动作名, 错误信息)``。动作名为 ``"deleted"`` /
             ``"set_pause"``；错误信息为 None 表示成功，否则是异常文本
             （调用方据此计入 failed）。
@@ -375,6 +390,7 @@ class MonitorFreeWindowService:
         skipped_refund = 0
         aborted_fatal = 0
         aborted_stalled = 0
+        aborted_window = 0
         skipped_action_cap = 0
         pre_paused = 0
         deleted = 0
@@ -396,7 +412,7 @@ class MonitorFreeWindowService:
             ``errors`` / ``action_items``（Python 的 nonlocal 语义）。
             返回 True 表示动作成功（该种子已脱离在途下载集合）。
             """
-            nonlocal deleted, pre_paused, failed
+            nonlocal deleted, pre_paused, failed, aborted_window
             elapsed_min = (
                 int(now_ts - info.added_at) // 60
                 if info.added_at is not None
@@ -429,6 +445,10 @@ class MonitorFreeWindowService:
             metric_action = "delete" if action == "deleted" else "pause"
             cleanup_actions.labels(action=metric_action, trigger=trigger).inc()
             free_seed_outcomes.labels(outcome="aborted", reason=trigger).inc()
+            if trigger == "window_expired":
+                # 独立计数：面板「上轮清理 · 窗口 N」只认这个数，不用减法
+                # 反推（退还种 / 非免费种也会累加 pre_paused / deleted）。
+                aborted_window += 1
             if action == "deleted":
                 deleted += 1
                 action_items.append(
@@ -578,6 +598,7 @@ class MonitorFreeWindowService:
             skipped_refund=skipped_refund,
             aborted_fatal=aborted_fatal,
             aborted_stalled=aborted_stalled,
+            aborted_window=aborted_window,
             skipped_action_cap=skipped_action_cap,
             remaining_active_downloads=remaining_active,
             pre_paused=pre_paused,
@@ -591,8 +612,9 @@ class MonitorFreeWindowService:
                     else f"扫描 {scanned}，命中 {matched}，暂停 {pre_paused}"
                 )
                 + (
-                    f"（异常 {aborted_fatal}，停滞 {aborted_stalled}）"
-                    if aborted_fatal or aborted_stalled
+                    f"（异常 {aborted_fatal}，停滞 {aborted_stalled}，"
+                    f"窗口 {aborted_window}）"
+                    if aborted_fatal or aborted_stalled or aborted_window
                     else ""
                 )
                 + (
@@ -663,13 +685,14 @@ class MonitorFreeWindowService:
             ),
         )
         logger.info(
-            "monitor: 下载器 %d，命中 %d，触发%s %d（异常 %d / 停滞 %d / 上限跳过 %d），"
-            "剩余在途 %d，跳过(无关/远/已完成/已暂停/校验中/永久/退还) "
+            "monitor: 下载器 %d，命中 %d，触发%s %d（异常 %d / 停滞 %d / 窗口 %d / "
+            "上限跳过 %d），剩余在途 %d，跳过(无关/远/已完成/已暂停/校验中/永久/退还) "
             "%d/%d/%d/%d/%d/%d/%d，失败 %d",
             result.scanned, result.matched,
             "删除" if delete_mode else "暂停",
             result.deleted if delete_mode else result.pre_paused,
-            result.aborted_fatal, result.aborted_stalled, result.skipped_action_cap,
+            result.aborted_fatal, result.aborted_stalled, result.aborted_window,
+            result.skipped_action_cap,
             remaining_active,
             result.skipped_unmatched, result.skipped_far_from_window,
             result.skipped_already_completed, result.skipped_already_paused,

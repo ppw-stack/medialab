@@ -234,10 +234,9 @@ async def get_free_seed_observability() -> dict[str, Any]:
     min_dlspeed_kbps = _param("monitor_min_dlspeed_kbps", 50)
     delete_expired = _param("monitor_delete_expired", 0) == 1
 
-    page = await job_run_service.list_job_runs(
-        job_name="push_and_monitor_free", limit=1, include_logs=False
+    last_run = await job_run_service.get_latest_job_run(
+        job_name="push_and_monitor_free", include_logs=False
     )
-    last_run = page.items[0] if page.items else None
 
     active_downloads: int | None = None
     last_run_at: str | None = None
@@ -259,7 +258,15 @@ async def get_free_seed_observability() -> dict[str, Any]:
             deleted = _as_int(mon.get("deleted"))
             aborted_fatal = _as_int(mon.get("aborted_fatal"))
             aborted_stalled = _as_int(mon.get("aborted_stalled"))
-            aborted_window = max(0, (pre_paused + deleted) - aborted_fatal - aborted_stalled)
+            # 窗口止损必须读**独立计数**。旧记录没有该字段（本次之前落库的
+            # 行），才退回减法反推——退还种 / 非免费种也累加 pre_paused 与
+            # deleted，减法会把它们算进窗口桶，使面板虚高。
+            window_raw = mon.get("aborted_window")
+            aborted_window = (
+                window_raw
+                if isinstance(window_raw, int) and not isinstance(window_raw, bool)
+                else max(0, (pre_paused + deleted) - aborted_fatal - aborted_stalled)
+            )
             last_monitor = {
                 "scanned": _as_int(mon.get("scanned")),
                 "matched": _as_int(mon.get("matched")),
