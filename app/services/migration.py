@@ -55,6 +55,7 @@ from app.services.driver_service import (
     guangya_refresh_callback,
     persist_guangya_credential,
 )
+from app.services.migration_link_cache import migration_link_cache
 from app.services.migration_pipeline import (
     GUANGYA_LANDED_NAME,
     SubmitGate,
@@ -494,11 +495,21 @@ async def _migrate_one(
     if waited >= 1:
         job.log(f"⏱️ 错开提交，等待 {waited:.0f}s：{entry.path}")
 
-    # ④ 换直链——光鸭直链**不绑 UA**
-    link = await source.get_direct_link(entry.remote_id, "")
-    if not link.url:
+    # ④ 换直链——光鸭直链**不绑 UA**；经 5.5h TTL 缓存复用，过期自动重取
+    async def _fetch_direct_url() -> str:
+        res = await source.get_direct_link(entry.remote_id, "")
+        return str(res.url or "")
+
+    direct_url, from_cache = await migration_link_cache.get_or_fetch(
+        job.params.source_driver_id,
+        entry.remote_id,
+        _fetch_direct_url,
+    )
+    if not direct_url:
         raise DriverError("源存储源返回空直链", kind="not_found")
-    job.log(f"🔗 已换取直链：{entry.path}")
+    job.log(
+        f"🔗 {'复用预取直链' if from_cache else '已换取直链'}：{entry.path}"
+    )
 
     # ⑤ 提交云下载
     #
@@ -507,10 +518,14 @@ async def _migrate_one(
     # 泛化失败（「云添加失败」code=8）**认不出是不是额度** → 当普通失败，
     # 跳过该文件继续下一个（**不自动重试**——失败也扣额度）。
     try:
-        task_id = await index.create_offline_task(link.url, target_dir_id)
+        task_id = await index.create_offline_task(direct_url, target_dir_id)
     except DriverError as exc:
         if is_quota_error(str(exc)):
             raise MigrationQuotaExceeded(str(exc)) from exc
+        if from_cache:
+            migration_link_cache.invalidate(
+                job.params.source_driver_id, entry.remote_id
+            )
         raise
     # 登记到缓存——否则同目录的后续预检看不到这个文件（缓存与实际不一致）
     await index.note_submitted(rel_dir, entry.name, entry.size)
@@ -533,7 +548,7 @@ async def _migrate_one(
     # 放了个叫 ``download`` 的文件时，服务端会把我们的落地文件自动改名成
     # ``download(1)`` → 跳过 ``download`` 后只改**我们那份**。
     # ``existing`` 是**提交前**的目录快照（含用户原有文件，不含本次落地）。
-    landed_names = (landed_name_from_url(link.url), GUANGYA_LANDED_NAME)
+    landed_names = (landed_name_from_url(direct_url), GUANGYA_LANDED_NAME)
     renamed = await index.rename_landed(
         rel_dir,
         tuple(n for n in landed_names if n),

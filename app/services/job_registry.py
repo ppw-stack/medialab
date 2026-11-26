@@ -101,6 +101,9 @@ DEFAULT_CRON: dict[str, str] = {
     # 7 *   每小时第 7 分钟（DAV TTL 默认 60s，小时级淘汰足够防 dict 无界）
     "cleanup_link_cache": "47 3 * * *",
     "purge_dav_auth_cache": "7 * * * *",
+    # 迁移断点自动续传：每 6 小时检查一次因云添加额度耗尽暂停的迁移任务，
+    # 跨北京时间自然日后自动用原参数续传（分钟位 13 避开既有作业）。
+    "resume_paused_migrations": "13 */6 * * *",
 }
 
 
@@ -298,6 +301,16 @@ JOB_META: tuple[JobMeta, ...] = (
         title="清理 DAV 认证缓存",
         description="淘汰过期的 WebDAV 认证失败记录，防止进程内字典无界增长（每小时）",
         make_func=lambda f: _job_fn(_run_purge_dav_auth_cache),
+        module="media",
+    ),
+    JobMeta(
+        name="resume_paused_migrations",
+        title="迁移额度续传",
+        description=(
+            "检查因云添加额度耗尽暂停的迁移任务，跨次日额度窗口后自动续传"
+            "（预取直链 5.5h 过期自动重取）"
+        ),
+        make_func=lambda f: _job_fn(_run_resume_paused_migrations),
         module="media",
     ),
 )
@@ -511,6 +524,13 @@ async def _run_purge_dav_auth_cache() -> dict[str, object]:
 
     purged = dav_authenticator.purge_expired()
     return {"purged": purged}
+
+
+async def _run_resume_paused_migrations() -> dict[str, object]:
+    """检查并自动续传跨日恢复额度的暂停迁移任务。"""
+    from app.services.migration_jobs import resume_due_paused_migrations
+
+    return await resume_due_paused_migrations()
 
 
 def _job_fn(

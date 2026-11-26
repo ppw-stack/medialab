@@ -24,6 +24,7 @@ from app.api.auth import require_session
 from app.services import migration_jobs
 from app.services.migration import (
     MigrationBrowseError,
+    MigrationError,
     browse_source_dirs,
     browse_target_dirs,
     validate_migration_drivers,
@@ -152,3 +153,19 @@ async def cancel(job_id: str) -> dict[str, bool]:
     if not ok:
         raise HTTPException(status_code=404, detail="任务不存在或已结束")
     return {"ok": True}
+
+
+@router.post("/jobs/{job_id}/resume", status_code=201)
+async def resume(job_id: str) -> dict[str, Any]:
+    """一键续传因额度耗尽暂停的迁移任务（复用原参数，目标目录天然幂等）。"""
+    try:
+        new_job = await migration_jobs.resume_paused_job(job_id)
+    except MigrationError as exc:
+        msg = str(exc)
+        status = 404 if "不存在" in msg else 409
+        raise HTTPException(status_code=status, detail=msg) from exc
+    return {
+        "job_id": new_job.id,
+        "state": new_job.state,
+        "resumed_from": job_id,
+    }

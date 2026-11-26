@@ -130,6 +130,8 @@ class MigrationJob:
 
     logs: list[str] = field(default_factory=list)
     error: str | None = None
+    #: 续传后的新任务 ID（仅当本任务处于 paused 且已被续传时有值）
+    resumed_by: str | None = None
     task: asyncio.Task[None] | None = field(default=None, repr=False)
 
     # -- 记录 --
@@ -238,6 +240,7 @@ class MigrationJob:
             "conflict_items": self.conflict_items,
             "logs": self.logs[-MAX_LOGS:],
             "error": self.error,
+            "resumed_by": self.resumed_by,
         }
 
     @property
@@ -370,3 +373,78 @@ async def _run_job(job: MigrationJob) -> None:
 def clear_all() -> None:
     """清空任务表（测试用）。"""
     _JOBS.clear()
+
+
+async def resume_paused_job(job_id: str) -> MigrationJob:
+    """用原参数续传一个因额度耗尽暂停的迁移任务。
+
+    :raises MigrationError: 任务不存在 / 非暂停状态 / 已被续传 / 已有运行中迁移。
+    """
+    running = await find_running()
+    if running is not None:
+        raise MigrationError(f"已有迁移任务在跑（job={running.id}）")
+    old = await get_job(job_id)
+    if old is None:
+        raise MigrationError("迁移任务不存在")
+    if old.state != STATE_PAUSED:
+        raise MigrationError(f"任务状态为 {old.state}，仅支持续传 paused 任务")
+    if old.resumed_by is not None:
+        raise MigrationError(f"任务已被续传（新任务 {old.resumed_by}）")
+
+    new_job = await start_migration_job(old.params)
+    old.resumed_by = new_job.id
+    old.log(f"▶️ 已触发续传 → 新任务 {new_job.id}")
+    return new_job
+
+
+def _is_next_bj_day(paused_ts: int, now_ts: int) -> bool:
+    """判断是否已跨过北京时间自然日（云添加额度按自然日重置）。"""
+    from datetime import UTC, datetime
+
+    from app.core.timeutils import format_bj
+
+    paused_day = format_bj(datetime.fromtimestamp(paused_ts, UTC))[:10]
+    now_day = format_bj(datetime.fromtimestamp(now_ts, UTC))[:10]
+    return now_day > paused_day
+
+
+async def resume_due_paused_migrations(*, now_ts: int | None = None) -> dict[str, Any]:
+    """定时检查因额度耗尽暂停的迁移任务，跨北京自然日后自动续传。"""
+    running = await find_running()
+    if running is not None:
+        return {
+            "resumed": 0,
+            "summary": f"已有迁移任务在跑（{running.id}），跳过续传检查",
+        }
+
+    now = int(time.time()) if now_ts is None else now_ts
+    async with _LOCK:
+        candidates = [
+            j
+            for j in _JOBS.values()
+            if j.state == STATE_PAUSED and j.resumed_by is None
+        ]
+    candidates.sort(key=lambda j: j.seq)
+
+    for old in candidates:
+        paused_at = old.finished_at or old.started_at
+        if not _is_next_bj_day(paused_at, now):
+            continue
+        new_job = await resume_paused_job(old.id)
+        logger.info("次日额度窗口打开，自动续传迁移 %s → %s", old.id, new_job.id)
+        return {
+            "resumed": 1,
+            "source_job_id": old.id,
+            "job_id": new_job.id,
+            "summary": f"已自动续传暂停任务 {old.id} → {new_job.id}",
+        }
+
+    return {
+        "resumed": 0,
+        "pending_paused": len(candidates),
+        "summary": (
+            f"有 {len(candidates)} 个暂停任务，等待次日额度窗口"
+            if candidates
+            else "无待续传迁移任务"
+        ),
+    }
