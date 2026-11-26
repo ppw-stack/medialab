@@ -348,7 +348,17 @@ const columns = [
         >
           <template #bodyCell="{ column, record }">
             <template v-if="column.key === 'name'">
-              <span class="row-name">{{ record.name }}</span>
+              <a-space :size="6" align="center">
+                <span class="row-name">{{ record.name }}</span>
+                <a-tooltip
+                  v-if="record.breaker_open"
+                  :title="`站点触发 403/429 熔断，暂停拉取至 ${record.breaker_until ?? ''}`"
+                >
+                  <a-tag color="red">
+                    熔断至 {{ (record.breaker_until ?? '').slice(11, 16) || '—' }}
+                  </a-tag>
+                </a-tooltip>
+              </a-space>
             </template>
             <template v-else-if="column.key === 'domain'">
               <span class="mono code">{{ record.domain || '—' }}</span>

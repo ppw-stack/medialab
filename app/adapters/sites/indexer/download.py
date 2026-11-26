@@ -99,6 +99,36 @@ def _normalize_download_url(url: str, base_url: Optional[str]) -> str:
     return url_parts._replace(scheme=base_parts.scheme, netloc=base_parts.netloc).geturl()
 
 
+def parse_download_recipe(url: str) -> Optional[tuple[dict[str, Any], str]]:
+    """
+    解析 API 站点的两段式下载换票配方 ``[base64_json]https://...``。
+
+    专站 spider（M-Team / HDArea / Piggo / Rousi / Yema / SunnyPT）在
+    ``get_download_url`` 中返回带 Base64 JSON 请求配置的 URL，需要按配方
+    先换取短时下载地址，再拉取真正的 ``.torrent`` 字节。
+
+    :param url: 候选下载地址或换票配方
+    :return: ``(request_params, endpoint_url)``；普通 URL 或非合法配方返回 None
+    """
+    if not url or not url.startswith("["):
+        return None
+    end = url.find("]")
+    if end <= 1:
+        return None
+    encoded = url[1:end]
+    endpoint = url[end + 1 :].strip()
+    if not endpoint.startswith(("http://", "https://")):
+        return None
+    try:
+        decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+        params = json.loads(decoded)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(params, dict):
+        return None
+    return params, endpoint
+
+
 def parse_download_response(request_params: dict[str, Any], status_code: Optional[int],
                             payload: object, response_text: Optional[str]) -> Optional[str]:
     """

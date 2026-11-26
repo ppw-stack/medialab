@@ -28,7 +28,8 @@ from app.adapters.sites.base import (
     SitePermanentError,
 )
 from app.core.logging import get_logger
-from app.core.metrics import feed_pulls, stage_duration
+from app.core.metrics import feed_pulls, site_breaker_open, stage_duration
+from app.core.metrics import state as metric_state
 from app.core.timeutils import bj_now, bj_now_dt, format_bj, parse_bj
 from app.db.models import Site, TorrentIndex
 from app.db.session import session_scope
@@ -178,6 +179,17 @@ async def fetch_all_sites(factory: AdapterFactory) -> dict[str, object]:
     failed_site_names |= {name for name, _ in site_failures}
     total_failed = len(failed_site_names)
     total_breaker_skipped = len(breaker_skipped)
+
+    open_breaker_names = {name for name, _ in breaker_skipped}
+    # 先清空本轮之前的 label 序列再写——站点被删除 / 停用 / 改名后，旧
+    # label 会永远停在最后一次写入的 1，Prometheus 上留下不存在的熔断站且
+    # 无法自愈（改名还会每次新增一条无主序列）。
+    site_breaker_open.clear()
+    for row in rows:
+        site_breaker_open.labels(site=row.name).set(
+            1 if row.name in open_breaker_names else 0
+        )
+    metric_state["sites_breaker_open"].set(len(open_breaker_names))
 
     if total_written:
         logger.info(

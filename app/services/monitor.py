@@ -47,6 +47,11 @@ from sqlalchemy import select
 
 from app.adapters.downloaders.base import DownloaderAdapter, TorrentState
 from app.core.logging import get_logger
+from app.core.metrics import (
+    cleanup_actions,
+    free_seed_outcomes,
+)
+from app.core.metrics import state as metric_state
 from app.core.timeutils import bj_now_dt, format_bj
 from app.db.models import TorrentIndex
 from app.db.session import session_scope
@@ -149,6 +154,15 @@ class MonitorResult:
     aborted_fatal: int = 0
     #: 停滞/龟速超时命中并成功处理数
     aborted_stalled: int = 0
+    #: 「窗口到期」命中并成功处理数（限时种临近/已过期 + 限时种无截止时间）
+    #:
+    #: **必须独立计数，不能用 ``pre_paused + deleted - 其它`` 反推**：
+    #: 退还种（refund）与非免费种（non_free）同样累加 ``pre_paused`` /
+    #: ``deleted``，减法会把它们算进窗口桶，面板「上轮清理 · 窗口 N」虚高，
+    #: 运维据此判断临期止损规模会得到错误结论。
+    aborted_window: int = 0
+    #: 因达到单轮异常/停滞清理上限而延至下轮处理的种子数
+    skipped_action_cap: int = 0
     #: 本轮监测动作执行后，默认下载器内剩余的全局在途下载数（供推送水位复用；拉取失败时 None）
     remaining_active_downloads: int | None = None
     pre_paused: int = 0
@@ -179,29 +193,69 @@ class MonitorFreeWindowService:
 
     @staticmethod
     async def _act(
-        adapter: DownloaderAdapter, hash_: str, delete_mode: bool
+        adapter: DownloaderAdapter,
+        hash_: str,
+        delete_mode: bool,
+        *,
+        downloader_name: str = "",
+        name: str = "",
+        reason: str = "",
+        completed_bytes: int = 0,
+        size: int = 0,
+        dlspeed: int = 0,
+        elapsed_min: int | None = None,
     ) -> tuple[str, str | None]:
         """对单个种子执行动作（暂停或删除）。
 
         :param adapter: 下载器适配器。
         :param hash_: 种子 infohash（40 位 hex，由适配器校验）。
         :param delete_mode: True=删任务 + 删磁盘数据；False=仅暂停。
+        :param downloader_name: 下载器名（审计日志用）。
+        :param name: 种子名（审计日志 / 明细展示用）。
+        :param reason: 触发原因的中文描述（写进审计日志与逐种明细）。
+        :param completed_bytes: 已下载字节数（审计日志用，单位字节）。
+        :param size: 种子总大小（字节）；未知时为 0。
+        :param dlspeed: 当前下载速度（字节/秒）；0 = 停滞。
+        :param elapsed_min: 从入队至今的分钟数；``None`` = 入队时刻未知
+            （适配器没给 ``added_at``），审计日志记成 ``unknown``。
         :return: ``(动作名, 错误信息)``。动作名为 ``"deleted"`` /
             ``"set_pause"``；错误信息为 None 表示成功，否则是异常文本
             （调用方据此计入 failed）。
         """
+        elapsed_text = f"{elapsed_min}m" if elapsed_min is not None else "unknown"
         if delete_mode:
-            # 删磁盘数据不可逆 → 必须记审计日志（AGENTS.md：删磁盘数据
-            # 单独开关并记审计日志）。审计的取证价值在于能定位"删了什么"，
-            # 故记 hash（单条，无批量截断问题）。
+            # 删磁盘数据不可逆 → 必须记完整结构化审计日志（AGENTS.md：删磁盘数据
+            # 单独开关并记审计日志）。记录下载器、hash、种子名、触发原因、完成字节
+            # 与速率，便于事后取证。
             logger.warning(
-                "monitor 删除下载器任务并删除磁盘数据：hash=%s", hash_
+                "monitor 审计[删除任务+磁盘数据]：downloader=%s hash=%s name=%r "
+                "reason=%s completed=%d/%d speed=%dB/s elapsed=%s",
+                downloader_name,
+                hash_,
+                name,
+                reason,
+                completed_bytes,
+                size,
+                dlspeed,
+                elapsed_text,
             )
             try:
                 await adapter.remove([hash_], delete_data=True)
             except Exception as exc:
                 return "remove", str(exc)
             return "deleted", None
+        logger.info(
+            "monitor 审计[暂停任务]：downloader=%s hash=%s name=%r "
+            "reason=%s completed=%d/%d speed=%dB/s elapsed=%s",
+            downloader_name,
+            hash_,
+            name,
+            reason,
+            completed_bytes,
+            size,
+            dlspeed,
+            elapsed_text,
+        )
         try:
             await adapter.set_pause([hash_], paused=True)
         except Exception as exc:
@@ -238,6 +292,7 @@ class MonitorFreeWindowService:
         scanned = len(infos)
         if scanned == 0:
             logger.info("monitor: 下载器无任务")
+            metric_state["free_seed_active"].set(0)
             return MonitorResult(
                 scanned=0,
                 remaining_active_downloads=0,
@@ -260,6 +315,7 @@ class MonitorFreeWindowService:
         threshold = format_bj(bj_now_dt() + self._pre_pause)
         stalled_timeout_min = rp.get_int("monitor_stalled_timeout_minutes")
         min_dlspeed_kbps = rp.get_int("monitor_min_dlspeed_kbps")
+        max_actions = rp.get_int("monitor_max_actions_per_run")
         now_ts = time.time()
 
         # 统计默认下载器内全部在途下载任务（含手动推送，共享带宽与槽位）
@@ -279,6 +335,7 @@ class MonitorFreeWindowService:
         }
         if not qb_hashes:
             logger.info("monitor: 下载器无任务 hash")
+            metric_state["free_seed_active"].set(active_without_hash)
             return MonitorResult(
                 scanned=scanned,
                 remaining_active_downloads=active_without_hash,
@@ -333,6 +390,8 @@ class MonitorFreeWindowService:
         skipped_refund = 0
         aborted_fatal = 0
         aborted_stalled = 0
+        aborted_window = 0
+        skipped_action_cap = 0
         pre_paused = 0
         deleted = 0
         failed = 0
@@ -346,15 +405,31 @@ class MonitorFreeWindowService:
         # 一半删除。
         delete_mode = rp.get_int("monitor_delete_expired") == 1
 
-        async def _apply(reason: str) -> bool:
-            """对当前种子执行动作（暂停 / 删除），并记录明细。
+        async def _apply(reason: str, *, trigger: str) -> bool:
+            """对当前种子执行动作（暂停 / 删除），并记录明细、审计日志与指标。
 
             闭包：直接改外层的 ``deleted`` / ``pre_paused`` / ``failed`` /
             ``errors`` / ``action_items``（Python 的 nonlocal 语义）。
             返回 True 表示动作成功（该种子已脱离在途下载集合）。
             """
-            nonlocal deleted, pre_paused, failed
-            action, err = await self._act(adapter, info.hash or "", delete_mode)
+            nonlocal deleted, pre_paused, failed, aborted_window
+            elapsed_min = (
+                int(now_ts - info.added_at) // 60
+                if info.added_at is not None
+                else None
+            )
+            action, err = await self._act(
+                adapter,
+                info.hash or "",
+                delete_mode,
+                downloader_name=default_dl.name,
+                name=info.name or "",
+                reason=reason,
+                completed_bytes=info.completed_bytes,
+                size=info.size,
+                dlspeed=info.dlspeed,
+                elapsed_min=elapsed_min,
+            )
             label = (info.name or hash_key)[:80]
             if err is not None:
                 failed += 1
@@ -362,8 +437,18 @@ class MonitorFreeWindowService:
                 action_items.append(
                     JobStepItem(label, "fail", None, f"{reason}：{err}")
                 )
+                free_seed_outcomes.labels(
+                    outcome="failed", reason="action_error"
+                ).inc()
                 return False
             handled_hashes.add(hash_key)
+            metric_action = "delete" if action == "deleted" else "pause"
+            cleanup_actions.labels(action=metric_action, trigger=trigger).inc()
+            free_seed_outcomes.labels(outcome="aborted", reason=trigger).inc()
+            if trigger == "window_expired":
+                # 独立计数：面板「上轮清理 · 窗口 N」只认这个数，不用减法
+                # 反推（退还种 / 非免费种也会累加 pre_paused / deleted）。
+                aborted_window += 1
             if action == "deleted":
                 deleted += 1
                 action_items.append(
@@ -374,6 +459,35 @@ class MonitorFreeWindowService:
                 action_items.append(
                     JobStepItem(label, "ok", None, f"{reason} → 已暂停")
                 )
+            return True
+
+        def _hit_action_cap(reason: str) -> bool:
+            """检查是否达到单轮异常/停滞清理上限（防网络抖动批量误清）。"""
+            nonlocal skipped_action_cap
+            if max_actions <= 0 or (aborted_fatal + aborted_stalled) < max_actions:
+                return False
+            skipped_action_cap += 1
+            free_seed_outcomes.labels(
+                outcome="skipped", reason="action_cap"
+            ).inc()
+            label = (info.name or hash_key)[:80]
+            action_items.append(
+                JobStepItem(
+                    label,
+                    "warn",
+                    None,
+                    f"{reason} → 已达单轮清理上限（{max_actions}），延至下轮",
+                )
+            )
+            logger.warning(
+                "monitor 达到单轮异常/停滞清理上限（%d），跳过本轮处理："
+                "downloader=%s hash=%s name=%r reason=%s",
+                max_actions,
+                default_dl.name,
+                hash_key,
+                info.name or "",
+                reason,
+            )
             return True
 
         for info in infos:
@@ -403,7 +517,9 @@ class MonitorFreeWindowService:
 
             # 1) 致命错误（ERROR / MISSING_FILES）——不受免费类型限制，立即清理
             if info.state.is_fatal:
-                if await _apply("下载异常（错误/文件丢失）"):
+                if _hit_action_cap("下载异常（错误/文件丢失）"):
+                    continue
+                if await _apply("下载异常（错误/文件丢失）", trigger="fatal"):
                     aborted_fatal += 1
                 continue
 
@@ -420,7 +536,9 @@ class MonitorFreeWindowService:
                     min_dlspeed_kbps=min_dlspeed_kbps,
                 )
                 if stalled_reason is not None:
-                    if await _apply(stalled_reason):
+                    if _hit_action_cap(stalled_reason):
+                        continue
+                    if await _apply(stalled_reason, trigger="stalled"):
                         aborted_stalled += 1
                     continue
                 skipped_permanent += 1
@@ -431,18 +549,18 @@ class MonitorFreeWindowService:
                 # 用户规则"当前非免费种直接处理"——与 NEUTRAL/UNKNOWN 走相同路径
                 # 单独计数便于统计退还种规模
                 skipped_refund += 1
-                await _apply("退还种")
+                await _apply("退还种", trigger="refund")
                 continue
 
             if ft in (FreeType.TIMED, FreeType.TWOU_TIMED):
                 # 限时种（含 2X 限时）：窗口判断
                 if fea is None:
                     # 异常：限时种无 end_at → 保守处理
-                    await _apply("限时种无截止时间")
+                    await _apply("限时种无截止时间", trigger="window_expired")
                     continue
                 if fea <= threshold:
                     # 即将到期 / 已过期 → 处理
-                    await _apply("临近窗口截止")
+                    await _apply("临近窗口截止", trigger="window_expired")
                     continue
                 # 窗口尚远：再检查是否停滞/龟速堵塞
                 stalled_reason = _stalled_or_slow_reason(
@@ -452,7 +570,9 @@ class MonitorFreeWindowService:
                     min_dlspeed_kbps=min_dlspeed_kbps,
                 )
                 if stalled_reason is not None:
-                    if await _apply(stalled_reason):
+                    if _hit_action_cap(stalled_reason):
+                        continue
+                    if await _apply(stalled_reason, trigger="stalled"):
                         aborted_stalled += 1
                     continue
                 skipped_far += 1
@@ -460,10 +580,11 @@ class MonitorFreeWindowService:
 
             # 其他 free_type（neutral_leech / unknown / 任何非免费）→ 直接处理
             # 用户规则："当前不是免费种，直接处理"
-            await _apply("已非免费种")
+            await _apply("已非免费种", trigger="non_free")
 
         initial_active = len(initial_active_hashes) + active_without_hash
         remaining_active = len(initial_active_hashes - handled_hashes) + active_without_hash
+        metric_state["free_seed_active"].set(remaining_active)
         action_items, action_items_total = build_items(action_items)
         result = MonitorResult(
             scanned=scanned,
@@ -477,6 +598,8 @@ class MonitorFreeWindowService:
             skipped_refund=skipped_refund,
             aborted_fatal=aborted_fatal,
             aborted_stalled=aborted_stalled,
+            aborted_window=aborted_window,
+            skipped_action_cap=skipped_action_cap,
             remaining_active_downloads=remaining_active,
             pre_paused=pre_paused,
             deleted=deleted,
@@ -489,8 +612,14 @@ class MonitorFreeWindowService:
                     else f"扫描 {scanned}，命中 {matched}，暂停 {pre_paused}"
                 )
                 + (
-                    f"（异常 {aborted_fatal}，停滞 {aborted_stalled}）"
-                    if aborted_fatal or aborted_stalled
+                    f"（异常 {aborted_fatal}，停滞 {aborted_stalled}，"
+                    f"窗口 {aborted_window}）"
+                    if aborted_fatal or aborted_stalled or aborted_window
+                    else ""
+                )
+                + (
+                    f"，达清理上限跳过 {skipped_action_cap}"
+                    if skipped_action_cap
                     else ""
                 )
                 + (f"，{failed} 失败" if failed else "")
@@ -518,7 +647,7 @@ class MonitorFreeWindowService:
                 ),
                 JobStep(
                     "判断窗口与异常",
-                    "ok",
+                    "warn" if skipped_action_cap else "ok",
                     pre_paused + deleted,
                     f"距截止 < {int(self._pre_pause.total_seconds() // 60)}min"
                     + (
@@ -529,16 +658,26 @@ class MonitorFreeWindowService:
                     + (
                         f"，命中异常 {aborted_fatal}、停滞 {aborted_stalled}"
                         f"，剩余在途 {remaining_active}"
+                    )
+                    + (
+                        f"，达单轮上限跳过 {skipped_action_cap}"
+                        if skipped_action_cap
+                        else ""
                     ),
                 ),
                 JobStep(
                     "自动删除" if delete_mode else "自动暂停",
-                    "warn" if failed else "ok",
+                    "warn" if (failed or skipped_action_cap) else "ok",
                     deleted if delete_mode else pre_paused,
                     (
                         f"已删除 {deleted} 个（含磁盘数据），{failed} 失败"
                         if delete_mode
                         else f"已暂停 {pre_paused} 个，{failed} 失败"
+                    )
+                    + (
+                        f"，上限跳过 {skipped_action_cap}"
+                        if skipped_action_cap
+                        else ""
                     ),
                     items=action_items,
                     items_total=action_items_total,
@@ -546,12 +685,15 @@ class MonitorFreeWindowService:
             ),
         )
         logger.info(
-            "monitor: 下载器 %d，命中 %d，触发%s %d（异常 %d / 停滞 %d），剩余在途 %d，"
-            "跳过(无关/远/已完成/已暂停/校验中/永久/退还) %d/%d/%d/%d/%d/%d/%d，失败 %d",
+            "monitor: 下载器 %d，命中 %d，触发%s %d（异常 %d / 停滞 %d / 窗口 %d / "
+            "上限跳过 %d），剩余在途 %d，跳过(无关/远/已完成/已暂停/校验中/永久/退还) "
+            "%d/%d/%d/%d/%d/%d/%d，失败 %d",
             result.scanned, result.matched,
             "删除" if delete_mode else "暂停",
             result.deleted if delete_mode else result.pre_paused,
-            result.aborted_fatal, result.aborted_stalled, remaining_active,
+            result.aborted_fatal, result.aborted_stalled, result.aborted_window,
+            result.skipped_action_cap,
+            remaining_active,
             result.skipped_unmatched, result.skipped_far_from_window,
             result.skipped_already_completed, result.skipped_already_paused,
             result.skipped_checking,

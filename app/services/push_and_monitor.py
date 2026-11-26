@@ -47,6 +47,10 @@ import time
 from typing import Any
 
 from app.core.logging import get_logger
+from app.core.timeutils import bj_now_dt, parse_bj
+from app.db.models import Site
+from app.db.session import session_scope
+from app.services import job_run_service
 from app.services.job_compose import build_summary, run_stage, to_payload
 from app.services.scheduler import JobStep
 
@@ -54,6 +58,7 @@ logger = get_logger(__name__)
 
 __all__ = [
     "PUSH_MIN_INTERVAL_SEC",
+    "get_free_seed_observability",
     "reset_throttle_state",
     "run_push_and_monitor",
 ]
@@ -190,3 +195,142 @@ async def _run_push(
     if tried:
         _THROTTLE.mark_pushed(time.monotonic())
     return payload
+
+
+def _as_int(value: object, default: int = 0) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else default
+
+
+def _as_opt_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+async def get_free_seed_observability() -> dict[str, Any]:
+    """汇总免费种推送与监测的实时观测快照（供面板 5s 轮询，不打下载器网络）。
+
+    数据来源：
+    - 进程内节流器（``_THROTTLE``）
+    - 内存运行时参数（``runtime_params``）
+    - 最近一次 ``push_and_monitor_free`` 执行记录（``job_runs``）
+    - 当前处于熔断期的启用站点（``sites.breaker_until``）
+    """
+    from sqlalchemy import select
+
+    from app.services.runtime_params import get_runtime_params, lookup_spec
+
+    def _param(key: str, fallback: int) -> int:
+        try:
+            return get_runtime_params().get_int(key)
+        except (RuntimeError, KeyError):
+            spec = lookup_spec(key)
+            return spec.default if spec is not None else fallback
+
+    remain = _THROTTLE.remaining(time.monotonic())
+    throttle_remaining_sec = int(remain) if remain is not None and remain > 0 else 0
+
+    max_active = _param("push_max_active_downloads", 10)
+    max_actions = _param("monitor_max_actions_per_run", 5)
+    stalled_timeout_min = _param("monitor_stalled_timeout_minutes", 60)
+    min_dlspeed_kbps = _param("monitor_min_dlspeed_kbps", 50)
+    delete_expired = _param("monitor_delete_expired", 0) == 1
+
+    last_run = await job_run_service.get_latest_job_run(
+        job_name="push_and_monitor_free", include_logs=False
+    )
+
+    active_downloads: int | None = None
+    last_run_at: str | None = None
+    last_ok: bool | None = None
+    last_monitor: dict[str, Any] | None = None
+    last_push: dict[str, Any] | None = None
+
+    if last_run is not None:
+        last_run_at = last_run.finished_at or last_run.started_at
+        last_ok = last_run.ok
+        res = last_run.result if isinstance(last_run.result, dict) else {}
+        mon = res.get("monitor") if isinstance(res.get("monitor"), dict) else None
+        push = res.get("push") if isinstance(res.get("push"), dict) else None
+
+        if mon is not None:
+            mon_active = _as_opt_int(mon.get("remaining_active_downloads"))
+            active_downloads = mon_active
+            pre_paused = _as_int(mon.get("pre_paused"))
+            deleted = _as_int(mon.get("deleted"))
+            aborted_fatal = _as_int(mon.get("aborted_fatal"))
+            aborted_stalled = _as_int(mon.get("aborted_stalled"))
+            # 窗口止损必须读**独立计数**。旧记录没有该字段（本次之前落库的
+            # 行），才退回减法反推——退还种 / 非免费种也累加 pre_paused 与
+            # deleted，减法会把它们算进窗口桶，使面板虚高。
+            window_raw = mon.get("aborted_window")
+            aborted_window = (
+                window_raw
+                if isinstance(window_raw, int) and not isinstance(window_raw, bool)
+                else max(0, (pre_paused + deleted) - aborted_fatal - aborted_stalled)
+            )
+            last_monitor = {
+                "scanned": _as_int(mon.get("scanned")),
+                "matched": _as_int(mon.get("matched")),
+                "pre_paused": pre_paused,
+                "deleted": deleted,
+                "aborted_window": aborted_window,
+                "aborted_fatal": aborted_fatal,
+                "aborted_stalled": aborted_stalled,
+                "skipped_action_cap": _as_int(mon.get("skipped_action_cap")),
+                "failed": _as_int(mon.get("failed")),
+                "remaining_active_downloads": mon_active,
+            }
+
+        if push is not None:
+            pushed_cnt = _as_int(push.get("pushed"))
+            push_active = _as_opt_int(push.get("active_downloads"))
+            if push_active is not None:
+                active_downloads = push_active + pushed_cnt
+            elif active_downloads is not None and pushed_cnt > 0:
+                active_downloads = active_downloads + pushed_cnt
+            last_push = {
+                "selected": _as_int(push.get("selected")),
+                "pushed": pushed_cnt,
+                "skipped_by_capacity": bool(push.get("skipped_by_capacity")),
+                "skipped_by_interval": bool(push.get("skipped_by_interval")),
+                "failed": _as_int(push.get("failed")),
+            }
+
+    now_dt = bj_now_dt()
+    breaker_sites: list[dict[str, Any]] = []
+    async with session_scope() as session:
+        rows = (
+            await session.execute(
+                select(Site.id, Site.name, Site.breaker_until).where(
+                    Site.enabled.is_(True),
+                    Site.breaker_until.is_not(None),
+                )
+            )
+        ).all()
+    for site_id, name, breaker_until in rows:
+        if not breaker_until:
+            continue
+        until_dt = parse_bj(breaker_until)
+        if until_dt is not None and until_dt > now_dt:
+            breaker_sites.append(
+                {
+                    "site_id": site_id,
+                    "name": name,
+                    "breaker_until": breaker_until,
+                }
+            )
+    breaker_sites.sort(key=lambda item: str(item["name"]))
+
+    return {
+        "active_downloads": active_downloads,
+        "max_active_downloads": max_active,
+        "throttle_remaining_sec": throttle_remaining_sec,
+        "max_actions_per_run": max_actions,
+        "stalled_timeout_minutes": stalled_timeout_min,
+        "min_dlspeed_kbps": min_dlspeed_kbps,
+        "delete_expired": delete_expired,
+        "last_run_at": last_run_at,
+        "last_ok": last_ok,
+        "last_monitor": last_monitor,
+        "last_push": last_push,
+        "breaker_sites": breaker_sites,
+    }

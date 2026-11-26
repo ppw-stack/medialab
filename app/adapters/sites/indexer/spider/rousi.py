@@ -333,6 +333,12 @@ class RousiSpider:
         base64_str = base64.b64encode(json.dumps(params).encode('utf-8')).decode('utf-8')
         return f"[{base64_str}]{url}"
 
+    def get_download_url(self, torrent_id: str) -> str:
+        """根据站内 ID 与当前凭据生成两段式下载换票配方。"""
+        if not self._apikey or not torrent_id:
+            return ""
+        return self.__get_download_url(torrent_id)
+
     def test_connection(self) -> Tuple[bool, str]:
         """
         用 PeerGo 个人 API Key 验证用户接口，不把网页成功当作 API 可用。

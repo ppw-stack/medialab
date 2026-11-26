@@ -135,6 +135,56 @@ export interface Site {
   seeding_count: number;
   /** 用户数据最近一次刷新时间（北京时间）；null = 从未刷新 */
   user_data_seen_at: string | null;
+  /** 熔断截止时间（北京时间字符串）；null = 未熔断 */
+  breaker_until: string | null;
+  /** 当前是否处于熔断期 */
+  breaker_open: boolean;
+}
+
+/** 熔断中的站点摘要（`GET /scheduler/free-seed-status`）。 */
+export interface BreakerSiteItem {
+  site_id: number;
+  name: string;
+  breaker_until: string;
+}
+
+/** 最近一轮监测统计摘要。 */
+export interface FreeSeedMonitorSnapshot {
+  scanned: number;
+  matched: number;
+  pre_paused: number;
+  deleted: number;
+  aborted_window: number;
+  aborted_fatal: number;
+  aborted_stalled: number;
+  skipped_action_cap: number;
+  failed: number;
+  remaining_active_downloads: number | null;
+}
+
+/** 最近一轮推送统计摘要。 */
+export interface FreeSeedPushSnapshot {
+  selected: number;
+  pushed: number;
+  skipped_by_capacity: boolean;
+  skipped_by_interval: boolean;
+  failed: number;
+}
+
+/** 免费种推送与监测观测快照（`GET /scheduler/free-seed-status`）。 */
+export interface FreeSeedObservability {
+  active_downloads: number | null;
+  max_active_downloads: number;
+  throttle_remaining_sec: number;
+  max_actions_per_run: number;
+  stalled_timeout_minutes: number;
+  min_dlspeed_kbps: number;
+  delete_expired: boolean;
+  last_run_at: string | null;
+  last_ok: boolean | null;
+  last_monitor: FreeSeedMonitorSnapshot | null;
+  last_push: FreeSeedPushSnapshot | null;
+  breaker_sites: BreakerSiteItem[];
 }
 
 /** 站点连通性与窗口解析自检（`POST /sites/{id}/test`）。 */

@@ -234,3 +234,33 @@ class TestBrowseGuangyaSource:
 
         assert resp.status_code == 200
         assert seen == [""], f"光鸭源应从账号根开始：{seen}"
+
+
+async def test_resume_unknown_job_returns_404(client) -> None:
+    """任务不存在 → 404（状态码由 service 层类型化异常给出，不嗅探文案）。"""
+    resp = await client.post("/api/migrations/jobs/nope/resume")
+
+    assert resp.status_code == 404
+    assert "不存在" in resp.json().get("detail", "")
+
+
+async def test_resume_non_paused_job_returns_409(client) -> None:
+    """非 paused 状态 → 409（同一个 MigrationError 家族的类型化区分）。"""
+    from app.services import migration_jobs
+    from app.services.migration_jobs import STATE_SUCCESS, MigrationParams
+
+    job = await migration_jobs.create_job(
+        MigrationParams(
+            source_driver_id=1,
+            source_cid="cid-1",
+            target_driver_id=2,
+            target_file_id="dir-2",
+        )
+    )
+    job.state = STATE_SUCCESS
+    try:
+        resp = await client.post(f"/api/migrations/jobs/{job.id}/resume")
+        assert resp.status_code == 409
+        assert "仅支持续传" in resp.json().get("detail", "")
+    finally:
+        migration_jobs.clear_all()

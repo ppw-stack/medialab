@@ -67,6 +67,7 @@ __all__ = [
     "LinkCacheEntry",
     "MediaFile",
     "MediaScrape",
+    "MigrationPausedJob",
     "OrganizeHistory",
     "ProbeResult",
     "SchedulerJobSetting",
@@ -1226,3 +1227,33 @@ class OrganizeHistory(Base):
         UniqueConstraint("source_path", name="uq_organize_history_source"),
         Index("idx_organize_history_status", "status"),
     )
+
+
+class MigrationPausedJob(Base):
+    """因云添加额度耗尽而**暂停**的迁移任务（跨重启续传的依据）。
+
+    迁移任务的进度本身是内存态（设计见
+    :mod:`app.services.migration_jobs` 的模块 docstring）——断点由光鸭目标
+    目录天然幂等。但「额度耗尽 → 次日自动续传」**不能**只靠内存表：
+
+    - 容器重启 / 崩溃会清空进程内任务表 → 续传候选为空，静默失效；
+    - 内存表超过 ``MAX_JOBS`` 会淘汰最旧任务 → 暂停任务被误当「已完成」。
+
+    本表只存**暂停且未续传**的任务参数（``params_json``）。续传成功后由
+    :func:`app.services.migration_jobs.resume_paused_job` 先回填
+    ``resumed_by``（记录续传后的新任务 ID），再**删除**对应行——已续传
+    的行不会长期保留，``resumed_by`` 只是「落库完成 → 删行」之间的
+    去重标记（崩溃落在这一步时，重启回灌仍能拒绝重复续传）。
+    """
+
+    __tablename__ = "migration_paused_jobs"
+
+    #: 任务 ID（与内存态 ``MigrationJob.id`` 一致）
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    #: :meth:`app.services.migration_jobs.MigrationParams.to_dict` 的 JSON
+    params_json: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 暂停时刻（北京时间字符串，跨自然日判定用）
+    paused_at: Mapped[str] = mapped_column(String(32), default=_bj_now, index=True)
+    #: 续传后的新任务 ID（NULL = 尚未续传；非空行会在删行前被清理）
+    resumed_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(32), default=_bj_now)

@@ -30,6 +30,7 @@ from sqlalchemy import CursorResult, delete, select
 from app.adapters.sites import resolve as resolve_site_adapter
 from app.adapters.sites.base import FeedItem, SiteHealth, SiteProfile
 from app.core.logging import get_logger
+from app.core.timeutils import bj_now_dt, parse_bj
 from app.db.models import Site, SiteUserData, TaskQueue, TorrentIndex
 from app.db.session import session_scope
 from app.services.errors import ServiceError
@@ -146,6 +147,10 @@ class SiteSnapshot:
     seeding_count: int = 0
     #: 用户数据最近一次刷新时间（北京时间）；None = 从未刷新
     user_data_seen_at: str | None = None
+    #: 熔断截止时间（北京时间字符串）；None = 未熔断
+    breaker_until: str | None = None
+    #: 当前是否处于熔断期（breaker_until > 当前北京时间）
+    breaker_open: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +238,13 @@ def _mask_rss_url(url: str | None) -> str:
     return re.sub(r"(?i)((?:passkey|apikey|key|auth)=)[^&]+", r"\1***", url)
 
 
+def _is_site_breaker_open(breaker_until: str | None) -> bool:
+    if not breaker_until:
+        return False
+    until = parse_bj(breaker_until)
+    return until is not None and until > bj_now_dt()
+
+
 def _to_snapshot(
     site: Site, user_data: SiteUserData | None = None
 ) -> SiteSnapshot:
@@ -240,6 +252,7 @@ def _to_snapshot(
 
     ``user_data`` 为 None（没抓到 / 该站没数据行）→ 各业务字段取默认值。
     """
+    breaker_until = site.breaker_until or None
     return SiteSnapshot(
         id=site.id,
         name=site.name,
@@ -256,6 +269,8 @@ def _to_snapshot(
         download=user_data.download if user_data else 0,
         seeding_count=user_data.seeding_count if user_data else 0,
         user_data_seen_at=user_data.last_seen_at if user_data else None,
+        breaker_until=breaker_until,
+        breaker_open=_is_site_breaker_open(breaker_until),
     )
 
 

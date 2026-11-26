@@ -51,6 +51,14 @@ stage_duration = Histogram(
     registry=REGISTRY,
 )
 
+#: 站点熔断状态（按站点名：1=熔断中，0=正常）
+site_breaker_open = Gauge(
+    "seedhelper_site_breaker_open",
+    "站点是否处于熔断期（1=熔断中，0=正常）",
+    labelnames=("site",),
+    registry=REGISTRY,
+)
+
 #: 实时状态 Gauge
 state = {
     "downloaders_up": Gauge(
@@ -59,6 +67,16 @@ state = {
     "free_seed_active": Gauge(
         "seedhelper_free_seed_active", "在途免费种任务数", registry=REGISTRY
     ),
+    "free_seed_max_active": Gauge(
+        "seedhelper_free_seed_max_active",
+        "免费种在途下载水位上限（0=不限）",
+        registry=REGISTRY,
+    ),
+    "sites_breaker_open": Gauge(
+        "seedhelper_sites_breaker_open",
+        "当前处于熔断期的启用站点数量",
+        registry=REGISTRY,
+    ),
     "free_window_parse_success": Gauge(
         "seedhelper_free_window_parse_success",
         "窗口解析成功率",
@@ -66,6 +84,11 @@ state = {
     ),
     "db_healthy": Gauge(
         "seedhelper_db_healthy", "数据库健康（1/0）", registry=REGISTRY
+    ),
+    "startup_degradations": Gauge(
+        "seedhelper_startup_degradations",
+        "启动或就绪降级项数量（与 /readyz degradations 一致）",
+        registry=REGISTRY,
     ),
 }
 

@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { api, errMsg } from '../api';
-import type { JobRunItem, JobRunPage, RunResult, SchedulerInfo, SchedulerJob } from '../types';
+import type {
+  FreeSeedObservability,
+  JobRunItem,
+  JobRunPage,
+  RunResult,
+  SchedulerInfo,
+  SchedulerJob,
+} from '../types';
 import { message } from 'ant-design-vue';
 import SchedulerConfigModal from '../components/SchedulerConfigModal.vue';
 import SchedulerHistoryModal from '../components/SchedulerHistoryModal.vue';
@@ -19,6 +26,7 @@ import PageHeader from '../components/PageHeader.vue';
  */
 
 const data = ref<SchedulerInfo | null>(null);
+const freeSeedObs = ref<FreeSeedObservability | null>(null);
 const runningJob = ref<string | null>(null);
 
 const runsByJob = ref<Record<string, JobRunItem[]>>({});
@@ -193,6 +201,14 @@ async function loadRuns() {
   }
 }
 
+async function loadFreeSeedObs() {
+  try {
+    freeSeedObs.value = await api.get<FreeSeedObservability>('/scheduler/free-seed-status');
+  } catch {
+    /* ignore */
+  }
+}
+
 async function load() {
   try {
     data.value = await api.get<SchedulerInfo>('/scheduler');
@@ -204,9 +220,11 @@ async function load() {
 onMounted(() => {
   void load();
   void loadRuns();
+  void loadFreeSeedObs();
   const timer = setInterval(() => {
     void load();
     void loadRuns();
+    void loadFreeSeedObs();
   }, 5000);
   onUnmounted(() => {
     clearInterval(timer);
@@ -244,7 +262,28 @@ async function runNow(name: string) {
     runningJob.value = null;
     void load();
     void loadRuns();
+    void loadFreeSeedObs();
   }
+}
+
+function formatWatermark(obs: FreeSeedObservability): string {
+  const active = obs.active_downloads === null ? '—' : String(obs.active_downloads);
+  const limit = obs.max_active_downloads > 0 ? String(obs.max_active_downloads) : '不限';
+  return `${active} / ${limit}`;
+}
+
+function isAtCapacity(obs: FreeSeedObservability): boolean {
+  return (
+    obs.max_active_downloads > 0 &&
+    obs.active_downloads !== null &&
+    obs.active_downloads >= obs.max_active_downloads
+  );
+}
+
+function formatCooldown(sec: number): string {
+  if (sec <= 0) return '就绪';
+  const mins = Math.ceil(sec / 60);
+  return `冷却中（约 ${String(mins)} 分钟）`;
 }
 
 /** 结果摘要优先用后端给的 summary（后端是人话来源，前端不硬编码字段名）。 */
@@ -343,6 +382,57 @@ function formatRunFull(s: string): string {
                   >
                 </template>
               </span>
+            </div>
+
+            <div v-if="group.key === 'seed' && freeSeedObs" class="seed-obs-bar">
+              <div class="seed-obs-item">
+                <span class="seed-obs-item__label dim">在途水位</span>
+                <span
+                  class="seed-obs-item__val mono"
+                  :class="{ 'seed-obs-item__val--warn': isAtCapacity(freeSeedObs) }"
+                >
+                  {{ formatWatermark(freeSeedObs) }}
+                </span>
+                <a-tag v-if="isAtCapacity(freeSeedObs)" color="orange">已达上限</a-tag>
+              </div>
+              <div class="seed-obs-item">
+                <span class="seed-obs-item__label dim">推送冷却</span>
+                <span class="seed-obs-item__val mono">
+                  {{ formatCooldown(freeSeedObs.throttle_remaining_sec) }}
+                </span>
+              </div>
+              <div class="seed-obs-item">
+                <span class="seed-obs-item__label dim">上轮清理</span>
+                <span v-if="freeSeedObs.last_monitor" class="seed-obs-item__val mono">
+                  窗口 {{ freeSeedObs.last_monitor.aborted_window }} · 异常
+                  {{ freeSeedObs.last_monitor.aborted_fatal }} · 停滞
+                  {{ freeSeedObs.last_monitor.aborted_stalled }}
+                  <template v-if="freeSeedObs.last_monitor.skipped_action_cap > 0">
+                    ·
+                    <span class="seed-obs-item__val--warn">
+                      上限跳过 {{ freeSeedObs.last_monitor.skipped_action_cap }}
+                    </span>
+                  </template>
+                </span>
+                <span v-else class="seed-obs-item__val mono dim">暂无记录</span>
+              </div>
+              <div class="seed-obs-item">
+                <span class="seed-obs-item__label dim">熔断站点</span>
+                <template v-if="freeSeedObs.breaker_sites.length">
+                  <a-space :size="4" wrap>
+                    <a-tooltip
+                      v-for="b in freeSeedObs.breaker_sites"
+                      :key="b.site_id"
+                      :title="`熔断至 ${b.breaker_until}`"
+                    >
+                      <a-tag color="red">
+                        {{ b.name }} 至 {{ b.breaker_until.slice(11, 16) }}
+                      </a-tag>
+                    </a-tooltip>
+                  </a-space>
+                </template>
+                <span v-else class="seed-obs-item__val mono dim">0 个</span>
+              </div>
             </div>
 
             <div class="job-list">
@@ -513,6 +603,39 @@ function formatRunFull(s: string): string {
 }
 
 .module-head__running {
+  color: var(--accent-red);
+}
+
+.seed-obs-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-4);
+  padding: var(--sp-2) var(--sp-3);
+  margin-bottom: var(--sp-3);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--r-md);
+  background: var(--bg-surface);
+  font-size: var(--text-xs);
+}
+
+.seed-obs-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex-wrap: wrap;
+}
+
+.seed-obs-item__label {
+  white-space: nowrap;
+}
+
+.seed-obs-item__val {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.seed-obs-item__val--warn {
   color: var(--accent-red);
 }
 

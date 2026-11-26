@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import httpx
@@ -15,6 +16,14 @@ from app.adapters.sites.base import (
 )
 from app.adapters.sites.generic import GenericAdapter
 from app.core.timeutils import parse_bj
+
+#: 测试用的占位凭据（**绝不是真实 API Key**）：只用于断言请求头透传。
+#: 允许环境变量覆盖，代码里不出现任何凭据字面量。
+_TEST_API_KEY = os.environ.get("MTEAM_APIKEY", "test-placeholder")
+
+#: 测试用的占位下载票据（**绝不是真实 token**）：拼进畸形地址，断言它不进日志。
+#: 不复用裸字面量——有人在调试时把真 token 粘进占位处就会永久留在 git 历史。
+_FAKE_DOWNLOAD_TICKET = os.environ.get("MTEAM_APIKEY", "test-placeholder")
 
 _LIST_HTML = """
 <table class="torrents">
@@ -782,3 +791,187 @@ def test_torrent_detail_is_a_frozen_dataclass() -> None:
     detail = TorrentDetail(item_id="123", title="片名", size=1024)
     assert detail.item_id == "123"
     assert detail.error is None
+
+
+# ------------------------------------------------------------------ API 换票配方 & 接线回归
+
+
+def test_parse_download_recipe_boundaries() -> None:
+    """普通 URL 或畸形前缀返回 None，合法 [base64]url 返回 (params, endpoint)。"""
+    import base64
+    import json
+
+    from app.adapters.sites.indexer.download import parse_download_recipe
+
+    assert parse_download_recipe("https://example.com/download.php?id=1") is None
+    assert parse_download_recipe("[not-base64]https://example.com/api") is None
+    bad_json = base64.b64encode(b"[1, 2]").decode("ascii")
+    assert parse_download_recipe(f"[{bad_json}]https://example.com/api") is None
+
+    cfg = {"method": "post", "result": "data"}
+    encoded = base64.b64encode(json.dumps(cfg).encode("utf-8")).decode("ascii")
+    parsed = parse_download_recipe(f"[{encoded}]https://api.example.com/genDlToken")
+    assert parsed == (cfg, "https://api.example.com/genDlToken")
+
+
+async def test_generic_download_recipe_rejects_off_site_endpoint() -> None:
+    """换票 endpoint 指向站外 / 非 https → 永久失败，绝不发请求（SSRF/凭据外泄）。"""
+    adapter = GenericAdapter(
+        SiteProfile(name="M-Team", domain="kp.m-team.cc"),
+        apikey=_TEST_API_KEY,
+    )
+    cfg = {"method": "post", "cookie": True, "result": "data"}
+
+    for endpoint in (
+        "http://169.254.169.254/latest/meta-data",  # 内网元数据 + 非 https
+        "https://api.m-team.io.attacker.test/genDlToken",  # 域名后缀伪装
+        "https://attacker.test/genDlToken",  # 完全站外
+    ):
+        with respx.mock(assert_all_called=False) as router:
+            # 任意请求都不该发生——若发生 respx 会返回 200，用例就会失败
+            router.route().mock(return_value=httpx.Response(200, content=b"d4:spam"))
+            with pytest.raises(SitePermanentError, match="换票地址"):
+                await adapter._exchange_download_recipe((cfg, endpoint), "1")
+    await adapter.close()
+
+
+async def test_generic_download_exchanges_mteam_recipe() -> None:
+    """M-Team 换票配方：POST 带 x-api-key 换真实链接，再 GET 取回 .torrent。"""
+    torrent_bytes = b"d8:announce17:http://t.test/anne"
+    adapter = GenericAdapter(
+        SiteProfile(name="M-Team", domain="kp.m-team.cc"),
+        apikey=_TEST_API_KEY,
+    )
+    with respx.mock(assert_all_called=False) as router:
+        token_route = router.post(
+            url__startswith="https://api.m-team.io/api/torrent/genDlToken"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={"code": "0", "data": "https://cdn.m-team.io/dl/123.torrent"},
+            )
+        )
+        dl_route = router.get("https://cdn.m-team.io/dl/123.torrent").mock(
+            return_value=httpx.Response(200, content=torrent_bytes)
+        )
+        raw = await adapter.download_torrent("998877")
+    await adapter.close()
+
+    assert raw == torrent_bytes
+    assert token_route.called
+    assert dl_route.called
+    req = token_route.calls[0].request
+    assert req.headers.get("x-api-key") == _TEST_API_KEY
+    assert req.url.params.get("id") == "998877"
+
+
+async def test_generic_download_recipe_error_classification() -> None:
+    """换票失败分级：401 → 永久失败；429 → 熔断；空 data → 瞬时失败。"""
+    adapter = GenericAdapter(
+        SiteProfile(name="M-Team", domain="kp.m-team.cc"),
+        apikey=_TEST_API_KEY,
+    )
+    with respx.mock(assert_all_called=False) as router:
+        router.post(
+            url__startswith="https://api.m-team.io/api/torrent/genDlToken"
+        ).mock(return_value=httpx.Response(401, json={"code": "401"}))
+        with pytest.raises(SitePermanentError):
+            await adapter.download_torrent("1")
+
+    with respx.mock(assert_all_called=False) as router:
+        router.post(
+            url__startswith="https://api.m-team.io/api/torrent/genDlToken"
+        ).mock(return_value=httpx.Response(429, text="rate limit"))
+        with pytest.raises(BreakerTripped):
+            await adapter.download_torrent("2")
+
+    with respx.mock(assert_all_called=False) as router:
+        router.post(
+            url__startswith="https://api.m-team.io/api/torrent/genDlToken"
+        ).mock(return_value=httpx.Response(200, json={"code": "1", "data": None}))
+        with pytest.raises(SiteFetchError):
+            await adapter.download_torrent("3")
+    await adapter.close()
+
+
+def test_api_spiders_expose_public_get_download_url() -> None:
+    """Rousi / Yema / SunnyPT 均暴露公开 get_download_url 并产出可解析配方。"""
+    from app.adapters.sites.indexer.download import parse_download_recipe
+    from app.adapters.sites.indexer.spider.rousi import RousiSpider
+    from app.adapters.sites.indexer.spider.sunnypt import SunnyPTSpider
+    from app.adapters.sites.indexer.spider.yema import YemaSpider
+
+    for cls, cfg in [
+        (RousiSpider, {"name": "rousi", "domain": "https://rousi.zip/", "apikey": "k1"}),
+        (YemaSpider, {"name": "yema", "domain": "https://www.yemapt.org/", "apikey": "k2"}),
+        (SunnyPTSpider, {"name": "sunny", "domain": "https://sunnypt.top/", "apikey": "k3"}),
+    ]:
+        spider = cls(cfg)
+        recipe = spider.get_download_url("12345")
+        parsed = parse_download_recipe(recipe)
+        assert parsed is not None, f"{cls.__name__} 未产出合法换票配方"
+
+
+def test_row_item_id_supports_ttg_and_promo_maps_30_percent() -> None:
+    """TTG `/dl/{id}/{auth}` 可提取稳定 ID；30% 折扣映射到 thirtypercent。"""
+    from app.adapters.sites.generic import _promo_payload, _row_item_id
+
+    assert _row_item_id({"enclosure": "https://totheglory.im/dl/556677/deadbeef99"}) == "556677"
+    assert _row_item_id({"page_url": "https://totheglory.im/t/889900/"}) == "889900"
+
+    payload = _promo_payload({"downloadvolumefactor": 0.3, "uploadvolumefactor": 1}, {})
+    assert payload is not None
+    assert payload["free_classes"] == ["thirtypercent"]
+
+
+def test_host_of_logs_invalid_url_without_query(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """非法 URL 返回空串，但必须留 warning（连 path 里的票据都不能泄露）。"""
+    from app.adapters.sites.generic import _host_of
+
+    with caplog.at_level("WARNING", logger="app.adapters.sites.generic"):
+        assert _host_of(f"https://[bad-host/dl/12345/{_FAKE_DOWNLOAD_TICKET}") == ""
+
+    assert "主机解析失败" in caplog.text
+    assert _FAKE_DOWNLOAD_TICKET not in caplog.text
+
+
+async def test_generic_anonymous_client_init_failure_is_site_fetch_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """匿名客户端构造失败（如代理配置非法）也映射为 SiteFetchError，不裸冒泡。"""
+    adapter = GenericAdapter(SiteProfile(name="OffSite", domain="site.test"))
+    try:
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise httpx.InvalidURL("bad proxy")
+
+        monkeypatch.setattr("app.adapters.sites.generic.httpx.AsyncClient", _boom)
+        with pytest.raises(SiteFetchError, match="匿名下载客户端初始化失败"):
+            await adapter._fetch_torrent_response(
+                "https://cdn.offsite.test/path.torrent"
+            )
+    finally:
+        await adapter.close()
+
+
+async def test_anonymous_client_failure_message_hides_malformed_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """畸形地址的失败消息只留 ``<unparsable>``，不回显 path 里的票据。"""
+    adapter = GenericAdapter(SiteProfile(name="OffSite", domain="site.test"))
+    try:
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise httpx.InvalidURL("bad proxy")
+
+        monkeypatch.setattr("app.adapters.sites.generic.httpx.AsyncClient", _boom)
+        with pytest.raises(SiteFetchError) as excinfo:
+            await adapter._fetch_torrent_response(
+                f"https://[bad-host/dl/12345/{_FAKE_DOWNLOAD_TICKET}"
+            )
+        assert "<unparsable>" in str(excinfo.value)
+        assert _FAKE_DOWNLOAD_TICKET not in str(excinfo.value)
+    finally:
+        await adapter.close()

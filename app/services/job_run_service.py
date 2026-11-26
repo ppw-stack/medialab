@@ -23,7 +23,7 @@ from app.services.errors import ServiceError
 
 logger = get_logger(__name__)
 
-__all__ = ["JobRunPage", "JobRunRow", "get_job_run", "list_job_runs"]
+__all__ = ["JobRunPage", "JobRunRow", "get_job_run", "get_latest_job_run", "list_job_runs"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +178,33 @@ async def list_job_runs(
         total=total,
         items=[_to_row(r, include_logs=include_logs) for r in rows],
     )
+
+
+async def get_latest_job_run(
+    job_name: str, *, include_logs: bool = False
+) -> JobRunRow | None:
+    """取某作业**最近一次**执行记录；没有任何记录时返回 None。
+
+    专供高频轮询（如面板 5s 拉一次的免费种观测）：:func:`list_job_runs`
+    固定先做一次 ``COUNT(*)`` 全表统计，只取 1 行时纯属浪费——``job_runs``
+    按作业频率持续增长（每 10 分钟一条），长跑后是数万行。这里直接
+    ``ORDER BY started_at DESC LIMIT 1``，不计数。
+
+    :param job_name: 作业名（``JobSpec.name``）。
+    :param include_logs: 是否保留执行日志（轮询默认不要）。
+    """
+    async with session_scope() as session:
+        row = (
+            await session.execute(
+                select(JobRun)
+                .where(JobRun.job_name == job_name)
+                .order_by(JobRun.started_at.desc(), JobRun.id.desc())
+                .limit(1)
+            )
+        ).scalars().first()
+    if row is None:
+        return None
+    return _to_row(row, include_logs=include_logs)
 
 
 async def get_job_run(run_id: int) -> JobRunRow:

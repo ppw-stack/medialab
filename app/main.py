@@ -242,10 +242,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     runtime_guard.start(asyncio.get_running_loop(), mounts=_probe_targets())
 
+    # 启动降级告警（仅在存在降级且配置了 ALERT_WEBHOOK_URL 时异步发一次）
+    from app.services import startup_status
+
+    startup_degradations = startup_status.snapshot()
+    if startup_degradations:
+        from app.services.alerting import notify_startup_degradations
+
+        app.state.degradation_alert_task = asyncio.create_task(
+            notify_startup_degradations(startup_degradations)
+        )
+
     try:
         yield
     finally:
         logger.info("停机中…")
+        # 后台 fire-and-forget 任务必须先取消再收尾。
+        #
+        # 与下面的 ``driver_probe_task`` 同构：进程停机时被丢弃的 task 会
+        # 留下「Task was destroyed but it is pending」/ 异常无人回收；若它
+        # 落到 DB，还会在 ``dispose_db()`` 之后报 RuntimeError 被吞掉。
+        alert_task: asyncio.Task[object] | None = getattr(
+            app.state, "degradation_alert_task", None
+        )
+        if alert_task is not None and not alert_task.done():
+            alert_task.cancel()
+            await asyncio.gather(alert_task, return_exceptions=True)
         # 启动测连任务要先取消——它会往 DB 写探测历史。
         #
         # **必须在 dispose_db() 之前**：``dispose_db()`` 把 session factory
