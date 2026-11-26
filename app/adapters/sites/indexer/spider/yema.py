@@ -462,3 +462,15 @@ class YemaSpider:
             json.dumps(request_config).encode("utf-8")
         ).decode("ascii")
         return f"[{encoded_config}]{self._download_key_url}"
+
+    def get_download_url(self, torrent_id: str) -> str:
+        """根据站内 ID 与当前凭据生成两段式下载换票配方。"""
+        if not self._api_key or not torrent_id:
+            return ""
+        try:
+            tid = int(str(torrent_id).strip())
+        except ValueError:
+            return ""
+        if tid <= 0:
+            return ""
+        return self._build_download_url(tid)

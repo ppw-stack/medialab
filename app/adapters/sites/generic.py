@@ -41,9 +41,12 @@ from app.adapters.sites.indexer.compat.settings import get_runtime_setting
 from app.adapters.sites.indexer.download import (
     is_download_confirmation,
     parse_download_confirmation,
+    parse_download_recipe,
+    parse_download_response,
 )
 from app.adapters.sites.indexer.engine import SPIDER_PARSER_CLASSES, IndexerEngine
 from app.adapters.sites.indexer.rules import SiteRules, load_site_rules
+from app.adapters.sites.indexer.spider.ttg import TTGDownloadAdapter
 from app.adapters.sites.user_data import SiteUserSnapshot
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -206,7 +209,7 @@ class GenericAdapter(SiteAdapter):
             "cookie": self._cookies,
             "apikey": self._apikey,
             "ua": self._user_agent,
-            "proxy": False,
+            "proxy": bool((get_settings().proxy_url or "").strip()),
         }
 
     def _detail_url(self, item_id: str) -> str:
@@ -316,6 +319,10 @@ class GenericAdapter(SiteAdapter):
                 f"{self.profile.name} 无法解析下载地址（id={item_id}）"
             )
 
+        recipe = parse_download_recipe(url)
+        if recipe is not None:
+            url = await self._exchange_download_recipe(recipe, item_id)
+
         resp = await self._fetch_torrent_response(url)
         if resp.content.startswith(_TORRENT_MAGIC):
             return resp.content
@@ -358,6 +365,89 @@ class GenericAdapter(SiteAdapter):
             f"{self.profile.name} 响应不是 bencoded torrent id={item_id}"
             f"（重试后：{_describe_torrent_response(retry)}；首次：{first_desc}）"
         )
+
+    async def _exchange_download_recipe(
+        self,
+        recipe: tuple[dict[str, Any], str],
+        item_id: str,
+    ) -> str:
+        """执行 API 站的两段式下载换票配方，返回真实 ``.torrent`` 下载地址。
+
+        配方由专站 spider 的 ``get_download_url`` 产出（``[base64_json]url``），
+        含 ``method`` / ``header`` / ``params`` / ``json`` / ``cookie`` /
+        ``allow_redirects`` / ``result`` 等字段。结果经
+        :func:`parse_download_response` 统一提取与规范化。
+
+        :raises BreakerTripped: 站点返回 403 / 429
+        :raises SitePermanentError: 401 鉴权失败（API Key / Token 无效）
+        :raises SiteFetchError: 网络异常、其他 HTTP 错误或响应未含下载地址
+        """
+        config, endpoint = recipe
+        method = str(config.get("method") or "get").upper()
+        raw_headers = config.get("header")
+        headers: dict[str, str] = (
+            {str(k): str(v) for k, v in raw_headers.items() if v is not None}
+            if isinstance(raw_headers, dict)
+            else {}
+        )
+        headers.setdefault("User-Agent", self._user_agent)
+        params = config.get("params") if isinstance(config.get("params"), dict) else None
+        json_body = config.get("json") if isinstance(config.get("json"), dict) else None
+        follow_redirects = bool(config.get("allow_redirects", True))
+        use_cookie = bool(config.get("cookie", False))
+
+        try:
+            if use_cookie:
+                resp = await self._client.request(
+                    method,
+                    endpoint,
+                    headers=headers,
+                    params=params,
+                    json=json_body,
+                    follow_redirects=follow_redirects,
+                    timeout=self._timeout,
+                )
+            else:
+                proxy_url = (get_settings().proxy_url or "").strip() or None
+                async with httpx.AsyncClient(
+                    headers=headers,
+                    follow_redirects=follow_redirects,
+                    timeout=self._timeout,
+                    proxy=proxy_url if config.get("proxy") else None,
+                ) as api_client:
+                    resp = await api_client.request(
+                        method,
+                        endpoint,
+                        params=params,
+                        json=json_body,
+                    )
+        except httpx.HTTPError as exc:
+            raise SiteFetchError(
+                f"{self.profile.name} 换取下载链接失败 id={item_id}：{exc}"
+            ) from exc
+
+        if resp.status_code == 401:
+            raise SitePermanentError(
+                f"{self.profile.name} 换票鉴权失败（HTTP 401），请检查 API Key/Token"
+                f"（id={item_id}）"
+            )
+        self._check_status_code(resp)
+
+        payload: object = None
+        try:
+            payload = resp.json()
+        except ValueError:
+            payload = None
+
+        real_url = parse_download_response(
+            config, resp.status_code, payload, resp.text
+        )
+        if not real_url:
+            raise SiteFetchError(
+                f"{self.profile.name} 换票响应未包含下载地址 id={item_id}"
+                f"（{_describe_torrent_response(resp)}）"
+            )
+        return real_url
 
     async def _fetch_torrent_response(self, url: str) -> httpx.Response:
         """GET 下载地址并按统一契约检查状态码。
@@ -650,6 +740,10 @@ def _row_item_id(row: dict[str, Any]) -> str | None:
         if not url:
             continue
         text = str(url)
+        # TTG 路径形如 `/t/{id}/` 或 `/dl/{id}/{auth}`（末段是短时票据）
+        ttg_id = TTGDownloadAdapter.torrent_id_from_url(text)
+        if ttg_id:
+            return ttg_id
         # 页面型站点 `details.php?id=123`；API 站（m-team）`/detail/123`
         for pattern in (r"[?&]id=(\d+)", r"/detail/(\d+)", r"/(\d+)/?$"):
             match = re.search(pattern, text)
@@ -820,10 +914,10 @@ def _promo_payload(row: dict[str, Any], rule: dict[str, Any]) -> dict[str, objec
     upload_factor = row.get("uploadvolumefactor")
     free_classes: list[str] = []
     try:
-        if factor is not None and float(factor) == 0:
-            free_classes.append("free")
-        elif factor is not None and float(factor) == 0.5:
-            free_classes.append("halfdown")
+        if factor is not None:
+            promo_cls = _PROMO_CLASS_BY_FACTOR.get(float(factor))
+            if promo_cls:
+                free_classes.append(promo_cls)
     except (TypeError, ValueError):
         pass
     try:

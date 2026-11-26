@@ -397,6 +397,12 @@ class SunnyPTSpider:
         token_url = f"{self._api_url}/torrents/{torrent_id}/download-token"
         return f"[{encoded_config}]{token_url}"
 
+    def get_download_url(self, torrent_id: str) -> str:
+        """根据站内 ID 与当前凭据生成两段式下载换票配方。"""
+        if not self._api_key or not torrent_id:
+            return ""
+        return self._build_download_url(torrent_id)
+
     def test_connection(self) -> Tuple[bool, str]:
         """
         通过与搜索相同的 profile 协议检测 API Key 和下载权限。

@@ -782,3 +782,113 @@ def test_torrent_detail_is_a_frozen_dataclass() -> None:
     detail = TorrentDetail(item_id="123", title="片名", size=1024)
     assert detail.item_id == "123"
     assert detail.error is None
+
+
+# ------------------------------------------------------------------ API 换票配方 & 接线回归
+
+
+def test_parse_download_recipe_boundaries() -> None:
+    """普通 URL 或畸形前缀返回 None，合法 [base64]url 返回 (params, endpoint)。"""
+    import base64
+    import json
+
+    from app.adapters.sites.indexer.download import parse_download_recipe
+
+    assert parse_download_recipe("https://example.com/download.php?id=1") is None
+    assert parse_download_recipe("[not-base64]https://example.com/api") is None
+    bad_json = base64.b64encode(b"[1, 2]").decode("ascii")
+    assert parse_download_recipe(f"[{bad_json}]https://example.com/api") is None
+
+    cfg = {"method": "post", "result": "data"}
+    encoded = base64.b64encode(json.dumps(cfg).encode("utf-8")).decode("ascii")
+    parsed = parse_download_recipe(f"[{encoded}]https://api.example.com/genDlToken")
+    assert parsed == (cfg, "https://api.example.com/genDlToken")
+
+
+async def test_generic_download_exchanges_mteam_recipe() -> None:
+    """M-Team 换票配方：POST 带 x-api-key 换真实链接，再 GET 取回 .torrent。"""
+    torrent_bytes = b"d8:announce17:http://t.test/anne"
+    adapter = GenericAdapter(
+        SiteProfile(name="M-Team", domain="kp.m-team.cc"),
+        apikey="mt-secret-key",
+    )
+    with respx.mock(assert_all_called=False) as router:
+        token_route = router.post(
+            url__startswith="https://api.m-team.io/api/torrent/genDlToken"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={"code": "0", "data": "https://cdn.m-team.io/dl/123.torrent"},
+            )
+        )
+        dl_route = router.get("https://cdn.m-team.io/dl/123.torrent").mock(
+            return_value=httpx.Response(200, content=torrent_bytes)
+        )
+        raw = await adapter.download_torrent("998877")
+    await adapter.close()
+
+    assert raw == torrent_bytes
+    assert token_route.called
+    assert dl_route.called
+    req = token_route.calls[0].request
+    assert req.headers.get("x-api-key") == "mt-secret-key"
+    assert req.url.params.get("id") == "998877"
+
+
+async def test_generic_download_recipe_error_classification() -> None:
+    """换票失败分级：401 → 永久失败；429 → 熔断；空 data → 瞬时失败。"""
+    adapter = GenericAdapter(
+        SiteProfile(name="M-Team", domain="kp.m-team.cc"),
+        apikey="mt-key",
+    )
+    with respx.mock(assert_all_called=False) as router:
+        router.post(
+            url__startswith="https://api.m-team.io/api/torrent/genDlToken"
+        ).mock(return_value=httpx.Response(401, json={"code": "401"}))
+        with pytest.raises(SitePermanentError):
+            await adapter.download_torrent("1")
+
+    with respx.mock(assert_all_called=False) as router:
+        router.post(
+            url__startswith="https://api.m-team.io/api/torrent/genDlToken"
+        ).mock(return_value=httpx.Response(429, text="rate limit"))
+        with pytest.raises(BreakerTripped):
+            await adapter.download_torrent("2")
+
+    with respx.mock(assert_all_called=False) as router:
+        router.post(
+            url__startswith="https://api.m-team.io/api/torrent/genDlToken"
+        ).mock(return_value=httpx.Response(200, json={"code": "1", "data": None}))
+        with pytest.raises(SiteFetchError):
+            await adapter.download_torrent("3")
+    await adapter.close()
+
+
+def test_api_spiders_expose_public_get_download_url() -> None:
+    """Rousi / Yema / SunnyPT 均暴露公开 get_download_url 并产出可解析配方。"""
+    from app.adapters.sites.indexer.download import parse_download_recipe
+    from app.adapters.sites.indexer.spider.rousi import RousiSpider
+    from app.adapters.sites.indexer.spider.sunnypt import SunnyPTSpider
+    from app.adapters.sites.indexer.spider.yema import YemaSpider
+
+    for cls, cfg in [
+        (RousiSpider, {"name": "rousi", "domain": "https://rousi.zip/", "apikey": "k1"}),
+        (YemaSpider, {"name": "yema", "domain": "https://www.yemapt.org/", "apikey": "k2"}),
+        (SunnyPTSpider, {"name": "sunny", "domain": "https://sunnypt.top/", "apikey": "k3"}),
+    ]:
+        spider = cls(cfg)
+        recipe = spider.get_download_url("12345")
+        parsed = parse_download_recipe(recipe)
+        assert parsed is not None, f"{cls.__name__} 未产出合法换票配方"
+
+
+def test_row_item_id_supports_ttg_and_promo_maps_30_percent() -> None:
+    """TTG `/dl/{id}/{auth}` 可提取稳定 ID；30% 折扣映射到 thirtypercent。"""
+    from app.adapters.sites.generic import _promo_payload, _row_item_id
+
+    assert _row_item_id({"enclosure": "https://totheglory.im/dl/556677/deadbeef99"}) == "556677"
+    assert _row_item_id({"page_url": "https://totheglory.im/t/889900/"}) == "889900"
+
+    payload = _promo_payload({"downloadvolumefactor": 0.3, "uploadvolumefactor": 1}, {})
+    assert payload is not None
+    assert payload["free_classes"] == ["thirtypercent"]
