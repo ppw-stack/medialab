@@ -17,6 +17,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 
+from app.core.metrics import state as metric_state
 from app.core.timeutils import bj_now
 
 #: 单条原因的最大长度——异常信息可能很长，不让台账变成日志转储。
@@ -49,12 +50,14 @@ def record(component: str, reason: object) -> None:
         _LEDGER[component] = Degradation(
             component=component, reason=text, at=str(bj_now())
         )
+        metric_state["startup_degradations"].set(len(_LEDGER))
 
 
 def clear(component: str) -> None:
     """清除某个降级（该组件恢复正常时调用）。"""
     with _LOCK:
         _LEDGER.pop(component, None)
+        metric_state["startup_degradations"].set(len(_LEDGER))
 
 
 def snapshot() -> dict[str, dict[str, str]]:
@@ -67,6 +70,7 @@ def reset() -> None:
     """清空台账（lifespan 入口调用）。"""
     with _LOCK:
         _LEDGER.clear()
+        metric_state["startup_degradations"].set(0)
 
 
 __all__ = ["Degradation", "clear", "record", "reset", "snapshot"]

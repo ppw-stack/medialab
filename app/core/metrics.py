@@ -85,6 +85,11 @@ state = {
     "db_healthy": Gauge(
         "seedhelper_db_healthy", "数据库健康（1/0）", registry=REGISTRY
     ),
+    "startup_degradations": Gauge(
+        "seedhelper_startup_degradations",
+        "启动或就绪降级项数量（与 /readyz degradations 一致）",
+        registry=REGISTRY,
+    ),
 }
 
 

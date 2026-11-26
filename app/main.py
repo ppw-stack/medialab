@@ -242,6 +242,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     runtime_guard.start(asyncio.get_running_loop(), mounts=_probe_targets())
 
+    # 启动降级告警（仅在存在降级且配置了 ALERT_WEBHOOK_URL 时异步发一次）
+    from app.services import startup_status
+
+    startup_degradations = startup_status.snapshot()
+    if startup_degradations:
+        from app.services.alerting import notify_startup_degradations
+
+        app.state.degradation_alert_task = asyncio.create_task(
+            notify_startup_degradations(startup_degradations)
+        )
+
     try:
         yield
     finally:

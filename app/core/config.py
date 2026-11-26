@@ -88,6 +88,12 @@ class AppSettings(BaseSettings):
     db_journal_mode: Literal["WAL", "DELETE"] = "WAL"
     db_synchronous: Literal["NORMAL", "FULL", "OFF"] = "NORMAL"
 
+    # -- 运维告警 --
+    alert_webhook_url: str = Field(
+        default="",
+        description="/readyz 启动降级告警 Webhook URL（支持通用 JSON POST；留空关闭）",
+    )
+
     # -- 调度 --
     scheduler_enabled: bool = True
     #:
