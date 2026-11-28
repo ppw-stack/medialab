@@ -55,7 +55,7 @@ from app.core.metrics import state as metric_state
 from app.core.timeutils import bj_now_dt, format_bj
 from app.db.models import TorrentIndex
 from app.db.session import session_scope
-from app.domain.enums import FreeType, PushStatus
+from app.domain.enums import SYSTEM_PUSH_CATEGORIES, FreeType, PushStatus
 from app.services.downloader_query import get_default_downloader
 from app.services.factory import AdapterFactory
 from app.services.scheduler import JobStep, JobStepItem, build_items
@@ -97,14 +97,28 @@ def is_completed(info: TorrentInfo) -> bool:
 _is_completed = is_completed
 
 
+def is_system_pushed(info: TorrentInfo) -> bool:
+    """下载器任务是否属于本系统推送（分类在 :data:`SYSTEM_PUSH_CATEGORIES` 内）。
+
+    用于将外部工具（如 MoviePilot）或用户手动添加到下载器的任务完全隔离在
+    免费种水位统计与窗口/停滞清理之外（即使与历史索引撞 hash 也不误动）。
+    """
+    return bool(info.category and info.category in SYSTEM_PUSH_CATEGORIES)
+
+
 def is_active_download(info: TorrentInfo) -> bool:
     """是否为占槽的「在途下载」任务（推送水位线与监测共享单一口径）。
 
-    口径：未完成（字节口径）且处于下载相关状态
+    口径：分类属于本系统推送（:data:`SYSTEM_PUSH_CATEGORIES`：
+    ``auto-push`` / ``manual-push``）、未完成（字节口径）且处于下载相关状态
     （``DOWNLOADING`` / ``STALLED_DL`` / ``CHECKING``，含下载器排队 ``queuedDL``）。
-    排除已完成做种、已暂停与致命错误任务。
+    排除外部/非系统分类任务、已完成做种、已暂停与致命错误任务。
     """
-    return not is_completed(info) and info.state.is_downloading
+    return (
+        is_system_pushed(info)
+        and not is_completed(info)
+        and info.state.is_downloading
+    )
 
 
 def _stalled_or_slow_reason(
@@ -318,7 +332,7 @@ class MonitorFreeWindowService:
         max_actions = rp.get_int("monitor_max_actions_per_run")
         now_ts = time.time()
 
-        # 统计默认下载器内全部在途下载任务（含手动推送，共享带宽与槽位）
+        # 统计默认下载器内本系统推送的在途下载任务（排除非系统分类任务）
         initial_active_hashes: set[str] = {
             (info.hash or "").lower()
             for info in infos
@@ -331,19 +345,25 @@ class MonitorFreeWindowService:
         qb_hashes: set[str] = {
             (info.hash or "").lower()
             for info in infos
-            if info.hash
+            if info.hash and is_system_pushed(info)
         }
         if not qb_hashes:
-            logger.info("monitor: 下载器无任务 hash")
+            logger.info("monitor: 下载器无系统推送任务（扫描 %d 个均为外部或无 hash）", scanned)
             metric_state["free_seed_active"].set(active_without_hash)
             return MonitorResult(
                 scanned=scanned,
+                skipped_unmatched=scanned,
                 remaining_active_downloads=active_without_hash,
-                summary="下载器任务无 hash",
+                summary=f"扫描 {scanned}，无系统推送任务",
                 steps=(
                     JobStep("查询默认下载器", "ok", 1, default_dl.name),
-                    JobStep("拉取下载器任务", "ok", scanned, f"{scanned} 个"),
-                    JobStep("匹配 torrent_index", "skip", 0, "下载器任务无 hash"),
+                    JobStep(
+                        "拉取下载器任务",
+                        "ok",
+                        scanned,
+                        f"{scanned} 个（在途 {active_without_hash}）",
+                    ),
+                    JobStep("匹配 torrent_index", "skip", 0, f"0 命中，{scanned} 无关"),
                 ),
             )
 
@@ -491,11 +511,15 @@ class MonitorFreeWindowService:
             return True
 
         for info in infos:
+            if not is_system_pushed(info):
+                # 分类不属于本系统推送（auto-push / manual-push）：直接跳过，
+                # 即使与历史 torrent_index 撞 hash 也不干预外部任务。
+                skipped_unmatched += 1
+                continue
             hash_key = (info.hash or "").lower()
             row = index_by_hash.get(hash_key)
             if row is None:
-                # qB 任务但 db 没 tracked：可能是用户手动推、auto-push 之外的
-                # category、或 push_status 没成功写入（极少见）。
+                # 属于系统分类但 db 没 tracked：可能索引行已删或 push_status 未写入。
                 skipped_unmatched += 1
                 continue
             matched += 1

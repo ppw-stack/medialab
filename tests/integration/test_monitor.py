@@ -127,6 +127,7 @@ async def _setup(
                 size=size,
                 downloaded=500,
                 completed_bytes=completed_bytes,
+                category="auto-push",
             )
         ]
     )
@@ -610,6 +611,7 @@ async def test_fatal_error_aborted_regardless_of_free_type(
             progress=0.3,
             size=1000,
             completed_bytes=300,
+            category="auto-push",
         ),
     )
     result = await _run(fake)
@@ -629,6 +631,7 @@ async def test_fatal_error_skips_completed_torrent(db: None) -> None:
             progress=1.0,
             size=1000,
             completed_bytes=1000,
+            category="auto-push",
         ),
     )
     result = await _run(fake)
@@ -653,6 +656,7 @@ async def test_stalled_dl_timeout_aborted_for_timed_and_permanent(db: None) -> N
             completed_bytes=100,
             dlspeed=0,
             added_at=old_added,
+            category="auto-push",
         ),
     )
     result = await _run(fake)
@@ -679,6 +683,7 @@ async def test_slow_downloading_timeout_aborted(db: None) -> None:
             completed_bytes=2_000_000,
             dlspeed=10 * 1024,  # 10 KB/s < 50 KB/s
             added_at=old_added,
+            category="auto-push",
         ),
     )
     result = await _run(fake)
@@ -708,6 +713,7 @@ async def test_zero_speed_when_min_speed_is_zero_catches_transmission_stalled(
             completed_bytes=100,
             dlspeed=0,
             added_at=old_added,
+            category="auto-push",
         ),
     )
     result = await _run(fake)
@@ -734,6 +740,7 @@ async def test_queued_dl_is_not_aborted_as_stalled_and_counts_as_active(
             dlspeed=0,
             added_at=old_added,
             is_queued=True,
+            category="auto-push",
         ),
     )
     result = await _run(fake)
@@ -743,11 +750,11 @@ async def test_queued_dl_is_not_aborted_as_stalled_and_counts_as_active(
 
 
 async def test_young_or_fast_or_disabled_timeout_not_aborted(db: None) -> None:
-    """未超时、速度达标或关闭停滞检测（timeout=0）均不触发清理。"""
+    """未超时不清理；在途统计仅计系统推送分类，排除外部/非系统分类任务。"""
     import time as _time
 
     now = int(_time.time())
-    # 1) 刚加入 10 分钟的 stalledDL
+    # 1) 刚加入 10 分钟的 stalledDL（系统自动推送）
     fake = await _setup_custom(
         free_type=FreeType.PERMANENT,
         info=TorrentInfo(
@@ -759,18 +766,43 @@ async def test_young_or_fast_or_disabled_timeout_not_aborted(db: None) -> None:
             completed_bytes=0,
             dlspeed=0,
             added_at=now - 10 * 60,
+            category="auto-push",
         ),
         extra_infos=[
-            # 手动推送的正在下载任务：不干预，但计入 remaining_active_downloads
+            # 面板手动推送的正在下载任务：计入 remaining_active_downloads
             TorrentInfo(
                 hash="b" * 40,
-                name="manual-dl",
+                name="manual-push-dl",
                 state=TorrentState.DOWNLOADING,
                 progress=0.5,
                 size=1000,
                 completed_bytes=500,
                 dlspeed=500 * 1024,
                 added_at=now - 120 * 60,
+                category="manual-push",
+            ),
+            # 外部工具（如 MoviePilot）或未分类的正在下载/停滞任务：不干预，也不计入在途
+            TorrentInfo(
+                hash="d" * 40,
+                name="external-cat-dl",
+                state=TorrentState.STALLED_DL,
+                progress=0.3,
+                size=1000,
+                completed_bytes=300,
+                dlspeed=0,
+                added_at=now - 120 * 60,
+                category="国产剧",
+            ),
+            TorrentInfo(
+                hash="e" * 40,
+                name="uncategorized-dl",
+                state=TorrentState.DOWNLOADING,
+                progress=0.4,
+                size=1000,
+                completed_bytes=400,
+                dlspeed=500 * 1024,
+                added_at=now - 120 * 60,
+                category=None,
             ),
             # 已完成做种：不计入在途下载
             TorrentInfo(
@@ -780,6 +812,7 @@ async def test_young_or_fast_or_disabled_timeout_not_aborted(db: None) -> None:
                 progress=1.0,
                 size=1000,
                 completed_bytes=1000,
+                category="auto-push",
             ),
         ],
     )
@@ -787,3 +820,34 @@ async def test_young_or_fast_or_disabled_timeout_not_aborted(db: None) -> None:
     assert fake.paused == []
     assert result.aborted_stalled == 0
     assert result.remaining_active_downloads == 2
+
+
+@pytest.mark.parametrize("external_category", ["国产剧", None])
+async def test_non_system_category_is_never_touched_even_if_hash_matches_index(
+    db: None, external_category: str | None
+) -> None:
+    """非系统推送分类（即使与历史 torrent_index 撞 hash 且临期/停滞）绝不暂停、删除或计入在途。"""
+    import time as _time
+
+    expired = format_bj(bj_now_dt() - timedelta(minutes=5))
+    fake = await _setup_custom(
+        free_type=FreeType.TIMED,
+        free_end_at=expired,
+        info=TorrentInfo(
+            hash="a" * 40,
+            name="external-collision",
+            state=TorrentState.STALLED_DL,
+            progress=0.2,
+            size=1000,
+            completed_bytes=200,
+            dlspeed=0,
+            added_at=int(_time.time()) - 120 * 60,
+            category=external_category,
+        ),
+    )
+    result = await _run(fake)
+    assert fake.paused == []
+    assert fake.removed == []
+    assert result.matched == 0
+    assert result.skipped_unmatched == 1
+    assert result.remaining_active_downloads == 0

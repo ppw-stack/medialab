@@ -622,13 +622,15 @@ class TestDynamicCapacity:
         class _FakeDl:
             async def list_torrents(self) -> list[TorrentInfo]:
                 return [
-                    TorrentInfo(hash="1" * 40, name="dl", state=TorrentState.DOWNLOADING, size=100, completed_bytes=10),
-                    TorrentInfo(hash="2" * 40, name="st", state=TorrentState.STALLED_DL, size=100, completed_bytes=0),
-                    TorrentInfo(hash="3" * 40, name="qd", state=TorrentState.DOWNLOADING, size=100, completed_bytes=0, is_queued=True),
-                    # 以下不计入在途下载
-                    TorrentInfo(hash="4" * 40, name="seed", state=TorrentState.SEEDING, size=100, completed_bytes=100),
-                    TorrentInfo(hash="5" * 40, name="paused", state=TorrentState.PAUSED_DL, size=100, completed_bytes=20),
-                    TorrentInfo(hash="6" * 40, name="err", state=TorrentState.ERROR, size=100, completed_bytes=20),
+                    TorrentInfo(hash="1" * 40, name="dl", state=TorrentState.DOWNLOADING, size=100, completed_bytes=10, category="auto-push"),
+                    TorrentInfo(hash="2" * 40, name="st", state=TorrentState.STALLED_DL, size=100, completed_bytes=0, category="auto-push"),
+                    TorrentInfo(hash="3" * 40, name="qd", state=TorrentState.DOWNLOADING, size=100, completed_bytes=0, is_queued=True, category="manual-push"),
+                    # 以下不计入在途下载：非系统分类 / 无分类 / 已完成 / 已暂停 / 报错
+                    TorrentInfo(hash="7" * 40, name="ext-cat", state=TorrentState.STALLED_DL, size=100, completed_bytes=10, category="国产剧"),
+                    TorrentInfo(hash="8" * 40, name="no-cat", state=TorrentState.DOWNLOADING, size=100, completed_bytes=10, category=None),
+                    TorrentInfo(hash="4" * 40, name="seed", state=TorrentState.SEEDING, size=100, completed_bytes=100, category="auto-push"),
+                    TorrentInfo(hash="5" * 40, name="paused", state=TorrentState.PAUSED_DL, size=100, completed_bytes=20, category="auto-push"),
+                    TorrentInfo(hash="6" * 40, name="err", state=TorrentState.ERROR, size=100, completed_bytes=20, category="auto-push"),
                 ]
 
         factory = AdapterFactory()

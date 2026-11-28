@@ -14,9 +14,11 @@ from typing import Final
 
 __all__ = [
     "NON_ABORTABLE_FREE_TYPES",
+    "SYSTEM_PUSH_CATEGORIES",
     "TYPES_WITHOUT_WINDOW",
     "FreeSource",
     "FreeType",
+    "PushCategory",
     "PushStatus",
 ]
 
@@ -49,6 +51,25 @@ class PushStatus:
 
     PUSHED = "pushed"
     FAILED = "failed"
+
+
+class PushCategory:
+    """推送到下载器时使用的分类标识。
+
+    用于区分本系统推送的任务与外部工具/用户手动添加到下载器的任务：
+    - ``AUTO``：免费种自动推送（:mod:`app.services.push_free`）
+    - ``MANUAL``：面板手动推送（:mod:`app.services.push_service`）
+    """
+
+    AUTO = "auto-push"
+    MANUAL = "manual-push"
+
+
+#: 属于本系统推送的下载器任务分类集合（在途水位统计的单一真源）。
+SYSTEM_PUSH_CATEGORIES: Final = frozenset({
+    PushCategory.AUTO,
+    PushCategory.MANUAL,
+})
 
 
 class FreeSource:

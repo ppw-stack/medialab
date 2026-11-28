@@ -79,6 +79,7 @@ class _StatefulFakeDownloader(DownloaderAdapter):
             completed_bytes=0,
             dlspeed=200 * 1024,
             added_at=int(time.time()),
+            category=payload.category,
         )
         return h
 
@@ -97,6 +98,7 @@ class _StatefulFakeDownloader(DownloaderAdapter):
                     completed_bytes=cur.completed_bytes,
                     dlspeed=0 if paused else cur.dlspeed,
                     added_at=cur.added_at,
+                    category=cur.category,
                 )
 
     async def remove(self, hashes: list[str], *, delete_data: bool = False) -> None:
@@ -221,39 +223,39 @@ async def test_e2e_clog_cleanup_and_refill_protects_manual_tasks(db: None) -> No
             site_id, item_id=f"cand-{i}", free_type=FreeType.PERMANENT, push_status=None
         )
 
-    # 初始在途任务数（is_active_download）：
-    # stalled-timed(1) + stalled-perm(1) + queued-old(1) + normal*6(6) + manual-stalled(1) = 10（满水位）
-    # fatal-err / manual-fatal / checking-done 不计入在途
+    # 初始在途任务数（is_active_download，仅统计系统推送分类 auto-push / manual-push）：
+    # stalled-timed(1) + stalled-perm(1) + queued-old(1) + normal*6(6) = 9
+    # fatal-err / checking-done 以及非系统分类的 external-stalled / external-fatal 均不计入在途
     initial = [
-        TorrentInfo(hash=_h("1"), name="stalled-timed", state=TorrentState.STALLED_DL, progress=0.2, size=1000, completed_bytes=200, dlspeed=0, added_at=old_ts),
-        TorrentInfo(hash=_h("2"), name="stalled-perm", state=TorrentState.DOWNLOADING, progress=0.1, size=1000, completed_bytes=100, dlspeed=10 * 1024, added_at=old_ts),
-        TorrentInfo(hash=_h("3"), name="fatal-err", state=TorrentState.ERROR, progress=0.1, size=1000, completed_bytes=100, dlspeed=0, added_at=old_ts),
-        TorrentInfo(hash=_h("4"), name="checking-done", state=TorrentState.CHECKING, progress=0.2, size=1000, completed_bytes=1000, dlspeed=0, added_at=old_ts),
-        TorrentInfo(hash=_h("5"), name="queued-old", state=TorrentState.DOWNLOADING, progress=0.0, size=1000, completed_bytes=0, dlspeed=0, added_at=old_ts, is_queued=True),
+        TorrentInfo(hash=_h("1"), name="stalled-timed", state=TorrentState.STALLED_DL, progress=0.2, size=1000, completed_bytes=200, dlspeed=0, added_at=old_ts, category="auto-push"),
+        TorrentInfo(hash=_h("2"), name="stalled-perm", state=TorrentState.DOWNLOADING, progress=0.1, size=1000, completed_bytes=100, dlspeed=10 * 1024, added_at=old_ts, category="auto-push"),
+        TorrentInfo(hash=_h("3"), name="fatal-err", state=TorrentState.ERROR, progress=0.1, size=1000, completed_bytes=100, dlspeed=0, added_at=old_ts, category="auto-push"),
+        TorrentInfo(hash=_h("4"), name="checking-done", state=TorrentState.CHECKING, progress=0.2, size=1000, completed_bytes=1000, dlspeed=0, added_at=old_ts, category="auto-push"),
+        TorrentInfo(hash=_h("5"), name="queued-old", state=TorrentState.DOWNLOADING, progress=0.0, size=1000, completed_bytes=0, dlspeed=0, added_at=old_ts, is_queued=True, category="auto-push"),
         *[
-            TorrentInfo(hash=_h(c), name=f"normal-{c}", state=TorrentState.DOWNLOADING, progress=0.5, size=1000, completed_bytes=500, dlspeed=500 * 1024, added_at=now_ts)
+            TorrentInfo(hash=_h(c), name=f"normal-{c}", state=TorrentState.DOWNLOADING, progress=0.5, size=1000, completed_bytes=500, dlspeed=500 * 1024, added_at=now_ts, category="auto-push")
             for c in ("6", "7", "8", "9", "a", "b")
         ],
-        # 用户直接在下载器添加的停滞 & 致命错误任务（不在 torrent_index）——绝不能被清理
-        TorrentInfo(hash=_h("e"), name="manual-stalled", state=TorrentState.STALLED_DL, progress=0.1, size=1000, completed_bytes=100, dlspeed=0, added_at=old_ts),
-        TorrentInfo(hash=_h("f"), name="manual-fatal", state=TorrentState.ERROR, progress=0.1, size=1000, completed_bytes=100, dlspeed=0, added_at=old_ts),
+        # 外部工具（如 MoviePilot）或用户直接在下载器添加的停滞 & 致命错误任务（非系统分类）——既不清理，也不计入系统在途水位
+        TorrentInfo(hash=_h("e"), name="external-stalled", state=TorrentState.STALLED_DL, progress=0.1, size=1000, completed_bytes=100, dlspeed=0, added_at=old_ts, category="国产剧"),
+        TorrentInfo(hash=_h("f"), name="external-fatal", state=TorrentState.ERROR, progress=0.1, size=1000, completed_bytes=100, dlspeed=0, added_at=old_ts, category="国产剧"),
     ]
     fake_dl = _StatefulFakeDownloader(initial)
     factory = _FakeFactory(fake_dl)
 
     out = await run_push_and_monitor(factory)
 
-    # 监测段：仅清理 3 个自推死种，绝不动手动任务/校验中/排队中/正常种
+    # 监测段：仅清理 3 个自推死种，绝不动外部任务/校验中/排队中/正常种
     assert set(fake_dl.paused_hashes) == {_h("1"), _h("2"), _h("3")}
     assert out["monitor"]["aborted_stalled"] == 2
     assert out["monitor"]["aborted_fatal"] == 1
-    assert out["monitor"]["remaining_active_downloads"] == 8
+    assert out["monitor"]["remaining_active_downloads"] == 7
 
-    # 推送段：水位 10，剩余在途 8 → 精准补推 2 个
-    assert out["push"]["active_downloads"] == 8
-    assert out["push"]["selected"] == 2
-    assert out["push"]["pushed"] == 2
-    assert len(fake_dl.added_names) == 2
+    # 推送段：水位 10，剩余在途 7（外部停滞种不占槽）→ 精准补推 3 个
+    assert out["push"]["active_downloads"] == 7
+    assert out["push"]["selected"] == 3
+    assert out["push"]["pushed"] == 3
+    assert len(fake_dl.added_names) == 3
 
 
 async def test_e2e_capacity_idle_does_not_block_next_refill(
@@ -268,8 +270,10 @@ async def test_e2e_capacity_idle_does_not_block_next_refill(
         await _add_index(site_id, item_id=f"c-{i}", free_type=FreeType.PERMANENT)
 
     initial = [
-        TorrentInfo(hash=_h("1"), name="active-1", state=TorrentState.DOWNLOADING, progress=0.5, size=1000, completed_bytes=500, dlspeed=500 * 1024, added_at=now_ts),
-        TorrentInfo(hash=_h("2"), name="active-2", state=TorrentState.DOWNLOADING, progress=0.5, size=1000, completed_bytes=500, dlspeed=500 * 1024, added_at=now_ts),
+        TorrentInfo(hash=_h("1"), name="active-1", state=TorrentState.DOWNLOADING, progress=0.5, size=1000, completed_bytes=500, dlspeed=500 * 1024, added_at=now_ts, category="auto-push"),
+        TorrentInfo(hash=_h("2"), name="active-2", state=TorrentState.DOWNLOADING, progress=0.5, size=1000, completed_bytes=500, dlspeed=500 * 1024, added_at=now_ts, category="manual-push"),
+        # 外部工具的在途任务不计入水位
+        TorrentInfo(hash=_h("e"), name="ext-active", state=TorrentState.STALLED_DL, progress=0.5, size=1000, completed_bytes=500, dlspeed=0, added_at=now_ts, category="综艺"),
     ]
     fake_dl = _StatefulFakeDownloader(initial)
     factory = _FakeFactory(fake_dl)
@@ -281,7 +285,7 @@ async def test_e2e_capacity_idle_does_not_block_next_refill(
 
     # 模拟 1 个任务完成做种 → 腾出 1 个槽位
     fake_dl.torrents[_h("1")] = TorrentInfo(
-        hash=_h("1"), name="active-1", state=TorrentState.SEEDING, progress=1.0, size=1000, completed_bytes=1000, dlspeed=0, added_at=now_ts
+        hash=_h("1"), name="active-1", state=TorrentState.SEEDING, progress=1.0, size=1000, completed_bytes=1000, dlspeed=0, added_at=now_ts, category="auto-push"
     )
 
     # 第二轮紧接着跑（未满 30 分钟）：因上轮空转不刷新节流，本轮立即补推 1 个
@@ -310,7 +314,7 @@ async def test_e2e_action_cap_limits_stalled_without_blocking_window_stop(
             push_status=PushStatus.PUSHED,
         )
         initial.append(
-            TorrentInfo(hash=_h(ch), name=f"stalled-{idx}", state=TorrentState.STALLED_DL, progress=0.1, size=1000, completed_bytes=100, dlspeed=0, added_at=old_ts)
+            TorrentInfo(hash=_h(ch), name=f"stalled-{idx}", state=TorrentState.STALLED_DL, progress=0.1, size=1000, completed_bytes=100, dlspeed=0, added_at=old_ts, category="auto-push")
         )
 
     # 1 个临期限时种（排在最后，验证不会被已打满的停滞上限拦住）
@@ -323,7 +327,7 @@ async def test_e2e_action_cap_limits_stalled_without_blocking_window_stop(
         push_status=PushStatus.PUSHED,
     )
     initial.append(
-        TorrentInfo(hash=_h("9"), name="expiring-soon", state=TorrentState.DOWNLOADING, progress=0.5, size=1000, completed_bytes=500, dlspeed=500 * 1024, added_at=old_ts)
+        TorrentInfo(hash=_h("9"), name="expiring-soon", state=TorrentState.DOWNLOADING, progress=0.5, size=1000, completed_bytes=500, dlspeed=500 * 1024, added_at=old_ts, category="auto-push")
     )
 
     fake_dl = _StatefulFakeDownloader(initial)
@@ -369,6 +373,7 @@ async def test_e2e_delete_audit_log_and_prometheus_metrics(
                 completed_bytes=1000,
                 dlspeed=0,
                 added_at=old_ts,
+                category="auto-push",
             )
         ]
     )
