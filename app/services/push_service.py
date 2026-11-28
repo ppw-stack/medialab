@@ -28,7 +28,7 @@ from sqlalchemy import select, update
 from app.core.logging import get_logger
 from app.db.models import DownloaderInstance, Site, TorrentIndex
 from app.db.session import session_scope
-from app.domain.enums import PushStatus
+from app.domain.enums import PushCategory, PushStatus
 from app.services.downloader_query import get_default_downloader, get_downloader_by_id
 from app.services.task_executor import PushItemError, execute_add_torrent
 from app.services.task_queue import (
@@ -279,7 +279,7 @@ async def push_index_entry(
     downloader_id: int | None,
     factory: AdapterFactory,
     *,
-    category: str = "manual-push",
+    category: str = PushCategory.MANUAL,
 ) -> PushOutcome:
     """把索引条目推送到下载器（手动推送入口）。
 

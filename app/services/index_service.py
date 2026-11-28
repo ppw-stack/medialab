@@ -24,6 +24,7 @@ from sqlalchemy import func, select
 
 from app.db.models import Site, TorrentIndex
 from app.db.session import session_scope
+from app.domain.enums import PushCategory
 from app.services.errors import ServiceError
 from app.services.factory import get_factory
 from app.services.push_service import (
@@ -368,7 +369,7 @@ async def push_entry(
             index_id,
             downloader_id,
             get_factory(),
-            category="manual-push",
+            category=PushCategory.MANUAL,
         )
     except PushError as exc:
         raise ServiceError(str(exc), status=exc.status) from exc

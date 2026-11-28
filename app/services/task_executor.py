@@ -28,7 +28,7 @@ from app.core.logging import get_logger
 from app.core.timeutils import bj_now
 from app.db.models import DownloaderInstance, Site, TorrentIndex
 from app.db.session import session_scope
-from app.domain.enums import PushStatus
+from app.domain.enums import PushCategory, PushStatus
 from app.services.task_queue import TaskKind
 
 if TYPE_CHECKING:
@@ -58,7 +58,7 @@ async def execute_add_torrent(
     payload: dict[str, Any],
     factory: AdapterFactory,
     *,
-    category: str = "auto-push",
+    category: str = PushCategory.AUTO,
 ) -> dict[str, Any]:
     """执行 ADD_TORRENT 任务：下载 .torrent → 解析 hash → 推送 → 更新索引。
 

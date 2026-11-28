@@ -101,7 +101,10 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         min=0,
         max=200,
         job="push_and_monitor_free",
-        note="默认下载器内全部未完成活跃下载任务达到此上限时暂缓推送；0 = 不限制",
+        note=(
+            "默认下载器内本系统推送（auto-push / manual-push）的未完成活跃下载任务"
+            "达到此上限时暂缓推送；0 = 不限制"
+        ),
     ),
     ParamSpec(
         key="monitor_stalled_timeout_minutes",
